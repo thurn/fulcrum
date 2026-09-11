@@ -53,15 +53,24 @@ Read-only inspection on September 11, 2026 found:
 | Codex projects | Saved local projects exist for Fulcrum, Tollgate, and Battlement | Resolve their actual IDs at setup; do not create duplicates. |
 | Tollgate projects | Tollgate and Battlement registered; Fulcrum absent. Battlement reported `configuration-pending`. | Register Fulcrum and verify configuration health before enabling implementation for each project. |
 
-These facts can change. Task 01 rechecks them. A registered repository is not
-automatically healthy, and an installed CLI is not proof of desktop integration.
+These facts can change. Task 01 rechecks them. Fulcrum is not registered with
+Tollgate at the start of this sequence; registration happens in Task 02. A
+registered repository is not automatically healthy, and an installed CLI is
+not proof of desktop integration.
 
-Execute numbered tasks in order. Each task depends on the preceding task unless
-explicitly described as conditional. The listed files are proposed new paths;
-preserve useful upstream structure when importing the Dashboard. Each task must
-leave its existing checks passing and produce the evidence named in its
-acceptance criteria. Later tasks extend the checks rather than making earlier
-stages depend on nonexistent frontend code.
+Execute numbered tasks in order. Task 01 is intentionally a pre-registration,
+documentation-only prerequisite: inspect the environment, review the resulting
+compatibility report, and commit and push it without claiming Tollgate
+certification. That is the final direct bootstrap change. Task 02 begins by
+registering the resulting repository state with Tollgate, then delivers the
+first normally certified code candidate. Every later task depends on the
+preceding task unless explicitly described as conditional.
+
+The listed files are proposed new paths; preserve useful upstream structure
+when importing the Dashboard. Each task must leave its existing checks passing
+and produce the evidence named in its acceptance criteria. Later tasks extend
+the checks rather than making earlier stages depend on nonexistent frontend
+code.
 
 ### Marking tasks done
 
@@ -168,25 +177,27 @@ entry point and registered software CI.
 
 **Work:**
 
-1. Add the package layout, CLI entry points, dependency lock or equivalent
+1. After Task 01's documentation is reviewed, committed, and pushed, verify that
+   the checkout is clean and record its repository/ref state. Register Fulcrum
+   through Tollgate's supported initialization with `scripts/check` as the
+   intended gate command. Because that script does not exist at the registration
+   anchor, record the bootstrap baseline as failing or unvalidated; registration
+   is not a passing certificate.
+2. Create the first normal Tollgate worktree from that anchor. Add the package
+   layout, CLI entry points, dependency lock or equivalent
    reproducible pins, Black configuration, and Pyre configuration. Use the
    compatible Python selected in Task 01; do not silently replace Pyre.
-2. Implement `fulcrum --help` and `fulcrum version`. Include installed source
+3. Implement `fulcrum --help` and `fulcrum version`. Include installed source
    revision in version output when available.
-3. Add `scripts/check` for Black, Pyre, and the focused tests that exist at this
+4. Add `scripts/check` for Black, Pyre, and the focused tests that exist at this
    stage. Document clean-environment installation and invocation in README.
-4. Add ignores for environments, application state, credentials, database files,
+5. Add ignores for environments, application state, credentials, database files,
    logs, caches, and generated builds. Preserve the user's existing documents.
-5. Register Fulcrum through Tollgate's supported initialization, recording the
-   initial repository/ref state before requiring normal worktrees. Configure
-   the real `scripts/check` command for the first scaffolding candidate, where
-   that script exists; do not pretend the LICENSE-only starting commit passes
-   Python CI. Initialization of a release anchor is not a passing certificate.
-   The scaffolding change must obtain normal passing evidence before it is
-   described as certified. Record this setup boundary in `docs/setup.md`.
 6. Verify the repository identity, remote mapping, configured checks, and
-   Tollgate-owned release behavior. Do not change other projects' policies as
-   a side effect.
+   Tollgate-owned release behavior. Submit the scaffolding from its Tollgate
+   worktree and obtain normal passing evidence before describing it as certified.
+   Record the bootstrap boundary in `docs/setup.md`. Do not change other
+   projects' policies as a side effect.
 
 **Acceptance:** a clean checkout installs the package and runs the Python checks;
 Tollgate can evaluate that same baseline and reports Fulcrum's identity and
