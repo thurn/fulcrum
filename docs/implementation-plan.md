@@ -31,6 +31,12 @@ prompt. This plan fills in delivery order and implementation details without
 reopening those decisions. In particular, retain lit-html and Node/Express from
 beads-ui, use Python for workflow helpers, and keep operational JSON untracked.
 
+Use server mode for concurrent access to the shared brain, with Beads owning
+the local database process. Reuse its automatic startup and existing lifecycle
+commands. Fulcrum adds health checks and recovery guidance, not a database
+LaunchAgent or a second process supervisor. Server mode runs on this Mac and
+does not require cloud hosting.
+
 The initial targets are Fulcrum, Tollgate, and Battlement on one Mac. The brain
 is private data, not a managed software project. Multi-host dispatch, a separate
 scheduling daemon, dashboard mutations, broad policy hooks, and a new issue
@@ -70,7 +76,7 @@ the retained source, candidate, or log, not a copied transcript or source patch.
 ```text
 pyproject.toml                 Python package, Black, pinned development tools
 .pyre_configuration           Pyre source and environment configuration
-src/fulcrum/                  CLI, records, readers, observations, service helpers
+src/fulcrum/                  CLI, records, readers, observations, dashboard service
 skills/<role>/SKILL.md         Seven portable role entry points
 skills/shared/                Small shared workflow/reference documents
 hooks/                        One installable hook definition source
@@ -111,6 +117,9 @@ gaps, with no guessed task APIs, database commands, or version compatibility.
 2. Inspect installed Beads help for server configuration, migration, commits,
    dependency operations, remote synchronization, and restoration. Inspect
    Tollgate help for configuration, candidates, worktrees, pause, and diagnosis.
+   Verify Beads' automatic startup and `bd dolt start`, `status`, and `stop`
+   contracts, including database identity, port selection, logs, and recovery.
+   Use brain-scoped commands; do not plan a separate Fulcrum database supervisor.
 3. Record Codex capabilities separately: creation, ID resolution, messaging,
    listing, reading, archival, model selection, scheduled wakes, hook delivery,
    and optional observation of existing desktop tasks.
@@ -214,7 +223,7 @@ or new JSON; a failed write preserves the previous record. An unknown task gets
 no inferred private role context. Missing memory does not hide a valid
 assignment, and invalid state remains visible as an error.
 
-### Task 05 — Provision the brain and managed local Dolt service
+### Task 05 — Provision the brain with Beads-managed local server mode
 
 **Outcome:** independent Beads clients can use one local database without data
 loss or accidental exposure.
@@ -224,24 +233,34 @@ loss or accidental exposure.
 1. Inspect and back up the existing embedded Beads store through its supported
    mechanism. Verify the backup can be read before migration. Preserve Git
    state, ignored configuration, and remote settings separately as needed.
-2. Install the selected Dolt version and configure Beads for one local server
-   using Task 01's verified interfaces. Bind to loopback or a Unix socket;
-   credentials and database working files stay outside ordinary Git tracking.
-3. Implement narrowly scoped service helpers and a macOS LaunchAgent definition
-   with an exact label, absolute executable, logs, readiness checks, start,
-   stop, and targeted restart. Choose a free configured port instead of
-   commandeering an unrelated listener.
+2. Install the compatible Dolt version and configure the brain's Beads store
+   for local server mode using Task 01's verified interfaces. Use loopback TCP
+   with Beads' automatic startup; Unix-socket operation does not support that
+   automatic startup. Keep credentials and database working files outside
+   ordinary Git tracking. Inspect Beads' selected port and report conflicts
+   without commandeering an unrelated listener.
+3. Reuse Beads' automatic startup and its existing lifecycle commands, scoped
+   to the brain: `bd --directory <brain> dolt status`, `start`, and `stop`.
+   Beads owns process identity, port selection, and logs. Add only the thin
+   status/connectivity calls needed for Fulcrum diagnostics. Do not implement
+   a database LaunchAgent, PID registry, restart loop, or lifecycle framework.
 4. Implement idempotent brain initialization that preserves existing data and
    verifies the intended private remote. Do not create a second issue database
    in each software repository.
-5. Document migration rollback and how to identify the active database. Never
-   concurrently migrate through multiple clients.
+5. Document migration rollback, how to identify the active database, and
+   recovery through Beads commands. Coordinate maintenance before explicitly
+   stopping the shared database. Never concurrently migrate through multiple
+   clients; worktree cleanup must not stop the brain's database.
 
 **Acceptance:** two independent Beads clients see each other's committed issue
-changes; existing issues/dependencies survive migration; service restart
-preserves them. A second setup run creates no duplicate service or database.
-Database endpoints are not remotely exposed. Restore into a disposable location
-works without touching the live brain.
+changes and existing issues/dependencies survive migration. In disposable
+server-mode fixtures, stop the server, verify subsequent client access starts
+it through Beads, and exercise recovery after controlled process failure.
+Concurrent startup and repeated setup create no duplicate server/database.
+If recovery fails, diagnose Beads configuration/version and report the failure;
+do not add a second supervisor to conceal it. Database endpoints are not
+remotely exposed. Restore into a disposable location works without touching
+the live brain.
 
 ### Task 06 — Integrate Beads ownership, dependencies, and synchronization
 
@@ -627,8 +646,10 @@ without losing active work.
 **Work:**
 
 1. Finish `fulcrum doctor`, versioned installation, skill installation, and
-   service commands. Report required capability failures, optional observation
-   gaps, hooks, source versions, and failed pushes separately.
+   Beads-backed database diagnostics. Report required capability failures,
+   optional observation gaps, hooks, source versions, and failed pushes
+   separately. Read database health through Beads' supported commands rather
+   than maintaining Fulcrum-owned database process metadata.
 2. Enroll the actual human-created Archon and Watchman; do not manufacture
    substitutes. Collect the initial Sage cadence time during setup. Resolve
    and verify all three initial project integrations.
@@ -641,14 +662,15 @@ without losing active work.
    Preserve local state and brain during updates, record skill revisions for
    active runs, and reconcile material workflow changes before applying them.
 5. Add small explicit schema conversions with backup when needed; unsupported
-   formats produce errors. Document Dolt backup/migration, hook retrust, service
-   version checks, targeted rollback, and uninstall preserving user data.
-6. Provide usable CLI diagnostics before the Dashboard exists. Service helpers
-   support later backend installation without attempting to start nonexistent
-   frontend code now.
+   formats produce errors. Document Beads/Dolt backup, migration, lifecycle
+   commands and version checks, hook retrust, targeted rollback, and uninstall
+   preserving user data. A Fulcrum package update does not restart the database.
+6. Provide usable CLI diagnostics before the Dashboard exists. Dashboard
+   service installation is implemented in Task 29; do not build a generic
+   database service manager as a prerequisite.
 
-**Acceptance:** install twice, restart the database, update the package, and
-re-read an active assignment without losing identity or creating duplicate
+**Acceptance:** install twice, recover the database through Beads, update the
+package, and re-read an active assignment without losing identity or creating duplicate
 roles/services/schedules. Doctor exposes actual health and configured version.
 An incompatible record is preserved and diagnosed, not reset to empty state.
 
@@ -665,7 +687,8 @@ destructive/error exercises. Do not run a separate production pilot project.
 **Required gate evidence:**
 
 - Python package/checks and Fulcrum Tollgate integration work from clean state.
-- Beads server concurrency, Git/Dolt synchronization, backup, and restore work.
+- Beads-managed startup, concurrent access, recovery, Git/Dolt synchronization,
+  backup, and restore work without a second database supervisor.
 - All seven roles are installed; real identity, messaging, Plan-mode exclusions,
   ownership, and archival obligations have been exercised.
 - Plans, activation, prerequisites, holds, review, promotion, source push,
@@ -773,7 +796,8 @@ and source failures.
 2. Implement Node readers of the registered Markdown/local JSON paths. Match
    the shared parser fixtures and schema semantics from Tasks 03 and 07. Keep
    the existing Beads command adapter; do not replace it with Python or launch
-   Python once per UI card.
+   Python once per UI card. Let Beads handle its database lifecycle; the backend
+   does not launch a separate Dolt server or run a database restart loop.
 3. Add a bounded read-only runtime adapter only for a configured compatible
    existing Codex transport. Demonstrate it observes the registered desktop
    tasks; otherwise return unavailable. Never scrape private Codex databases
@@ -932,7 +956,7 @@ version actually running.
 1. Make the Node backend serve Vite production assets, HTTP reads, and
    WebSocket subscriptions from one loopback origin. Vite dev/preview servers
    are not the persistent deployment.
-2. Extend the service helpers with a named Dashboard LaunchAgent, configured
+2. Implement the service helpers with a named Dashboard LaunchAgent, configured
    port, log paths, health/readiness, exact-process restart/stop, and served
    source/build revision. Health exposes availability without private content.
    Use `GET /health` for process readiness and served version; source failures
@@ -942,7 +966,8 @@ version actually running.
    working version for targeted rollback; never serve from a disposable
    implementation worktree.
 4. Make Archon service operations invoke management scripts and delegate code
-   repair/builds. Retain database and state through backend restart/update.
+   repair/builds. Retain database and state through backend restart/update;
+   do not restart the Beads-managed database with the Dashboard.
 5. Document install/start/status/update/rollback/stop in `docs/setup.md` and
    add a minimal operational troubleshooting page or CLI output.
 
@@ -1082,6 +1107,7 @@ mapping is a coverage commitment, not a claim that the feature already exists.
 | Fulcrum coordinates local Codex tasks across software projects | 01, 09–10, 19–21, 32 | Actual host/task IDs and saved project scope; no substitute chat or scheduling daemon. |
 | Every project uses Git, Tollgate, and a Codex Project; Fulcrum manages itself | 02, 10, 19–21, 32 | Initial three projects reconciled; Dashboard is Fulcrum's first complete self-managed project. |
 | Private brain with Beads, Markdown, JSON; immediate pushes | 03–07, 19 | Markdown/Git and Beads/Dolt each push immediately after commit. Design refines JSON to local/untracked and allows visible retries after failed pushes. |
+| Concurrent fleet access to the brain with simple local operation | 01, 05, 19–20, 23 | Server mode retained; Beads owns automatic startup and lifecycle. Fulcrum does not duplicate its database process management. |
 | Archon is strategic, delegates source investigation, maintains NEWS | 10, 13–15, 25–27 | Includes priorities, project summaries, cross-project incidents, and concise briefing. |
 | Weaver interviews, plans, approval, discovery, task intake, refinement | 07–08, 11, 21 | Plan-mode writes deferred; queued/future distinct; cold-reader and verifier behavior implemented. |
 | Clear tasks executable by a weaker model | 06, 11, 21 | Scope, references, dependencies, constraints, acceptance, and validation in each bead. |

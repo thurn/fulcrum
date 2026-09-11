@@ -21,7 +21,7 @@ These contracts supply the identities and evidence used by the policies below:
   queue, diagnosis, resource, and promotion behavior.
 - [Codex task scheduling][schedules] and [app-server][app-server]: external
   integration capabilities and constraints.
-- [Beads server operation][beads-server]: local database process and backups.
+- [Beads server operation][beads-server]: Beads-managed local server and backups.
 
 [wt]: /Users/dthurn/.llms/skills/wt/SKILL.md
 [implement]: /Users/dthurn/.llms/skills/implement-plan/SKILL.md
@@ -481,11 +481,15 @@ It must be repeatable without duplicating projects, schedules, or role tasks.
 
 - Confirm a Git repository, saved Codex Project, and healthy Tollgate identity
   for each enabled software project.
-- Configure one private brain remote and local Dolt server. Bind database
-  access to localhost or a Unix socket; keep credentials outside tracked data.
+- Configure one private brain remote and one Beads-managed local Dolt server
+  for that brain. Use loopback TCP so Beads' automatic startup can manage it;
+  no remote database host is required. Keep credentials outside tracked data.
 - Pin compatible Beads/Dolt versions and use supported server commit/sync
   commands. Do not assume server-mode writes automatically create the history
   needed for a push; configure and verify explicit commit behavior.
+- Verify Beads' automatic startup and its `bd dolt start`, `status`, and `stop`
+  commands from the brain directory. Beads owns server identity, port selection,
+  and logs. Do not add a database LaunchAgent, PID store, or restart supervisor.
 - Discover Codex creation, messaging, listing, archival, and model capabilities.
 - Record whether the installed runtime exposes read-only task observation.
 - Install one Fulcrum hook source using Codex's review/trust mechanism. Verify
@@ -494,8 +498,9 @@ It must be repeatable without duplicating projects, schedules, or role tasks.
   A CLI feature flag alone is insufficient evidence of desktop coverage.
 - Install the role skills and Python CLI with their own portable references.
   Personal reference-skill paths are not required runtime dependencies.
-- Start the dashboard and database under macOS service management with exact
-  service identities, logs, readiness checks, and targeted restart/stop actions.
+- Start the dashboard under macOS service management with an exact service
+  identity, logs, readiness checks, and targeted restart/stop actions. Database
+  lifecycle stays with Beads; it does not require a second service installer.
 - Enroll the user-created Archon and Night Watchman and configure one patrol
   automation. Setup never manufactures substitute persistent human tasks.
 
@@ -514,19 +519,45 @@ Model defaults use verified runtime identifiers. Upgrade policy applies to
 delegated assignments, not silent changes to human-created task preferences.
 Record user authorization separately from agent recommendations for Astra.
 
+### Database lifecycle and recovery
+
+Use Beads' local server mode for concurrent access to the single brain.
+Embedded mode needs no separate process but permits only one writer; changing
+to it would require reconsidering the fleet's concurrent access contract.
+Server mode still runs entirely on the owner's Mac.
+
+Let Beads start its server when needed. Inspect health with the installed
+version's supported status/connectivity commands. For explicit maintenance or
+recovery, use `bd --directory <brain> dolt stop` and
+`bd --directory <brain> dolt start`, then verify connectivity and the intended
+database. Coordinate a maintenance boundary before intentionally stopping a
+database shared by active tasks. An Executor's ordinary worktree cleanup does
+not stop the shared brain database.
+
+Setup must exercise concurrent clients, automatic startup after a stopped or
+failed server, and repeated startup without duplicate processes. Verify actual
+behavior before claiming transparent recovery. If the installed version fails
+these checks, diagnose its configuration/version through supported Beads tools;
+report the failure rather than silently adding another lifecycle manager.
+Fulcrum retains a concise health observation or recovery report, not a competing
+source of truth for server PID files and ports.
+
 ### Self-updates and schema changes
 
 Fulcrum's own changes pass through the same pair and Tollgate process. Restart
-managed services from a certified version after successful promotion, preserving
-the brain and local agent state. Report the served version explicitly.
+the dashboard from a certified version after successful promotion, preserving
+the brain and local agent state. A dashboard update does not restart the shared
+database. Report the served version explicitly.
 
 - Validate local records on read and report incompatible formats clearly.
   A format change should preserve active assignments; use a small explicit
   conversion with a local backup when needed.
 - Changed hook definitions may require renewed Codex trust. Verify coverage
   after updates and report skipped hooks; do not bypass the trust flow.
-- Beads migrations follow its supported version and backup process; do not
-  concurrently migrate the shared database from several agents.
+- Beads updates and migrations follow its supported version and backup process,
+  using Beads' lifecycle commands when maintenance requires stopping/starting
+  the server. Verify database identity and data afterward; do not concurrently
+  migrate the shared database from several agents.
 - Reload skills for newly dispatched work while recording the skill version
   used by existing runs. Material workflow-contract changes require explicit
   reconciliation before an active run adopts them.

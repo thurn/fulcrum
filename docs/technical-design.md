@@ -16,8 +16,8 @@ state stays local and untracked. Fulcrum's implementation and this
 specification belong to the public repository at `~/fulcrum`.
 
 V1 operates on one Mac for one human owner. It uses agent skills, Python
-workflow scripts and Codex lifecycle hooks, a local Dolt database server for
-Beads, and a read-only dashboard forked from beads-ui using lit-html and its
+workflow scripts and Codex lifecycle hooks, a Beads-managed local Dolt server,
+and a read-only dashboard forked from beads-ui using lit-html and its
 existing Node backend.
 Agents make decisions; small scripts assist with repetitive operations.
 There is no additional background service making scheduling decisions.
@@ -86,9 +86,9 @@ projects. Fulcrum manages itself through the same normal execution process.
   integrations are available and their identities match.
 - The brain is a data repository, not a managed software project. Its immediate
   changes use ordinary Git and Beads commits and pushes, not software CI.
-- V1 uses one shared brain checkout and one local Dolt server. Host-qualified
-  paths and task identities leave room for multiple hosts without pretending
-  that cross-host dispatch or replica reconciliation already exists.
+- V1 uses one shared brain checkout and its Beads-managed local Dolt server.
+  Host-qualified paths and task identities leave room for multiple hosts without
+  pretending that cross-host dispatch or replica reconciliation already exists.
 
 A **task** or **agent** in this specification means a local Codex task with
 persistent history, corresponding to the app's thread APIs. A **subagent** is a
@@ -98,14 +98,16 @@ The execution boundaries are deliberately small:
 
 - Codex skills define roles and invoke the app's project/task tools.
 - Python scripts help read context, update owned local state, inspect resources,
-  and manage local services.
+  and manage the dashboard service. Database lifecycle uses Beads' own commands.
 - Codex hooks refresh context after compaction and remind implementation pairs
   about handoffs. Scheduling and promotion stay with the agents and Tollgate.
 - Beads owns issue content, priority, dependencies, and task status.
 - Tollgate owns CI execution and certified Git promotion.
 - The forked beads-ui backend reads Beads, Markdown, local JSON, and available
   runtime evidence. It makes no scheduling decisions.
-- The local Dolt server serves database clients. It makes no fleet decisions.
+- Beads starts and manages the brain's local Dolt server. Fulcrum verifies its
+  health and uses supported Beads commands for recovery; it does not add a
+  database supervisor. The server makes no fleet decisions.
 - An optional Cloudflare connector exposes only the authenticated dashboard.
 
 ## Agent Roles
@@ -333,8 +335,16 @@ The three data forms have distinct responsibilities:
 Use ordinary Git to commit and push Markdown. Beads uses Dolt for issue history
 and its supported commands to commit and push that history to the same private
 GitHub repository. A normal Git push alone does not include database edits.
-[Beads documents this distinction][beads-sync]. The Dolt server runs locally
-and supports concurrent Beads clients; Fulcrum does not lock all their edits.
+[Beads documents this distinction][beads-sync]. Server mode supports concurrent
+Beads clients on the same Mac. Embedded mode runs Dolt inside each `bd` process
+and permits only one writer; the fleet uses server mode so independent agents
+can access the shared brain concurrently. Neither mode requires cloud hosting.
+
+Use Beads' automatic server startup and its `bd dolt start`, `status`, and
+`stop` commands in the brain directory. Verify that behavior with the selected
+version. Fulcrum does not add a database LaunchAgent, process supervisor, or
+global lock around Beads edits. Database backup, migration, and synchronization
+remain Beads/Dolt operations.
 
 Commit Markdown changes, then commit related Beads changes. Immediately attempt
 each corresponding push. On a network failure, retain the local changes,

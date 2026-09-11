@@ -35,8 +35,8 @@ second application with a different visual language.
 
 Retain the Node/Express backend, including its supported Beads CLI access. Do
 not reimplement those adapters in Python. Fulcrum's Python scripts remain
-agent workflow and service helpers. Vite supplies development serving and
-frontend builds, replacing upstream build wiring where necessary.
+agent workflow and dashboard-service helpers. Vite supplies development serving
+and frontend builds, replacing upstream build wiring where necessary.
 
 Write new dashboard code in TypeScript. Existing upstream checked JavaScript
 can stay in place, with Prettier, ESLint, and its type checks retained. Preserve
@@ -334,8 +334,13 @@ dashboard should not materially compete with the builds it is monitoring.
 Reuse beads-ui's Beads command adapter and read-only HTTP/WebSocket operations
 for issue data. Its existing database watchers and subscriptions provide the
 starting point for live updates. Verify those notifications against the chosen
-local Dolt server: directory recognition alone does not prove that every
-server-side database edit triggers a refresh.
+Beads-managed local Dolt server: directory recognition alone does not prove
+that every server-side database edit triggers a refresh.
+
+The adapter uses Beads' supported access to the configured brain. Beads owns
+database startup and process lifecycle; the dashboard does not start a separate
+Dolt server, track its PID, or supervise its restarts. Display database health
+and read failures independently from the Node backend's own availability.
 
 If the watcher misses Dolt changes, refresh subscribed issue queries on a
 shared five-second backend timer. Coalesce identical reads so browser tabs do
@@ -401,10 +406,13 @@ origin. Vite's dev server is for development, and its preview command is not
 the deployed persistent server.
 [Vite's deployment guide][vite] distinguishes these uses.
 
-The Archon manages service start, health inspection, and targeted restart
+The Archon manages dashboard start, health inspection, and targeted restart
 through scripts. macOS service management retains the backend across Codex
 turns and restarts it after failure. Health responses expose the served version
 and source availability without leaking credentials or private document text.
+This service management covers the dashboard. The brain's local Dolt server
+uses Beads' built-in lifecycle commands and automatic startup; restarting or
+updating the dashboard must not restart that shared database.
 
 Optional remote access uses a named Cloudflare Tunnel to the loopback backend
 and a Cloudflare Access application restricting access to the owner's configured

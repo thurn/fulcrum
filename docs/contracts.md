@@ -194,11 +194,19 @@ history, so ordinary `git push` alone does not save database edits remotely.
 Use the installed Beads version's supported commands and verify its commit
 behavior. [Beads documents this storage distinction][sync].
 
-V1 uses one **local Dolt server**, a database process running on the Mac. It
-requires no remote database host. It lets independent Beads clients work
-concurrently without repeatedly opening an embedded database. Beads/Dolt
-handles database concurrency; Fulcrum adds no global edit lock around it.
+V1 uses one **Beads-managed local Dolt server** for the shared brain. This is
+a database process on the Mac, not a remote database host. Embedded mode opens
+Dolt inside each `bd` process and allows one writer; server mode accepts
+concurrent clients, which fits independent fleet tasks sharing the brain.
 Performance benefits should be measured in actual use, not assumed.
+
+All fleet Beads commands target the brain directory. Beads owns automatic
+startup, process identity, port selection, and database logs. Use its supported
+`bd dolt status`, `start`, and `stop` commands for inspection and recovery.
+Fulcrum does not maintain a second database PID registry, LaunchAgent, restart
+loop, or global edit lock. Because all projects share this brain, they do not
+need separate database servers or Beads' machine-wide multi-database mode.
+Backup, migration, commits, and pushes still use Beads/Dolt's supported tools.
 
 Keep file coordination equally narrow:
 
@@ -326,7 +334,9 @@ a recovery option, not a mandatory periodic replacement.
 
 Python scripts support repetitive operations: reading role context, validating
 and atomically writing an owned record, collecting resource observations,
-listing discovered plans, and starting or inspecting managed services.
+listing discovered plans, and managing the dashboard service. Database health
+checks and recovery delegate to Beads' existing commands; helpers do not
+reimplement its server lifecycle.
 Lifecycle handlers reuse these readers for short refreshers and local checks;
 they do not invoke models, push repositories, or make scheduling decisions.
 
