@@ -66,6 +66,11 @@ registering the resulting repository state with Tollgate, then delivers the
 first normally certified code candidate. Every later task depends on the
 preceding task unless explicitly described as conditional.
 
+Task headings carry a primary-work tag: `[skills]` for Markdown, agent-skill,
+runbook, or workflow-evidence work, and `[code]` for product, helper, hook,
+service, or test implementation. Mixed tasks use the tag for their dominant
+deliverable.
+
 The listed files are proposed new paths; preserve useful upstream structure
 when importing the Dashboard. Each task must leave its existing checks passing
 and produce the evidence named in its acceptance criteria. Later tasks extend
@@ -135,7 +140,7 @@ installed code or skills.
 
 ## Infrastructure tasks
 
-### Task 01 — Verify integration contracts and record prerequisites
+### Task 01 [skills] — Verify integration contracts and record prerequisites
 
 **Status:** done — compatibility and prerequisite evidence is recorded in
 `docs/compatibility.md` (2026-09-11).
@@ -169,7 +174,7 @@ viewing. Each unresolved technical compatibility issue has a concrete probe and
 an owning later task. No production records, schedules, or databases are changed
 merely to inspect them.
 
-### Task 02 — Establish packaging, checks, and Fulcrum's Tollgate registration
+### Task 02 [code] — Establish packaging, checks, and Fulcrum's Tollgate registration
 
 **Status:** done — package scaffold, checks, and Tollgate bootstrap evidence are
 documented in `README.md` and `docs/setup.md`.
@@ -206,7 +211,7 @@ Tollgate can evaluate that same baseline and reports Fulcrum's identity and
 configuration. A deliberately failing check in a disposable probe cannot
 produce passing evidence. Dashboard checks are added when that code exists.
 
-### Task 03 — Define configuration and owned local records
+### Task 03 [code] — Define configuration and owned local records
 
 **Status:** done — versioned typed records, JSON Schema, ownership, examples,
 and malformed-input checks are implemented in `src/fulcrum/records.py`,
@@ -238,7 +243,7 @@ source push pending after promotion, paused work, and an active Sage interview.
 Malformed fields and unsupported schema versions produce actionable errors.
 Every mutable file has one documented owner.
 
-### Task 04 — Implement atomic state I/O and concise context readers
+### Task 04 [code] — Implement atomic state I/O and concise context readers
 
 **Status:** done — configuration, owned atomic state I/O, CLI readers/writers,
 and partial task context are implemented with focused failure and concurrency
@@ -269,7 +274,7 @@ or new JSON; a failed write preserves the previous record. An unknown task gets
 no inferred private role context. Missing memory does not hide a valid
 assignment, and invalid state remains visible as an error.
 
-### Task 05 — Provision the brain with Beads-managed local server mode
+### Task 05 [code] — Provision the brain with Beads-managed local server mode
 
 **Status:** done — the existing brain was backed up and migrated to loopback
 Beads-managed Dolt server mode; diagnostics and idempotent initialization are
@@ -312,7 +317,7 @@ do not add a second supervisor to conceal it. Database endpoints are not
 remotely exposed. Restore into a disposable location works without touching
 the live brain.
 
-### Task 06 — Integrate Beads ownership, dependencies, and synchronization
+### Task 06 [code] — Integrate Beads ownership, dependencies, and synchronization
 
 **Status:** pending
 
@@ -345,7 +350,7 @@ dependency. Separate Git and Dolt pushes restore Markdown and issue history
 into a clean checkout. Network failure preserves local changes and exposes a
 retry obligation. Retrying interrupted intake does not duplicate existing beads.
 
-### Task 07 — Implement Markdown plans, memory, and NEWS readers
+### Task 07 [code] — Implement Markdown plans, memory, and NEWS readers
 
 **Status:** pending
 
@@ -375,7 +380,7 @@ stays future; a malformed document produces a file-specific diagnostic.
 Multi-project NEWS entries and future-plan links preserve their scope. No
 Markdown reader invokes a model or rewrites human text.
 
-### Task 08 — Implement eligibility facts and plan revision reconciliation
+### Task 08 [code] — Implement eligibility facts and plan revision reconciliation
 
 **Status:** pending
 
@@ -406,7 +411,7 @@ cross-project prerequisites, a cycle, partial intake, canceled prerequisites,
 an empty plan, and refinement of an active assignment. The helper explains
 facts and never mutates task inventory, changes activation, or issues a promotion.
 
-### Task 09 — Implement task identity and portable shared role contracts
+### Task 09 [skills] — Implement task identity and portable shared role contracts
 
 **Status:** pending
 
@@ -438,7 +443,7 @@ provisioning attempts, and deliver a real handoff to the intended task. A clean
 installation outside the developer's home paths resolves all shared references.
 Plan-mode role activation causes no brain or state writes.
 
-### Task 10 — Implement the Archon role and project enrollment
+### Task 10 [skills] — Implement the Archon role and project enrollment
 
 **Status:** pending
 
@@ -467,7 +472,7 @@ writers, preserves a pending mandate, and prevents a mismatched or unhealthy
 project from receiving implementation. The role delegates source investigation
 and builds and keeps its briefing short enough for the context reader.
 
-### Task 11 — Implement Weaver planning, intake, and refinement
+### Task 11 [skills] — Implement Weaver planning, intake, and refinement
 
 **Status:** pending
 
@@ -497,7 +502,7 @@ direct bug intake, interrupted bead creation, and active-plan refinement.
 Generated beads contain enough scope and criteria to execute without the
 conversation. Saving a future plan does not dispatch implementation.
 
-### Task 12 — Implement assignment, review, and certified completion roles
+### Task 12 [skills] — Implement assignment, review, and certified completion roles
 
 **Status:** pending
 
@@ -532,7 +537,7 @@ rejected revision, third-rejection escalation, a replacement candidate, and
 push/cleanup pending after promotion. Certification remains with Tollgate and
 there are no direct writes to release or unauthorized source-branch pushes.
 
-### Task 13 — Add resource observations, holds, and verified pause/resume
+### Task 13 [code] — Add resource observations, holds, and verified pause/resume
 
 **Status:** pending
 
@@ -564,7 +569,7 @@ a relevant process lives. Overlapping holds survive partial release; an
 unvalidated checkpoint cannot be treated as a candidate. Raw measurements stay
 local while concise evidence-linked lessons can enter project memory.
 
-### Task 14 — Implement escalation and recovery runbooks
+### Task 14 [skills] — Implement escalation and recovery runbooks
 
 **Status:** pending
 
@@ -595,7 +600,7 @@ repeated CI failure, lost task, source push failure, nested investigation, and
 Tollgate worktree outage. Each ends in recovery or a named expected next actor
 with preserved evidence. Do not break the production Tollgate service to test it.
 
-### Task 15 — Implement Night Watchman patrol and recurring-work bookkeeping
+### Task 15 [code] — Implement Night Watchman patrol and recurring-work bookkeeping
 
 **Status:** pending
 
@@ -626,7 +631,7 @@ and twelve-hour offset. A disposable patrol reports a real anomaly to the
 registered Archon while a quiet patrol creates no user-facing noise. Schedule
 setup reruns without duplicating the hourly wake.
 
-### Task 16 — Implement Sage postmortems and bounded interviews
+### Task 16 [skills] — Implement Sage postmortems and bounded interviews
 
 **Status:** pending
 
@@ -654,7 +659,7 @@ cannot stall forever, and repeated findings update one issue. A sample finding
 about Fulcrum itself explains expected benefit without claiming an unmeasured
 speedup. It does not silently expand an active assignment.
 
-### Task 17 — Implement Inquisitor architectural review
+### Task 17 [skills] — Implement Inquisitor architectural review
 
 **Status:** pending
 
@@ -680,7 +685,7 @@ architectural finding or an evidence-based no-findings result, honors project
 scope, and does not prioritize a trivial recent commit over an older major
 boundary problem.
 
-### Task 18 — Implement and verify the two lifecycle hooks
+### Task 18 [code] — Implement and verify the two lifecycle hooks
 
 **Status:** pending
 
@@ -714,7 +719,7 @@ turns. A failed/missing helper does not manufacture authority or mutate state.
 If desktop coverage is unavailable, the documented skill/patrol fallback is
 verified and the limitation remains visible.
 
-### Task 19 — Complete installation, diagnostics, and safe self-updates
+### Task 19 [code] — Complete installation, diagnostics, and safe self-updates
 
 **Status:** pending
 
@@ -752,7 +757,7 @@ package, and re-read an active assignment without losing identity or creating du
 roles/services/schedules. Doctor exposes actual health and configured version.
 An incompatible record is preserved and diagnosed, not reset to empty state.
 
-### Task 20 — Pass the infrastructure readiness gate
+### Task 20 [skills] — Pass the infrastructure readiness gate
 
 **Status:** pending
 
@@ -794,7 +799,7 @@ Fulcrum project. Complete all required infrastructure first. The Dashboard
 must not merely display seeded records claiming that its own development ran
 through Fulcrum.
 
-### Task 21 — Admit the Dashboard through the real project lifecycle
+### Task 21 [skills] — Admit the Dashboard through the real project lifecycle
 
 **Status:** pending
 
@@ -831,7 +836,7 @@ implemented behavior. No handwritten JSON claims substitute for actual task
 messages, candidates, or completion. The application remains part of the
 Fulcrum repository and its Tollgate registration.
 
-### Task 22 — Import beads-ui and establish a read-only application foundation
+### Task 22 [code] — Import beads-ui and establish a read-only application foundation
 
 **Status:** pending
 
@@ -862,7 +867,7 @@ rejection and unchanged Beads data. No raw path, command, SQL, or arbitrary
 workspace selection is accepted. The foundation is not deployed with writable
 upstream handlers while awaiting a later security task.
 
-### Task 23 — Add the read-only Fulcrum data API and runtime observation
+### Task 23 [code] — Add the read-only Fulcrum data API and runtime observation
 
 **Status:** pending
 
@@ -900,7 +905,7 @@ unavailable, not idle or running. A successful empty source remains distinct
 from failure, and traversal/symlink escape attempts cannot read unregistered
 files.
 
-### Task 24 — Implement the design system, navigation, and responsive shell
+### Task 24 [code] — Implement the design system, navigation, and responsive shell
 
 **Status:** pending
 
@@ -929,7 +934,7 @@ themes and every major state without becoming production fake data. Inspect
 320px width, desktop, 200% zoom, keyboard focus, long titles, and reduced motion.
 The style guide documents reusable tokens and components in the code repository.
 
-### Task 25 — Implement Status and agent details
+### Task 25 [code] — Implement Status and agent details
 
 **Status:** pending
 
@@ -958,7 +963,7 @@ paused, scheduled, completed, and promoted-with-cleanup-pending. No row falsely
 implies an intervention occurred, and ordinary refresh does not reshuffle
 unchanged cards.
 
-### Task 26 — Implement Projects and approved plan details
+### Task 26 [code] — Implement Projects and approved plan details
 
 **Status:** pending
 
@@ -983,7 +988,7 @@ unchanged cards.
 health. A stale narrative, future plan, active plan revision change, and empty
 project are distinguishable. No page-load model inference fills missing text.
 
-### Task 27 — Implement Newsfeed, bead details, search, and dependencies
+### Task 27 [code] — Implement Newsfeed, bead details, search, and dependencies
 
 **Status:** pending
 
@@ -1011,7 +1016,7 @@ back preserves position. Dependency blockers, canceled work, future work,
 retained completion, and unavailable evidence all read correctly. An empty
 project feed shows no invented example tasks.
 
-### Task 28 — Complete live refresh, caching, and partial-failure behavior
+### Task 28 [code] — Complete live refresh, caching, and partial-failure behavior
 
 **Status:** pending
 
@@ -1041,7 +1046,7 @@ ten seconds under the tested normal load. Several tabs share backend work;
 database failure and recovery preserve state and show accurate freshness.
 Background tabs stop polling and animating.
 
-### Task 29 — Install persistent serving and certified Dashboard updates
+### Task 29 [code] — Install persistent serving and certified Dashboard updates
 
 **Status:** pending
 
@@ -1074,7 +1079,7 @@ An unsuccessful update preserves recoverable previous service artifacts and
 does not erase brain/state. No development server remains as an owned-process
 cleanup leak.
 
-### Task 30 — Validate the complete local Dashboard
+### Task 30 [code] — Validate the complete local Dashboard
 
 **Status:** pending
 
@@ -1103,7 +1108,7 @@ retained useful upstream tests, and focused integration checks pass. The UI
 walkthrough finds no unmet specified state or major responsive/readability
 problem. Fix findings within their affected tasks or explicit repair beads.
 
-### Task 31 — Implement optional authenticated remote viewing
+### Task 31 [code] — Implement optional authenticated remote viewing
 
 **Status:** pending
 
@@ -1136,7 +1141,7 @@ record activation as pending optional setup. When configured, test the actual
 remote URL and direct-origin denial. Never report remote viewing as verified
 from mocks alone. Missing remote configuration does not block local completion.
 
-### Task 32 — Prove Dashboard delivery through Fulcrum end to end
+### Task 32 [skills] — Prove Dashboard delivery through Fulcrum end to end
 
 **Status:** pending
 
@@ -1171,7 +1176,7 @@ that Fulcrum carried the project rather than merely showing it afterward.
 Conditional remote activation is reported separately, and incomplete required
 work is not relabeled as future scope to claim completion.
 
-### Task 33 — Complete the first postmortem and operational acceptance
+### Task 33 [skills] — Complete the first postmortem and operational acceptance
 
 **Status:** pending
 
