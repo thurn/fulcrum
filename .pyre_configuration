@@ -1,0 +1,5 @@
+{
+  "source_directories": ["src"],
+  "strict": true,
+  "exclude": [".venv.*", "build", "dist"]
+}

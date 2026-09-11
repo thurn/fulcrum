@@ -171,7 +171,8 @@ merely to inspect them.
 
 ### Task 02 — Establish packaging, checks, and Fulcrum's Tollgate registration
 
-**Status:** pending
+**Status:** done — package scaffold, checks, and Tollgate bootstrap evidence are
+documented in `README.md` and `docs/setup.md`.
 
 **Outcome:** a small installable Python foundation with an executable validation
 entry point and registered software CI.

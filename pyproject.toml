@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fulcrum"
+version = "0.1.0"
+description = "Local coordination infrastructure for durable agent workflows"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Derek Thurn" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "black==26.5.1",
+  "pyre-check==0.10.0",
+]
+
+[project.scripts]
+fulcrum = "fulcrum.cli:main"
+fulcrum-hook = "fulcrum.hook:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]

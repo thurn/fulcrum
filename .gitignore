@@ -1,1 +1,35 @@
-.obsidian
+# Python environments and generated package output
+.venv/
+.venv-*/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pyre/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node and dashboard output (introduced in later tasks)
+node_modules/
+dashboard/dist/
+
+# Fulcrum operational state and secrets
+.env
+.env.*
+!.env.example
+state/
+logs/
+credentials/
+*.log
+*.pid
+*.sock
+*.db
+*.sqlite
+*.sqlite3
+.beads/
+
+# Tollgate-owned worktrees and local editor state
+.worktrees/
+.DS_Store
