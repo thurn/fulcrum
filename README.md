@@ -27,6 +27,16 @@ lock file for reproducible validation.
 scripts/check
 ```
 
+State commands accept global `--brain-root` and `--state-root` overrides before
+the subcommand. They emit JSON on stdout and diagnostics on stderr:
+
+```sh
+fulcrum --state-root /absolute/state state read --kind progress --id task-123
+fulcrum --state-root /absolute/state state write --input progress.json
+fulcrum --brain-root /absolute/brain --state-root /absolute/state \
+  context --task task-123
+```
+
 `fulcrum version` includes the source Git revision when it can resolve the
 installed checkout, or when packaging supplies `FULCRUM_BUILD_REVISION`.
 `scripts/check` creates an ignored `.venv-check`, installs the pinned tools, and

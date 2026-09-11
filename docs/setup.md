@@ -23,12 +23,21 @@ treated as certified. Registration by itself says nothing about code health.
    by the editable package as shown in the README.
 4. Run `scripts/check`, `fulcrum --help`, and `fulcrum version`.
 
-The application will later resolve configuration in this order: explicit CLI
-path, named Fulcrum environment variable, then per-user configuration. The
-brain defaults to `~/brain`; local state defaults to
-`~/Library/Application Support/Fulcrum`. Task 04 implements those rules. Do not
-put credentials, Beads working files, logs, or real operational records in the
-source checkout.
+The application resolves configuration in this order: explicit
+`--brain-root`/`--state-root`, `FULCRUM_BRAIN_ROOT`/`FULCRUM_STATE_ROOT`, then
+the installation record selected by `FULCRUM_CONFIG` (defaulting to
+`~/Library/Application Support/Fulcrum/config.json`). The brain defaults to
+`~/brain`; local state defaults to `~/Library/Application Support/Fulcrum`.
+Paths are expanded once and derived record identifiers may not contain path
+separators or traversal. Do not put credentials, Beads working files, logs, or
+real operational records in the source checkout.
+
+State files are split by the ownership table in `schemas/README.md` and are
+written through `fulcrum state write --input <file>`. The helper validates the
+schema and declared writer before using a same-directory temporary file,
+`fsync`, and atomic replacement. `logs/` and `observations/` are reserved
+separately from the registry; readers and hooks do not mutate another role's
+state.
 
 ## Tollgate verification
 

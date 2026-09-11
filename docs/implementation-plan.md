@@ -240,7 +240,9 @@ Every mutable file has one documented owner.
 
 ### Task 04 — Implement atomic state I/O and concise context readers
 
-**Status:** pending
+**Status:** done — configuration, owned atomic state I/O, CLI readers/writers,
+and partial task context are implemented with focused failure and concurrency
+coverage.
 
 **Outcome:** records remain readable during writes, and roles can obtain a
 small, relevant view without loading the entire brain.
