@@ -8,10 +8,8 @@ through Fulcrum's own lifecycle. The Dashboard is a plan within the registered
 Fulcrum software project, not a second repository or project registration.
 
 This document specifies implementation outcomes, dependencies, and acceptance
-criteria. It does not choose an agent arrangement or execution workflow for
-building the infrastructure. References to Archon, Weaver, and other roles
-describe the product being implemented and the required Dashboard acceptance
-exercise.
+criteria. References to Archon, Weaver, and other roles describe the product
+being implemented and the required Dashboard acceptance exercise.
 
 ## Sources and scope
 
@@ -65,6 +63,29 @@ leave its existing checks passing and produce the evidence named in its
 acceptance criteria. Later tasks extend the checks rather than making earlier
 stages depend on nonexistent frontend code.
 
+### Marking tasks done
+
+Each numbered task starts with `Status: pending`. When its implementation,
+required review, and acceptance criteria are complete, change that task's
+status in this document to **`done`**. Do not leave completed tasks marked
+pending. Use `in_progress` or `blocked` while work remains, with a concise
+reason or evidence reference where useful.
+
+If the task has a corresponding Beads issue, complete that issue through the
+installed Beads version's supported completion command/status and promptly
+commit/push its history. Use its native terminal state rather than introducing
+a parallel Beads status; the implementation plan's completion label is `done`.
+For code tasks, review alone is insufficient: certification, required source
+push, and cleanup must finish before marking the task done. For non-code
+tasks, retain the required review/validation result and save the deliverable.
+Record a short completion-evidence reference with the status update.
+
+Task 31 can be done once its required support code and checks are complete even
+when optional remote activation remains unconfigured; explicitly note that
+optional setup as pending. Do not use that exception for required work in
+other tasks. Update the corresponding task status in the brain's Dashboard
+plan as well once that plan exists.
+
 Keep code-behavior documentation and sanitized fixtures in this repository.
 Keep real plans, NEWS, and high-level memory in the brain. Keep real task IDs,
 credentials, host configuration, raw evidence, and operational state local.
@@ -107,6 +128,8 @@ installed code or skills.
 
 ### Task 01 — Verify integration contracts and record prerequisites
 
+**Status:** pending
+
 **Outcome:** implementation begins from supported interfaces and known setup
 gaps, with no guessed task APIs, database commands, or version compatibility.
 
@@ -137,6 +160,8 @@ an owning later task. No production records, schedules, or databases are changed
 merely to inspect them.
 
 ### Task 02 — Establish packaging, checks, and Fulcrum's Tollgate registration
+
+**Status:** pending
 
 **Outcome:** a small installable Python foundation with an executable validation
 entry point and registered software CI.
@@ -170,6 +195,8 @@ produce passing evidence. Dashboard checks are added when that code exists.
 
 ### Task 03 — Define configuration and owned local records
 
+**Status:** pending
+
 **Outcome:** small, documented records that separate durable task truth from
 operational coordination.
 
@@ -191,12 +218,14 @@ Do not put mutable bead status into these records. Keep model authorization
 provenance separate from an agent's recommendation. Represent unavailable
 observations distinctly from successful empty results.
 
-**Acceptance:** examples cover a healthy review wait, unresolved task creation,
+**Acceptance:** examples cover a healthy review wait, unresolved task identity,
 source push pending after promotion, paused work, and an active Sage interview.
 Malformed fields and unsupported schema versions produce actionable errors.
 Every mutable file has one documented owner.
 
 ### Task 04 — Implement atomic state I/O and concise context readers
+
+**Status:** pending
 
 **Outcome:** records remain readable during writes, and roles can obtain a
 small, relevant view without loading the entire brain.
@@ -224,6 +253,8 @@ no inferred private role context. Missing memory does not hide a valid
 assignment, and invalid state remains visible as an error.
 
 ### Task 05 — Provision the brain with Beads-managed local server mode
+
+**Status:** pending
 
 **Outcome:** independent Beads clients can use one local database without data
 loss or accidental exposure.
@@ -264,6 +295,8 @@ the live brain.
 
 ### Task 06 — Integrate Beads ownership, dependencies, and synchronization
 
+**Status:** pending
+
 **Outcome:** one brain-wide issue graph supports project work and is durably
 recoverable through both Git and Dolt synchronization.
 
@@ -295,6 +328,8 @@ retry obligation. Retrying interrupted intake does not duplicate existing beads.
 
 ### Task 07 — Implement Markdown plans, memory, and NEWS readers
 
+**Status:** pending
+
 **Outcome:** people can maintain ordinary Markdown while Fulcrum discovers
 plans and supplies useful role/project context.
 
@@ -323,6 +358,8 @@ Markdown reader invokes a model or rewrites human text.
 
 ### Task 08 — Implement eligibility facts and plan revision reconciliation
 
+**Status:** pending
+
 **Outcome:** roles can explain why work may start without relying on a second
 automated scheduler.
 
@@ -348,9 +385,11 @@ automated scheduler.
 **Acceptance:** fixtures demonstrate queued versus future, composed holds,
 cross-project prerequisites, a cycle, partial intake, canceled prerequisites,
 an empty plan, and refinement of an active assignment. The helper explains
-facts and never creates tasks, changes activation, or issues a promotion.
+facts and never mutates task inventory, changes activation, or issues a promotion.
 
 ### Task 09 — Implement task identity and portable shared role contracts
+
+**Status:** pending
 
 **Outcome:** roles use actual Codex identities, reliable handoffs, and installed
 instructions independent of personal skill directories.
@@ -359,9 +398,9 @@ instructions independent of personal skill directories.
 
 1. Write shared skill references for registration, starting a turn, handoffs,
    archive obligations, model policy, and reading current assignment/holds.
-2. Specify immediate and pending creation flows. Store a real task/host ID only
+2. Specify immediate and pending identity-resolution flows. Store a real task/host ID only
    after resolution; never send messages to `clientThreadId`. Reconcile unique
-   role tags and existing tasks before retrying an uncertain creation.
+   role tags and existing tasks before retrying uncertain provisioning.
 3. Allocate nonrecycled role numbers; pair numbers match. Weaver titles stay
    descriptive. Human-created roles preserve selected model preferences.
 4. Implement record helpers for role/progress initialization. A Weaver may
@@ -376,11 +415,13 @@ instructions independent of personal skill directories.
    capability problem rather than silent substitution.
 
 **Acceptance:** disposable tool exercises resolve pending IDs, detect duplicate
-creation attempts, and deliver a real handoff to the intended task. A clean
+provisioning attempts, and deliver a real handoff to the intended task. A clean
 installation outside the developer's home paths resolves all shared references.
 Plan-mode role activation causes no brain or state writes.
 
 ### Task 10 — Implement the Archon role and project enrollment
+
+**Status:** pending
 
 **Outcome:** one current strategic coordinator can register projects and
 reconcile the fleet without writing code or running builds.
@@ -397,7 +438,7 @@ reconcile the fleet without writing code or running builds.
    Reconcile the existing Fulcrum, Tollgate, and Battlement records; report
    configuration problems instead of marking registration alone as readiness.
 4. Describe strategic prioritization, investigation delegation, and explicit
-   creation of project-scoped runs. Named implementation tasks begin in the
+   initialization of project-scoped runs. Named implementation tasks begin in the
    saved local project context; their product workflow owns worktree creation.
 5. Require scheduling rationale and meaningful project/news updates. Fulcrum
    workflow improvements and architectural changes receive prominent coverage.
@@ -409,6 +450,8 @@ and builds and keeps its briefing short enough for the context reader.
 
 ### Task 11 — Implement Weaver planning, intake, and refinement
 
+**Status:** pending
+
 **Outcome:** approved human intent becomes standalone plans and executable
 beads without starting work simply because a plan was saved.
 
@@ -418,7 +461,7 @@ beads without starting work simply because a plan was saved.
    guidance: one material question at a time, recommended answer, repository
    exploration for discoverable facts.
 2. In Plan mode, interview without writing files or beads. Ask queued versus
-   future. Approval authorizes saving the plan and creating its tasks, with
+   future. Approval authorizes saving the plan and publishing its Beads work graph, with
    execution eligibility determined separately by activation.
 3. For substantial plans, specify a fresh cold reader given only the document
    and a separate requirements verifier given original inputs and decisions.
@@ -436,6 +479,8 @@ Generated beads contain enough scope and criteria to execute without the
 conversation. Saving a future plan does not dispatch implementation.
 
 ### Task 12 — Implement assignment, review, and certified completion roles
+
+**Status:** pending
 
 **Outcome:** Overseer and Executor skills express the complete code-delivery
 contract, including failures and cleanup.
@@ -470,6 +515,8 @@ there are no direct writes to release or unauthorized source-branch pushes.
 
 ### Task 13 — Add resource observations, holds, and verified pause/resume
 
+**Status:** pending
+
 **Outcome:** the Archon has enough facts to coordinate capacity and quiet
 intervals; no helper schedules independently.
 
@@ -500,6 +547,8 @@ local while concise evidence-linked lessons can enter project memory.
 
 ### Task 14 — Implement escalation and recovery runbooks
 
+**Status:** pending
+
 **Outcome:** tooling failures lead to bounded diagnosis and preserved work.
 
 **Work:**
@@ -529,14 +578,16 @@ with preserved evidence. Do not break the production Tollgate service to test it
 
 ### Task 15 — Implement Night Watchman patrol and recurring-work bookkeeping
 
+**Status:** pending
+
 **Outcome:** one hourly patrol detects anomalies and reports due work without
 becoming a second scheduler.
 
 **Work:**
 
 1. Add `skills/night-watchman/SKILL.md` and read-only patrol helpers. Compare
-   registry/progress with supported Codex and Tollgate evidence, pending task
-   creation, expected waits, archived tasks, and known failed pushes.
+   registry/progress with supported Codex and Tollgate evidence, pending role
+   provisioning, expected waits, archived tasks, and known failed pushes.
 2. Distinguish a healthy idle review wait from an unexplained stop. Respect
    deadlines recorded with handoffs; elapsed time alone does not prove a hung
    task. Report uncertainty when observation is unavailable.
@@ -557,6 +608,8 @@ registered Archon while a quiet patrol creates no user-facing noise. Schedule
 setup reruns without duplicating the hourly wake.
 
 ### Task 16 — Implement Sage postmortems and bounded interviews
+
+**Status:** pending
 
 **Outcome:** workflow problems become actionable, deduplicated future work.
 
@@ -584,6 +637,8 @@ speedup. It does not silently expand an active assignment.
 
 ### Task 17 — Implement Inquisitor architectural review
 
+**Status:** pending
+
 **Outcome:** each enabled project can receive fresh whole-codebase review that
 produces useful future tasks.
 
@@ -607,6 +662,8 @@ scope, and does not prioritize a trivial recent commit over an older major
 boundary problem.
 
 ### Task 18 — Implement and verify the two lifecycle hooks
+
+**Status:** pending
 
 **Outcome:** registered roles receive short compaction context and active pairs
 receive at most one reminder about a potentially missing handoff.
@@ -639,6 +696,8 @@ If desktop coverage is unavailable, the documented skill/patrol fallback is
 verified and the limitation remains visible.
 
 ### Task 19 — Complete installation, diagnostics, and safe self-updates
+
+**Status:** pending
 
 **Outcome:** the infrastructure can be installed repeatedly and maintained
 without losing active work.
@@ -676,6 +735,8 @@ An incompatible record is preserved and diagnosed, not reset to empty state.
 
 ### Task 20 — Pass the infrastructure readiness gate
 
+**Status:** pending
+
 **Outcome:** all non-Dashboard infrastructure exists and can support the first
 real Fulcrum project.
 
@@ -710,12 +771,13 @@ UI fork, or production Dashboard beads have begun before this gate.
 ## Dashboard as the first complete Fulcrum project
 
 The following tasks specify both the application and its acceptance as a real
-Fulcrum project. They are not a recommendation for how to staff the earlier
-infrastructure work. Complete all required infrastructure first. The Dashboard
+Fulcrum project. Complete all required infrastructure first. The Dashboard
 must not merely display seeded records claiming that its own development ran
 through Fulcrum.
 
 ### Task 21 — Admit the Dashboard through the real project lifecycle
+
+**Status:** pending
 
 **Outcome:** Dashboard work exists as an approved plan and genuine brain-wide
 Beads tasks managed by the installed Fulcrum system.
@@ -752,6 +814,8 @@ Fulcrum repository and its Tollgate registration.
 
 ### Task 22 — Import beads-ui and establish a read-only application foundation
 
+**Status:** pending
+
 **Outcome:** a licensed, reproducible fork provides the retained issue UI and
 backend foundation without exposing upstream editing features.
 
@@ -780,6 +844,8 @@ workspace selection is accepted. The foundation is not deployed with writable
 upstream handlers while awaiting a later security task.
 
 ### Task 23 — Add the read-only Fulcrum data API and runtime observation
+
+**Status:** pending
 
 **Outcome:** the Node backend reads real Fulcrum state with explicit freshness
 and source failures.
@@ -817,6 +883,8 @@ files.
 
 ### Task 24 — Implement the design system, navigation, and responsive shell
 
+**Status:** pending
+
 **Outcome:** all retained/new views share the specified science-fantasy visual
 language before feature pages multiply.
 
@@ -843,6 +911,8 @@ themes and every major state without becoming production fake data. Inspect
 The style guide documents reusable tokens and components in the code repository.
 
 ### Task 25 — Implement Status and agent details
+
+**Status:** pending
 
 **Outcome:** the owner can see who is responsible, what happens next, and where
 progress needs attention.
@@ -871,6 +941,8 @@ unchanged cards.
 
 ### Task 26 — Implement Projects and approved plan details
 
+**Status:** pending
+
 **Outcome:** project direction and live delivery facts are visible together.
 
 **Work:**
@@ -893,6 +965,8 @@ health. A stale narrative, future plan, active plan revision change, and empty
 project are distinguishable. No page-load model inference fills missing text.
 
 ### Task 27 — Implement Newsfeed, bead details, search, and dependencies
+
+**Status:** pending
 
 **Outcome:** the full task contract and its current delivery evidence are
 available in fleet and project views.
@@ -919,6 +993,8 @@ retained completion, and unavailable evidence all read correctly. An empty
 project feed shows no invented example tasks.
 
 ### Task 28 — Complete live refresh, caching, and partial-failure behavior
+
+**Status:** pending
 
 **Outcome:** dashboard changes normally appear within ten seconds without
 each browser tab multiplying CLI work.
@@ -947,6 +1023,8 @@ database failure and recovery preserve state and show accurate freshness.
 Background tabs stop polling and animating.
 
 ### Task 29 — Install persistent serving and certified Dashboard updates
+
+**Status:** pending
 
 **Outcome:** the built Dashboard survives task completion and reports the
 version actually running.
@@ -979,6 +1057,8 @@ cleanup leak.
 
 ### Task 30 — Validate the complete local Dashboard
 
+**Status:** pending
+
 **Outcome:** the local application meets functional, visual, and read-only
 requirements before optional external exposure.
 
@@ -1005,6 +1085,8 @@ walkthrough finds no unmet specified state or major responsive/readability
 problem. Fix findings within their affected tasks or explicit repair beads.
 
 ### Task 31 — Implement optional authenticated remote viewing
+
+**Status:** pending
 
 **Outcome:** remote viewing is supported but remains disabled until the owner
 supplies the required host and access configuration.
@@ -1036,6 +1118,8 @@ remote URL and direct-origin denial. Never report remote viewing as verified
 from mocks alone. Missing remote configuration does not block local completion.
 
 ### Task 32 — Prove Dashboard delivery through Fulcrum end to end
+
+**Status:** pending
 
 **Outcome:** the first complete Fulcrum project is delivered with real system
 evidence, including its own live monitoring view.
@@ -1069,6 +1153,8 @@ Conditional remote activation is reported separately, and incomplete required
 work is not relabeled as future scope to claim completion.
 
 ### Task 33 — Complete the first postmortem and operational acceptance
+
+**Status:** pending
 
 **Outcome:** the first real project also exercises Fulcrum's improvement loop.
 
@@ -1115,7 +1201,7 @@ mapping is a coverage commitment, not a claim that the feature already exists.
 | Plan dependencies, holds, priorities, throughput, resource learning | 08, 10, 13 | Includes cross-project edges, indefinite holds, quiet intervals, and short evidence-linked lessons. |
 | Never silently stop when blocked; repair tooling | 09, 12–15, 18 | Expected waits, escalation chain, bounded diagnosis, owned recovery work, and patrol fallback. |
 | Short high-level project memory; code behavior stays with code | 04, 07, 10–11, 16, 33 | Context selection, pruning, retained evidence references, and correct repository boundaries. |
-| Hourly persistent Watchman | 15, 19–20, 33 | One human-created task and one idempotent schedule; no duplicate specialist schedules. |
+| Hourly persistent Watchman | 15, 19–20, 33 | One human-provisioned role and one idempotent schedule; no duplicate specialist schedules. |
 | Daily Sage, interviews, workflow/tooling improvements | 16, 33 | Includes Fulcrum's own efficiency and actionable deduplicated future beads. |
 | Daily Inquisitor, twelve-hour offset, major architectural issues | 15, 17, 33 | Separate project-scoped runs and whole-codebase review, not recent-change review. |
 | Role lifetimes, task tags, paired numbers, fresh runs | 09–12, 15–17 | Design refines Weaver to ordinary titles and uses real returned task IDs; tags are discovery aids. |
@@ -1145,7 +1231,7 @@ setup inputs into invented defaults or blockers for unrelated tasks:
 - Existing brain contents and remote access: inspect and preserve before
   migration; obtain missing credentials through normal setup if necessary.
 - Human-created Archon and Watchman identities, and initial Sage time: collect
-  during Task 19; user-created persistent tasks are part of the product contract.
+  during Task 19; user-provisioned persistent roles are part of the product contract.
 - Desktop hook coverage and access to existing runtime observations: prove
   capability or retain the documented unavailable state. Do not broaden scope
   into private database scraping or a replacement runtime.
