@@ -1,0 +1,16 @@
+{
+  "record_kind": "executor_evidence",
+  "schema_version": 1,
+  "writer_id": "task-executor-3",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "executor_task_id": "task-executor-3",
+  "worktree_path": "/example/worktrees/fc-91",
+  "base_oid": "0123456789abcdef0123456789abcdef01234567",
+  "source_oid": "123456789abcdef0123456789abcdef012345678",
+  "candidate_id": "candidate-91",
+  "tested_oid": "23456789abcdef0123456789abcdef0123456789",
+  "queue_revision": 7,
+  "push_state": "pending",
+  "cleanup_state": "pending",
+  "suspended_investigations": []
+}

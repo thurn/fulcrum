@@ -1,0 +1,15 @@
+{
+  "record_kind": "installation",
+  "schema_version": 1,
+  "writer_id": "setup",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "brain_root": "/example/brain",
+  "state_root": "/example/Fulcrum",
+  "host_id": "local",
+  "configured_services": ["beads", "codex", "tollgate"],
+  "observations": {
+    "codex_task_listing": "available",
+    "desktop_hook_delivery": "unverified",
+    "remote_viewing": "unavailable"
+  }
+}

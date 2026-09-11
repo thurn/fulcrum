@@ -208,7 +208,9 @@ produce passing evidence. Dashboard checks are added when that code exists.
 
 ### Task 03 — Define configuration and owned local records
 
-**Status:** pending
+**Status:** done — versioned typed records, JSON Schema, ownership, examples,
+and malformed-input checks are implemented in `src/fulcrum/records.py`,
+`schemas/`, and `tests/fixtures/records/`.
 
 **Outcome:** small, documented records that separate durable task truth from
 operational coordination.

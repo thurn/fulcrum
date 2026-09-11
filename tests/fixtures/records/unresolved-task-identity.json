@@ -1,0 +1,29 @@
+{
+  "record_kind": "role_run_registry",
+  "schema_version": 1,
+  "writer_id": "task-archon",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "current_archon_task_id": "task-archon",
+  "roles": [
+    {
+      "role": "executor",
+      "project_id": "example",
+      "host_id": "local",
+      "task_id": null,
+      "client_thread_id": "pending-client-7",
+      "identity_state": "pending",
+      "role_number": 4,
+      "run_id": "run-7",
+      "pair_id": "pair-4",
+      "title": "[executor-4] Pending setup",
+      "selected_model": "example-model",
+      "selected_reasoning": "high",
+      "model_authorization": {
+        "source": "plan",
+        "reference": "plan:example"
+      },
+      "agent_recommendation": "medium",
+      "skill_revision": "abc1234"
+    }
+  ]
+}

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Derek Thurn" }]
-dependencies = []
+dependencies = ["jsonschema==4.25.1"]
 
 [project.optional-dependencies]
 dev = [
@@ -24,6 +24,9 @@ fulcrum-hook = "fulcrum.hook:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.data-files]
+"share/fulcrum/schemas" = ["schemas/*.json"]
 
 [tool.black]
 line-length = 88
