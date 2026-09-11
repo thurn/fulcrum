@@ -39,6 +39,64 @@ schema and declared writer before using a same-directory temporary file,
 separately from the registry; readers and hooks do not mutate another role's
 state.
 
+## Shared brain server
+
+The brain uses Beads' managed local Dolt server. Fulcrum does not install a
+LaunchAgent, retain a PID, select a port, or restart the process. Every client
+must point to the one configured brain rather than running `bd init` in a
+software repository.
+
+Install Dolt 2.2.0 on `PATH`, then verify an existing brain without changing
+it:
+
+```sh
+fulcrum --brain-root /absolute/brain brain status \
+  --expected-remote git@github.com:owner/private-brain.git
+bd --directory /absolute/brain where --json
+bd --directory /absolute/brain dolt status --json
+bd --directory /absolute/brain dolt test --json
+```
+
+`fulcrum brain init` has the same required `--expected-remote`. It initializes
+only when `.beads` is absent, requests server mode on `127.0.0.1`, and otherwise
+validates the existing store. It refuses remote mismatches and non-loopback
+configuration. Its status output identifies the active Beads directory,
+database path, database name, PID, selected port, and connectivity result.
+
+Beads owns lifecycle operations. Coordinate maintenance with other clients
+before explicitly stopping the shared server:
+
+```sh
+bd --directory /absolute/brain dolt status --json
+bd --directory /absolute/brain dolt stop
+bd --directory /absolute/brain dolt start
+```
+
+After a crash, run `bd --directory /absolute/brain dolt test`. A normal client
+read should automatically start the loopback server; inspect `dolt status` and
+`.beads/dolt-server.log` if it does not. Diagnose the configured mode, host,
+database, and Beads/Dolt versions rather than adding another supervisor.
+
+### Migration evidence and rollback
+
+Before the 2026-09-11 migration, `bd backup sync` captured a readable
+full-history backup at
+`/Users/dthurn/Library/Application Support/Fulcrum/backups/brain-pre-server-20260911`.
+The original embedded `.beads` directory is separately preserved at
+`/Users/dthurn/Library/Application Support/Fulcrum/backups/brain-embedded-beads-20260911`.
+The full-history backup was restored into a disposable embedded database before
+the live store changed. The migrated brain and its Dolt remote were then
+committed and pushed independently; ordinary Git history does not contain the
+database history.
+
+For rollback, first coordinate downtime and stop the brain with `bd dolt stop`.
+Move the current `.beads` directory to a new dated quarantine path, restore the
+preserved embedded directory, and verify `bd where`, `bd status`, issue counts,
+and dependency counts before resuming clients. Alternatively, initialize a
+fresh disposable destination and use `bd backup restore` there first. Never
+restore over the live database, run two migrations concurrently, or stop the
+brain as part of worktree cleanup.
+
 ## Tollgate verification
 
 ```sh

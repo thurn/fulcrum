@@ -271,7 +271,9 @@ assignment, and invalid state remains visible as an error.
 
 ### Task 05 — Provision the brain with Beads-managed local server mode
 
-**Status:** pending
+**Status:** done — the existing brain was backed up and migrated to loopback
+Beads-managed Dolt server mode; diagnostics and idempotent initialization are
+implemented and recovery was exercised in disposable fixtures.
 
 **Outcome:** independent Beads clients can use one local database without data
 loss or accidental exposure.

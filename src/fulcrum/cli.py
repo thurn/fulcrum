@@ -8,6 +8,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from fulcrum.brain import brain_status, initialize_brain
 from fulcrum.config import resolve_paths
 from fulcrum.context import read_task_context
 from fulcrum.records import load_record
@@ -39,6 +40,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     context_parser = subparsers.add_parser("context", help="read concise task context")
     context_parser.add_argument("--task", required=True, help="exact Codex task ID")
+
+    brain_parser = subparsers.add_parser("brain", help="inspect or initialize Beads")
+    brain_commands = brain_parser.add_subparsers(dest="brain_command", required=True)
+    for name, help_text in (
+        ("status", "verify server mode and connectivity"),
+        ("init", "initialize a missing server-mode store, then verify it"),
+    ):
+        command = brain_commands.add_parser(name, help=help_text)
+        command.add_argument(
+            "--expected-remote",
+            required=True,
+            help="exact private Git remote expected for the brain",
+        )
     return parser
 
 
@@ -50,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(version_text())
         return 0
-    if args.command in {"state", "context"}:
+    if args.command in {"state", "context", "brain"}:
         try:
             paths = resolve_paths(
                 brain_override=args.brain_root,
@@ -62,8 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input_record = load_record(Path(args.input))
                 target = atomic_write_record(paths, input_record)
                 result = {"ok": True, "path": str(target)}
-            else:
+            elif args.command == "context":
                 result = read_task_context(paths, args.task)
+            elif args.brain_command == "init":
+                result = initialize_brain(paths.brain_root, args.expected_remote)
+            else:
+                result = brain_status(paths.brain_root, args.expected_remote)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         except Exception as error:
