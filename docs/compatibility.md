@@ -14,8 +14,8 @@ compatibility guarantee.
 | Python | CPython 3.12.14 | Installed and used to create an isolated virtual environment successfully. Fulcrum supports Python `>=3.12,<3.13` initially. |
 | Pyre | `pyre-check==0.10.0` | Installed into that Python 3.12 environment and `pyre --version` completed. Task 02 must also run it against Fulcrum's actual sources. |
 | Black | `black==26.5.1` | Installed into the same environment and reported CPython 3.12.14. |
-| Beads | `bd` 1.2.2 (`6c124203e771`) | Installed CLI. The brain opens successfully in embedded mode and the server, backup, migration, dependency, sync, and Dolt commands below were inspected from this exact build. |
-| Dolt | 2.3.2 | Homebrew's available stable version. It is not installed at this checkpoint. Task 05 owns installation and a real Beads server-mode migration probe before this pairing is considered operational. |
+| Beads | `bd` 1.2.2 (`6c124203e771`) | Installed CLI. The brain opens successfully in server mode and the backup, migration, dependency, sync, and Dolt commands below were inspected from this exact build. |
+| Dolt | 2.2.0 | Installed from the upstream release and exercised with Beads 1.2.2. Beads pins this version because Dolt 2.3.x changed hard-reset behavior; do not upgrade this pairing without repeating the migration and recovery probes. |
 | Node.js | 24.19.0 | Installed; satisfies beads-ui's declared `node >=22` engine. |
 | beads-ui | 0.12.6, upstream `b1d519a1bb7cf0a133c64dd999d74f0d02490c00` | Upstream retains Express 5.2.1 and lit-html 3.3.1. On Node 24, `npm ci` succeeded and all 384 tests passed. A read-only launch against the current brain returned `GET /healthz` as `{"ok":true}` with `bd` 1.2.2. Dashboard import remains deferred until Task 21. |
 | Tollgate | `tg` 0.1.0 | Installed CLI. Repository registration, worktree, candidate, approval, queue, diagnosis, pause/resume, push, and configuration help were inspected. |
@@ -35,15 +35,16 @@ read-model integration.
   Fulcrum `6cabdf2e-d919-4a9f-a329-b73237a49e97`, Tollgate
   `0a9a3915-3530-4904-ae4a-1e56f6175487`, and Battlement
   `b7695810-dfa7-4dad-bd90-8311e615e77b`.
-- Tollgate registers Tollgate (`01a0267b-b143-7a50-ba6c-33e6e55c08ff`),
-  Battlement (`01a0348b-7538-7bb1-a666-65ac689f3716`), and the unrelated
-  Quest Prototype repository. Fulcrum is not registered yet. Battlement reports
-  `configuration-pending`; Task 02 must not change another project's policy.
+- Tollgate registers Fulcrum (`01a09277-71b8-7c93-9d80-04b8d8dbd072`),
+  Tollgate (`01a0267b-b143-7a50-ba6c-33e6e55c08ff`), Battlement
+  (`01a0348b-7538-7bb1-a666-65ac689f3716`), and the unrelated Quest Prototype
+  repository. Fulcrum's integration branch and clean gate are operational;
+  unrelated repository policy was not changed.
 - The brain is `/Users/dthurn/brain`, a clean Git checkout whose private source
-  remote is `git@github.com:thurn/brain.git`. Beads resolves
-  `/Users/dthurn/brain/.beads`, prefix/database `brain`, with an embedded store
-  at `.beads/embeddeddolt`. It currently contains zero issues and its configured
-  Dolt sync remote is the corresponding private Git SSH URL.
+  remote is `git@github.com:thurn/brain.git`. It now uses Beads-managed server
+  mode, database `brain`, loopback host `127.0.0.1`, and a dynamically selected
+  port. The Dolt origin is the corresponding private Git SSH URL. It contained
+  zero issues before and after migration.
 - Project instructions require every Fulcrum repository change to be committed
   immediately with a Conventional Commit and pushed. The numbered plan further
   requires each task to be a separate pushed commit.
@@ -82,10 +83,13 @@ supervisor. Local automatic startup requires loopback TCP, not a Unix socket.
 used as database recovery. `bd export` is an interchange fallback, not the
 primary migration backup.
 
-Task 05 must take and verify a backup before changing the current embedded
-store, inspect the automatically selected port before use, run pre/post
-migration diagnostics, and prove stop/automatic-restart/recovery in a
-disposable fixture. No inspection command in Task 01 changed the database.
+Task 05 took and independently restored a supported full-history backup before
+changing the embedded store. The live migration passed `bd doctor --server`,
+`bd dolt test`, repeated-start, explicit-stop, and automatic-restart checks. A
+disposable two-issue fixture preserved its dependency across backup/migration,
+two independent clients observed the same committed issue, repeated setup did
+not create another database, and a killed disposable server recovered through
+the next Beads client. Both live and fixture listeners bound only to loopback.
 
 ## Supported Tollgate interfaces
 
@@ -151,10 +155,10 @@ skills and persisted progress—not hooks—remain the workflow protection.
   inspected without mutation.
 - [x] Python/Pyre/Black and Node/beads-ui baselines exercised in disposable
   environments.
-- [ ] **Task 02:** register Fulcrum, create `scripts/check`, prove that the
+- [x] **Task 02:** register Fulcrum, create `scripts/check`, prove that the
   bootstrap anchor cannot pass, and obtain a normal passing Tollgate result for
   the package scaffold.
-- [ ] **Task 05:** install Dolt 2.3.2, verify it with Beads 1.2.2, back up and
+- [x] **Task 05:** install Dolt 2.2.0, verify it with Beads 1.2.2, back up and
   migrate the brain, then exercise two-client visibility and controlled
   recovery. If the pairing fails, stop before migration and select a version
   from Beads' own diagnostics rather than guessing.

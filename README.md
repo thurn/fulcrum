@@ -35,7 +35,14 @@ fulcrum --state-root /absolute/state state read --kind progress --id task-123
 fulcrum --state-root /absolute/state state write --input progress.json
 fulcrum --brain-root /absolute/brain --state-root /absolute/state \
   context --task task-123
+fulcrum --brain-root /absolute/brain brain status \
+  --expected-remote git@github.com:owner/private-brain.git
 ```
+
+`fulcrum brain init` initializes only a missing `.beads` store and then performs
+the same verification. It refuses a different Git or Dolt remote, a non-server
+backend, and a non-loopback endpoint. Beads remains responsible for automatic
+startup, PID and port selection, logs, and recovery.
 
 `fulcrum version` includes the source Git revision when it can resolve the
 installed checkout, or when packaging supplies `FULCRUM_BUILD_REVISION`.
