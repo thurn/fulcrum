@@ -137,7 +137,8 @@ installed code or skills.
 
 ### Task 01 — Verify integration contracts and record prerequisites
 
-**Status:** pending
+**Status:** done — compatibility and prerequisite evidence is recorded in
+`docs/compatibility.md` (2026-09-11).
 
 **Outcome:** implementation begins from supported interfaces and known setup
 gaps, with no guessed task APIs, database commands, or version compatibility.
