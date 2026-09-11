@@ -17,11 +17,13 @@ treated as certified. Registration by itself says nothing about code health.
 ## Local installation
 
 1. Install CPython 3.12.
-2. Clone the repository and verify that `origin` identifies the intended
+2. Install the pinned Dolt version listed in `docs/compatibility.md`; do not
+   substitute the newest release without repeating the compatibility probes.
+3. Clone the repository and verify that `origin` identifies the intended
    private GitHub repository.
-3. Create a virtual environment and install `requirements-dev.lock`, followed
+4. Create a virtual environment and install `requirements-dev.lock`, followed
    by the editable package as shown in the README.
-4. Run `scripts/check`, `fulcrum --help`, and `fulcrum version`.
+5. Run `scripts/check`, `fulcrum --help`, and `fulcrum version`.
 
 The application resolves configuration in this order: explicit
 `--brain-root`/`--state-root`, `FULCRUM_BRAIN_ROOT`/`FULCRUM_STATE_ROOT`, then
@@ -72,6 +74,26 @@ bd --directory /absolute/brain dolt stop
 bd --directory /absolute/brain dolt start
 ```
 
+### Moving to a new machine
+
+A Git clone contains the brain's Markdown and Beads configuration, but ordinary
+Git history does not contain the Dolt database. On a newly cloned machine,
+verify the configured action before hydrating the database from its private
+remote:
+
+```sh
+chmod 700 /absolute/brain/.beads
+bd --directory /absolute/brain bootstrap --dry-run
+bd --directory /absolute/brain bootstrap --yes
+bd --directory /absolute/brain dolt status --json
+bd --directory /absolute/brain dolt test --json
+```
+
+The dry run must identify the expected private remote and database. Do not use
+`bd init` merely because the cloned server initially reports that its database
+is missing; doing so can create empty state instead of restoring shared issue
+history.
+
 After a crash, run `bd --directory /absolute/brain dolt test`. A normal client
 read should automatically start the loopback server; inspect `dolt status` and
 `.beads/dolt-server.log` if it does not. Diagnose the configured mode, host,
@@ -98,6 +120,19 @@ restore over the live database, run two migrations concurrently, or stop the
 brain as part of worktree cleanup.
 
 ## Tollgate verification
+
+On a machine where Fulcrum is not yet registered, initialize it with the same
+gate used by the repository:
+
+```sh
+tg init /absolute/fulcrum --run scripts/check --json --no-launch
+```
+
+If the cloned tip is a merge commit, Tollgate cannot use it as a source
+candidate. Register that already-pushed state with `--no-bootstrap`, enable the
+documented `origin`/`master` remote policy in `.tollgate/config.toml`, apply the
+configuration, and submit the next single-parent substantive commit normally.
+Do not rewrite the shared history merely to manufacture a bootstrap candidate.
 
 ```sh
 tg repo list --json --no-launch
