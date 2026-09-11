@@ -1,0 +1,21 @@
+{
+  "record_kind": "progress",
+  "schema_version": 1,
+  "writer_id": "task-executor-3",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "role_task_id": "task-executor-3",
+  "role": "executor",
+  "phase": "reviewing",
+  "phase_started_at": "2026-09-11T22:00:00Z",
+  "expected_next_actor": "task-overseer-3",
+  "expected_next_action": "Review candidate candidate-91",
+  "handoff_needed": false,
+  "handoff_sent": true,
+  "delivery_error": null,
+  "owned_resources": [
+    {
+      "kind": "worktree",
+      "identifier": "/example/worktrees/fc-91"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "record_kind": "project_registry",
+  "schema_version": 1,
+  "writer_id": "task-archon",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "projects": [
+    {
+      "project_id": "example",
+      "repo_path": "/example/project",
+      "host_id": "local",
+      "codex_project_id": "project-123",
+      "tollgate_repo_id": "repo-123",
+      "enabled": true
+    }
+  ]
+}

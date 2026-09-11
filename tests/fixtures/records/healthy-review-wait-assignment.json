@@ -1,0 +1,15 @@
+{
+  "record_kind": "assignment",
+  "schema_version": 1,
+  "writer_id": "task-overseer-3",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "assignment_id": "assignment-fc-91",
+  "bead_id": "fc-91",
+  "plan_id": "example-plan",
+  "approved_plan_commit": "0123456789abcdef0123456789abcdef01234567",
+  "executor_task_id": "task-executor-3",
+  "overseer_task_id": "task-overseer-3",
+  "scope_reference": "docs/example-plan.md#task-1",
+  "review_history": [],
+  "mandate": null
+}

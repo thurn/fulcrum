@@ -1,0 +1,23 @@
+{
+  "record_kind": "holds_jobs",
+  "schema_version": 1,
+  "writer_id": "task-archon",
+  "updated_at": "2026-09-11T22:10:00Z",
+  "holds": [
+    {
+      "hold_id": "hold-benchmark",
+      "scope": "plan:example",
+      "reason": "Benchmark is still running",
+      "release_condition": "Benchmark run benchmark-12 completes",
+      "permitted_exceptions": ["read-only diagnosis"]
+    }
+  ],
+  "recurring_jobs": [
+    {
+      "job_id": "night-watch",
+      "cadence_anchor": "2026-09-11T08:00:00Z",
+      "next_due": "2026-09-12T08:00:00Z",
+      "active_run_id": null
+    }
+  ]
+}
