@@ -647,13 +647,25 @@ Fulcrum approval evidence; it is not a new Tollgate certification mechanism.
 - Repair permissions may cover ordinary merge-conflict resolution and bounded
   in-scope CI fixes. Permissions must be explicit; absence means review again.
 - A covered replacement retains its new source/candidate, original approval,
-  predecessor, repair reason, and validation. Executor reports the concrete
-  repair; Python checks identity and permission mechanically.
-- If classifying the repair requires uncertain scope judgment, route to
-  Overseer. Do not ask Python to infer semantic equivalence from an arbitrary
-  diff, and do not require routine re-review for clearly covered repairs.
+  predecessor, repair reason, and validation. Executor classifies its own repair
+  against Overseer's explicit permissions and reports `repair_category` plus
+  `repair_rationale` explaining why the concrete changes qualify.
+- Python checks the registered Executor, current assignment, predecessor and
+  replacement candidate/source identities, presence of the rationale and
+  validation, and membership of the reported category in the retained approval's
+  allowed repairs. It does not assess the rationale's semantic correctness or
+  classify the diff. This workflow trusts Executor's repair-scope judgment.
+- Executor must request Overseer review when uncertain or outside the granted
+  permissions. A report without matching permission cannot advance as a covered
+  replacement. Clearly covered repairs require no additional Overseer turn;
+  every replacement still requires native certification.
 - A source change outside the mandate or an approved scope change requires a new
   review. New source still requires Tollgate certification in every case.
+
+Adapt the existing `authorize_replacement` helper to this ownership: its current
+contract assumes Overseer has classified the concrete repair. In the controller
+workflow, Overseer grants the categories, Executor classifies the repair, and
+Python records the permitted replacement after the mechanical checks above.
 
 ```json
 {
@@ -917,7 +929,10 @@ actual desktop and Tollgate boundaries described in Manual QA.
   of another correction when the shared allowance was already consumed.
 - Exercise review counts, missing evidence, covered and uncovered replacements,
   model changes only by Archon decision, and source repair followed by native
-  certification. A pending native dependency cannot gain implicit authority.
+  certification. Check required repair rationale, category permission, and
+  candidate linkage; a permitted Executor report advances without a new review
+  turn, while uncertain or uncovered repairs return to Overseer. A pending
+  native dependency cannot gain implicit authority.
 - Verify permitted helper use, denied peer operations, helper termination before
   pair handoff, and unavailable helper observations retaining the reservation.
 - Test future-work exclusion, default pending findings, partial intake, stable
@@ -1018,8 +1033,10 @@ that recovery preserves identity, authority, and completed work.
   infrastructure failure. Confirm only substantive rejections count and Archon
   decides the next approach or model change.
 - Perform a clearly covered repair, then an out-of-scope repair. Verify retained
-  original mandate plus replacement evidence for the first, renewed review for
-  the second, and native certification for both.
+  original mandate plus Executor's category, rationale, and replacement evidence
+  for the first, with no additional Overseer turn. Verify renewed review for the
+  second and for an explicitly uncertain classification, and native
+  certification for every replacement.
 - Fail source push, cleanup, and specialist publication separately. Recovery
   must reuse existing candidates, reports, and finding identities. No agent
   starts just to check CI or repeat a network push.
