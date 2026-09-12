@@ -1,24 +1,11 @@
-"""Review accounting and links; Tollgate remains the certification authority."""
+"""Review accounting; Tollgate remains the certification authority."""
 
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 from typing import Literal, cast
-from urllib.parse import quote
 
 from fulcrum.records import AssignmentRecord, Mandate, ReviewEntry, validate_record
-
-
-def review_url(worktree: Path) -> str:
-    if not worktree.is_absolute():
-        raise ValueError("review worktree must be absolute")
-    inner = (
-        "vscode://dthurn.worktree-review/review?worktree="
-        + quote(str(worktree), safe="")
-        + "&base=release"
-    )
-    return "https://vscode.dev/redirect?url=" + quote(inner, safe="")
 
 
 def record_review(

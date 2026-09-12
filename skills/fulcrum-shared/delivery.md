@@ -14,17 +14,9 @@ Tollgate may test a reconstruction atop earlier queued work. Retain log handles
 and a concise check result; never substitute a local test for certification.
 
 Immediately send Overseer those identities, contract/approved-plan revision,
-and review evidence. Build “Open worktree review” from the absolute owned path:
-
-```javascript
-const inner = "vscode://dthurn.worktree-review/review?worktree="
-  + encodeURIComponent(absoluteWorktreePath) + "&base=release";
-const reviewUrl = "https://vscode.dev/redirect?url=" + encodeURIComponent(inner);
-```
-
-Python callers may use fulcrum.delivery.review_url. Include UI walkthrough and
-retained screenshots when appearance changed; track and clean up demo services.
-Reviewer inspects only; it never edits or builds inside the Executor's tree.
+and review evidence. Include UI walkthrough and retained screenshots when
+appearance changed; track and clean up demo services. Reviewer inspects only;
+it never edits or builds inside the Executor's tree.
 
 Review approval names exact candidate, assignment, reviewed scope and allowed
 replacement categories. Missing authority is a wait, not a request to bypass.

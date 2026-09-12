@@ -191,21 +191,10 @@ These values must not be substituted for one another.
 - Immediately hand off the candidate and review artifacts to the Overseer;
   do not wait for speculative CI results before requesting review.
 - Include the exact candidate ID, full source OID, tested OID when available,
-  queue revision, branch/base identity, and a usable worktree review link.
+  queue revision, and branch/base identity.
 
-The review link follows `$wt`'s VS Code HTTPS redirect contract. Construct it
-from the exact absolute owned worktree path, encoding both layers:
-
-```javascript
-const inner = "vscode://dthurn.worktree-review/review?worktree="
-  + encodeURIComponent(absoluteWorktreePath) + "&base=release";
-const reviewUrl = "https://vscode.dev/redirect?url="
-  + encodeURIComponent(inner);
-```
-
-Label the resulting link “Open worktree review.” Visual changes also include
-a focused native or browser walkthrough and retained screenshots as appropriate.
-The Executor owns cleanup of any demo processes.
+Visual changes also include a focused native or browser walkthrough and retained
+screenshots as appropriate. The Executor owns cleanup of any demo processes.
 
 ### Review and authority
 

@@ -530,9 +530,8 @@ contract, including failures and cleanup.
    certified release; implementation/checks; clean immutable candidate
    submission without authority; immediate review handoff; and expected waits.
 3. Preserve distinct source OID, tested OID, candidate ID, base identity, and
-   queue revision. Include the specified encoded worktree review link and
-   visual evidence for UI changes. Review may inspect read-only, not edit or
-   run builds in the Executor's tree.
+   queue revision. Include visual evidence for UI changes. Review may inspect
+   read-only, not edit or run builds in the Executor's tree.
 4. Count substantive reviews of new submissions. Three unsuccessful reviews
    escalate to Archon; missing evidence and duplicate messages do not increment
    the count. Never import the reference skill's automatic third-review

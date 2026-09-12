@@ -5,9 +5,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from urllib.parse import parse_qs, urlparse
 
-from fulcrum.delivery import record_review, authorize_replacement, review_url
+from fulcrum.delivery import record_review, authorize_replacement
 from fulcrum.eligibility import plan_completion
 from test_eligibility import assignment, bead, plan
 
@@ -151,13 +150,3 @@ class DeliveryTests(unittest.TestCase):
                 )
             self.assertEqual(git("status", "--porcelain"), "")
             self.assertFalse((root / ".git/refs/heads/release").exists())
-
-    def test_review_link_roundtrips_spaces_and_reserved_characters(self):
-        path = Path("/tmp/owned worktree/#a&b%20")
-        outer = parse_qs(urlparse(review_url(path)).query)["url"][0]
-        self.assertEqual(urlparse(outer).scheme, "vscode")
-        inner = parse_qs(urlparse(outer).query)
-        self.assertEqual(inner["worktree"], [str(path)])
-        self.assertEqual(inner["base"], ["release"])
-        with self.assertRaises(ValueError):
-            review_url(Path("relative"))
