@@ -314,3 +314,29 @@ expected Git root, remote push enabled, and no repository block reason. No
 human-created Archon or Watchman task was present in the supported task listing,
 so no role registry or automation was invented. Those are required failures for
 Task 20, not optional gaps.
+
+The promoted 0.2.0 package was then installed three times from the retained
+`/Users/dthurn/fulcrum` checkout at certified revision `543da4b`. Each result
+reported the same seven roles and skill revision, one hook source, no migration,
+and `database_restarted: false`. The first repeated invocation accidentally
+recorded a misspelled expected brain remote; the next invocation corrected that
+configuration through the same safe update path before doctor ran. No brain,
+role, project, assignment, or schedule record was changed.
+
+## Task 20 — Infrastructure readiness gate
+
+[`readiness-evidence.json`](readiness-evidence.json) is the concise canonical
+pass/fail/unsupported matrix, and [readiness-gate.md](readiness-gate.md) records
+commands, expected exit, exact live project mappings, evidence routes, and the
+completion procedure. `tests/test_readiness.py` proves required failures block
+readiness, required rows cannot be disguised as unsupported, duplicate rows are
+rejected, and optional unsupported coverage is accepted only as a named
+fallback.
+
+The evaluated gate is **FAIL**, as expected from live doctor output. Human role
+enrollment/hourly scheduling and the Archon-owned three-project registry are
+required blockers. Desktop hook delivery and runtime visibility are optional
+unsupported rows with explicit skill/patrol and reported-state fallbacks. Every
+other infrastructure row passes. No separate production pilot, Dashboard code,
+Dashboard UI fork, service, or production Dashboard bead was created; Task 21
+remains blocked.

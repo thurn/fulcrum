@@ -745,10 +745,10 @@ verified and the limitation remains visible.
 
 ### Task 19 [code] — Complete installation, diagnostics, and safe self-updates
 
-**Status:** done — repeatable certified-source installation, version/skill/hook
-diagnostics, schema backup conversion, and safe update checks pass; the live
-human Archon/Watchman enrollment and Watchman schedule remain required readiness
-failures rather than fabricated setup success.
+**Status:** blocked — repeatable certified-source installation,
+version/skill/hook diagnostics, schema backup conversion, and safe update checks
+pass, but the absent human Archon/Watchman enrollment and Watchman schedule are
+required Task 19 outcomes that cannot be manufactured by setup.
 
 **Outcome:** the infrastructure can be installed repeatedly and maintained
 without losing active work.
@@ -786,7 +786,10 @@ An incompatible record is preserved and diagnosed, not reset to empty state.
 
 ### Task 20 [skills] — Pass the infrastructure readiness gate
 
-**Status:** pending
+**Status:** blocked — the evidence matrix and fail-closed evaluator are complete;
+human Archon/Watchman enrollment, the hourly Watchman schedule, and the
+Archon-owned three-project registry remain required failures, so Task 21 is not
+admitted.
 
 **Outcome:** all non-Dashboard infrastructure exists and can support the first
 real Fulcrum project.

@@ -17,6 +17,7 @@ from fulcrum.doctor import doctor_runtime
 from fulcrum.hook_config import install_hook_source
 from fulcrum.install import install_runtime
 from fulcrum.records import ProjectRegistryRecord, load_record
+from fulcrum.readiness import load_and_evaluate
 from fulcrum.resources import collect_resources
 from fulcrum.state import atomic_write_record, read_record
 from fulcrum.version import version_text
@@ -33,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", help="override the configured local state root")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("version", help="show package and source version")
+    readiness_parser = subparsers.add_parser(
+        "readiness", help="evaluate an infrastructure evidence matrix"
+    )
+    readiness_parser.add_argument("--matrix", required=True)
 
     install_parser = subparsers.add_parser(
         "install", help="install or update from retained certified source"
@@ -120,6 +125,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(version_text())
         return 0
+    if args.command == "readiness":
+        try:
+            result = load_and_evaluate(Path(args.matrix))
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["ready"] else 2
+        except Exception as error:
+            print(f"fulcrum: {error}", file=sys.stderr)
+            return 2
     if args.command in {"install", "doctor"}:
         try:
             paths = resolve_paths(
