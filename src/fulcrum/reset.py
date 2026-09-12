@@ -64,7 +64,18 @@ def reset_brain(
                     dolt_remotes = [item for item in raw if isinstance(item, dict)]
             except json.JSONDecodeError:
                 pass
-        _run([bd, "-C", str(root), "admin", "reset", "--force"], cwd=root)
+        try:
+            _run([bd, "-C", str(root), "admin", "reset", "--force"], cwd=root)
+        except ResetError as error:
+            if "not yet supported in embedded mode" not in str(error):
+                raise
+            shutil.rmtree(root / ".beads")
+    if not dolt_remotes and isinstance(remote, str):
+        dolt_url = _dolt_url(remote)
+        if dolt_url:
+            dolt_remotes = [{"name": "origin", "url": dolt_url}]
+    if remote:
+        _run(["git", "remote", "remove", "origin"], cwd=root)
     _run(["git", "checkout", "--orphan", "fulcrum-reset"], cwd=root)
     for child in root.iterdir():
         if child.name == ".git":
@@ -86,8 +97,6 @@ def reset_brain(
         _run(
             [
                 bd,
-                "-C",
-                str(root),
                 "init",
                 "--non-interactive",
                 "--prefix",
@@ -106,6 +115,8 @@ def reset_brain(
                 )
         if dolt_remotes and synchronize_remote:
             _run([bd, "-C", str(root), "dolt", "push", "--force"], cwd=root)
+    if remote:
+        _run(["git", "remote", "add", "origin", remote], cwd=root)
     if remote and synchronize_remote:
         _run(
             ["git", "push", "--force", "origin", f"HEAD:refs/heads/{branch}"], cwd=root
@@ -118,3 +129,14 @@ def reset_brain(
         "git_remote": remote,
         "dolt_remotes": dolt_remotes,
     }
+
+
+def _dolt_url(git_remote: str) -> str | None:
+    if git_remote.startswith("git+ssh://"):
+        return git_remote
+    if git_remote.startswith("git@") and ":" in git_remote:
+        host, path = git_remote.split(":", 1)
+        return f"git+ssh://{host}/{path}"
+    if git_remote.startswith("ssh://"):
+        return "git+" + git_remote
+    return None
