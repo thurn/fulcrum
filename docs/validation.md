@@ -262,3 +262,29 @@ The live interview subject was restored to archived state; the disposable Beads
 probe used its own embedded database and left no shared database process running.
 Full tool and candidate evidence remains local; the synthetic reviews do not
 claim measured production speedups or grant implementation authority.
+
+## Task 18 — Bounded lifecycle hooks
+
+`tests/test_hook.py` exercises exact `session_id` lookup, compact-only context,
+the 3,600-character hard cap (below the configured 1,000-token spill threshold),
+one missing-handoff correction, and nonintervention for a second Stop pass,
+Plan mode, unknown tasks, healthy reported handoffs, inactive runs, active
+debrief interviews, unrelated roles, and missing or invalid progress. It also
+installs twice into a disposable `hooks.json` and proves unrelated handlers and
+top-level metadata remain byte-equivalent in meaning without duplicate Fulcrum
+handlers. The helper performs no subprocess, network, model, Beads, or transcript
+work; failed input/read paths return `{\"continue\":true}` and do not write state.
+
+Run the focused check with:
+
+```sh
+python -m unittest tests.test_hook
+```
+
+This coding task had no supported way to compel the current desktop thread to
+compact or to open its interactive `/hooks` trust reviewer. No trust bypass was
+used, and CLI invocation is not represented as desktop delivery. Consequently,
+desktop latency, delivered context size, and correction-turn evidence remain
+`unavailable`, not passing. Until a human reviews the installed hash and performs
+the desktop exercise in [hooks.md](hooks.md), the installed role skills and the
+Night Watchman patrol are the verified fallback for context and missed handoffs.

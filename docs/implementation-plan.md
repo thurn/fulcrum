@@ -709,7 +709,9 @@ boundary problem.
 
 ### Task 18 [code] — Implement and verify the two lifecycle hooks
 
-**Status:** pending
+**Status:** done — local hook behavior and idempotent source merging pass focused
+checks; this non-interactive run could not perform the required desktop trust and
+event-delivery exercise, so skill/patrol fallback remains explicitly active.
 
 **Outcome:** registered roles receive short compaction context and active pairs
 receive at most one reminder about a potentially missing handoff.
