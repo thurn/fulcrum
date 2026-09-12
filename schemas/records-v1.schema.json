@@ -18,6 +18,17 @@
       "format": "date-time",
       "pattern": "Z$"
     },
+    "watchman_patrol_evidence": {
+      "type": "object",
+      "required": ["watchman_task_id", "observed_at", "outcome", "evidence"],
+      "properties": {
+        "watchman_task_id": { "type": "string", "minLength": 1 },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "outcome": { "enum": ["success", "failure"] },
+        "evidence": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "base": {
       "type": "object",
       "required": ["record_kind", "schema_version", "writer_id", "updated_at"],
@@ -103,6 +114,9 @@
             "observations": {
               "type": "object",
               "additionalProperties": { "type": "string", "minLength": 1 }
+            },
+            "first_watchman_patrol": {
+              "$ref": "#/$defs/watchman_patrol_evidence"
             }
           },
           "additionalProperties": false

@@ -140,6 +140,20 @@ fulcrum setup record-evidence \
   --codex-projects-verified-at <observed-UTC-time>
 ```
 
+Run one real Watchman patrol and retain its observed result. A quiet patrol is
+successful evidence when it completes without findings; do not invent an alert
+just to prove that the patrol ran. Record that proof by rerunning the command
+with both first-patrol arguments:
+
+```text
+  --first-patrol-observed-at <observed-UTC-time> \
+  --first-patrol-evidence <concise-patrol-result>
+```
+
+The readiness gate stays closed until this durable evidence identifies the
+current Watchman task and reports a successful patrol. Schedule creation alone
+is not patrol evidence.
+
 When the user also confirmed the desktop exercise, append:
 
 ```text
@@ -147,10 +161,12 @@ When the user also confirmed the desktop exercise, append:
   --hooks-evidence <concise-human-confirmation>
 ```
 
-The two hook arguments must be supplied together. Without them, scheduling and
-project evidence are recorded while desktop delivery remains an explicit
-optional fallback. The command refuses a non-current Archon or a missing human
-Watchman. Never record schedule or hook success from intent alone.
+The two hook arguments and the two first-patrol arguments must each be supplied
+together. Without hook arguments, scheduling and project evidence are recorded
+while desktop delivery remains an explicit optional fallback. Without
+first-patrol arguments, setup evidence is recorded but readiness remains closed.
+The command refuses a non-current Archon or a missing human Watchman. Never
+record schedule or patrol success from intent alone.
 
 ## Clear the gate and become Archon
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -14,6 +16,7 @@ from fulcrum.hook_config import FULCRUM_STATUS_PREFIX
 from fulcrum.install import LINKED_SKILLS, ROLES, SETUP_SKILLS, runtime_package_root
 from fulcrum.records import (
     ExecutorEvidenceRecord,
+    HoldsJobsRecord,
     InstallationRecord,
     ProgressRecord,
     ProjectRegistryRecord,
@@ -252,6 +255,270 @@ def _project_checks(paths: RuntimePaths, codex_projects_verified: bool) -> list[
     ]
 
 
+def _valid_utc_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _progress_state_check(
+    paths: RuntimePaths,
+    *,
+    task_id: str | None,
+    role: str,
+    name: str,
+    registry_error: str | None = None,
+) -> Check:
+    if registry_error is not None:
+        return _check("required", name, "fail", registry_error)
+    if not task_id:
+        return _check(
+            "required",
+            name,
+            "fail",
+            f"resolved current {role} task ID is missing",
+        )
+    try:
+        loaded = read_record(paths, "progress", task_id)
+        if loaded["record_kind"] != "progress":
+            raise ValueError("wrong record kind")
+        progress = cast(ProgressRecord, loaded)
+        failures = []
+        if progress["role_task_id"] != task_id:
+            failures.append("role_task_id does not match the registered task")
+        if progress["writer_id"] != task_id:
+            failures.append("writer_id does not match the registered task")
+        if progress["role"] != role:
+            failures.append(f"role is {progress['role']!r}, expected {role!r}")
+        return _check(
+            "required",
+            name,
+            "fail" if failures else "pass",
+            (
+                "; ".join(failures)
+                if failures
+                else f"{role} progress is present and owned by {task_id}"
+            ),
+        )
+    except Exception as error:
+        return _check("required", name, "fail", str(error))
+
+
+def _holds_jobs_state_check(
+    paths: RuntimePaths,
+    *,
+    current_archon_task_id: str | None,
+    registry_error: str | None,
+) -> Check:
+    if registry_error is not None:
+        return _check("required", "holds_jobs_state", "fail", registry_error)
+    failures: list[str] = []
+    try:
+        loaded = read_record(paths, "holds_jobs")
+        if loaded["record_kind"] != "holds_jobs":
+            raise ValueError("wrong record kind")
+        jobs_record = cast(HoldsJobsRecord, loaded)
+    except Exception as error:
+        return _check("required", "holds_jobs_state", "fail", str(error))
+
+    if not current_archon_task_id:
+        failures.append("current Archon task ID is missing")
+    elif jobs_record["writer_id"] != current_archon_task_id:
+        failures.append(
+            "writer_id does not match current Archon " f"{current_archon_task_id}"
+        )
+
+    try:
+        loaded_projects = read_record(paths, "project_registry")
+        if loaded_projects["record_kind"] != "project_registry":
+            raise ValueError("wrong record kind")
+        project_registry = cast(ProjectRegistryRecord, loaded_projects)
+        enabled_project_ids = {
+            project["project_id"]
+            for project in project_registry["projects"]
+            if project["enabled"]
+        }
+    except Exception as error:
+        enabled_project_ids = set()
+        failures.append(f"project registry unavailable: {error}")
+
+    jobs = jobs_record["recurring_jobs"]
+    counts = Counter(job["job_id"] for job in jobs)
+    duplicate_ids = sorted(job_id for job_id, count in counts.items() if count > 1)
+    if duplicate_ids:
+        failures.append("duplicate recurring job IDs: " + ", ".join(duplicate_ids))
+
+    for job in jobs:
+        if job.get("role") not in {"sage", "inquisitor"}:
+            failures.append(f"{job['job_id']}: recurring role is missing or invalid")
+        if not isinstance(job.get("scope"), str) or not job["scope"]:
+            failures.append(f"{job['job_id']}: recurring scope is missing")
+        if not _valid_utc_timestamp(job["cadence_anchor"]):
+            failures.append(f"{job['job_id']}: invalid cadence_anchor")
+        if not _valid_utc_timestamp(job["next_due"]):
+            failures.append(f"{job['job_id']}: invalid next_due")
+
+    expected: dict[str, tuple[str, str]] = {"sage:fleet": ("sage", "fleet")}
+    expected.update(
+        {
+            f"inquisitor:{project_id}": ("inquisitor", f"project:{project_id}")
+            for project_id in enabled_project_ids
+        }
+    )
+    for job_id, (role, scope) in sorted(expected.items()):
+        matches = [job for job in jobs if job["job_id"] == job_id]
+        if len(matches) != 1:
+            failures.append(
+                f"{job_id}: expected exactly one recurring job, found {len(matches)}"
+            )
+            continue
+        job = matches[0]
+        if job.get("role") != role:
+            failures.append(f"{job_id}: role is {job.get('role')!r}, expected {role!r}")
+        if job.get("scope") != scope:
+            failures.append(
+                f"{job_id}: scope is {job.get('scope')!r}, expected {scope!r}"
+            )
+
+    return _check(
+        "required",
+        "holds_jobs_state",
+        "fail" if failures else "pass",
+        (
+            "; ".join(failures)
+            if failures
+            else "holds/jobs ledger is present, Archon-owned, and complete"
+        ),
+    )
+
+
+def _first_watchman_patrol_check(
+    installation: InstallationRecord, *, watchman_task_id: str | None
+) -> Check:
+    raw = installation.get("first_watchman_patrol")
+    if not isinstance(raw, dict):
+        return _check(
+            "required",
+            "watchman_first_patrol",
+            "fail",
+            "durable evidence of a successful first Watchman patrol is missing",
+        )
+    if raw.get("outcome") != "success":
+        return _check(
+            "required",
+            "watchman_first_patrol",
+            "fail",
+            "first Watchman patrol evidence does not report success",
+        )
+    if not watchman_task_id:
+        return _check(
+            "required",
+            "watchman_first_patrol",
+            "fail",
+            "cannot verify first patrol ownership without a resolved Watchman",
+        )
+    if raw.get("watchman_task_id") != watchman_task_id:
+        return _check(
+            "required",
+            "watchman_first_patrol",
+            "fail",
+            "first patrol evidence belongs to a different Watchman task",
+        )
+    if not _valid_utc_timestamp(raw.get("observed_at")):
+        return _check(
+            "required",
+            "watchman_first_patrol",
+            "fail",
+            "first patrol evidence has an invalid observed_at timestamp",
+        )
+    evidence = raw.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        return _check(
+            "required",
+            "watchman_first_patrol",
+            "fail",
+            "first patrol evidence is empty",
+        )
+    return _check(
+        "required",
+        "watchman_first_patrol",
+        "pass",
+        f"successful first patrol by {watchman_task_id} at {raw['observed_at']}",
+    )
+
+
+def _patrol_ready_state_checks(
+    paths: RuntimePaths, installation: InstallationRecord
+) -> list[Check]:
+    archon_registry_error: str | None = None
+    watchman_registry_error: str | None = None
+    current_archon_task_id: str | None = None
+    watchman_task_id: str | None = None
+    try:
+        loaded = read_record(paths, "role_run_registry")
+        if loaded["record_kind"] != "role_run_registry":
+            raise ValueError("wrong record kind")
+        registry = cast(RoleRunRegistryRecord, loaded)
+        current_archon_task_id = registry["current_archon_task_id"]
+        current_archons = [
+            role
+            for role in registry["roles"]
+            if role["role"] == "archon"
+            and role["task_id"] == current_archon_task_id
+            and role["identity_state"] == "resolved"
+        ]
+        if len(current_archons) != 1:
+            current_archon_task_id = None
+            archon_registry_error = (
+                "role registry must contain exactly one resolved current Archon; "
+                f"found {len(current_archons)}"
+            )
+        watchmen = [
+            role
+            for role in registry["roles"]
+            if role["role"] == "night_watchman"
+            and role["task_id"]
+            and role["identity_state"] == "resolved"
+        ]
+        if len(watchmen) == 1:
+            watchman_task_id = cast(str, watchmen[0]["task_id"])
+        else:
+            watchman_registry_error = (
+                "role registry must contain exactly one resolved Watchman; "
+                f"found {len(watchmen)}"
+            )
+    except Exception as error:
+        archon_registry_error = f"role registry unavailable: {error}"
+        watchman_registry_error = archon_registry_error
+
+    return [
+        _holds_jobs_state_check(
+            paths,
+            current_archon_task_id=current_archon_task_id,
+            registry_error=archon_registry_error,
+        ),
+        _progress_state_check(
+            paths,
+            task_id=current_archon_task_id,
+            role="archon",
+            name="archon_progress",
+            registry_error=archon_registry_error,
+        ),
+        _progress_state_check(
+            paths,
+            task_id=watchman_task_id,
+            role="night_watchman",
+            name="watchman_progress",
+            registry_error=watchman_registry_error,
+        ),
+        _first_watchman_patrol_check(installation, watchman_task_id=watchman_task_id),
+    ]
+
+
 def _push_checks(paths: RuntimePaths) -> list[Check]:
     failures: list[str] = []
     for directory, kind in (
@@ -388,6 +655,7 @@ def doctor_runtime(
     checks.extend(
         _project_checks(paths, bool(observations.get("codex_projects_verified_at")))
     )
+    checks.extend(_patrol_ready_state_checks(paths, installation))
     checks.append(
         _check(
             "required",

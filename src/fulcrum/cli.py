@@ -58,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_evidence.add_argument("--codex-projects-verified-at", required=True)
     setup_evidence.add_argument("--hooks-verified-at")
     setup_evidence.add_argument("--hooks-evidence")
+    setup_evidence.add_argument("--first-patrol-observed-at")
+    setup_evidence.add_argument("--first-patrol-evidence")
 
     install_parser = subparsers.add_parser(
         "install", help="install or update from retained certified source"
@@ -164,6 +166,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     codex_projects_verified_at=args.codex_projects_verified_at,
                     hooks_verified_at=args.hooks_verified_at,
                     hooks_evidence=args.hooks_evidence,
+                    first_patrol_observed_at=args.first_patrol_observed_at,
+                    first_patrol_evidence=args.first_patrol_evidence,
                 )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["ok"] else 2

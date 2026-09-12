@@ -22,7 +22,10 @@ The checked-in file preserves this historical baseline. `$fulcrum-setup`
 evaluates current runtime readiness by saving a fresh `fulcrum doctor` report
 outside the repository and passing it with `--doctor-report`. That overlay may
 change only the human-role/schedule, project-registry, desktop-hook, and runtime
-visibility rows; all other evidence remains unchanged.
+visibility rows; all other evidence remains unchanged. The live `live-doctor`
+row also fails closed until Doctor verifies the Archon-owned recurring ledger,
+both persistent-role progress records, and durable evidence of one successful
+first Watchman patrol. A quiet successful patrol is valid evidence.
 
 ## Gate matrix
 
@@ -35,8 +38,9 @@ visibility rows; all other evidence remains unchanged.
 | Patrol, cadence, interviews, findings/NEWS | PASS | Tasks 15–16 |
 | Desktop hook delivery | UNSUPPORTED (optional) | Task 18; skills/patrol fallback remains active |
 | Runtime observation feed | UNSUPPORTED (optional) | Task 15; unavailable remains distinct from idle |
-| Human Archon/Watchman and hourly wake | **FAIL (required)** | Live task listing and `fulcrum doctor` |
+| Human Archon/Watchman, progress, and hourly wake | **FAIL (required)** | Live task listing and `fulcrum doctor` |
 | Persisted three-project registry | **FAIL (required)** | Live mappings resolved; Archon-owned record absent |
+| Recurring ledger and first Watchman patrol proof | **FAIL (required)** | `holds_jobs`, progress, and patrol evidence records |
 | Isolated test scope/no premature Dashboard | PASS | Temporary fixtures and repository inventory |
 
 ## Reproduction and completion

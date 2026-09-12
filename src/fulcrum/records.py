@@ -33,6 +33,13 @@ RECORD_KINDS = {
 }
 
 
+class WatchmanPatrolEvidence(TypedDict):
+    watchman_task_id: str
+    observed_at: str
+    outcome: Literal["success", "failure"]
+    evidence: str
+
+
 class InstallationRecord(TypedDict):
     record_kind: Literal["installation"]
     schema_version: int
@@ -43,6 +50,7 @@ class InstallationRecord(TypedDict):
     host_id: str
     configured_services: list[str]
     observations: dict[str, str]
+    first_watchman_patrol: NotRequired[WatchmanPatrolEvidence]
 
 
 class Project(TypedDict):

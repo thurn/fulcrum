@@ -102,13 +102,13 @@ class ReadinessTest(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertFalse(result["baseline_ready"])
         doctor["ready"] = False
-        doctor["required_failures"] = [{"name": "repository_links"}]
+        doctor["required_failures"] = [{"name": "holds_jobs_state"}]
         failed = apply_doctor_evidence(matrix, doctor)
         self.assertFalse(failed["ready"])
         self.assertEqual(failed["blockers"][-1]["id"], "live-doctor")
 
         doctor["ready"] = False
-        doctor["required_failures"] = [{"name": "repository_links"}]
+        doctor["required_failures"] = [{"name": "watchman_first_patrol"}]
         failed = apply_doctor_evidence(matrix, doctor)
         self.assertFalse(failed["ready"])
         self.assertEqual(failed["blockers"][-1]["id"], "live-doctor")

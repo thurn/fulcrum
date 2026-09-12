@@ -252,11 +252,16 @@ class SetupTest(unittest.TestCase):
             codex_projects_verified_at=NOW,
             hooks_verified_at=NOW,
             hooks_evidence="reviewed in the desktop hook browser",
+            first_patrol_observed_at=NOW,
+            first_patrol_evidence="quiet patrol completed with no notifications",
         )
         self.assertTrue(result["ok"])
         observations = read_record(self.paths, "installation")["observations"]
         self.assertEqual(observations["watchman_schedule_id"], "automation-1")
         self.assertEqual(observations["hook_trust"], "desktop_verified")
+        patrol = read_record(self.paths, "installation")["first_watchman_patrol"]
+        self.assertEqual(patrol["watchman_task_id"], "task-watchman")
+        self.assertEqual(patrol["outcome"], "success")
 
     def test_schedule_evidence_does_not_invent_optional_hook_delivery(self) -> None:
         bootstrap_fleet(self.paths, self.input())
@@ -269,6 +274,9 @@ class SetupTest(unittest.TestCase):
         observations = read_record(self.paths, "installation")["observations"]
         self.assertEqual(observations["watchman_schedule"], "ready")
         self.assertNotIn("hook_trust", observations)
+        self.assertNotIn(
+            "first_watchman_patrol", read_record(self.paths, "installation")
+        )
         with self.assertRaisesRegex(SetupError, "supplied together"):
             record_setup_evidence(
                 self.paths,
@@ -276,6 +284,14 @@ class SetupTest(unittest.TestCase):
                 watchman_schedule_id="automation-1",
                 codex_projects_verified_at=NOW,
                 hooks_evidence="missing timestamp",
+            )
+        with self.assertRaisesRegex(SetupError, "first patrol.*together"):
+            record_setup_evidence(
+                self.paths,
+                archon_task_id="task-archon",
+                watchman_schedule_id="automation-1",
+                codex_projects_verified_at=NOW,
+                first_patrol_evidence="missing timestamp",
             )
 
 

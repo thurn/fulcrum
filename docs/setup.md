@@ -287,6 +287,13 @@ human evidence without claiming that CLI execution proves desktop delivery.
 When that exercise is unavailable, the same command records project and
 schedule evidence while leaving the documented hook fallback visible.
 
+After the first real Watchman patrol, rerun the evidence command with
+`--first-patrol-observed-at <UTC-time>` and
+`--first-patrol-evidence <concise-result>`. A quiet patrol is valid successful
+evidence and does not need a manufactured alert. Scheduling alone is not proof
+of a patrol, so Doctor keeps readiness closed until this durable, current-
+Watchman-owned evidence is recorded.
+
 The checked-in readiness matrix retains its historical evidence. To evaluate
 the current machine, save `fulcrum doctor` JSON outside the repository and
 overlay only its four runtime-dependent rows:

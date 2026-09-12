@@ -13,7 +13,8 @@ from unittest.mock import patch
 from fulcrum.config import RuntimePaths
 from fulcrum.doctor import doctor_runtime
 from fulcrum.install import LINKED_SKILLS, InstallationError, install_runtime
-from fulcrum.state import atomic_write_record, read_record
+from fulcrum.roles import initialize_progress
+from fulcrum.state import atomic_write_record, read_record, selected_record_path
 
 REPO_ROOT = Path(__file__).parents[1]
 NOW = "2026-09-11T20:00:00Z"
@@ -77,6 +78,132 @@ class InstallDoctorTest(unittest.TestCase):
                 expected_brain_remote="git@example.test:brain.git",
                 sage_anchor="2026-09-12T08:00:00Z",
                 now=NOW,
+            )
+
+    def prepare_valid_fleet_state(self) -> None:
+        self.install()
+        atomic_write_record(
+            self.paths,
+            {
+                "record_kind": "role_run_registry",
+                "schema_version": 1,
+                "writer_id": "task-archon",
+                "updated_at": NOW,
+                "current_archon_task_id": "task-archon",
+                "roles": [
+                    self.role("archon", "task-archon"),
+                    self.role("night_watchman", "task-watchman"),
+                ],
+            },
+        )
+        projects = []
+        for name in ("fulcrum", "tollgate", "battlement"):
+            repo = self.root / name
+            (repo / ".git").mkdir(parents=True)
+            projects.append(
+                {
+                    "project_id": name,
+                    "repo_path": str(repo),
+                    "host_id": "local",
+                    "codex_project_id": f"codex-{name}",
+                    "tollgate_repo_id": f"tg-{name}",
+                    "enabled": True,
+                }
+            )
+        atomic_write_record(
+            self.paths,
+            {
+                "record_kind": "project_registry",
+                "schema_version": 1,
+                "writer_id": "task-archon",
+                "updated_at": NOW,
+                "projects": projects,
+            },
+        )
+        for role_name, task_id in (
+            ("archon", "task-archon"),
+            ("night_watchman", "task-watchman"),
+        ):
+            atomic_write_record(
+                self.paths,
+                initialize_progress(self.role(role_name, task_id), NOW),
+            )
+        atomic_write_record(
+            self.paths,
+            {
+                "record_kind": "holds_jobs",
+                "schema_version": 1,
+                "writer_id": "task-archon",
+                "updated_at": NOW,
+                "holds": [],
+                "recurring_jobs": [
+                    {
+                        "job_id": "sage:fleet",
+                        "cadence_anchor": NOW,
+                        "next_due": NOW,
+                        "active_run_id": None,
+                        "role": "sage",
+                        "scope": "fleet",
+                    },
+                    *[
+                        {
+                            "job_id": f"inquisitor:{name}",
+                            "cadence_anchor": NOW,
+                            "next_due": NOW,
+                            "active_run_id": None,
+                            "role": "inquisitor",
+                            "scope": f"project:{name}",
+                        }
+                        for name in ("battlement", "fulcrum", "tollgate")
+                    ],
+                ],
+            },
+        )
+        config = json.loads(self.paths.config_file.read_text())
+        config["observations"].update(
+            hook_trust="desktop_verified",
+            runtime_observation="available",
+            watchman_schedule="ready",
+            codex_projects_verified_at=NOW,
+        )
+        config["first_watchman_patrol"] = {
+            "watchman_task_id": "task-watchman",
+            "observed_at": NOW,
+            "outcome": "success",
+            "evidence": "quiet patrol completed with no notifications",
+        }
+        self.paths.config_file.write_text(json.dumps(config), encoding="utf-8")
+
+    def run_doctor(self) -> dict[str, object]:
+        with (
+            patch(
+                "fulcrum.doctor.runtime_package_root",
+                return_value=(self.source / "src" / "fulcrum").resolve(),
+            ),
+            patch(
+                "fulcrum.doctor.schema_root",
+                return_value=(self.source / "schemas").resolve(),
+            ),
+            patch("fulcrum.doctor._tool_version", return_value="version"),
+            patch(
+                "fulcrum.doctor._tollgate_project_status",
+                side_effect=lambda repository_id: {
+                    "path": str(self.root / repository_id.removeprefix("tg-")),
+                    "execution_state": "active",
+                    "block_reasons": [],
+                    "remote_enabled": True,
+                },
+            ),
+            patch(
+                "fulcrum.doctor.brain_status",
+                return_value={"database": "brain", "host": "127.0.0.1"},
+            ),
+        ):
+            return doctor_runtime(
+                paths=self.paths,
+                expected_brain_remote="git@example.test:brain.git",
+                hooks_config=self.hooks,
+                skills_root=self.skills,
             )
 
     def test_install_twice_links_live_source_without_touching_active_state(
@@ -225,6 +352,45 @@ class InstallDoctorTest(unittest.TestCase):
                 "projects": projects,
             },
         )
+        for role_name, task_id in (
+            ("archon", "task-archon"),
+            ("night_watchman", "task-watchman"),
+        ):
+            atomic_write_record(
+                self.paths,
+                initialize_progress(self.role(role_name, task_id), NOW),
+            )
+        atomic_write_record(
+            self.paths,
+            {
+                "record_kind": "holds_jobs",
+                "schema_version": 1,
+                "writer_id": "task-archon",
+                "updated_at": NOW,
+                "holds": [],
+                "recurring_jobs": [
+                    {
+                        "job_id": "sage:fleet",
+                        "cadence_anchor": NOW,
+                        "next_due": NOW,
+                        "active_run_id": None,
+                        "role": "sage",
+                        "scope": "fleet",
+                    },
+                    *[
+                        {
+                            "job_id": f"inquisitor:{name}",
+                            "cadence_anchor": NOW,
+                            "next_due": NOW,
+                            "active_run_id": None,
+                            "role": "inquisitor",
+                            "scope": f"project:{name}",
+                        }
+                        for name in ("battlement", "fulcrum", "tollgate")
+                    ],
+                ],
+            },
+        )
         config = json.loads(self.paths.config_file.read_text())
         config["observations"].update(
             hook_trust="desktop_verified",
@@ -232,6 +398,12 @@ class InstallDoctorTest(unittest.TestCase):
             watchman_schedule="ready",
             codex_projects_verified_at=NOW,
         )
+        config["first_watchman_patrol"] = {
+            "watchman_task_id": "task-watchman",
+            "observed_at": NOW,
+            "outcome": "success",
+            "evidence": "quiet patrol completed with no notifications",
+        }
         self.paths.config_file.write_text(json.dumps(config), encoding="utf-8")
         with (
             patch(
@@ -267,6 +439,142 @@ class InstallDoctorTest(unittest.TestCase):
         self.assertEqual(report["required_failures"], [])
         self.assertEqual(report["optional_gaps"], [])
         self.assertEqual(report["push_failures"], [])
+
+    def test_doctor_fails_closed_for_missing_state_and_failed_first_patrol(
+        self,
+    ) -> None:
+        self.install()
+        atomic_write_record(
+            self.paths,
+            {
+                "record_kind": "role_run_registry",
+                "schema_version": 1,
+                "writer_id": "task-archon",
+                "updated_at": NOW,
+                "current_archon_task_id": "task-archon",
+                "roles": [
+                    self.role("archon", "task-archon"),
+                    self.role("night_watchman", "task-watchman"),
+                ],
+            },
+        )
+        config = json.loads(self.paths.config_file.read_text())
+        config["first_watchman_patrol"] = {
+            "watchman_task_id": "task-watchman",
+            "observed_at": NOW,
+            "outcome": "failure",
+            "evidence": "patrol failed before completing its checks",
+        }
+        self.paths.config_file.write_text(json.dumps(config), encoding="utf-8")
+        with (
+            patch(
+                "fulcrum.doctor.runtime_package_root",
+                return_value=(self.source / "src" / "fulcrum").resolve(),
+            ),
+            patch(
+                "fulcrum.doctor.schema_root",
+                return_value=(self.source / "schemas").resolve(),
+            ),
+            patch("fulcrum.doctor._tool_version", return_value="version"),
+            patch(
+                "fulcrum.doctor.brain_status",
+                return_value={"database": "brain", "host": "127.0.0.1"},
+            ),
+        ):
+            report = doctor_runtime(
+                paths=self.paths,
+                expected_brain_remote="git@example.test:brain.git",
+                hooks_config=self.hooks,
+                skills_root=self.skills,
+            )
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        for name in (
+            "holds_jobs_state",
+            "archon_progress",
+            "watchman_progress",
+            "watchman_first_patrol",
+        ):
+            self.assertEqual(checks[name]["status"], "fail")
+
+    def test_doctor_names_invalid_holds_jobs_owner(self) -> None:
+        self.prepare_valid_fleet_state()
+        path = selected_record_path(self.paths, "holds_jobs", None)
+        jobs = read_record(self.paths, "holds_jobs")
+        jobs["writer_id"] = "task-other"
+        path.write_text(json.dumps(jobs), encoding="utf-8")
+
+        report = self.run_doctor()
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        self.assertEqual(checks["holds_jobs_state"]["status"], "fail")
+        self.assertIn("current Archon", checks["holds_jobs_state"]["detail"])
+
+    def test_doctor_names_wrong_archon_progress_owner(self) -> None:
+        self.prepare_valid_fleet_state()
+        path = selected_record_path(self.paths, "progress", "task-archon")
+        progress = read_record(self.paths, "progress", "task-archon")
+        progress["writer_id"] = "task-other"
+        path.write_text(json.dumps(progress), encoding="utf-8")
+
+        report = self.run_doctor()
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        self.assertEqual(checks["archon_progress"]["status"], "fail")
+        self.assertIn("writer_id", checks["archon_progress"]["detail"])
+        self.assertEqual(checks["watchman_progress"]["status"], "pass")
+
+    def test_doctor_names_wrong_watchman_progress_owner(self) -> None:
+        self.prepare_valid_fleet_state()
+        path = selected_record_path(self.paths, "progress", "task-watchman")
+        progress = read_record(self.paths, "progress", "task-watchman")
+        progress["writer_id"] = "task-other"
+        path.write_text(json.dumps(progress), encoding="utf-8")
+
+        report = self.run_doctor()
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        self.assertEqual(checks["watchman_progress"]["status"], "fail")
+        self.assertIn("writer_id", checks["watchman_progress"]["detail"])
+        self.assertEqual(checks["archon_progress"]["status"], "pass")
+
+    def test_doctor_names_incomplete_required_job_ledger(self) -> None:
+        self.prepare_valid_fleet_state()
+        path = selected_record_path(self.paths, "holds_jobs", None)
+        jobs = read_record(self.paths, "holds_jobs")
+        jobs["recurring_jobs"] = [
+            job
+            for job in jobs["recurring_jobs"]
+            if job["job_id"] != "inquisitor:tollgate"
+        ]
+        path.write_text(json.dumps(jobs), encoding="utf-8")
+
+        report = self.run_doctor()
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        self.assertEqual(checks["holds_jobs_state"]["status"], "fail")
+        self.assertIn("inquisitor:tollgate", checks["holds_jobs_state"]["detail"])
+        self.assertEqual(checks["archon_progress"]["status"], "pass")
+        self.assertEqual(checks["watchman_progress"]["status"], "pass")
+
+    def test_doctor_names_failed_patrol_without_other_state_failures(self) -> None:
+        self.prepare_valid_fleet_state()
+        config = json.loads(self.paths.config_file.read_text())
+        config["first_watchman_patrol"]["outcome"] = "failure"
+        self.paths.config_file.write_text(json.dumps(config), encoding="utf-8")
+
+        report = self.run_doctor()
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        self.assertEqual(checks["watchman_first_patrol"]["status"], "fail")
+        self.assertEqual(checks["holds_jobs_state"]["status"], "pass")
+        self.assertEqual(checks["archon_progress"]["status"], "pass")
+        self.assertEqual(checks["watchman_progress"]["status"], "pass")
 
     @staticmethod
     def role(role: str, task_id: str) -> dict[str, object]:

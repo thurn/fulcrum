@@ -294,14 +294,20 @@ def record_setup_evidence(
     codex_projects_verified_at: str,
     hooks_verified_at: str | None = None,
     hooks_evidence: str | None = None,
+    first_patrol_observed_at: str | None = None,
+    first_patrol_evidence: str | None = None,
 ) -> dict[str, Any]:
-    """Record observed scheduling and optional human-verified desktop hooks."""
+    """Record setup observations and explicit first-patrol evidence."""
 
     projects_at = _timestamp(codex_projects_verified_at, "codex_projects_verified_at")
     schedule_id = _text(watchman_schedule_id, "watchman_schedule_id")
     if (hooks_verified_at is None) != (hooks_evidence is None):
         raise SetupError(
             "hook verification timestamp and evidence must be supplied together"
+        )
+    if (first_patrol_observed_at is None) != (first_patrol_evidence is None):
+        raise SetupError(
+            "first patrol timestamp and evidence must be supplied together"
         )
     registry = read_record(paths, "role_run_registry")
     if registry["record_kind"] != "role_run_registry":
@@ -344,9 +350,20 @@ def record_setup_evidence(
                 "hook_evidence": evidence,
             }
         )
+    if first_patrol_observed_at is not None and first_patrol_evidence is not None:
+        patrol_at = _timestamp(first_patrol_observed_at, "first_patrol_observed_at")
+        patrol_evidence = _text(first_patrol_evidence, "first_patrol_evidence")
+        installation["first_watchman_patrol"] = {
+            "watchman_task_id": cast(str, watchmen[0]["task_id"]),
+            "observed_at": patrol_at,
+            "outcome": "success",
+            "evidence": patrol_evidence,
+        }
+        installation["updated_at"] = patrol_at
     target = atomic_write_record(paths, installation)
     return {
         "ok": True,
         "path": str(target),
         "observations": installation["observations"],
+        "first_watchman_patrol": installation.get("first_watchman_patrol"),
     }

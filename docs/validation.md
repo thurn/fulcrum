@@ -301,10 +301,13 @@ is reported. An unknown schema remains byte-for-byte unchanged and errors. A
 `.worktrees` source is rejected.
 
 The passing doctor fixture uses three Git/Codex/Tollgate mappings, human-marked
-resolved Archon and Watchman identities, one externally observed hourly
-schedule, Beads-returned connectivity, repository links, and no push
-obligations. Failure output is partitioned into
-`required_failures`, `optional_gaps`, and `push_failures`.
+resolved Archon and Watchman identities, Archon-owned recurring jobs, both
+persistent-role progress records, durable evidence of one successful first
+Watchman patrol, one externally observed hourly schedule, Beads-returned
+connectivity, repository links, and no push obligations. The patrol evidence
+accepts a quiet successful patrol without manufacturing an alert. Failure
+output is partitioned into `required_failures`, `optional_gaps`, and
+`push_failures`.
 
 Read-only live checks on 2026-09-11 observed Beads 1.2.2, Dolt 2.2.0, a running
 loopback Beads-managed server with a successful connection test, and Tollgate
@@ -353,6 +356,9 @@ does not duplicate roles or projects.
 Schedule and hook observations are recorded separately after the skill has used
 supported Codex automation inspection and the user has reviewed the exact hook
 definition in `/hooks`. The evidence writer refuses a non-current Archon or a registry
-without exactly one resolved human Watchman. Live readiness overlays only the
+without exactly one resolved human Watchman. A second evidence pass records the
+actual result of one first patrol; quiet success is sufficient, but schedule
+creation cannot stand in for patrol execution. Live readiness overlays only the
 four runtime-dependent rows of the historical matrix and fails closed when a
-doctor check is missing or failing.
+doctor check is missing or failing, including missing ledger, progress, or
+first-patrol proof.
