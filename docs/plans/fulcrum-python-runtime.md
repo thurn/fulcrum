@@ -373,28 +373,14 @@ an approved scope change removes that dependency.
 
 ### Counting active work
 
-A **slot** is a reservation for one managed parent-task turn and its bounded
-native helpers. Global and per-project limits count these reservations, not open
+A **slot** is a reservation for one managed parent-task turn and its native
+helpers. Global and per-project limits count these reservations, not open
 conversations or unfinished assignments.
 
-The default helper policy permits at most two simultaneous native helpers per
-parent and no recursive helper delegation. Python includes this finite limit in
-the parent's instructions; Archon may record a different finite limit for an
-assignment. Use native runtime enforcement where available, but do not introduce
-a Python permission round trip for each helper spawn.
-
-Parents may compose these bounded helper prompts and use native spawn and
+Parents may compose helper prompts and use native spawn and
 result-delivery tools. This is the exception to Python-produced role prompts and
 fleet coordination, not permission to create another managed role or to replace
 the Overseer's independent code review.
-
-When runtime enforcement is unavailable, label the helper limit as an
-instruction-level policy rather than a hard model-concurrency guarantee. An
-observed violation holds further managed starts for that parent and raises one
-exception; it does not release the existing reservation or discard helpers.
-Reliable helper-termination observation is still required for pair handoff. For
-example, two Executor parents with two helpers each consume two managed slots,
-even though up to six model invocations may be active.
 
 - Executor and Overseer alternate within a pair. Reserve capacity before
   dispatch; allow at most one active or uncertain start for the pair.
@@ -856,8 +842,7 @@ not conceal more defects or unfinished work.
 Keep full external evidence outside prompts and return concise results with
 references. Do not add verbose per-tool logging, duplicate CI, continuous full
 history reads, generic resource locks, or extra analysis agents without a
-specific demonstrated need. Native helpers remain bounded and useful; their
-shared slot is not a rationale for unbounded fan-out.
+specific demonstrated need.
 
 ## Drain-Before-Cutover Migration
 
@@ -923,8 +908,6 @@ actual desktop and Tollgate boundaries described in Manual QA.
   certification. A pending native dependency cannot gain implicit authority.
 - Verify permitted helper use, denied peer operations, helper termination before
   pair handoff, and unavailable helper observations retaining the reservation.
-  Observe an exceeded helper limit without native enforcement and verify the
-  instruction-policy violation produces a hold rather than false capacity.
 - Test future-work exclusion, default pending findings, partial intake, stable
   retries, graph changes, unsupported model settings, and title restoration.
 - Advance an injected clock through downtime, delayed specialist dispatch,
@@ -986,7 +969,7 @@ runtime activity together.
   required hold applies immediately but no message enters its active turn.
 - Arrange several updates to the same condition and a separate decision. Expect
   the latest condition plus the distinct decision, not lost actions or a flood.
-- Spawn a bounded native helper and end or delay its parent. Verify the pair
+- Spawn a native helper and end or delay its parent. Verify the pair
   reservation persists until all required activity is terminal; no Overseer
   overlap. Inspect helper usage separately from managed slot counts.
 - Put an assignment in CI wait, use its released capacity, then make a repair
