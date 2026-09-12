@@ -319,7 +319,10 @@ the live brain.
 
 ### Task 06 [code] — Integrate Beads ownership, dependencies, and synchronization
 
-**Status:** pending
+**Status:** done — Beads conventions, idempotent intake, narrow Git commit
+serialization, independent synchronization, and disposable restore evidence
+are implemented in `src/fulcrum/beads.py`, `templates/brain/bead.md`, and
+`docs/validation.md`.
 
 **Outcome:** one brain-wide issue graph supports project work and is durably
 recoverable through both Git and Dolt synchronization.

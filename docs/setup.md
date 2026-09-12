@@ -94,6 +94,29 @@ The dry run must identify the expected private remote and database. Do not use
 is missing; doing so can create empty state instead of restoring shared issue
 history.
 
+### Brain commits and synchronization
+
+Use one `project:<id>` label on every bead. Plan work carries one `plan:<id>`
+label and inherits activation from that plan. Standalone work may carry one
+`activation:queued` or `activation:future` label; no activation label means
+future work. The checked-in [bead template](../templates/brain/bead.md) includes
+the implementation contract expected at intake.
+
+Server-mode writes use an explicit batch boundary: pass
+`--dolt-auto-commit batch` while creating or updating related issues, then run
+`bd --directory <brain> dolt commit -m <message>`. Immediately follow the Dolt
+commit with `bd --directory <brain> dolt push`. This is separate from the Git
+commit and push that save Markdown; a successful `git push` does not save issue
+history.
+
+For shared Markdown edits, serialize only staging and committing. Refuse a
+commit when unrelated staged content already exists, stage explicit paths or
+hunks, then release the short commit lock before `git push` or any Beads
+operation. A failed Git or Dolt push leaves the corresponding local commit in
+place and becomes a `push_obligations` entry in the responsible role's progress
+record. Normal work or patrol retries that exact push; there is no sync daemon
+or cross-store transaction journal.
+
 After a crash, run `bd --directory /absolute/brain dolt test`. A normal client
 read should automatically start the loopback server; inspect `dolt status` and
 `.beads/dolt-server.log` if it does not. Diagnose the configured mode, host,

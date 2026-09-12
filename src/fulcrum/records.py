@@ -144,6 +144,12 @@ class OwnedResource(TypedDict):
     identifier: str
 
 
+class PushObligation(TypedDict):
+    source: Literal["git", "beads"]
+    command: list[str]
+    detail: str
+
+
 class ProgressRecord(TypedDict):
     record_kind: Literal["progress"]
     schema_version: int
@@ -159,6 +165,7 @@ class ProgressRecord(TypedDict):
     handoff_sent: bool
     delivery_error: str | None
     owned_resources: list[OwnedResource]
+    push_obligations: NotRequired[list[PushObligation]]
 
 
 class SuspendedInvestigation(TypedDict):

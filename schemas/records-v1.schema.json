@@ -267,6 +267,23 @@
                 },
                 "additionalProperties": false
               }
+            },
+            "push_obligations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["source", "command", "detail"],
+                "properties": {
+                  "source": { "enum": ["git", "beads"] },
+                  "command": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "minLength": 1 }
+                  },
+                  "detail": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              }
             }
           },
           "additionalProperties": false
