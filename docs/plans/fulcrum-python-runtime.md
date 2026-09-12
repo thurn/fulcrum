@@ -419,6 +419,51 @@ below. Existing legacy installations enter the drain-before-cutover flow through
 this same entry point. `$fulcrum-setup` is an optional pointer to the script,
 not a second installation workflow.
 
+### Operate directly from the local Git clone
+
+A retained local Git clone is required for both ordinary operation and development.
+The checkout itself is the live runtime source, including uncommitted edits and
+changes brought in by Git. Initial setup establishes dependencies, links, and
+services once; editing source, prompts, skills, or hooks requires no install,
+build, copy, publish, commit, or rerun of `scripts/setup` to take effect. Wheel-only
+installs, copied runtime trees, and snapshots of the installed revision are not
+supported. The recorded Git revision is diagnostic context, not an execution gate.
+
+- Install the package editable in the checkout's `.venv`. The stable CLI link,
+  hook directory, and retained skill directories resolve directly into that
+  checkout. LaunchAgents invoke checkout-backed commands using that same Python
+  environment. `doctor` verifies actual import paths and link targets, not merely
+  that a command with the expected name exists on `PATH`.
+- Each CLI/hook invocation reads the current source. Read prompt templates from
+  the editable package's source directory whenever assembling an action brief;
+  do not retain an in-memory template cache across edits or copy templates into
+  installation state. Human skill instructions likewise come from the linked
+  checkout when invoked. Existing agent turns retain the instructions already
+  delivered; the next invocation, brief, or context refresh uses the edited text.
+- An editable install alone does not reload imported Python in `fulcrum serve`.
+  Include automatic source-change detection for `src/fulcrum/**/*.py` using a
+  maintained file-watching library. Coalesce file-save events, then stop taking
+  new mutations/dispatches, finish current short controller operations, and
+  re-exec the controller from the same checkout at a safe boundary. Retain
+  unresolved external operations for normal reconciliation; never repeat a
+  mutation merely because code changed. Preserve the single-writer lock across
+  replacement. This is a controller reload, not a fleet reboot: app-server,
+  desktop, existing agent turns, thread IDs, and worktrees stay intact.
+- Code reload happens automatically after the save and bounded current operation,
+  without waiting for the 30-second scheduling fallback or for all agent work to
+  finish. Resume requests and dispatch after reconnect/reconciliation. Surface
+  import/startup errors through service diagnostics; do not silently keep running
+  an old source snapshot. `launchd` remains the supervisor; do not add a third
+  service, Python child-process supervisor, module-hot-swap framework, or content
+  hashing scheme.
+
+Dependency or package-metadata changes remain the explicit exception: changes to
+`pyproject.toml` or `requirements-dev.lock` require reinstalling requirements and
+the editable package in `.venv`, as required by this repository. Initial machine
+setup and changing OS service registration are installation work; ordinary edits
+to the linked runtime are not. Moving the checkout requires updating its links
+and configured paths; do not silently operate from a detached copy.
+
 ### Setup authority and identity
 
 Setup installs/starts the shared app-server and controller services, verifies the
@@ -708,7 +753,8 @@ creates their tasks and supplies their instructions. Human-facing skills such
 as Weaver and setup remain thin entry points.
 
 Store action-specific text templates in `src/fulcrum/prompts/` as package data,
-loaded with `importlib.resources`. Use ordinary Python assembly; no new template
+loaded afresh with `importlib.resources` from the editable checkout for each
+brief. Use ordinary Python assembly; no new template
 framework or model turn is needed to generate operational instructions. Dispatch
 and compaction use the same prompt builder and current controller records.
 
@@ -1693,6 +1739,8 @@ Every agent-result transition still waits for normal turn/helper completion.
    two LaunchAgent definitions
    and desktop launch wrapper; verify repeatable service setup and shared-runtime
    readiness without enabling a duplicate app-server.
+   Preserve checkout-backed links/imports and implement automatic controller
+   reload on Python edits; verify that reload keeps running Codex turns intact.
 3. **Complete one real bead end to end.** Wire single-command small-task intake
    and the shared graph-intake handler, one Archon-approved
    assignment, Executor submission, independent Overseer review, and native
@@ -1758,6 +1806,8 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Uncommitted CLI/hook/skill/template edits and controller Python edits in the retained clone | Next invocation/brief reads edited source without setup, copy, build, or install; controller reloads automatically at a safe boundary, retaining one writer and existing agent work; `doctor` verifies live import/link paths |
+| Controller reload during a pending native operation, invalid source edit, or repeated file-save events | Preserve operation intent and reconcile rather than duplicate it; coalesce reloads; expose startup errors; shared app-server and agents remain intact |
 | Clean macOS environment, saved non-interactive config, partial setup failure, and rerun | One `scripts/setup` invocation installs dependencies, configures the selected brain/projects/services, creates Archon and policies, and verifies readiness; rerun resumes without duplicates; missing credentials/capabilities produce precise incomplete status |
 | First/repeated setup, conflicting listener, or desktop on a private runtime | Two supervised services and a configured desktop launcher; verify shared thread visibility before dispatch; reuse known services; report conflicts without killing listeners or silently moving desktop work |
 | Controller/app-server restart, reconnect with lost mutation reply, and each fleet reboot mode | Controller restart leaves app-server alive; reconnect initializes once and reconciles before starts; no replayed mutation; fleet reboot/reset preserves services and unrelated desktop conversations |
@@ -1802,6 +1852,10 @@ to the already verified shared runtime without disrupting existing conversations
    commands or fabricated evidence. Rerun and confirm the same resources are reused.
    Verify the development desktop and controller observe the same thread.
    Exercise controller restart and reconnect without restarting app-server.
+   Edit a CLI response, a prompt template, and controller behavior in the retained
+   test checkout without committing or reinstalling. Verify the next invocation
+   and brief reflect the edits, automatic controller reload adopts the code,
+   and a running disposable agent remains on the same thread. Restore the edits.
    Create/name Archon with explicit model settings, establish initial limits/policies,
    and confirm `$archon` links to
    that same task without converting the invoking conversation.
