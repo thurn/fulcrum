@@ -642,7 +642,7 @@ the Overseer's independent code review.
   together before dispatch. Interviews with execution roles consume their
   subject's global/project capacity as well.
 - Archon and human-invoked Weaver turns are outside execution limits, including
-  their native helpers. Record all their usage nevertheless.
+  their native helpers. Track their activity for idle-only delivery nonetheless.
 - CI waits, delivery retries, and inactive decision waits consume no model slot.
   Resumption must reacquire capacity. This policy does not bound the number of
   unfinished assignments; show that count separately.
@@ -1096,7 +1096,7 @@ Preserve configured anchors across restart.
   Failed analysis or publication stays attached to the same occurrence.
 - Apply holds, limits, project eligibility, and Archon's priorities. Policy
   approval does not exempt specialists from capacity or conflict checks.
-- Sage reads workflow measurements, failures, and retained evidence. Recurring
+- Sage reads workflow events, outcomes, failures, and retained evidence. Recurring
   Inquisitor examines the whole project at a recorded certified source commit;
   recent changes receive no privileged review scope. One-off runs follow their
   retained project set and optional scope prompt using the same evidence rules.
@@ -1162,7 +1162,7 @@ read-only report. Python archives them under the shared completion rules after
 their final report, including a report with zero findings. A retained
 `evidence_needed` result keeps the specialist available for its continuation.
 
-## Recovery, Status, and Efficiency
+## Recovery and Status
 
 Python compares expected workflow state with actual runtime and native delivery
 facts. It should explain a concrete invalid state, not assign another agent to
@@ -1211,39 +1211,21 @@ dashboard contract to consume them. Building the dashboard UI is separate work;
 do not create a new web service or pretend to migrate nonexistent readers as
 part of the controller implementation.
 
-### Audit every recurring process
+### Operational diagnostics
 
-Measure cost at each boundary before expanding its machinery. The target
-successful path has no registration conversation, peer-status turn, routine
-Overseer setup, model-driven CI wait, or acknowledgment-only Archon wake.
+Retain concise controller events needed to explain current status and failures:
+what action started or finished, why work is waiting, and which Python operation
+owns remaining recovery, publication, or archival. Link to existing runtime and
+Tollgate evidence rather than duplicating tool transcripts or CI logs.
 
-| Existing cost | Target behavior | Evidence to retain |
-| --- | --- | --- |
-| Role discovery | Python creates and records ID | Setup duration |
-| Repeated context reads | Action-specific prompts | Size and cache usage |
-| Peer coordination | Outcomes and idle-only batches | Latency, wake reason |
-| Patrol agent | Events and targeted reads | Exceptions, recovery time |
-| CI/push monitoring | Native CI observations; Python push retries | Repair wakes |
-| Repeated findings/interviews | Reuse, single round | Findings and turns |
-| Missing finish | One controller-owned reminder per action | Missing outcomes, reminder results |
+This is ordinary workflow diagnostics. There is no cost audit, required token
+accounting, comparison against historical workflow costs, or recurring efficiency
+report. Sage can investigate concrete workflow friction using retained events and
+outcomes without requiring a cost-measurement pipeline.
 
-Record task creation, registration, eligible-to-start delay, Archon decision
-wait, implementation, review, correction, CI, push, and cleanup separately.
-Include failed attempts and helper turns. When available, record input, cached
-input, output, and reasoning tokens without double-counting parent/helper
-aggregates. Unavailable usage remains unavailable; API price estimates are not
-proof of Codex subscription savings.
-
-Do not impose the old proposal's fixed model-comparison trial, financial
-threshold, or automatic model-routing change. Compare representative tiny,
-related-task, failure-recovery, and UI workflows against observed prior costs.
-Report elapsed time and review quality alongside token use so fewer tokens do
-not conceal more defects or unfinished work.
-
-Keep full external evidence outside prompts and return concise results with
-references. Do not add verbose per-tool logging, duplicate CI, continuous full
-history reads, generic resource locks, or extra analysis agents without a
-specific demonstrated need.
+Keep the filing and dispatch timing checks specified above in the development
+integration flow to verify responsiveness. They do not require an ongoing audit
+or a new benchmark service.
 
 ## Drain-Before-Cutover Migration
 
