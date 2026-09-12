@@ -30,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.data-files]
 "share/fulcrum/schemas" = ["schemas/*.json"]
+"share/fulcrum/skills/archon" = ["skills/archon/*.md"]
 "share/fulcrum/skills/shared" = ["skills/shared/*.md"]
 
 [tool.black]

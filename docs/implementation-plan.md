@@ -420,7 +420,8 @@ facts and never mutates task inventory, changes activation, or issues a promotio
 
 ### Task 09 [skills] — Implement task identity and portable shared role contracts
 
-**Status:** pending
+**Status:** done — identity/handoff checks and portable wheel verified; commit
+`17ccfb0` certified, pushed, and cleaned up through Tollgate.
 
 **Outcome:** roles use actual Codex identities, reliable handoffs, and installed
 instructions independent of personal skill directories.

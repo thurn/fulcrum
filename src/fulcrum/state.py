@@ -100,7 +100,9 @@ def _current_archon(paths: RuntimePaths) -> str:
     return archon
 
 
-def require_owner(paths: RuntimePaths, record: Record) -> None:
+def require_owner(
+    paths: RuntimePaths, record: Record, *, handover_from: str | None = None
+) -> None:
     """Enforce the record's cooperative single-writer contract."""
 
     kind = record["record_kind"]
@@ -111,6 +113,16 @@ def require_owner(paths: RuntimePaths, record: Record) -> None:
             return
         expected = "setup or human"
     elif kind == "role_run_registry":
+        registry_path = selected_record_path(paths, "role_run_registry", None)
+        if registry_path.exists():
+            previous = cast(
+                RoleRunRegistryRecord, read_record(paths, "role_run_registry")
+            )["current_archon_task_id"]
+            incoming = cast(RoleRunRegistryRecord, record)["current_archon_task_id"]
+            if incoming != previous and (previous is None or handover_from != previous):
+                raise OwnershipError(
+                    "Archon replacement requires verified cooperative handover"
+                )
         expected = (
             cast(RoleRunRegistryRecord, record)["current_archon_task_id"] or "human"
         )
@@ -149,11 +161,13 @@ def read_record(
     return record
 
 
-def atomic_write_record(paths: RuntimePaths, value: object) -> Path:
+def atomic_write_record(
+    paths: RuntimePaths, value: object, *, handover_from: str | None = None
+) -> Path:
     """Validate and atomically replace one cooperatively owned record."""
 
     record = validate_record(value)
-    require_owner(paths, record)
+    require_owner(paths, record, handover_from=handover_from)
     target = record_path(paths, record)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary: Path | None = None

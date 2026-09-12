@@ -76,3 +76,18 @@ The wheel installs shared references under `share/fulcrum/skills/shared`.
 Install the complete skills tree together, preserving relative references.
 The helper only constructs records; the role uses the existing atomic writer
 and the supported Codex tools. It does not claim that a send caused action.
+
+## Task 10 — Cooperative Archon and enrollment
+
+`tests/test_coordination.py` transfers the current coordinator after verified
+relinquishment, rejects stale writers/acknowledgments, and preserves the exact
+assignment bytes including its mandate. Enrollment checks reject missing health,
+wrong repository paths, wrong project IDs, wrong hosts, and non-Git contexts.
+These checks run against disposable state, not the human's current fleet.
+
+Read-only live reconciliation on 2026-09-11 found existing saved local Git
+projects and active configured Tollgate registrations at matching Git roots for
+Fulcrum, Tollgate, and Battlement. No duplicate project was created and no
+production role was activated. IDs differ from the earlier compatibility audit;
+resolve them at enrollment rather than copying historical report values. Current
+Archon enrollment remains a Task 19 setup operation.
