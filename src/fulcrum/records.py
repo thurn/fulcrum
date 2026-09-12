@@ -110,6 +110,7 @@ class HoldsJobsRecord(TypedDict):
 
 
 class ReviewEntry(TypedDict):
+    source_oid: NotRequired[str]
     attempt: int
     outcome: Literal["approved", "changes_requested", "escalated"]
     candidate_id: str
@@ -118,6 +119,8 @@ class ReviewEntry(TypedDict):
 
 
 class Mandate(TypedDict):
+    allowed_replacements: NotRequired[list[str]]
+    replaces_candidate_id: NotRequired[str]
     candidate_id: str
     scope: str
     granted_at: str

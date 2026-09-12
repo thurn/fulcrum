@@ -32,6 +32,8 @@ where = ["src"]
 "share/fulcrum/schemas" = ["schemas/*.json"]
 "share/fulcrum/skills/archon" = ["skills/archon/*.md"]
 "share/fulcrum/skills/weaver" = ["skills/weaver/*.md"]
+"share/fulcrum/skills/overseer" = ["skills/overseer/*.md"]
+"share/fulcrum/skills/executor" = ["skills/executor/*.md"]
 "share/fulcrum/skills/shared" = ["skills/shared/*.md"]
 
 [tool.black]

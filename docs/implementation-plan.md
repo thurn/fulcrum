@@ -483,7 +483,8 @@ and builds and keeps its briefing short enough for the context reader.
 
 ### Task 11 [skills] — Implement Weaver planning, intake, and refinement
 
-**Status:** pending
+**Status:** done — Weaver scenario and skill checks pass; commit `8041896`
+certified, source synchronized, and worktree cleaned by Tollgate.
 
 **Outcome:** approved human intent becomes standalone plans and executable
 beads without starting work simply because a plan was saved.

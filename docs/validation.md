@@ -103,3 +103,31 @@ and Task 09 covers Plan-mode registration refusal. Skill frontmatter is validate
 with skill-creator's quick_validate.py. Manual contract review confirms that
 substantial plans require two distinct reviews, whereas direct intake does not,
 and approval to save future work does not authorize implementation.
+
+## Task 12 — Review, replacement, and certified recovery
+
+`tests/test_delivery.py` uses immutable commits in a disposable Git repository
+for an accepted review after one rejected version, missing/duplicate evidence,
+third-rejection escalation, an Archon-directed next approach, permitted versus
+out-of-scope replacement, and closure refusal while push/cleanup is pending.
+The completion facts in that unit exercise are explicitly simulated observations,
+not certificates. Review URL decoding verifies both encoding layers.
+
+A separate live disposable Tollgate repository on 2026-09-11 used a voting file
+check: removing the required file produced a failed candidate with no certificate.
+A corrected single-commit replacement passed and was certified/promoted. The
+probe exposed and verified Tollgate's unpromoted-ancestor rejection, now covered
+in the portable delivery contract. A retained worktree demonstrated outstanding
+cleanup; an unavailable disposable remote exercised source synchronization
+failure and recovery. No production release or source branch was manually changed.
+
+The assignment schema adds optional reviewed source OID, allowed replacement
+categories, and predecessor candidate ID. Existing version-1 records remain
+readable; absent replacement permissions grant none. Tollgate still owns all
+certificates, tested commits, queue reconstruction, and promotion authority checks.
+
+A clean wheel installation into an isolated prefix outside the developer home
+resolved every relative skill reference and imported the installed delivery
+helper. Black, Pyre, and all 71 focused tests pass. The live remote outage was
+reported as Tollgate preflight-pending (not a falsely claimed promoted change);
+post-promotion push/cleanup-pending closure is covered by controlled observations.
