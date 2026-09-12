@@ -54,6 +54,8 @@ class Project(TypedDict):
     codex_project_id: str | None
     tollgate_repo_id: str | None
     enabled: bool
+    ineligibility_reason: NotRequired[str]
+    scope_decision: NotRequired[str]
 
 
 class ProjectRegistryRecord(TypedDict):

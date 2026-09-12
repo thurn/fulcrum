@@ -102,7 +102,7 @@
             },
             "observations": {
               "type": "object",
-              "additionalProperties": { "enum": ["available", "unavailable", "unverified"] }
+              "additionalProperties": { "type": "string", "minLength": 1 }
             }
           },
           "additionalProperties": false
@@ -131,7 +131,9 @@
                   "host_id": { "type": "string", "minLength": 1 },
                   "codex_project_id": { "type": ["string", "null"], "minLength": 1 },
                   "tollgate_repo_id": { "type": ["string", "null"], "minLength": 1 },
-                  "enabled": { "type": "boolean" }
+                  "enabled": { "type": "boolean" },
+                  "ineligibility_reason": { "type": "string", "minLength": 1 },
+                  "scope_decision": { "type": "string", "minLength": 1 }
                 },
                 "additionalProperties": false
               }

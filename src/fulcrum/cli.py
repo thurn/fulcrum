@@ -13,7 +13,9 @@ from fulcrum.brain import brain_status, initialize_brain
 from fulcrum.config import resolve_paths
 from fulcrum.context import read_task_context
 from fulcrum.documents import discover_plans
+from fulcrum.doctor import doctor_runtime
 from fulcrum.hook_config import install_hook_source
+from fulcrum.install import install_runtime
 from fulcrum.records import ProjectRegistryRecord, load_record
 from fulcrum.resources import collect_resources
 from fulcrum.state import atomic_write_record, read_record
@@ -31,6 +33,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root", help="override the configured local state root")
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("version", help="show package and source version")
+
+    install_parser = subparsers.add_parser(
+        "install", help="install or update from retained certified source"
+    )
+    install_parser.add_argument("--source-root", required=True)
+    install_parser.add_argument("--certified-revision", required=True)
+    install_parser.add_argument("--skills-root", required=True)
+    install_parser.add_argument("--hooks-config", required=True)
+    install_parser.add_argument("--hook-command", required=True)
+    install_parser.add_argument("--host-id", default="local")
+    install_parser.add_argument("--expected-brain-remote", required=True)
+    install_parser.add_argument("--sage-anchor", required=True)
+    install_parser.add_argument("--codex-projects-verified-at")
+    install_parser.add_argument("--watchman-schedule-id")
+
+    doctor_parser = subparsers.add_parser(
+        "doctor", help="report required failures, optional gaps, and failed pushes"
+    )
+    doctor_parser.add_argument("--expected-brain-remote", required=True)
+    doctor_parser.add_argument("--skills-root", required=True)
+    doctor_parser.add_argument("--hooks-config", required=True)
 
     hooks_parser = subparsers.add_parser("hooks", help="install lifecycle hooks")
     hooks_commands = hooks_parser.add_subparsers(dest="hooks_command", required=True)
@@ -97,6 +120,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(version_text())
         return 0
+    if args.command in {"install", "doctor"}:
+        try:
+            paths = resolve_paths(
+                brain_override=args.brain_root,
+                state_override=args.state_root,
+            )
+            if args.command == "install":
+                result = install_runtime(
+                    paths=paths,
+                    source_root=Path(args.source_root),
+                    certified_revision=args.certified_revision,
+                    skills_root=Path(args.skills_root),
+                    hooks_config=Path(args.hooks_config),
+                    hook_command=Path(args.hook_command),
+                    host_id=args.host_id,
+                    expected_brain_remote=args.expected_brain_remote,
+                    sage_anchor=args.sage_anchor,
+                    codex_projects_verified_at=args.codex_projects_verified_at,
+                    watchman_schedule_id=args.watchman_schedule_id,
+                )
+            else:
+                result = doctor_runtime(
+                    paths=paths,
+                    expected_brain_remote=args.expected_brain_remote,
+                    hooks_config=Path(args.hooks_config),
+                    skills_root=Path(args.skills_root),
+                )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result.get("ready", result.get("ok", False)) else 2
+        except Exception as error:
+            print(f"fulcrum: {error}", file=sys.stderr)
+            return 2
     if args.command == "hooks":
         try:
             result = install_hook_source(Path(args.config), Path(args.command))

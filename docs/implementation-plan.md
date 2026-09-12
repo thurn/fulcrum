@@ -745,7 +745,10 @@ verified and the limitation remains visible.
 
 ### Task 19 [code] — Complete installation, diagnostics, and safe self-updates
 
-**Status:** pending
+**Status:** done — repeatable certified-source installation, version/skill/hook
+diagnostics, schema backup conversion, and safe update checks pass; the live
+human Archon/Watchman enrollment and Watchman schedule remain required readiness
+failures rather than fabricated setup success.
 
 **Outcome:** the infrastructure can be installed repeatedly and maintained
 without losing active work.

@@ -288,3 +288,29 @@ desktop latency, delivered context size, and correction-turn evidence remain
 `unavailable`, not passing. Until a human reviews the installed hash and performs
 the desktop exercise in [hooks.md](hooks.md), the installed role skills and the
 Night Watchman patrol are the verified fallback for context and missed handoffs.
+
+## Task 19 — Repeatable installation and doctor
+
+`tests/test_install_doctor.py` creates a retained synthetic source with matching
+release and remote refs, installs twice, and confirms the active assignment and
+recurring-job bytes are unchanged, services and hooks are not duplicated, all
+seven skills are present, and no database restart is reported. It updates the
+recorded package to 0.2.0 while retaining active role skill revisions for doctor
+reconciliation. A schema-0 config is backed up before its explicit conversion;
+an unknown schema remains byte-for-byte unchanged and errors. A `.worktrees`
+source is rejected.
+
+The passing doctor fixture uses three Git/Codex/Tollgate mappings, human-marked
+resolved Archon and Watchman identities, one externally observed hourly
+schedule, Beads-returned connectivity, matching package/source/skill revisions,
+and no push obligations. Failure output is partitioned into
+`required_failures`, `optional_gaps`, and `push_failures`.
+
+Read-only live checks on 2026-09-11 observed Beads 1.2.2, Dolt 2.2.0, a running
+loopback Beads-managed server with a successful connection test, and Tollgate
+0.1.0. The actual saved Codex project IDs and active Tollgate registrations were
+resolved for Fulcrum, Tollgate, and Battlement; each Tollgate repository had its
+expected Git root, remote push enabled, and no repository block reason. No
+human-created Archon or Watchman task was present in the supported task listing,
+so no role registry or automation was invented. Those are required failures for
+Task 20, not optional gaps.

@@ -180,3 +180,82 @@ Remove only the installation being decommissioned:
 - Preserve the brain and local application state unless they are separately
   backed up and explicitly selected for removal. Package removal never implies
   database deletion.
+
+## Versioned install and update workflow
+
+Run installation only from the retained checkout after Tollgate has promoted
+and synchronized the exact revision. The installer rejects paths containing
+`.worktrees` and requires `HEAD`, `refs/heads/release`, and
+`refs/remotes/origin/master` to equal `--certified-revision`.
+
+```sh
+revision=$(git -C /absolute/retained/fulcrum rev-parse HEAD)
+python3.12 -m venv /absolute/retained/fulcrum/.venv
+/absolute/retained/fulcrum/.venv/bin/pip install \
+  --requirement /absolute/retained/fulcrum/requirements-dev.lock
+/absolute/retained/fulcrum/.venv/bin/pip install --no-deps \
+  --editable /absolute/retained/fulcrum
+/absolute/retained/fulcrum/.venv/bin/fulcrum \
+  --brain-root /absolute/brain --state-root /absolute/state install \
+  --source-root /absolute/retained/fulcrum \
+  --certified-revision "$revision" \
+  --skills-root /absolute/codex/skills \
+  --hooks-config /absolute/codex/hooks.json \
+  --hook-command /absolute/retained/fulcrum/.venv/bin/fulcrum-hook \
+  --expected-brain-remote git@github.com:owner/private-brain.git \
+  --sage-anchor 2026-09-12T16:00:00Z \
+  --codex-projects-verified-at 2026-09-11T19:45:00Z
+```
+
+The command installs all seven role skills under Fulcrum-owned skill
+directories, merges the two handlers into one hook source, records package,
+source, and skill revisions, and preserves unrelated skills and hooks. Running
+it twice is expected and does not create roles, schedules, services, or project
+registrations. It never restarts Beads. Existing active runs retain their
+recorded skill revision; `doctor` fails readiness until a material skill change
+has been reconciled rather than silently rewriting their history.
+
+The Archon and Night Watchman task IDs must come from human-created Codex tasks
+and use human model authorization in the role registry. After the Watchman task
+exists, create or update its one hourly heartbeat through Codex's supported
+automation UI/API, then repeat install with `--watchman-schedule-id <actual-id>`.
+Do not manufacture substitute tasks or specialist schedules. Record exactly
+three initial projects with their actual Git root, Codex project ID, host, and
+Tollgate repository ID. Keep an ineligible project registered with
+`ineligibility_reason`; a true scope exclusion additionally needs a written
+`scope_decision`, and disabled initial integrations still fail readiness until
+repaired.
+
+After every install or update, use the CLI before any Dashboard is available:
+
+```sh
+/absolute/retained/fulcrum/.venv/bin/fulcrum doctor \
+  --expected-brain-remote git@github.com:owner/private-brain.git \
+  --skills-root /absolute/codex/skills \
+  --hooks-config /absolute/codex/hooks.json
+```
+
+`doctor` reports required capability failures, optional desktop/runtime
+observation gaps, and retained Git/Dolt push failures separately. Database
+health comes from `bd where`, `bd dolt status`, and `bd dolt test` through the
+Beads adapter; Fulcrum does not keep a PID or offer a generic database service
+manager.
+
+Hook definitions are hash-trusted. Every install marks hook trust as requiring
+review: use `/hooks` in Codex to inspect and trust the exact new definition,
+then perform the compact/Stop desktop exercise. Never use a trust bypass as
+readiness evidence.
+
+Before a supported record conversion, Fulcrum writes the original installation
+record under `state/backups/`. The only automatic conversion is the explicit
+installation schema 0-to-1 mapping. Invalid or unknown versions remain unchanged
+and produce an error. For a package rollback, install a previously certified
+revision from its retained checkout and rerun the same command; do not restore
+the whole state directory over active work. Database backup and restoration use
+`bd backup sync` and `bd backup restore` into a disposable destination first,
+with `bd dolt stop/start` only during coordinated database maintenance.
+
+Uninstall the package and the seven `fulcrum-*` skill directories only after
+disabling/removing the two marked Fulcrum handlers. Preserve the config, brain,
+state, backups, role registry, and project registry unless the user separately
+selects those data for deletion.
