@@ -830,6 +830,48 @@ Packaged prompts explain coordination boundaries and the native-helper
 exception. Defer tool-blocking guards unless observed mistakes demonstrate their
 need; do not build a shell-command parser or a general bypass-prevention layer.
 
+### Archive completed threads
+
+Python automatically archives a managed thread when its role's work is complete
+and no further action is assigned to that thread. Agents end their turns after
+finish; they never archive themselves or wait for Archon to acknowledge completion.
+Archival is a controller operation requiring no model turn or execution slot.
+
+| Thread | When Python archives it |
+| --- | --- |
+| Weaver | Its writable authoring work has a successful final outcome and retained outputs; remaining publication/sync work has a durable Python owner |
+| Executor and Overseer | Their approved run has no remaining beads, and the last assignment meets the full delivery/cleanup/closure contract; archive both threads |
+| Sage and Inquisitor, recurring or one-off | Their final report and explicit findings list are retained, no analysis/interview continuation remains, and remaining publication/sync work has a durable Python owner |
+| Restored interview subject | Its interview action is resolved and it is inactive, if Python restored it from archived state; otherwise preserve its prior active lifecycle |
+| Current Archon | Keep open between decisions; archive only when explicitly retired or replaced, including reboot |
+
+For all rows, wait for observed thread and helper inactivity before invoking
+the runtime's supported archive operation. A valid finish is not permission to
+archive a still-running thread. Use the stored runtime thread ID; never look up
+an archive target by title. Retain thread IDs, role records, outcomes, and links
+after archival so status and later authorized interviews can find the history.
+
+An Executor handoff, Overseer approval, CI wait, pause, blocker, or Sage request
+for interview evidence does not complete the thread's work. Keep the pair for
+remaining approved sequential beads, even if the next bead is temporarily
+blocked. Archive it when the run ends; do not retain it for hypothetical future
+work. Failed or interrupted actions remain available for their concrete recovery.
+Explicit cancellation or retirement may end that lifecycle after preserving
+work and resolving or transferring owned obligations under the existing rules.
+Plan-mode Weaver naming alone never triggers automatic archival.
+
+Record archive intent with the thread's lifecycle completion using the existing
+external-operation record, and process it promptly once inactivity and cleanup
+requirements hold. Re-evaluate it when helpers stop or required cleanup finishes.
+On restart, resume retained
+archive work; no fleet scan, archive daemon, or separate retry framework is needed.
+Mark the thread archived only after runtime confirmation. A failed or uncertain
+archive leaves completed work completed and exposes `archive pending` with the
+specific failure in status. Reconcile through the existing bounded runtime policy
+before retrying an ambiguous operation. Do not silently drop the obligation or
+rerun the agent's work. Track each pair member separately so one successful
+archive is retained if the other's operation fails.
+
 ## Pair Execution, Review, and Delivery
 
 Python starts Executor directly with Archon-approved scope. There is no routine
@@ -963,8 +1005,8 @@ active to observe CI or retry an ordinary network failure.
 - Verify configured source synchronization, owned process termination, and
   supported worktree/branch cleanup before Beads closure. Keep brain-history
   pushes as separately owned obligations.
-- Archive a completed pair only after both conversations/helpers are inactive
-  and all remaining administrative obligations have durable ownership.
+- At run completion, archive both pair members under the archive rules above.
+  Keep them for the next approved bead when the run still has work.
 
 The inspected Tollgate implementation treats failed checks as terminal failures.
 Its separate service-error and interrupted-run recovery can automatically
@@ -1111,13 +1153,14 @@ as an answer.
   uncertain start before classifying it as expired. Already-running interviews
   may finish; retain their late answers and restore prior archival state without
   interrupting them merely because collection closed.
-- An interrupted interview may consume the same bounded finish-recovery
-  allowance as other managed turns; it is not permission for new questions.
+- An interrupted interview retains its evidence for specific recovery; it is
+  not permission for new questions. A normally ended interview missing its
+  answer uses the controller's one missing-outcome reminder.
 
 Specialists require no source worktree or fabricated promotion candidate for a
-read-only report. Python archives them after their result is retained,
-publication is reconciled, helpers are inactive, and remaining synchronization
-has a durable owner.
+read-only report. Python archives them under the shared completion rules after
+their final report, including a report with zero findings. A retained
+`evidence_needed` result keeps the specialist available for its continuation.
 
 ## Recovery, Status, and Efficiency
 
@@ -1344,7 +1387,7 @@ Every agent-result transition still waits for normal turn/helper completion.
 | `correcting`, permitted-repair result validated | `delivering`; retain replacement linkage and require native certification |
 | Any active stage, reported blocker or failed external operation | `recovering`; retain prior stage and the specific next action/owner |
 | `recovering`, cause resolved | Resume the recorded action under current holds/capacity; do not restart the assignment |
-| `delivering` or delivery recovery, full completion contract observed | `completed`; advance the run or archive the inactive pair |
+| `delivering` or delivery recovery, full completion contract observed | `completed`; advance remaining approved beads, or retain archive operations for both pair members when the run ends |
 | Explicit cancellation decision | `canceled`; reconcile native work and retain cleanup ownership before releasing conflicting work |
 
 ### Ordered implementation tasks
@@ -1370,7 +1413,9 @@ Every agent-result transition still waits for normal turn/helper completion.
    delivery/closure. Use packaged prompts through `context.py` and the concrete
    finish forms. Reuse `beads.py`/`brain.py` native publication helpers,
    `documents.py` readers, and `delivery.py` review accounting with the new
-   ownership. Exit only after the assembled-product flow below passes. Do this
+   ownership. Wire automatic archival for completed Weaver work and both members
+   of a completed run, with retained archive operations and visible failures.
+   Exit only after the assembled-product flow below passes. Do this
    before expanding recurring workflows or collecting broad mock-test counts.
 4. **Add scheduling and bounded recovery.** Adapt `eligibility.py` and
    `coordination.py` for approved runs, capacity, composed holds, idle-only
@@ -1393,7 +1438,8 @@ Every agent-result transition still waits for normal turn/helper completion.
    Keep semantic duplicate matching with the specialist: it names an existing
    bead after inspecting the evidence; Python validates that target and appends
    evidence without expanding active scope. Exit with demonstrated findings,
-   valid empty reports, publication retries, and deadline handling.
+   valid empty reports, publication retries, deadline handling, and confirmed
+   archival of final-report threads and previously archived interview subjects.
 7. **Install and cut over.** Follow the drain procedure, replace `install.py`,
    `doctor.py`, `readiness.py`, and hook expectations, remove obsolete role/shared
    skills and all Watchman code, and update affected tests and operational docs.
@@ -1419,6 +1465,8 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Weaver completes, pair finishes an intermediate/final bead, specialist requests evidence or reports zero findings, and Archon finishes decisions | Archive completed Weaver/final-run pair/final-report specialist after inactivity; retain pair for approved successors, specialist for continuation, and current Archon |
+| Helpers still running, publication push fails, one pair archive fails, or restart occurs before archive confirmation | Wait for inactivity; Python-owned sync does not require an agent to remain open; retain each archive operation independently; show completed work with archive pending until runtime confirms; no repeated agent work |
 | Bare `$weaver`, conversational role overrides, and pair reuse | Defaults persist as Sol/high for both roles; the flatbuffers example stores Sol Executor/Astra Overseer with human provenance; apply both models on assignment; unsupported runtime settings remain explicit blockers |
 | One-off Sage/Inquisitor, global/project scope, full capacity, and restart | Retain exact scope and authority; queue without another approval turn; apply appropriate project/global reservations; resume one request; publish through shared evidence rules; recurring anchors remain unchanged |
 | Registration, rename, compaction, reboot, and number above 9999 | Exact role emoji/code/brackets/spacing; at least four digits without rollover; concurrent same-role registrations get distinct numbers; `SAGE0001` and `INQ0001` coexist; registration advances only its role's counter; allocations persist; Archon remains exactly `👑 ARCHON 👑` without consuming a number |
@@ -1455,6 +1503,8 @@ configuration, and isolated brain, state, and remotes.
    controller activation, no authoring publication/finish obligation, and the
    same numeral after writable approval. File one small documentation bead using
    the single-command title/description form and record time to its durable ID.
+   Finish authoring and verify runtime-confirmed Weaver archival after inactivity,
+   without waiting for Archon acknowledgment or Python-owned remote push work.
 3. Verify the bead stays pending until Archon approves its exact scope. Start
    Executor in the Python-created Tollgate worktree with the correct model and
    a complete action brief, without an Overseer preparation turn. Measure filing
@@ -1464,9 +1514,9 @@ configuration, and isolated brain, state, and remotes.
    helper completion and verify Overseer does not start; then review the exact
    candidate independently and approve with explicit repair permissions.
 5. Observe Python drive native certification, promotion, configured source sync,
-   cleanup, and Beads closure. Verify task archival follows inactivity and any
-   remaining brain push has a controller owner. No agent waits on CI or sends a
-   peer handoff.
+   cleanup, and Beads closure. Verify both pair threads are archived in the actual
+   runtime after inactivity, current Archon remains open, and any remaining brain
+   push has a controller owner. No agent waits on CI or sends a peer handoff.
 
 Then exercise two projects and sequential beads, compaction, native helper
 termination, source repair, and all three reboot modes. For reset, seed plans,
