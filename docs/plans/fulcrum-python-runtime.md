@@ -219,7 +219,9 @@ creation step.
 - Setup is repeatable: reuse its retained operation and actual Archon ID rather
   than create another Archon on every invocation.
 - Archon's first useful turn establishes initial global/project limits and
-  recurring policies. No execution starts until those policies exist.
+  recurring policies. No execution starts until capacity limits exist; recurring
+  runs additionally require their standing policy. An explicitly authorized
+  one-off specialist run needs no recurring policy.
 - Replacement transfers the binding after the previous Archon is inactive and
   pending decisions are reconciled. Reject later commands from the former
   binding; preserve previously approved scope and pending work except during
@@ -326,21 +328,46 @@ reporting registration complete.
 
 ### Model policy
 
-Weaver's argument selects the resulting Executor model, not the model of the
-human's current Weaver conversation. Record the selected model on every bead
-created by that intake and in the eventual assignment.
+Weaver interprets model preferences conversationally, not through a strict
+positional grammar or a Python parser for `$weaver` prompt text. With no model
+specified, use Sol/high for both Executor and Overseer. A bare model preference
+such as `$weaver luna` conventionally selects the Executor; named roles select
+their own models. These choices do not change the current Weaver conversation's
+model. For example, this is valid without reformulating it as flags:
+
+```text
+$weaver sol executor astra overseer: Please add flatbuffers
+```
+
+Weaver resolves that to Executor Sol/high and Overseer Astra/high. Accept natural
+word order and ordinary prose; ask only when the intended role/model is materially
+ambiguous or contradictory. Do not add a model call solely for parsing: this is
+part of Weaver's existing authoring turn. Show the resolved choices with the
+intake result without a separate confirmation when the user's intent is clear.
 
 | Role or selection | Model | Reasoning effort |
 | --- | --- | --- |
 | Archon | Explicit setup configuration | Explicit setup configuration |
 | Overseer, Sage, Inquisitor | `gpt-5.6-sol` | `high` |
+| `$weaver` default Executor | `gpt-5.6-sol` | `high` |
 | `$weaver luna` Executor | `gpt-5.6-luna` | `xhigh` |
 | `$weaver sol` Executor | `gpt-5.6-sol` | `high` |
+| Explicit Astra selection | `gpt-6-astra` | `high` unless otherwise requested |
 
-Validate aliases and effective settings against the live catalog. Missing Weaver
-arguments return a short usage error, not a model choice made by Python.
-Unsupported settings block affected dispatch and produce one actionable
-condition. Do not silently substitute models or efforts.
+Weaver passes resolved settings to Python through structured intake fields:
+`executor_model`, `executor_reasoning_effort`, `overseer_model`, and
+`overseer_reasoning_effort`. Store all four effective values on every resulting
+bead, even when defaults apply, and snapshot them on assignment. Retain the
+source of explicit human overrides with the bead. The example above itself
+provides human authorization for the Overseer's Astra selection; no additional
+permission exchange is required. Refinements update the same bead explicitly,
+and changes to an active assignment follow the existing scope/model-change rules.
+
+Python validates the resolved models and efforts against runtime capabilities;
+it does not reject ordinary prompt wording. Unsupported settings block affected
+dispatch and produce one actionable condition. Do not silently substitute models
+or efforts. On each assignment, including when reusing a pair, apply and verify
+both roles' retained settings before starting their turns.
 
 Archon may explicitly change an Executor's model with rationale. Apply the
 change at a turn boundary, retain earlier attempts, and preserve any stricter
@@ -365,7 +392,7 @@ The following are target Fulcrum interfaces, not existing commands promised by
 the current installation:
 
 ```sh
-fulcrum weaver register --model sol
+fulcrum weaver register
 fulcrum instructions
 fulcrum --dispatch 17 intake --title "Fix empty search results" \
   --description "Show an empty-state message when search returns no matches; preserve matching results. Verify both cases."
@@ -377,7 +404,9 @@ the returned instructions contain the complete commands with the actual value.
 
 Registration binds the actual runtime identity, allocates the numeral once, sets
 the canonical name, and returns the relevant instructions in one response. An
-identical retry returns that registration. Conflicting model selection after
+identical retry returns that registration. Naming/registration does not require
+parsing model preferences first; writable authoring passes the resolved choices
+at intake. Conflicting model selection after
 publication needs an explicit update, not silent relabeling of existing work.
 
 Weaver receives its canonical name and numeral on activation, including in Plan
@@ -400,14 +429,19 @@ and source changes still require the approved writable authoring phase.
   helper reviews, or an extra model turn to record an already-understood task.
   The author supplies meaningful content; Python checks required fields without
   invoking a model to expand or classify the description.
-- Infer the project and selected Executor model from the registered authoring
-  context. Accept `--project` when the project is ambiguous; never guess among
-  multiple projects. A human may also file directly with
-  `fulcrum intake --project <project> --model sol --title <title>
+- Infer the project from the registered authoring context and carry forward
+  both resolved role/model choices. Accept `--project` when the project is
+  ambiguous; never guess among multiple projects. A human may also file directly with
+  `fulcrum intake --project <project> --title <title>
   --description <description>` without creating a Weaver conversation. Direct
   filing is an explicit local CLI operation, grants no scheduling approval, and
   uses the same intake handler. Managed authoring retains its dispatch binding;
   specialist findings retain their evidence-backed publication contract.
+- The single-task CLI accepts `--executor-model`, `--executor-reasoning-effort`,
+  `--overseer-model`, and `--overseer-reasoning-effort` for resolved preferences;
+  graph intake carries the same fields per bead. Without preferences, both roles
+  default to Sol/high. These structured interfaces are for Python validation and
+  storage, not a syntax the human must use in a `$weaver` prompt.
 - Optional `--depends-on <bead-id>` arguments and `--context <reference>` supply
   dependencies and supporting material. Use `intake --input tasks.json` for a
   substantial plan's complete task graph; both forms share validation and native
@@ -436,16 +470,15 @@ and source changes still require the approved writable authoring phase.
   outputs and assigning ownership of remaining publication work. Weaver never
   waits for Archon acknowledgment or archives itself directly.
 
-A tiny task should remain tiny:
+A tiny task should remain tiny. Omitted model fields in this input are expanded
+to both roles' effective defaults before storing the bead:
 
 ```json
 {
   "project": "fulcrum",
   "title": "Correct the install example",
-  "outcome": "README matches the supported install command",
-  "scope": "README installation example only",
-  "acceptance": "Compare with the actual installation instructions",
-  "model": "sol", "activation": "pending"
+  "description": "Make the README installation example match the supported command. Verify it against the actual installation instructions.",
+  "activation": "pending"
 }
 ```
 
@@ -603,8 +636,10 @@ the Overseer's independent code review.
   result delivery are an explicit exception, not a way to monitor another fleet
   role or substitute for Overseer review.
 - Sage and Inquisitor consume execution slots. Fleet Sage consumes a global slot
-  without a software-project slot; Inquisitor consumes both global and
-  reviewed-project capacity. Interviews with execution roles consume their
+  without a software-project slot; project-scoped Sage also consumes that project's
+  capacity. Inquisitor consumes one global slot and one slot in each reviewed
+  project, including for a one-off global review. Acquire these reservations
+  together before dispatch. Interviews with execution roles consume their
   subject's global/project capacity as well.
 - Archon and human-invoked Weaver turns are outside execution limits, including
   their native helpers. Record all their usage nevertheless.
@@ -996,7 +1031,55 @@ the runtime cannot safely change that context, hold the run as an integration
 failure rather than continue in the previous worktree. Overseer receives the new
 scope independently of Executor's narrative; earlier mandates do not apply.
 
-## Recurring Specialists and Single-Round Interviews
+## Specialists and Single-Round Interviews
+
+### One-off runs
+
+Provide these Python entry points; they create managed specialist tasks using
+the same packaged prompts and controller lifecycle as scheduled occurrences:
+
+```sh
+fulcrum sage
+fulcrum sage --scope "Investigate why recent review handoffs have been slow"
+fulcrum inquisitor
+fulcrum inquisitor --project fulcrum --scope "Review the indexing architecture"
+```
+
+Both commands accept optional `--project <id>` and `--scope <prompt>`. Without a
+project, Sage assesses fleet workflow and Inquisitor reviews all currently enabled
+projects. With a project, either role is limited to that project. A scope prompt
+focuses the role's analysis; without it, use its normal broad workflow or
+architecture review. Resolve the project set when accepting the request and
+retain it with the exact prompt; later project enrollment does not expand it.
+Python uses the project selector to bind scope and capacity, rather than trying
+to infer a project list from arbitrary prose.
+
+A direct human CLI request authorizes that one analysis run. Return a retained
+request ID and queued/running status promptly, without waiting for Archon,
+analysis, or publication. Archon may also request a one-off run in its structured
+decisions. Other agents can propose a run for Archon's approval; they cannot
+grant themselves this authority. A one-off request does not require a new Bead,
+installed specialist skill, or standing recurring policy.
+
+Queue the request under existing priorities, limits, holds, and project health
+checks; it does not interrupt active work or bypass capacity. Start a fresh
+numbered specialist thread when eligible. A global Inquisitor uses one thread
+with the retained project set and each project's recorded certified source
+commit; reserve capacity in each reviewed project as described above. Show
+specific blockers in status. No matching project means an actionable request
+error, not a successful empty architecture review.
+
+Reuse the occurrence, report, findings, interview, and publication paths below.
+Store the trigger as one-off with its authority, project set, and optional scope;
+it has no cadence anchor. Restart resumes that same request. Each explicit new
+invocation requests a new analysis; transport retries of a retained request reuse
+its identity. One-off runs neither advance nor reset recurring due times and
+do not replace an already queued recurring occurrence. Findings still require
+concrete evidence and Archon approval before implementation; zero findings is
+valid. Reports and completion status remain accessible by request ID after the
+specialist is archived.
+
+### Recurring runs and shared reporting
 
 Archon approves standing recurring policies. Python tracks due times, creates
 occurrences, and dispatches them under those policies without seeking approval
@@ -1012,9 +1095,10 @@ Preserve configured anchors across restart.
   Failed analysis or publication stays attached to the same occurrence.
 - Apply holds, limits, project eligibility, and Archon's priorities. Policy
   approval does not exempt specialists from capacity or conflict checks.
-- Sage reads workflow measurements, failures, and retained evidence. Inquisitor
-  examines the whole project at a recorded certified source commit; recent
-  changes receive no privileged review scope.
+- Sage reads workflow measurements, failures, and retained evidence. Recurring
+  Inquisitor examines the whole project at a recorded certified source commit;
+  recent changes receive no privileged review scope. One-off runs follow their
+  retained project set and optional scope prompt using the same evidence rules.
 - Findings include the problem, evidence, expected benefit, affected project,
   and acceptance criteria. Deduplicate against existing issues using stable
   problem identity and explicit reconciliation, not another generated hash.
@@ -1029,9 +1113,10 @@ Preserve configured anchors across restart.
   publishes that explicit list; it does not classify prose, extract tasks from
   report observations, or invoke an additional evidence-review agent.
 - Publish those findings as pending unless explicitly deferred. Archon still
-  approves execution. Specialist default implementation model is Sol/high unless
-  its approved policy selects another supported model; persist it on the
-  resulting beads and permit normal Archon revision.
+  approves execution. Findings default to Sol/high for both Executor and Overseer
+  unless their approved policy or one-off request selects other supported models;
+  persist both effective role settings on resulting beads under the model policy
+  above and permit normal Archon revision.
 - Retain reports, including explicit empty findings. Publication retries reuse
   the report and occurrence without repeating model analysis.
 
@@ -1049,8 +1134,9 @@ Sage resumes once with answers and explicitly missing responses
 
 Python retains subject identity, prior archival state, request, due time, and
 answer status. Default collection timeout is 24 hours from the request, and the
-standing policy may override it. This prevents an unavailable subject from
-holding an occurrence forever without treating silence as an answer.
+standing policy or authorized one-off request may override it. This prevents an
+unavailable subject from holding an occurrence forever without treating silence
+as an answer.
 
 - Do not interrupt active work for interviews. Obey pair exclusion and normal
   subject capacity; an interview does not authorize old code work.
@@ -1255,7 +1341,7 @@ columns; bounded outcome payloads and approved scope can be JSON/text.
 | Reservations and holds | At most one unreleased dispatch per pair; global/project counts derive from reservations; holds do not erase assignment stage |
 | External operations | Intent, exact target/input, observed result, unresolved condition, and whether its reconciliation pass was used |
 | Updates and batches | Recipient/action identity, frozen batch membership, accepted dispatch and processing outcome |
-| Recurring occurrences and interviews | At most one unfinished occurrence per policy; one request per occurrence/subject; deadline and prior archival state |
+| Specialist occurrences and interviews | Recurring policy or explicit one-off authority/retained scope; at most one unfinished occurrence per recurring policy; one request per occurrence/subject; deadline and prior archival state |
 | Delivery/publication obligations | Existing candidate/report/intake identity, required remaining action, observed failure and retry ownership |
 
 Store stage changes as current rows plus concise append-only diagnostic events;
@@ -1339,7 +1425,9 @@ Every agent-result transition still waits for normal turn/helper completion.
    delete unrelated Beads databases. Exercise dirty disposable worktrees and
    remote history replacement in isolated test state. Exit with fresh agents
    after each mode and no old work accidentally reactivated by reset.
-6. **Add specialists and interviews.** Move cadence calculations out of
+6. **Add specialists and interviews.** Add one-off `sage`/`inquisitor` CLI requests
+   with global/project scope and optional prompts, using the same occurrence and
+   publication code as recurring runs. Move cadence calculations out of
    `watchman.py` into controller scheduling. Adapt `findings.py` and
    `interviews.py` for controller-owned publication and the single-round policy.
    Keep semantic duplicate matching with the specialist: it names an existing
@@ -1369,6 +1457,8 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Bare `$weaver`, conversational role overrides, and pair reuse | Defaults persist as Sol/high for both roles; the flatbuffers example stores Sol Executor/Astra Overseer with human provenance; apply both models on assignment; unsupported runtime settings remain explicit blockers |
+| One-off Sage/Inquisitor, global/project scope, full capacity, and restart | Retain exact scope and authority; queue without another approval turn; apply appropriate project/global reservations; resume one request; publish through shared evidence rules; recurring anchors remain unchanged |
 | Registration, rename, compaction, reboot, and number above 9999 | Exact role emoji/code/brackets/spacing; at least four digits without rollover; concurrent same-role registrations get distinct numbers; `SAGE0001` and `INQ0001` coexist; registration advances only its role's counter; allocations persist; Archon remains exactly `👑 ARCHON 👑` without consuming a number |
 | Small-task filing through authoring context and direct human CLI | One command returns a durable Beads ID; no plan/file/helper/extra conversation required; remote publication failure remains Python-owned; exact scope still needs Archon approval |
 | Idle Archon receives eligible new work; approved work becomes runnable | Immediate useful scheduling brief with complete approval scope; approved actions dispatch without another Archon turn or artificial delay; record local and external startup timings separately |
