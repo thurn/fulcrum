@@ -48,10 +48,11 @@ that agents must retain after Python takes ownership.
 
 **Beads** is the issue tracker, and a **bead** is one issue. The **brain** is
 the existing private repository containing plans, shared memory, and Beads
-history. **Tollgate** owns source worktrees, CI, certification, promotion, and
-configured source synchronization. A **candidate** is its retained source
-submission; certification records the checks passed by the reconstructed source
-it promotes.
+history. **Tollgate** manages source-worktree creation and cleanup, CI,
+certification, promotion, and configured source synchronization. Fulcrum owns
+the binding between an assignment, its worktree, and the permitted Executor.
+A **candidate** is Tollgate's retained source submission; certification records
+the checks passed by the reconstructed source it promotes.
 
 A **task** here means a Codex desktop conversation with a runtime thread ID. An
 **assignment** binds one approved bead and scope to an execution pair. A **run**
@@ -103,7 +104,17 @@ retry succeeds; existing findings remain unchanged
 
 The existing Night Watchman task, patrol heartbeat, and agent-authored patrol
 reports are removed. Python observes runtime state and due work directly. There
-is no replacement monitoring agent.
+is no replacement monitoring agent. Remove Watchman from active role types,
+registrations, setup/bootstrap inputs, CLI commands, hooks, installation,
+readiness, and dashboard expectations. A healthy installation never requires a
+Watchman task, automation, or successful patrol report.
+
+Move any reused cadence or observation calculations from `watchman.py` into the
+controller's scheduling/reconciliation modules, then delete `watchman.py`, its
+skill, and obsolete patrol tests/fixtures. Do not retain a disabled role, alias,
+or renamed patrol subsystem. Replace useful calculation tests with tests of the
+controller operations. Historical records may remain in the inert cutover
+export; current operational state contains no Watchman registration or duty.
 
 ## Shared Desktop Runtime
 
@@ -114,6 +125,10 @@ it does not establish a permanent compatibility guarantee.
 
 - Use the app-server protocol behind a small adapter. Keep the endpoint local
   and preserve saved-project context, tools, permissions, and user history.
+- Use a maintained WebSocket client library. The experiment's handwritten
+  framing code proves feasibility; do not turn it into production networking
+  infrastructure. Fulcrum implements only the required protocol methods and
+  event handling, with schemas generated from the installed runtime.
 - Verify the desktop and controller observe the same task IDs and activity.
   Sharing a data directory alone is insufficient.
 - Use version-matched protocol schemas when implementing the adapter. Treat
@@ -207,17 +222,78 @@ creation step.
   recurring policies. No execution starts until those policies exist.
 - Replacement transfers the binding after the previous Archon is inactive and
   pending decisions are reconciled. Reject later commands from the former
-  binding; preserve previously approved scope and pending work.
+  binding; preserve previously approved scope and pending work except during
+  the explicitly destructive reset defined below.
 - Preserve Archon's configured model across replacement. Changes require user
   instruction. Use the normal explicit local setup/admin path, without adding
   biometric dialogs or a new authentication subsystem.
+
+`$archon` runs the read-only `fulcrum archon` lookup and presents a link to the
+current controller-owned conversation. It never converts the invoking task into
+Archon or initiates a takeover. If no current Archon exists, return the setup
+action instead of creating one implicitly. Setup and explicit reboot operations
+own creation and replacement; Archon's instructions are packaged prompts too.
+
+### Development reboot command
+
+Provide `fulcrum reboot --soft`, `fulcrum reboot --hard`, and
+`fulcrum reboot --reset` as mutually exclusive Python CLI modes. Each replaces
+the fleet with fresh agent conversations; restarting only the controller while
+resuming the same agents is insufficient. These are explicit local admin
+actions and work without approval or cooperation from the current Archon.
+Reuse controller lifecycle and runtime-adapter operations, with no reboot agent.
+
+| Mode | Stopping behavior | Retained state |
+| --- | --- | --- |
+| `--soft` | Stop new dispatch, let active turns and helpers finish, then retire the old agents | Brain, approvals, work, queues, policies, and obligations |
+| `--hard` | Stop new dispatch, interrupt managed turns/helpers, and confirm termination before replacement | Same durable state as soft reboot, including unfinished source work |
+| `--reset` | Stop agents as for hard reboot, dispose of owned pending external work, then wipe state and bootstrap | Source repositories and connection/model configuration only |
+
+Soft reboot waits for current turns, not completion of every assignment or
+multi-bead run. It does not silently become hard reboot after a timeout. Hard
+reboot preserves worktrees, candidates, review history, and pending delivery;
+fresh agents receive the relevant durable facts. Rebind pending work explicitly
+to the new tasks. After verifying old-agent/helper inactivity and the worktree's
+identity, Python may transfer the existing assignment and worktree to its fresh
+Executor using the transfer checks below. Preserve unfinished changes in place.
+
+Reset clears the selected environment's entire brain: plans, Beads issues and
+history, reports, strategic and agent memory, and retained brain Git history.
+It also clears controller records, task bindings, queues, approvals, holds,
+reservations, recurring occurrences and policies, observations, logs, cached
+prompts, and numbering. Remove old state exports rather than importing them into
+the new system. Synchronize the reset brain through its configured remote paths
+so prior state cannot return on the next pull or Beads synchronization. Reset
+does not roll back promoted source commits or delete enrolled source repositories.
+
+Before wiping ownership records, terminate managed helpers and owned processes,
+reconcile or cancel pending Tollgate operations, and remove disposable owned
+worktrees through supported interfaces. Reset explicitly discards pending tracked
+and untracked work in those verified disposable trees before native removal;
+soft and hard reboot preserve it. Never clean the primary source checkout.
+Preserve the exact unresolved cleanup
+if this fails and report reset incomplete; do not erase the only record of a
+still-running operation. Retire old Codex conversations through supported
+archival; their runtime-managed history is not imported into fresh agents.
+These commands target the selected Fulcrum environment, not unrelated desktop
+tasks or another environment's brain and resources.
+
+Retain one in-progress reboot operation outside the paths reset clears so a CLI
+retry or controller restart continues the same operation. Remove that temporary
+record after completion. Apply the bounded uncertain-operation rule to runtime
+calls. Bring up a fresh Archon with the retained model configuration; recreate
+other roles only when work requires them. After reset, recheck configured
+projects and require Archon to establish new policies before dispatch. Never
+create Watchman. Return the new Archon link and any incomplete action.
 
 ### Canonical names
 
 Python allocates names before managed work starts. Use one persistent increasing
 numeral sequence. An Executor/Overseer pair shares one allocated numeral; every
 other managed task receives its own. Never recycle an allocated numeral,
-including after archival or failed provisioning.
+including after archival or failed provisioning. The explicit `--reset` wipe is
+the exception: its new fleet begins at 1. Soft and hard reboot continue the
+existing sequence; runtime task IDs distinguish old archived conversations.
 
 Use these role prefixes and a concise description:
 
@@ -271,28 +347,43 @@ registers through a fast Python startup operation, receives the prompt needed
 for its current mode, and performs its authoring work without fleet discovery or
 a registration conversation.
 
+Its mode-specific prompt preserves repository-first exploration, one-at-a-time
+interview questions, and the distinction between small task intake and a
+substantial standalone plan. Substantial plans retain the native cold-reader
+and requirements-verifier helper passes; Weaver crafts those helper prompts.
+Small tasks need neither a planning document nor those review passes.
+
 The following are target Fulcrum interfaces, not existing commands promised by
 the current installation:
 
 ```sh
 fulcrum weaver register --model sol
 fulcrum instructions
-fulcrum intake --input tasks.json
-fulcrum finish --input outcome.json
+fulcrum --dispatch 17 intake --input tasks.json
+fulcrum --dispatch 17 finish intake_complete
 ```
+
+Here `17` represents the authoring dispatch returned by writable registration;
+the returned instructions contain the complete commands with the actual value.
 
 Registration binds the actual runtime identity, allocates the numeral once, sets
 the canonical name, and returns the relevant instructions in one response. An
 identical retry returns that registration. Conflicting model selection after
 publication needs an explicit update, not silent relabeling of existing work.
 
-Codex Plan Mode still prohibits publishing documents, beads, and source changes.
-Weaver naming and operational registration must be provided by controller-side
-activation outside the Plan-mode agent's mutating commands; instruction
-retrieval inside the turn is read-only. Verify this activation boundary in the
-desktop. If the installed runtime cannot provide it, report the capability gap
-rather than instruct a Plan-mode agent to bypass its restrictions. Registering a
-Weaver never authorizes publication.
+Weaver receives its canonical name and numeral on activation, including in Plan
+Mode. Do not defer naming until publication. The controller performs the metadata
+operation and retains the task/numeral binding; that binding creates no assignment,
+publication permission, or finish obligation for a planning turn. Instruction
+retrieval inside the turn remains read-only.
+
+The [Plan-mode naming experiment](../codex-desktop-python-control.md#experiment-5-name-a-task-configured-for-plan-mode)
+verified external `thread/name/set` against a task configured in Plan Mode. The
+automatic `$weaver` activation trigger still needs a real desktop integration
+check. Use that trigger to run the controller metadata operation; do not ask the
+Plan-mode agent to bypass its restrictions or silently postpone the name if the
+trigger is unavailable. Report that specific capability gap. Documents, beads,
+and source changes still require the approved writable authoring phase.
 
 - Standalone intake requires project, title, intended outcome, bounded scope,
   and acceptance criteria. Dependencies and context are included when needed.
@@ -328,13 +419,45 @@ A tiny task should remain tiny:
 ### Python-produced prompts
 
 Python assembles canonical role instructions and assignment-specific context at
-startup, at each managed wake, and after compaction. Installed skills become
-thin entry points rather than a chain of files an agent must repeatedly read.
+startup, at each managed wake, and after compaction. Executor, Overseer, Sage,
+and Inquisitor have no installed skills or direct skill activation path. Python
+creates their tasks and supplies their instructions. Human-facing skills such
+as Weaver and setup remain thin entry points.
+
+Store action-specific text templates in `src/fulcrum/prompts/` as package data,
+loaded with `importlib.resources`. Use ordinary Python assembly; no new template
+framework or model turn is needed to generate operational instructions. Dispatch
+and compaction use the same prompt builder and current controller records.
+
+Migrate the existing skill content by responsibility:
+
+| Existing instructions | Destination |
+| --- | --- |
+| Executor implementation/validation and Overseer review criteria | Implementation, review, and repair prompt templates |
+| Sage analysis, Inquisitor codebase coverage, finding quality, interview questions | Specialist action templates and authored results |
+| Identity, handoffs, cadence, counters, publication, delivery, archival | Python operations; remove agent procedure text |
+| Model constraints, escalation judgment, recovery decisions | Python enforces recorded policy; current prompts request only the needed judgment |
+
+Move useful guidance out of `fulcrum-shared` into these destinations and remove
+the shared skill-reading chain. Preserve substantive review and evidence
+criteria without copying the old role's entire operational manual into every
+prompt. Helpers continue to receive prompts crafted by their parent agent.
 
 Each managed prompt supplies the role, current assignment, approved scope,
-relevant evidence, permitted action, and exact finish obligation. Include only
-changed context and necessary references on follow-up turns. Required scope must
-remain complete; do not truncate it merely to hit a prompt budget.
+current constraints, relevant evidence references, permitted action, and exact
+finish obligation. Every wake, including follow-up and recovery turns, receives
+a self-contained brief for that action. Compaction rebuilds the same complete
+brief from current controller facts; correctness never depends on an earlier
+prompt surviving in the conversation. Required scope remains complete even
+when unchanged; do not truncate it merely to hit a prompt budget.
+
+Keep the role guidance short and include only the current action's instructions.
+Link to bulky source, logs, and artifacts instead of repeating them. Supply the
+exact action-specific finish command and explain only the arguments the agent
+must author. Routine outcomes require no JSON wrapper or agent-selected IDs. Do not track
+which instruction fragments an agent has seen or infer what it remembers.
+Retaining the exact dispatched input for operation reconciliation remains
+required; it is not a mechanism for constructing later prompts as deltas.
 
 ```text
 You are Overseer 3. Review candidate c-42 for bead fc-31.
@@ -520,16 +643,45 @@ Validate legal outcome kinds, assignment, current source, and expected state.
 This protects cooperative workflow correctness, not against a hostile local
 administrator or an agent deliberately bypassing every available interface.
 
-```json
-{
-  "assignment": "assignment-31",
-  "outcome": "ready_for_review",
-  "candidate": "c-42",
-  "source_oid": "actual-git-commit-id",
-  "checks": [{"command": "focused validation", "result": "passed"}],
-  "evidence": ["retained-review-artifact"]
-}
+The inspected shell exposes `CODEX_THREAD_ID` and `CODEX_SESSION_ID`, but no
+turn ID. Allocate an integer dispatch ID before every managed start and render
+it into the prompt's complete command as the global `--dispatch` argument.
+Validate both the runtime task ID from the environment and that dispatch's
+retained task/turn binding. The argument selects recorded context, not another
+role's authority. Reject a stale dispatch; never guess the current turn from a
+task's newest assignment. Hooks use their native `session_id` plus the retained
+active dispatch, and need no agent-authored identity.
+
+Routine outcomes use `fulcrum finish <outcome>` with action-specific arguments:
+
+```sh
+fulcrum --dispatch 42 finish ready_for_review --evidence path/to/validation.md
+fulcrum --dispatch 43 finish approved --assessment "Matches the approved scope"
+fulcrum --dispatch 42 finish blocked --reason "Required test service is unavailable"
 ```
+
+These are alternatives for different dispatches, not commands to run in
+sequence. The controller supplies the number; agents author only the outcome's
+arguments. Registration and read-only instruction retrieval do not require a
+managed dispatch ID. Writable Weaver activation creates its authoring dispatch;
+Plan-mode naming alone does not.
+
+Python supplies task, turn, assignment, candidate, and source identities from
+the dispatched turn and its retained native-operation receipts. Review refers
+to the candidate captured in that review's dispatch; Executor submission refers
+to the candidate retained by its Python submission helper. Never bind a delayed
+command to whichever assignment or candidate is newest at invocation time.
+Missing or contradictory bindings return an actionable error, not a request for
+the agent to guess IDs. `intake_complete` similarly uses that Weaver turn's
+retained intake result and requires no copied bead list.
+
+Agents supply judgment, rationale, and evidence references. Python builds and
+validates the durable outcome record. Use `--input` with the appropriate outcome
+for substantial findings, scheduling decisions, and other structured results;
+task graphs remain input to `fulcrum intake`. These files contain authored
+content and referenced decision targets, not duplicated caller identity. A
+routine finish must not require creating an intermediate outcome file. Evidence
+references point to retained artifacts containing the actual checks and results.
 
 Use role-specific outcomes rather than a generic success flag:
 
@@ -618,11 +770,25 @@ Python starts Executor directly with Archon-approved scope. There is no routine
 Overseer assignment-preparation turn. Each bead has one active assignment and
 one owned source worktree; sequential beads in a run use fresh worktrees.
 
-The Python helper invokes existing Tollgate worktree creation from the actual
-registered Executor context and retains the native owner, path, branch, and
-base. Do not create an independent Codex worktree as well. Controller operations
-must respect the existing Tollgate ownership contract; verify those operations
+Python invokes `tg --repository <id> worktree create <name>` and retains the
+returned path, branch, and base. Fulcrum records the assignment's Executor binding
+separately; Tollgate's worktree interface does not require a Codex task identity.
+Do not invent a native owner field, task impersonation, or a Tollgate transfer
+API. Configure the Executor to use that worktree rather than creating an
+independent Codex worktree. Verify native creation, submission, and cleanup
 through the real integration before enabling dispatch.
+
+A fresh Executor may resume the same assignment's worktree after an explicit
+soft/hard reboot or approved replacement. Python first confirms the old Executor
+and helpers have stopped, verifies the registered Git worktree's repository,
+path, branch, and current HEAD, and inventories pending changes, owned processes,
+and native candidates. Unknown activity or mismatched identity holds the transfer.
+Then update the Fulcrum Executor binding atomically, reject commands from the old
+binding, and supply the fresh agent with a complete recovery brief and verified
+working directory. Preserve dirty files, assignment scope, review history, and
+delivery obligations. Transfer does not grant new promotion authority or make
+uncommitted changes part of an immutable candidate. New beads still get fresh
+worktrees; changing agents within the same assignment does not require one.
 
 - Executor investigates, implements, and runs proportionate local validation. It
   supplies relevant rendered evidence for UI changes and tracks owned demo or
@@ -689,13 +855,9 @@ contract assumes Overseer has classified the concrete repair. In the controller
 workflow, Overseer grants the categories, Executor classifies the repair, and
 Python records the permitted replacement after the mechanical checks above.
 
-```json
-{
-  "outcome": "approved", "candidate": "c-42",
-  "scope_assessment": "Matches the approved indexing task",
-  "blocking_findings": [],
-  "allowed_repairs": ["ordinary_merge_conflict", "bounded_in_scope_ci_fix"]
-}
+```sh
+fulcrum --dispatch 43 finish approved --assessment "Matches the approved indexing task" \
+  --allow-repair ordinary_merge_conflict --allow-repair bounded_in_scope_ci_fix
 ```
 
 Source immutability, registered caller, current assignment, and explicit review
@@ -707,7 +869,7 @@ that every direct Tollgate invocation is made impossible.
 ### Python-owned delivery
 
 Python performs routine delivery after review, using existing Tollgate status,
-authorization, diagnosis, retry, push, and cleanup interfaces. No agent remains
+authorization, diagnosis, push, and cleanup interfaces. No agent remains
 active to observe CI or retry an ordinary network failure.
 
 - Recheck candidate/source, scope, mandate, inactivity, and holds before new
@@ -716,9 +878,17 @@ active to observe CI or retry an ordinary network failure.
   Refuse uncertain coverage rather than authorize extra work implicitly.
 - Continue existing speculative CI instead of launching duplicate validation.
   Read native certification and promotion results, not inferred success flags.
-- On failure, obtain retained native diagnosis and logs. Permit one unchanged
-  retry when evidence supports a transient infrastructure problem. A source
-  repair resumes Executor with the specific failure and applicable mandate.
+- On CI failure, obtain retained native diagnosis and logs and resume Executor
+  to diagnose and fix the cause within its scope and applicable mandate. Flaky
+  tests and CI defects require repair; Fulcrum never automatically reruns the
+  unchanged candidate hoping for a pass. A repair outside the assignment's scope
+  goes to Archon for a scoped repair task, with the affected delivery retained.
+- Use `tg diagnose` in its retained-evidence mode; do not automatically request
+  diagnostic replays. Executor may run targeted experiments to investigate a
+  failure, but a later green run alone does not resolve the original defect.
+  Revalidation follows a concrete source, test, CI, or environment repair. Python
+  must not classify arbitrary logs as transient or maintain another CI-retry
+  counter. Native certification remains required after repair.
 - Bound transient connection and synchronization retries with backoff; after
   repeated failure retain one exception and retry observation at low frequency.
   Reconcile uncertain mutations before retry regardless of elapsed time.
@@ -729,6 +899,12 @@ active to observe CI or retry an ordinary network failure.
   pushes as separately owned obligations.
 - Archive a completed pair only after both conversations/helpers are inactive
   and all remaining administrative obligations have durable ownership.
+
+The inspected Tollgate implementation treats failed checks as terminal failures.
+Its separate service-error and interrupted-run recovery can automatically
+restart execution. Fulcrum neither adds another retry layer nor claims to disable
+that native behavior. Changing Tollgate's own interruption recovery is separate
+from this controller plan. Connection and push retries above do not rerun CI.
 
 An assignment is complete only when required review or covered replacement
 approval, certification, promotion, source synchronization, owned cleanup, and
@@ -838,8 +1014,9 @@ ask whether work is still happening.
   read its state, but elapsed silence alone never authorizes replacement.
 - Retain uncertain ownership and capacity until actual inactivity is known.
   Inventory worktree, candidate, and processes before any approved replacement.
-- Never adopt another Executor's owned worktree implicitly. Replacement work
-  needs explicit authority and an ownership path supported by existing tools.
+- Never adopt another Executor's worktree implicitly. Authorized replacement
+  uses the Fulcrum binding transfer and worktree checks above; no native
+  task-ownership transfer or reconstruction into a new tree is required.
 - Reconcile interrupted operations before retry. Retain the same operation ID,
   expected inputs, observed result, and next action across controller restarts.
 - Ambiguous runtime requests use the single automatic reconciliation pass above.
@@ -854,7 +1031,7 @@ the dashboard. Do not escalate endlessly back to the same broken task or give
 another role scheduling authority. Previously approved work may continue where
 safe; new approvals wait for explicit recovery or setup replacement.
 
-Read-only status and the dashboard use the same controller readers:
+Read-only status exposes the shared controller read model:
 
 ```sh
 fulcrum status --run run-3 --events 20
@@ -868,6 +1045,12 @@ review/source identities, and remaining delivery obligations. Explain why a
 queued run cannot start. Missing observations are unavailable, never zero or
 complete. Task links must open the actual desktop context.
 
+This checkout has a dashboard design document, not an implemented dashboard.
+Provide the machine-readable `fulcrum status --json` views and update the
+dashboard contract to consume them. Building the dashboard UI is separate work;
+do not create a new web service or pretend to migrate nonexistent readers as
+part of the controller implementation.
+
 ### Audit every recurring process
 
 Measure cost at each boundary before expanding its machinery. The target
@@ -880,7 +1063,7 @@ Overseer setup, model-driven CI wait, or acknowledgment-only Archon wake.
 | Repeated context reads | Action-specific prompts | Size and cache usage |
 | Peer coordination | Outcomes and idle-only batches | Latency, wake reason |
 | Patrol agent | Events and targeted reads | Exceptions, recovery time |
-| CI/push monitoring | Native observations, Python retries | Repair wakes |
+| CI/push monitoring | Native CI observations; Python push retries | Repair wakes |
 | Repeated findings/interviews | Reuse, single round | Findings and turns |
 | Stop reminders | One correction allowance | Misses, hook duration |
 
@@ -919,13 +1102,22 @@ are explicitly resolved by an operator.
   Historical names remain history; new managed names follow the shared sequence.
 - Disable Watchman's heartbeat, legacy specialist launch paths, and legacy
   scheduler ownership before enabling the controller. Verify their disablement.
+  Remove the Watchman automation through its supported interface, archive its
+  task after inactivity, and omit its registration from imported active state.
+  Transfer any real unfinished obligation to the controller before retiring it.
 - Import durable data atomically and retain a cutover record. Create the new
   Archon through setup or reuse the already recorded setup operation; do not
   accidentally appoint an old inactive role through its title.
 - Replace agent-owned operational writers, readiness requirements, role skills,
-  hook instructions, and dashboard readers with the new ownership model. No
+  hook instructions, and dashboard read contracts with the new ownership model. No
   dual-write system, backward-compatibility layer, or versioned record format is
   required. Retain an inert historical export for diagnosis.
+- Remove the Executor, Overseer, Sage, and Inquisitor skill directories and their
+  installed links after migrating their judgment guidance to packaged prompts.
+  Remove Watchman's skill and the superseded shared instruction bundle as well.
+  Update `install.py` and `doctor.py` to require the retained human entry points
+  and packaged prompt resources; removed role skills must not remain readiness
+  requirements or be recreated by installation.
 - Verify shared runtime capabilities and initial Archon policies before the
   controller can dispatch. Failures leave dispatch disabled with named reasons.
 
@@ -942,163 +1134,209 @@ controller rather than restart the legacy scheduler against the same beads. No
 Tollgate policy installation, service patch, or review-enforcement migration is
 part of this transition.
 
-## Automated Validation
+## Implementation Contract and Sequence
 
-Tests must distinguish workflow correctness from runtime capabilities. Use
-controlled adapters for state-machine and failure injection, then exercise the
-actual desktop and Tollgate boundaries described in Manual QA.
+Implement this as a small Python application with explicit functions and state
+transitions. Do not introduce a workflow framework, event-sourced database,
+plugin system for roles, generic rule language, or a second operational store.
+The sections above define product behavior; the sequence below defines the
+implementation boundaries and exit checks.
 
-- Check concurrent command/event handling, unique bead ownership, durable
-  numbering, paired starts, global/project limits, holds, and duplicate
-  outcomes.
-- Deliver idle and terminal notifications in both orders. Lose creation and send
-  responses before persistence, replay events after restart, and verify no
-  duplicate starts, lost batches, or premature capacity release.
-- Leave a runtime request ambiguous after its single reconciliation pass.
-  Verify one operator condition, retained reservation/batch, no expanded search
-  or restart-triggered repeat pass, and continued unrelated approved work when
-  remaining capacity permits.
-- Test busy-recipient coalescing, full-capacity scheduling suppression,
-  exception delivery, explicit deferral, and updates arriving during a
-  recipient's turn.
-- Test finish success, missing hook, hook-used correction, failed correction,
-  candidate/source identity mismatch, interrupted turn, and non-Fulcrum/Plan-mode
-  stops. Verify that a later worktree edit cannot substitute source for the
-  recorded immutable candidate. Verify superseding-outcome history and rejection
-  of another correction when the shared allowance was already consumed.
-- Exercise review counts, missing evidence, covered and uncovered replacements,
-  model changes only by Archon decision, and source repair followed by native
-  certification. Check required repair rationale, category permission, and
-  candidate linkage; a permitted Executor report advances without a new review
-  turn, while uncertain or uncovered repairs return to Overseer. A pending
-  native dependency cannot gain implicit authority.
-- Verify permitted helper use, denied peer operations, helper termination before
-  pair handoff, and unavailable helper observations retaining the reservation.
-- Test future-work exclusion, default pending findings, partial intake, stable
-  retries, graph changes, unsupported model settings, and title restoration.
-- Verify specialist prompts include the evidence requirement and allow zero
-  findings. Reject submitted findings without problem or evidence fields;
-  report observations alone must never create beads. These checks establish the
-  publication contract, not the semantic quality of a model's evidence.
-- Advance an injected clock through downtime, delayed specialist dispatch,
-  publication failure, single-round interviews, collection timeout, and no
-  duplicate recurring occurrences or repeat interviews. Expire pending
-  interviews while one start is uncertain; reconcile that start and ensure
-  expired requests cannot be delivered afterward.
-- Fail push and cleanup after promotion; verify delivery recovery without new
-  implementation. Interrupt drained cutover and ensure one scheduler remains.
-  Exhaust Archon's finish recovery and verify one operator condition, retained
-  decisions, no self-escalation loop, and no new approval authority.
+### Process, storage, and command boundaries
 
-The first real integration check must include a shared desktop task, a genuine
-Executor/Overseer alternation, and existing Tollgate delivery. A fixture that
-accepts a fabricated completion record cannot establish that boundary.
+- `fulcrum serve` runs `controller.py` as the single supervised process with an
+  asyncio loop. It accepts local CLI requests over a Unix-domain socket, receives runtime events,
+  and advances ready operations. Run existing blocking native helpers outside
+  database transactions and off the event loop; feed their results back to the
+  controller. Only this process writes operational SQLite state.
+- `store.py` uses standard-library SQLite with explicit SQL transactions and
+  constraints. `runtime.py` wraps the shared app-server; `tollgate.py` wraps the
+  native CLI with argument arrays and structured output. Each adapter returns
+  observed facts or an explicit error. Adapters never grant workflow authority.
+- Keep static environment configuration separate from disposable state. Retain
+  the configured brain/state paths, native repository/project connection facts,
+  remotes, and model constraints. Keep the process lock, Unix socket, and one
+  in-progress reboot record in a control directory beside that configuration;
+  reset clears operational data without deleting its own lock or recovery record.
+  Use the existing configuration selection rules to choose a test environment.
+- CLI mutations forward one newline-delimited JSON request over the local socket
+  and receive one JSON result with either data or an actionable error. CLI code
+  handles parsing/output; domain code validates and applies the operation.
+  Do not expose generic SQL or record-write commands to agents. Read-only status
+  and hook context can use SQLite read transactions when the daemon is unavailable;
+  they must disclose stale or missing observations.
+- Each managed mutation includes the environment task identity and prefilled
+  dispatch ID. Admin commands are explicit local CLI operations and do not
+  impersonate Archon. Hook correction bookkeeping goes through the controller;
+  an unavailable controller does not turn the hook into a second writer.
 
-## Manual QA
+Use these stored records, with ordinary integer IDs for Fulcrum entities and
+native IDs for external objects. Keep required relationship and query fields in
+columns; bounded outcome payloads and approved scope can be JSON/text.
 
-Use disposable desktop tasks, a disposable enrolled source repository with
-existing Tollgate configuration, and isolated brain/operational state. Provide
-read-only queue, run-event, capability, and obligation views plus an isolated
-failure-injection harness. The harness must not mutate production observations.
+| Records | Required identity and invariant |
+| --- | --- |
+| Tasks and name allocations | Unique native task ID; one global increasing name allocation; pair members reference the same allocation |
+| Runs and assignments | Ordered approved beads and scope snapshot; at most one unfinished assignment per bead; current Executor/Overseer bindings |
+| Dispatches and outcomes | Immutable task/action/scope binding, delivered prompt, native turn ID, attempt/correction link; one accepted outcome per dispatch |
+| Reservations and holds | At most one unreleased dispatch per pair; global/project counts derive from reservations; holds do not erase assignment stage |
+| External operations | Intent, exact target/input, observed result, unresolved condition, and whether its reconciliation pass was used |
+| Updates and batches | Recipient/action identity, frozen batch membership, accepted dispatch and processing outcome |
+| Recurring occurrences and interviews | At most one unfinished occurrence per policy; one request per occurrence/subject; deadline and prior archival state |
+| Delivery/publication obligations | Existing candidate/report/intake identity, required remaining action, observed failure and retry ownership |
 
-### Early assembled-product flow
+Store stage changes as current rows plus concise append-only diagnostic events;
+events are for inspection, not replaying an entire database to recover it.
+After restart, read current state and reconcile only outstanding external work.
 
-Exercise this flow before relying on broad component-test results. It crosses
-Weaver intake, Archon authority, Python runtime control, real review, and native
-delivery.
+Use one role-specific parser/validator for each outcome, shared by CLI handling,
+prompt command rendering, and finish validation. Implement these concrete forms:
 
-1. Verify desktop and Python share the intended runtime. Configure Archon model
-   and effort, let Python create and name Archon, and record initial limits and
-   recurring policies. Confirm setup creates no Watchman or duplicate Archon.
-2. Invoke Weaver with `sol` for a small documentation task. Check its numeral,
-   title, returned instructions, and selected bead model. In Plan Mode verify
-   registration/context without document or bead publication before approval.
-3. Publish the task and inspect its pending status. Confirm Executor does not
-   start until Archon approves the exact run and scope.
-4. Observe Python start Executor without an Overseer preparation turn. Open the
-   task and verify model, working directory, relevant prompt, and numbered name.
-5. Submit ready-for-review through finish. Delay the final turn completion and
-   verify Overseer remains idle. Then observe Overseer start with the same run
-   numeral after Executor and any helpers are terminal.
-6. Have Overseer approve the actual candidate with explicit repair permissions.
-   Verify Python waits for that turn to finish, then drives existing Tollgate
-   authorization, certification, promotion, source synchronization, and cleanup.
-7. Confirm Beads closure follows the required evidence. Both pair tasks archive
-   only when inactive; status retains the completed work and any separately
-   owned brain push. Inspect timings for absence of coordination-only turns.
+| Role/action | Finish outcome and authored content |
+| --- | --- |
+| Executor submission | `ready_for_review --evidence <path>`; candidate receipt comes from the submission helper |
+| Executor covered repair | `permitted_repair_complete --repair-category <category> --repair-rationale <text> --evidence <path>` |
+| Executor stop/block | `checkpointed --evidence <path>` or `blocked --reason <text>` |
+| Overseer approval | `approved --assessment <text>` with zero or more `--allow-repair <category>` arguments |
+| Overseer other result | `changes_requested --input <findings.json>`, `incomplete --input <missing-evidence.json>`, or `exception --reason <text>` |
+| Archon decision | `decisions --input <decisions.json>` containing the proposed run/exception targets, decisions, and optional policy/summary changes |
+| Archon deferral | `deferred --reason <text> --input <reactivation.json>` referring to a concrete capacity, dependency, hold, or operator-change condition |
+| Weaver completion | `intake_complete`, `future_plan --evidence <path>`, or `blocked --reason <text>` |
+| Specialist completion | `report --input <report.json>` with authored report content and an explicit findings list, including an empty list |
+| Specialist evidence collection | `evidence_needed --input <requests.json>`; Sage may request its one interview round |
+| Interview answer | `interview_answer --input <answer.json>`; occurrence and subject come from the dispatch |
 
-### Queue, capacity, and prompt checks
+All rows use the prefilled `fulcrum --dispatch <id> finish` prefix. The approval
+and finding fields described earlier are the required content; the implementer
+must define their typed payloads and valid/invalid fixtures in the same task as
+the command, not add a generic arbitrary-outcome escape hatch. `future_plan`
+publishes only after authoring approval, with explicit future activation.
 
-Use small independent runs in two projects and inspect queue state and actual
-runtime activity together.
+Use explicit assignment transitions; a hold leaves the current stage intact.
+Every agent-result transition still waits for normal turn/helper completion.
 
-- Fill global capacity and one project limit. Add pending work and verify no
-  scheduling-only Archon wake. Free relevant capacity and expect one useful
-  proposal batch, including changes accumulated while Archon was busy.
-- While Archon is active, create an exception and additional updates. Verify any
-  required hold applies immediately but no message enters its active turn.
-- Arrange several updates to the same condition and a separate decision. Expect
-  the latest condition plus the distinct decision, not lost actions or a flood.
-- Spawn a native helper and end or delay its parent. Verify the pair
-  reservation persists until all required activity is terminal; no Overseer
-  overlap. Inspect helper usage separately from managed slot counts.
-- Put an assignment in CI wait, use its released capacity, then make a repair
-  actionable. Verify it waits for reacquisition without a model polling turn.
-- Reduce a limit below active usage, apply ordinary and urgent holds, and
-  exercise a host quiet interval. Verify drainage, interruption reconciliation,
-  process/Tollgate checks, and no claim that already-completed promotion
-  reversed.
-- Complete two related beads in one run. Verify pair reuse, fresh owned source
-  worktree, correct runtime directory, no stale mandate, and no routine setup
-  review. Restart and restore tasks; numbers and pair mapping must remain
-  stable.
-- Force compaction. Inspect concise Python-produced current instructions, active
-  holds, and the exact finish obligation rather than a legacy skill-reading
-  loop.
+| Current stage and observation | Next stage/action |
+| --- | --- |
+| `queued`, approved and eligible | `preparing`; create the worktree and bind the pair |
+| `preparing`, native worktree/configuration verified | `implementing`; reserve capacity and start Executor |
+| `implementing` or `correcting`, ready-for-review result | `review_pending`; retain the exact candidate/evidence |
+| `review_pending`, review dispatch eligible | `reviewing`; reserve capacity and start Overseer |
+| `reviewing`, approved | `delivering`; recheck authority before native authorization |
+| `reviewing`, changes requested or missing evidence | `correcting`; request the bounded fix/evidence from Executor; missing evidence does not count as rejection |
+| `correcting`, permitted-repair result validated | `delivering`; retain replacement linkage and require native certification |
+| Any active stage, reported blocker or failed external operation | `recovering`; retain prior stage and the specific next action/owner |
+| `recovering`, cause resolved | Resume the recorded action under current holds/capacity; do not restart the assignment |
+| `delivering` or delivery recovery, full completion contract observed | `completed`; advance the run or archive the inactive pair |
+| Explicit cancellation decision | `canceled`; reconcile native work and retain cleanup ownership before releasing conflicting work |
 
-### Failure and specialist checks
+### Ordered implementation tasks
 
-Inject failures at recorded boundaries and use the diagnostic history to verify
-that recovery preserves identity, authority, and completed work.
+1. **Verify and wrap the runtime boundaries.** Implement the small runtime and
+   Tollgate adapters and a disposable integration harness. Verify a shared
+   desktop task, working-directory changes, native helper observation, and
+   interruption; prove the automatic Weaver naming trigger in Plan Mode.
+   Verify native worktree creation/submission from Python and exact candidate
+   reads. Preserve the existing naming experiment as evidence, not a claim that
+   the activation trigger works. Any missing capability produces a specific
+   blocked integration task; do not invent a protocol or a substitute runtime.
+2. **Build the store, daemon, and local CLI.** Add the records and uniqueness
+   constraints above, dispatch binding, process lock, socket request handler,
+   status readers, and explicit setup/Archon lookup. Reuse `config.py` path
+   selection. Replace the operational portions of `records.py`/`state.py` rather
+   than dual-writing their JSON files. Exit with restart persistence, rejected
+   stale/foreign dispatches, and a runnable foreground daemon for development.
+3. **Complete one real bead end to end.** Wire Weaver intake, one Archon-approved
+   assignment, Executor submission, independent Overseer review, and native
+   delivery/closure. Use packaged prompts through `context.py` and the concrete
+   finish forms. Reuse `beads.py`/`brain.py` native publication helpers,
+   `documents.py` readers, and `delivery.py` review accounting with the new
+   ownership. Exit only after the assembled-product flow below passes. Do this
+   before expanding recurring workflows or collecting broad mock-test counts.
+4. **Add scheduling and bounded recovery.** Adapt `eligibility.py` and
+   `coordination.py` for approved runs, capacity, composed holds, idle-only
+   batches, and the transition table above. Completion requires the existing
+   full delivery contract. Add the shared
+   one-correction allowance and operator resolution for ambiguous operations.
+   Exit with the relevant failure matrix below passing.
+5. **Add soft, hard, and reset reboot.** Implement the exact behaviors above,
+   including worktree transfer and a full brain reset through its actual Git
+   and Beads/Dolt paths. Verify resetting the selected database does not stop or
+   delete unrelated Beads databases. Exercise dirty disposable worktrees and
+   remote history replacement in isolated test state. Exit with fresh agents
+   after each mode and no old work accidentally reactivated by reset.
+6. **Add specialists and interviews.** Move cadence calculations out of
+   `watchman.py` into controller scheduling. Adapt `findings.py` and
+   `interviews.py` for controller-owned publication and the single-round policy.
+   Keep semantic duplicate matching with the specialist: it names an existing
+   bead after inspecting the evidence; Python validates that target and appends
+   evidence without expanding active scope. Exit with demonstrated findings,
+   valid empty reports, publication retries, and deadline handling.
+7. **Install and cut over.** Follow the drain procedure, replace `install.py`,
+   `doctor.py`, `readiness.py`, and hook expectations, remove obsolete role/shared
+   skills and all Watchman code, and update affected tests and operational docs.
+   Retain only human entry points and packaged prompts. Connect status views to
+   the documented dashboard read contract; dashboard UI work is separate. Exit
+   with one controller owner, no legacy launch/writer path, and no requirement
+   for deleted skills, Watchman, or old record formats.
 
-- Lose creation and turn-start responses, disconnect the controller, and replay
-  events after restart. Verify one task and one accepted batch, or explicit
-  unresolved state with retained capacity; never an optimistic duplicate retry.
-- Leave one lost response unresolved after bounded reconciliation. Verify the
-  operator action names the operation and missing evidence, survives restart,
-  and holds only affected work subject to its retained capacity and conflicts.
-  Resolve it through the local admin path using the actual external result;
-  no search agent or duplicate runtime request should be created.
-- Omit finish once with working hooks and once with unavailable hooks. Each
-  attempt gets at most one correction total. A second failure creates one
-  exception; a Plan-mode authoring stop gets none.
-- Interrupt after an accepted finish and separately inject a candidate/source
-  identity mismatch. Verify neither case grants advancement. Edit the worktree
-  after ready-for-review and verify review still targets the recorded immutable
-  candidate; the edit is neither included nor automatically treated as report
-  invalidation.
-- Request missing review evidence, reject three new sources, and retry an
-  infrastructure failure. Confirm only substantive rejections count and Archon
-  decides the next approach or model change.
-- Perform a clearly covered repair, then an out-of-scope repair. Verify retained
-  original mandate plus Executor's category, rationale, and replacement evidence
-  for the first, with no additional Overseer turn. Verify renewed review for the
-  second and for an explicitly uncertain classification, and native
-  certification for every replacement.
-- Fail source push, cleanup, and specialist publication separately. Recovery
-  must reuse existing candidates, reports, and finding identities. No agent
-  starts just to check CI or repeat a network push.
-- Make Sage and project Inquisitors overdue. Verify one occurrence per policy,
-  normal capacity accounting, whole-project Inquisitor scope, and pending
-  findings that still require Archon approval before implementation.
-- Give a specialist a concrete code defect and a speculative future scaling
-  concern. Inspect its report and published findings: the defect may become a
-  pending task with evidence; the unsupported scaling concern remains a report
-  observation. A report with no demonstrated problems creates no beads.
-- Request a single Sage interview round with an active subject, an archived
-  subject, and an unavailable subject. Verify idle-only delivery, correct prior
-  archival restoration, no new questions, and one Sage continuation containing
-  answers plus explicit missing evidence after timeout.
-- Attempt cutover with unresolved legacy delivery, then resolve it and retry.
-  Verify unresolved work blocks transition, repeated setup/import is safe, old
-  launch paths remain disabled, and new dispatch has exactly one owner.
+Each task lands its matching tests and removes replaced behavior as it goes.
+Run focused unit tests during development and `scripts/check` for code changes
+before delivery. If dependencies or the lockfile change, reinstall requirements
+and the editable package in `.venv` as required by this repository. No separate
+model-comparison trial or new benchmark framework is needed.
+
+## Validation
+
+Use controlled adapters and an injected clock for transition/failure tests.
+Use the actual shared runtime and native Tollgate/Beads boundaries for capability
+claims. The following matrix replaces duplicated automated/manual checklists;
+exercise native boundaries with isolated disposable state and retained evidence.
+
+| Scenario | Required result |
+| --- | --- |
+| Two starts race; idle and terminal events arrive in either order | Unique bead ownership and pair reservation; no handoff before parent/helpers terminate |
+| Creation/send response is lost or events replay after restart | Attach a corroborated result once, or retain reservation/batch and one operator condition after the bounded pass; no expanded search or repeat send |
+| Busy Archon, full capacity, changing updates, and mid-turn additions | Idle-only useful batches; decisions cannot acknowledge unseen updates; deferral does not cause identical wakes |
+| Limits fall; ordinary/urgent holds and quiet periods overlap | No new forbidden starts; observed interruption/drainage; releasing one hold does not clear others |
+| Finish missing, hook absent, correction already used, or turn fails after finish | One shared correction allowance; retained evidence and one exception after exhaustion; no Plan-mode or unrelated-task correction |
+| Candidate identity mismatches or worktree changes after submission | Explicit mismatch holds advancement; review continues to target the recorded immutable candidate, never a newer worktree state |
+| Three substantive review failures, missing evidence, or covered repair | Only new substantive source rejections count; Archon decides after three; permitted repair records rationale/linkage without another Overseer turn |
+| Flaky/failed CI or a later unexplained green result | Diagnosis and concrete repair; no Fulcrum CI retry or automatic diagnostic replay; native certification after repair |
+| Source push, cleanup, or brain publication fails | Reuse retained candidate/report/intake; Python owns the remaining obligation; no duplicate implementation or analysis |
+| Follow-up, compaction, stale command, or missing template | Complete action brief and approved scope; valid prefilled finish command; stale/foreign dispatch fails; installed templates work without role skills |
+| Partial/duplicate intake, dependency cycle, scope edit, or unsupported model | No partial graph dispatch or silent scope/model change; preserve native Beads identities and explicit future exclusion |
+| Specialist overdue after downtime, duplicate finding, or speculative observation | One occurrence; reuse known findings; only evidence-backed submitted findings produce pending beads; zero findings is valid |
+| Busy/archived/unavailable interview subject and collection timeout | One request per subject; correct restoration; expire unstarted requests; reconcile uncertain starts; one Sage continuation with explicit missing evidence |
+| Soft/hard reboot, dirty worktree transfer, and reset | Fresh IDs; old commands rejected; preserve work for soft/hard; reset clears selected local/remote state and numbering while retaining bootstrap configuration and source repositories |
+| Interrupted reboot/cutover, cleanup failure, or unavailable Archon | One owner; resume retained operation; never erase live ownership; one operator condition without a self-escalation loop |
+| Setup, installation, doctor, status, and recovery without Watchman | No Watchman creation, registration, automation, patrol evidence, skill, or readiness dependency |
+
+### First assembled-product check
+
+Run this before expanding the controller beyond a single bead. Use disposable
+Codex tasks, an enrolled disposable source repository with actual Tollgate
+configuration, and isolated brain, state, and remotes.
+
+1. Connect to the shared desktop runtime. Create/name Archon with explicit model
+   settings, establish initial limits/policies, and confirm `$archon` links to
+   that same task without converting the invoking conversation.
+2. Invoke Weaver with `sol` in Plan Mode. Verify immediate canonical naming via
+   controller activation, no authoring publication/finish obligation, and the
+   same numeral after writable approval. Publish one small documentation bead.
+3. Verify the bead stays pending until Archon approves its exact scope. Start
+   Executor in the Python-created Tollgate worktree with the correct model and
+   a complete action brief, without an Overseer preparation turn.
+4. Submit the candidate and call the generated finish command. Delay parent or
+   helper completion and verify Overseer does not start; then review the exact
+   candidate independently and approve with explicit repair permissions.
+5. Observe Python drive native certification, promotion, configured source sync,
+   cleanup, and Beads closure. Verify task archival follows inactivity and any
+   remaining brain push has a controller owner. No agent waits on CI or sends a
+   peer handoff.
+
+Then exercise two projects and sequential beads, compaction, native helper
+termination, source repair, and all three reboot modes. For reset, seed plans,
+beads, memory, histories, queues, and dirty disposable worktrees; verify removal
+locally and through native brain synchronization, with a fresh Archon numbered
+1. Preserve measured timings and unavailable capabilities. Mock success records
+cannot replace these native checks or establish automatic Weaver activation.

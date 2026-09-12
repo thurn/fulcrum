@@ -453,6 +453,26 @@ This final check established that the title operation was not limited to tasks
 created by the Python client. Given an authorized `threadId`, Python could
 rename the current desktop task as well.
 
+## Experiment 5: name a task configured for Plan Mode
+
+A follow-up check used the existing shared listener and one disposable task,
+`01a09757-aab0-7602-a3a3-a28669bf5f9e`. The client first verified that the
+listener could read the current desktop task's exact runtime ID. It then used
+the installed binary's generated schemas to configure the disposable task with
+`thread/settings/update`, selecting `collaborationMode.mode: plan` and the
+built-in mode instructions.
+
+The `thread/settings/updated` event confirmed `collaborationMode.mode: plan`.
+Python called `thread/name/set`, and `thread/read` confirmed the name
+`Weaver Plan Mode naming verification`. The task had zero turns and was archived
+after the check. Repeated checks reused that same task; no model turn was started.
+
+This proves an external Python client can rename a task configured for Plan
+Mode. It does not establish that a Plan-mode agent should execute mutating
+commands, or that Fulcrum already receives an automatic `$weaver` activation
+callback. Early naming can be a controller-owned metadata action; the activation
+trigger and desktop presentation remain integration checks for implementation.
+
 ## Capability verdict
 
 | Capability | Result | Strongest evidence |
@@ -468,6 +488,7 @@ rename the current desktop task as well.
 | Archive by task ID | Passed | archive event, archived inclusion, active exclusion |
 | Restore without identity loss | Passed | same ID, title, turn IDs, prompts, and responses after unarchive |
 | Rename current task by ID | Passed | current task update event and final API read |
+| Rename a task configured for Plan Mode | Passed | Plan-mode settings event, verified name, zero model turns |
 
 The end-to-end answer for this installation is therefore **yes**: Python can
 replace agent-driven creation, identification, naming, model/effort selection,
