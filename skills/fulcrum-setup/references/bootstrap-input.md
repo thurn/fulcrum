@@ -53,7 +53,7 @@ The `projects` array must contain exactly the Fulcrum, Tollgate, and Battlement
 entries. `tollgate_healthy` is true only when current status reports the same
 canonical path, active execution, no block reasons, and remote push enabled.
 
-The command reads the installed skill revision itself. It refuses one task
-serving as both roles, a non-human marker, three-project violations, duplicate
-project IDs, or replacement of another current Archon. A mismatched project is
-retained disabled with its observed reasons and the command exits nonzero.
+The command refuses one task serving as both roles, a non-human marker,
+three-project violations, duplicate project IDs, or replacement of another
+current Archon. A mismatched project is retained disabled with its observed
+reasons and the command exits nonzero.

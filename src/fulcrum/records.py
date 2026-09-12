@@ -84,7 +84,6 @@ class RoleRun(TypedDict):
     selected_model: str
     selected_reasoning: str
     model_authorization: ModelAuthorization
-    skill_revision: str
     client_thread_id: NotRequired[str]
     agent_recommendation: NotRequired[str | None]
 

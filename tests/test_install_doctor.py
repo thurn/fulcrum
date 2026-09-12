@@ -1,9 +1,8 @@
-"""Repeatable installation, migration preservation, and doctor diagnostics."""
+"""Repository-linked installation and doctor diagnostics."""
 
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -13,7 +12,7 @@ from unittest.mock import patch
 
 from fulcrum.config import RuntimePaths
 from fulcrum.doctor import doctor_runtime
-from fulcrum.install import InstallationError, install_runtime
+from fulcrum.install import LINKED_SKILLS, InstallationError, install_runtime
 from fulcrum.state import atomic_write_record, read_record
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -37,10 +36,11 @@ class InstallDoctorTest(unittest.TestCase):
         self.source = self.root / "retained-source"
         self.source.mkdir()
         shutil.copytree(REPO_ROOT / "skills", self.source / "skills")
+        shutil.copytree(REPO_ROOT / "hooks", self.source / "hooks")
         git(self.source, "init", "-q")
         git(self.source, "config", "user.email", "test@example.test")
         git(self.source, "config", "user.name", "Test")
-        git(self.source, "add", "skills")
+        git(self.source, "add", "skills", "hooks")
         git(self.source, "commit", "-qm", "test source")
         self.revision = git(self.source, "rev-parse", "HEAD")
         git(self.source, "update-ref", "refs/heads/release", self.revision)
@@ -48,11 +48,9 @@ class InstallDoctorTest(unittest.TestCase):
         self.paths = RuntimePaths(
             self.root / "brain", self.root / "state", self.root / "config.json"
         )
-        self.skills = self.root / "codex-skills"
-        self.hooks = self.root / "hooks.json"
-        self.command = self.root / "bin" / "fulcrum-hook"
-        self.command.parent.mkdir()
-        self.command.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.codex_root = self.root / "codex"
+        self.skills = self.codex_root / "skills"
+        self.hooks = self.codex_root / "hooks.json"
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -64,7 +62,6 @@ class InstallDoctorTest(unittest.TestCase):
             certified_revision=self.revision,
             skills_root=self.skills,
             hooks_config=self.hooks,
-            hook_command=self.command,
             host_id="local",
             expected_brain_remote="git@example.test:brain.git",
             sage_anchor="2026-09-12T08:00:00Z",
@@ -84,7 +81,6 @@ class InstallDoctorTest(unittest.TestCase):
         first_assignment = assignment_path.read_bytes()
         first_jobs = jobs_path.read_bytes()
         second = self.install()
-        self.assertEqual(first["skill_revision"], second["skill_revision"])
         self.assertEqual(first_assignment, assignment_path.read_bytes())
         self.assertEqual(first_jobs, jobs_path.read_bytes())
         installation = read_record(self.paths, "installation")
@@ -92,44 +88,49 @@ class InstallDoctorTest(unittest.TestCase):
             installation["configured_services"],
             ["beads", "codex", "hooks", "tollgate"],
         )
-        self.assertEqual(installation["observations"]["package_version"], "0.3.0")
+        self.assertEqual(installation["observations"]["package_version"], "0.4.0")
         self.assertEqual(len(json.loads(self.hooks.read_text())["hooks"]["Stop"]), 1)
+        self.assertEqual(len(first["skill_links"]), len(LINKED_SKILLS))
+        for name in LINKED_SKILLS:
+            self.assertTrue((self.skills / name).is_symlink())
+            self.assertEqual(
+                (self.skills / name).resolve(),
+                (self.source / "skills" / name).resolve(),
+            )
+        hook_link = self.codex_root / "hooks" / "fulcrum"
+        self.assertTrue(hook_link.is_symlink())
+        configured_command = json.loads(self.hooks.read_text())["hooks"]["Stop"][0][
+            "hooks"
+        ][0]["command"]
+        self.assertEqual(configured_command, str(hook_link / "fulcrum-hook"))
+        skill_source = self.source / "skills" / "fulcrum-archon" / "SKILL.md"
+        skill_source.write_text("changed live\n", encoding="utf-8")
         self.assertEqual(
-            len(list(self.skills.glob("fulcrum-*/SKILL.md"))),
-            8,
+            (self.skills / "fulcrum-archon" / "SKILL.md").read_text(),
+            "changed live\n",
         )
-        self.assertEqual(first["setup_skills_installed"], ["fulcrum-setup"])
-        for skill in self.skills.glob("fulcrum-*/SKILL.md"):
-            for relative in re.findall(r"\]\((\.\./[^)]+)\)", skill.read_text()):
-                self.assertTrue((skill.parent / relative).resolve().is_file())
+        hook_source = self.source / "hooks" / "fulcrum-hook"
+        hook_source.write_text("hook changed\n", encoding="utf-8")
+        self.assertEqual((hook_link / "fulcrum-hook").read_text(), "hook changed\n")
+        self.assertTrue(first["hook_retrust_required"])
+        self.assertFalse(second["hook_retrust_required"])
         self.assertFalse(second["database_restarted"])
 
-    def test_schema_zero_is_backed_up_and_unknown_schema_is_preserved(self) -> None:
-        self.paths.config_file.write_text(
-            json.dumps(
-                {
-                    "record_kind": "installation",
-                    "schema_version": 0,
-                    "brain_root": str(self.paths.brain_root),
-                    "state_root": str(self.paths.state_root),
-                    "host_id": "local",
-                }
-            ),
-            encoding="utf-8",
-        )
-        migrated = self.install()
-        backup = Path(str(migrated["migration_backup"]))
-        self.assertTrue(backup.is_file())
-        self.assertEqual(json.loads(backup.read_text())["schema_version"], 0)
-        self.assertEqual(
-            json.loads(self.paths.config_file.read_text())["schema_version"], 1
-        )
-
+    def test_unsupported_schema_is_preserved(self) -> None:
         incompatible = b'{"record_kind":"installation","schema_version":44}\n'
         self.paths.config_file.write_bytes(incompatible)
         with self.assertRaises(InstallationError):
             self.install()
         self.assertEqual(self.paths.config_file.read_bytes(), incompatible)
+
+    def test_existing_nonlink_asset_is_preserved_and_rejected(self) -> None:
+        target = self.skills / "fulcrum-archon"
+        target.mkdir(parents=True)
+        marker = target / "keep.txt"
+        marker.write_text("unrelated\n", encoding="utf-8")
+        with self.assertRaisesRegex(InstallationError, "not the expected symlink"):
+            self.install()
+        self.assertEqual(marker.read_text(), "unrelated\n")
 
     def test_disposable_source_is_rejected(self) -> None:
         disposable = self.root / ".worktrees" / "candidate"
@@ -141,7 +142,6 @@ class InstallDoctorTest(unittest.TestCase):
                 certified_revision=self.revision,
                 skills_root=self.skills,
                 hooks_config=self.hooks,
-                hook_command=self.command,
                 host_id="local",
                 expected_brain_remote="remote",
                 sage_anchor=NOW,
@@ -149,8 +149,7 @@ class InstallDoctorTest(unittest.TestCase):
             )
 
     def test_doctor_separates_required_optional_and_push_findings(self) -> None:
-        result = self.install()
-        skill_revision = str(result["skill_revision"])
+        self.install()
         roles = {
             "record_kind": "role_run_registry",
             "schema_version": 1,
@@ -158,8 +157,8 @@ class InstallDoctorTest(unittest.TestCase):
             "updated_at": NOW,
             "current_archon_task_id": "task-archon",
             "roles": [
-                self.role("archon", "task-archon", skill_revision),
-                self.role("night_watchman", "task-watchman", skill_revision),
+                self.role("archon", "task-archon"),
+                self.role("night_watchman", "task-watchman"),
             ],
         }
         atomic_write_record(self.paths, roles)
@@ -224,7 +223,7 @@ class InstallDoctorTest(unittest.TestCase):
         self.assertEqual(report["push_failures"], [])
 
     @staticmethod
-    def role(role: str, task_id: str, revision: str) -> dict[str, object]:
+    def role(role: str, task_id: str) -> dict[str, object]:
         return {
             "role": role,
             "project_id": "fleet",
@@ -238,7 +237,6 @@ class InstallDoctorTest(unittest.TestCase):
             "selected_model": "model",
             "selected_reasoning": "high",
             "model_authorization": {"source": "human", "reference": "setup"},
-            "skill_revision": revision,
         }
 
 

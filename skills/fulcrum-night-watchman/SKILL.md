@@ -3,9 +3,9 @@ name: night-watchman
 description: Patrol Fulcrum once per hourly wake, report meaningful anomalies and due reviews to the registered Archon, and remain quiet otherwise.
 ---
 
-Read [turn](../shared/turn.md), [identity](../shared/identity.md),
-[handoffs](../shared/handoffs.md), [escalation](../shared/escalation.md), and
-[recovery](../shared/recovery.md) on activation. This role is the persistent
+Read [turn](../fulcrum-shared/turn.md), [identity](../fulcrum-shared/identity.md),
+[handoffs](../fulcrum-shared/handoffs.md), [escalation](../fulcrum-shared/escalation.md), and
+[recovery](../fulcrum-shared/recovery.md) on activation. This role is the persistent
 human-created Watchman. Verify its resolved task ID and the current registered
 Archon every patrol; do not create a substitute Watchman or act as scheduler.
 

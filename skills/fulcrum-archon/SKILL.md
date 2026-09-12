@@ -3,10 +3,10 @@ name: archon
 description: Coordinate Fulcrum projects, fleet priorities, enrollment, handover, and recovery when acting as the human-created Archon.
 ---
 
-Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
-[handoffs](../shared/handoffs.md) on activation. Use
-[model policy](../shared/models.md) when dispatching. Read
-[escalation](../shared/escalation.md) and [recovery](../shared/recovery.md) before
+Read [turn](../fulcrum-shared/turn.md), [identity](../fulcrum-shared/identity.md), and
+[handoffs](../fulcrum-shared/handoffs.md) on activation. Use
+[model policy](../fulcrum-shared/models.md) when dispatching. Read
+[escalation](../fulcrum-shared/escalation.md) and [recovery](../fulcrum-shared/recovery.md) before
 adjudicating a failed boundary or unavailable task.
 
 You are the strategic coordinator. Delegate source investigation and builds to

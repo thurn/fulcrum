@@ -11,8 +11,8 @@ registries, but it begins routine coordination only after the gate passes. It is
 human-created because the user started it; never create a substitute Archon or
 Watchman. Do not activate in Plan mode.
 
-Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
-[handoffs](../shared/handoffs.md) before writing live state. Use the installed
+Read [turn](../fulcrum-shared/turn.md), [identity](../fulcrum-shared/identity.md), and
+[handoffs](../fulcrum-shared/handoffs.md) before writing live state. Use the installed
 `archon` skill after the final transition.
 
 ## Resume safely
@@ -30,9 +30,9 @@ stop with one precise identity instruction. Titles are discovery aids, not IDs.
 ## Automated preflight
 
 1. Resolve the installed brain, state, source, skills, and hooks paths from the
-   installation record. Verify the installed package and retained source refer
-   to the same certified revision; `HEAD`, `release`, and `origin/master` must
-   agree before reinstalling.
+   installation record. Fulcrum requires a retained Git checkout; wheel-only or
+   copied-skill installations are invalid. Verify `HEAD`, `release`, and
+   `origin/master` agree before installing.
 2. Run `scripts/check` when source verification or installation changed. Run
    `fulcrum doctor`, `fulcrum brain status`, `bd where`, `bd dolt status`, and
    `bd dolt test`. Inspect `tg repo list`, configuration, and status through its
@@ -41,16 +41,24 @@ stop with one precise identity instruction. Titles are discovery aids, not IDs.
    ID, host, and Git-project flag for exactly Fulcrum, Tollgate, and Battlement.
    Match each canonical root to one active Tollgate repository with remote push
    enabled and no block reason.
-4. Verify all seven role skills plus `fulcrum-setup` are installed. Verify the
-   user-level hooks file contains exactly one marked Fulcrum `SessionStart`
-   compact handler and one marked Fulcrum `Stop` handler using the installed
-   absolute `fulcrum-hook` path. Do not duplicate hooks per project.
+4. Verify every `~/.codex/skills/fulcrum-*` entry is a symlink to the matching
+   directory under the retained checkout's `skills/`, and
+   `~/.codex/hooks/fulcrum` is a symlink to its `hooks/`. Verify the user-level
+   hooks file contains exactly one marked Fulcrum `SessionStart` compact handler
+   and one marked Fulcrum `Stop` handler using the linked `fulcrum-hook`. Do not
+   duplicate hooks per project.
 
 Repair safe, in-scope installation drift with the documented idempotent
 `fulcrum install` command from retained certified source. Preserve the brain,
 active state, unrelated skills, and unrelated hooks. Report rather than bypass
 remote mismatches, uncertified source, unknown schemas, or unhealthy
 integrations.
+
+The links are the runtime contract. Edits under the retained checkout's
+`skills/`, `hooks/`, and editable `src/fulcrum/` tree take effect on the next
+read or process invocation; do not copy files, compute content hashes, record
+per-run skill snapshots, or reinstall after an edit. Restart Codex only if its
+skill discovery cache does not show a changed skill.
 
 ## Human task checkpoint
 
@@ -106,11 +114,12 @@ automation and retain its actual ID as evidence.
 ## Verify hooks and record evidence
 
 Configuration inspection is automatic; trust and desktop delivery are human
-evidence. If the current hook hash is not trusted, instruct the user to open
-`/hooks`, inspect the exact user-level definition, and trust it. Never use a
-trust bypass. Ask the user to confirm one real compact refresh and one normal
-Stop exercise. If Codex cannot compel compaction, retain the documented
-unsupported fallback instead of claiming delivery.
+evidence. If the user-level hook definition changed, instruct the user to open
+`/hooks`, inspect it, and trust it. Editing the linked hook implementation does
+not require reinstalling Fulcrum. Never use a trust bypass. Ask the user to
+confirm one real compact refresh and one normal Stop exercise. If Codex cannot
+compel compaction, retain the documented unsupported fallback instead of
+claiming delivery.
 
 After viewing the active hourly automation, run:
 

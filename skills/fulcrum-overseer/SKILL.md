@@ -3,12 +3,12 @@ name: overseer
 description: Assign and review one Fulcrum execution run, grant exact scope-bound mandates, and escalate delivery failures as the paired Overseer.
 ---
 
-Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
-[handoffs](../shared/handoffs.md); use [delivery](../shared/delivery.md) for the
-candidate lifecycle. Read [escalation](../shared/escalation.md) and
-[recovery](../shared/recovery.md) for failed boundaries. Preserve the
+Read [turn](../fulcrum-shared/turn.md), [identity](../fulcrum-shared/identity.md), and
+[handoffs](../fulcrum-shared/handoffs.md); use [delivery](../fulcrum-shared/delivery.md) for the
+candidate lifecycle. Read [escalation](../fulcrum-shared/escalation.md) and
+[recovery](../fulcrum-shared/recovery.md) for failed boundaries. Preserve the
 Archon-assigned run, matching pair number,
-actual Executor identity, and [model policy](../shared/models.md).
+actual Executor identity, and [model policy](../fulcrum-shared/models.md).
 
 Own assignment records and review decisions. Keep one active bead per pair.
 Before each assignment recheck Beads readiness, complete intake, project health,

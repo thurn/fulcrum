@@ -181,12 +181,14 @@ Remove only the installation being decommissioned:
   backed up and explicitly selected for removal. Package removal never implies
   database deletion.
 
-## Versioned install and update workflow
+## Repository-linked install and update workflow
 
-Run installation only from the retained checkout after Tollgate has promoted
-and synchronized the exact revision. The installer rejects paths containing
-`.worktrees` and requires `HEAD`, `refs/heads/release`, and
-`refs/remotes/origin/master` to equal `--certified-revision`.
+Every Fulcrum user must retain a Git checkout. Wheel-only and copied-skill
+installations are unsupported. Run installation from the repository root after
+Tollgate has promoted and synchronized the exact revision. The installer
+rejects nested and disposable `.worktrees` paths and requires `HEAD`,
+`refs/heads/release`, and `refs/remotes/origin/master` to equal
+`--certified-revision`.
 
 ```sh
 revision=$(git -C /absolute/retained/fulcrum rev-parse HEAD)
@@ -201,20 +203,25 @@ python3.12 -m venv /absolute/retained/fulcrum/.venv
   --certified-revision "$revision" \
   --skills-root /absolute/codex/skills \
   --hooks-config /absolute/codex/hooks.json \
-  --hook-command /absolute/retained/fulcrum/.venv/bin/fulcrum-hook \
   --expected-brain-remote git@github.com:owner/private-brain.git \
   --sage-anchor 2026-09-12T16:00:00Z \
   --codex-projects-verified-at 2026-09-11T19:45:00Z
 ```
 
-The command installs all seven role skills and the `fulcrum-setup` bootstrap
-skill under Fulcrum-owned skill directories, merges the two handlers into one
-hook source, records package,
-source, and skill revisions, and preserves unrelated skills and hooks. Running
-it twice is expected and does not create roles, schedules, services, or project
-registrations. It never restarts Beads. Existing active runs retain their
-recorded skill revision; `doctor` fails readiness until a material skill change
-has been reconciled rather than silently rewriting their history.
+The command creates `fulcrum-*` symlinks under the selected Codex skills
+directory and a `hooks/fulcrum` symlink under the same Codex home. Every link
+points directly into the retained checkout. It merges two small handler entries
+into the user-level hooks file while preserving unrelated hooks. Running the
+command twice is a no-op for links and does not create roles, schedules,
+services, or project registrations. It never restarts Beads.
+
+Edits to a linked skill or hook script are visible immediately. The editable
+Python install likewise uses the checkout's current `src/fulcrum` code on the
+next command or hook process. There are no copied skill manifests, content
+hashes, per-run skill snapshots, or stale-content reconciliation. Re-run
+installation only when establishing links or changing the hook definition, not
+after ordinary repository edits. If Codex does not surface a skill edit, restart
+Codex to refresh discovery.
 
 The Archon and Night Watchman task IDs must come from human-created Codex tasks
 and use human model authorization in the role registry. After the Watchman task
@@ -242,9 +249,11 @@ health comes from `bd where`, `bd dolt status`, and `bd dolt test` through the
 Beads adapter; Fulcrum does not keep a PID or offer a generic database service
 manager.
 
-Hook definitions are hash-trusted. Every install marks hook trust as requiring
-review: use `/hooks` in Codex to inspect and trust the exact new definition,
-then perform the compact/Stop desktop exercise. Never use a trust bypass as
+When installation changes the user-level hook definition, it marks hook trust
+as requiring review. Use `/hooks` in Codex to inspect and trust that definition,
+then perform the compact/Stop desktop exercise. Re-running an unchanged install
+does not invalidate already recorded trust, and editing the linked hook
+implementation does not require reinstalling it. Never use a trust bypass as
 readiness evidence.
 
 ## Guided fleet bootstrap
@@ -279,16 +288,15 @@ Required doctor failures remain failures; optional desktop/runtime observations
 may remain unsupported only with their documented fallbacks. A ready result lets
 the invoking task load `$archon` and continue as the first coordinator.
 
-Before a supported record conversion, Fulcrum writes the original installation
-record under `state/backups/`. The only automatic conversion is the explicit
-installation schema 0-to-1 mapping. Invalid or unknown versions remain unchanged
-and produce an error. For a package rollback, install a previously certified
-revision from its retained checkout and rerun the same command; do not restore
-the whole state directory over active work. Database backup and restoration use
-`bd backup sync` and `bd backup restore` into a disposable destination first,
-with `bd dolt stop/start` only during coordinated database maintenance.
+Invalid or unknown record schemas remain unchanged and produce an error; Fulcrum
+does not carry record-format conversion machinery. For a package rollback,
+install a previously certified revision from its retained checkout and rerun the
+same command; do not restore the whole state directory over active work.
+Database backup and restoration use `bd backup sync` and `bd backup restore`
+into a disposable destination first, with `bd dolt stop/start` only during
+coordinated database maintenance.
 
-Uninstall the package and the seven `fulcrum-*` skill directories only after
-disabling/removing the two marked Fulcrum handlers. Preserve the config, brain,
-state, backups, role registry, and project registry unless the user separately
-selects those data for deletion.
+Uninstall by removing the Fulcrum skill symlinks and `hooks/fulcrum` symlink only
+after disabling/removing the two marked Fulcrum handlers. Preserve their Git
+checkout, config, brain, state, role registry, and project registry unless the
+user separately selects those data for deletion.

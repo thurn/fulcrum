@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fulcrum"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local coordination infrastructure for durable agent workflows"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -23,24 +23,12 @@ dev = [
 
 [project.scripts]
 fulcrum = "fulcrum.cli:main"
-fulcrum-hook = "fulcrum.hook:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.data-files]
 "share/fulcrum/schemas" = ["schemas/*.json"]
-"share/fulcrum/skills/archon" = ["skills/archon/*.md"]
-"share/fulcrum/skills/weaver" = ["skills/weaver/*.md"]
-"share/fulcrum/skills/overseer" = ["skills/overseer/*.md"]
-"share/fulcrum/skills/executor" = ["skills/executor/*.md"]
-"share/fulcrum/skills/night-watchman" = ["skills/night-watchman/*.md"]
-"share/fulcrum/skills/sage" = ["skills/sage/*.md"]
-"share/fulcrum/skills/inquisitor" = ["skills/inquisitor/*.md"]
-"share/fulcrum/skills/fulcrum-setup" = ["skills/fulcrum-setup/*.md"]
-"share/fulcrum/skills/fulcrum-setup/agents" = ["skills/fulcrum-setup/agents/*.yaml"]
-"share/fulcrum/skills/fulcrum-setup/references" = ["skills/fulcrum-setup/references/*.md"]
-"share/fulcrum/skills/shared" = ["skills/shared/*.md"]
 
 [tool.black]
 line-length = 88

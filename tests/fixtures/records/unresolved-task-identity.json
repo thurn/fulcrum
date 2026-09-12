@@ -22,8 +22,7 @@
         "source": "plan",
         "reference": "plan:example"
       },
-      "agent_recommendation": "medium",
-      "skill_revision": "abc1234"
+      "agent_recommendation": "medium"
     }
   ]
 }

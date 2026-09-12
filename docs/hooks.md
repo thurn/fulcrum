@@ -32,10 +32,13 @@ The installed stop handler also receives unrelated root-task stops, but
 returns immediately without a reminder for those tasks and Plan-mode
 interviews. Codex does not provide a role matcher for `Stop`.
 
-Use a small Python helper that reads Codex's event JSON and the task's existing
-Fulcrum registration and progress. It makes no model calls, network requests,
-Beads queries, or transcript scans. Missing information is not a reason to
-invent task state or block the fleet.
+The configured command is `~/.codex/hooks/fulcrum/fulcrum-hook`. Its parent is
+a symlink into the retained Fulcrum Git checkout, where the wrapper starts the
+editable Python helper. Changes to either are live on the next hook invocation;
+there is no copied executable or reinstall step. The helper reads Codex's event
+JSON and the task's existing Fulcrum registration and progress. It makes no
+model calls, network requests, Beads queries, or transcript scans. Missing
+information is not a reason to invent task state or block the fleet.
 
 ## Refresh After Compaction
 
@@ -75,7 +78,7 @@ Illustrative configuration for the installed helper:
 matcher = "^compact$"
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = "/absolute/path/to/fulcrum-hook"
+command = "/absolute/codex/home/hooks/fulcrum/fulcrum-hook"
 timeout = 2
 additionalContextLimit = 1000
 ```

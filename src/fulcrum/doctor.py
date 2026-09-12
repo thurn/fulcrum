@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
@@ -11,7 +12,7 @@ from fulcrum import __version__
 from fulcrum.brain import brain_status
 from fulcrum.config import RuntimePaths
 from fulcrum.hook_config import FULCRUM_STATUS_PREFIX
-from fulcrum.install import ROLES, SETUP_SKILLS
+from fulcrum.install import LINKED_SKILLS, ROLES, SETUP_SKILLS
 from fulcrum.records import (
     ExecutorEvidenceRecord,
     InstallationRecord,
@@ -72,7 +73,7 @@ def _tollgate_project_status(repository_id: str) -> dict[str, Any]:
     return cast(dict[str, Any], value["state"])
 
 
-def _hooks_check(path: Path) -> Check:
+def _hooks_check(path: Path, expected_command: Path) -> Check:
     try:
         value: object = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(value, dict) or not isinstance(value.get("hooks"), dict):
@@ -96,12 +97,17 @@ def _hooks_check(path: Path) -> Check:
             raise ValueError(f"expected two Fulcrum handlers, found {len(marked)}")
         if any(handler.get("timeout") != 2 for handler in marked):
             raise ValueError("Fulcrum handlers do not use the two-second ceiling")
+        if any(
+            shlex.split(str(handler.get("command", ""))) != [str(expected_command)]
+            for handler in marked
+        ):
+            raise ValueError("Fulcrum handlers do not use the repository hook link")
         return _check("required", "hooks_config", "pass", str(path))
     except Exception as error:
         return _check("required", "hooks_config", "fail", str(error))
 
 
-def _role_checks(paths: RuntimePaths, installed_skill_revision: str) -> list[Check]:
+def _role_checks(paths: RuntimePaths) -> list[Check]:
     try:
         value = read_record(paths, "role_run_registry")
         if value["record_kind"] != "role_run_registry":
@@ -125,7 +131,7 @@ def _role_checks(paths: RuntimePaths, installed_skill_revision: str) -> list[Che
         and role["task_id"]
         and role["model_authorization"]["source"] == "human"
     ]
-    result = [
+    return [
         _check(
             "required",
             "human_role_enrollment",
@@ -133,33 +139,35 @@ def _role_checks(paths: RuntimePaths, installed_skill_revision: str) -> list[Che
             f"resolved current Archons={len(archon)}; resolved Watchmen={len(watchmen)}",
         )
     ]
-    stale: list[str] = []
-    for role in registry["roles"]:
-        task_id = role.get("task_id")
-        if not task_id:
-            continue
-        try:
-            progress = read_record(paths, "progress", task_id)
-        except Exception:
-            continue
-        if progress["record_kind"] == "progress" and cast(ProgressRecord, progress)[
-            "phase"
-        ] not in {"completed", "canceled"}:
-            if role["skill_revision"] != installed_skill_revision:
-                stale.append(task_id)
-    result.append(
-        _check(
-            "required",
-            "active_skill_reconciliation",
-            "fail" if stale else "pass",
-            (
-                "active runs on older skill revisions: " + ", ".join(stale)
-                if stale
-                else "active runs agree with the installed skill revision"
-            ),
-        )
+
+
+def _linked_assets_check(
+    installation: InstallationRecord, skills_root: Path, hooks_config: Path
+) -> Check:
+    source_value = installation["observations"].get("installed_source_root")
+    if not source_value:
+        return _check("required", "repository_links", "fail", "source root missing")
+    source_root = Path(source_value).resolve(strict=False)
+    failures: list[str] = []
+    for name in LINKED_SKILLS:
+        link = skills_root / name
+        expected = (source_root / "skills" / name).resolve(strict=False)
+        if not link.is_symlink() or link.resolve(strict=False) != expected:
+            failures.append(str(link))
+    hook_link = skills_root.parent / "hooks" / "fulcrum"
+    expected_hook = (source_root / "hooks").resolve(strict=False)
+    if not hook_link.is_symlink() or hook_link.resolve(strict=False) != expected_hook:
+        failures.append(str(hook_link))
+    if hooks_config.parent.resolve(strict=False) != skills_root.parent.resolve(
+        strict=False
+    ):
+        failures.append("Codex home mismatch")
+    return _check(
+        "required",
+        "repository_links",
+        "fail" if failures else "pass",
+        "invalid: " + ", ".join(failures) if failures else str(source_root),
     )
-    return result
 
 
 def _project_checks(paths: RuntimePaths, codex_projects_verified: bool) -> list[Check]:
@@ -349,7 +357,9 @@ def doctor_runtime(
             checks.append(_check("required", name, "pass", _tool_version(command)))
         except Exception as error:
             checks.append(_check("required", name, "fail", str(error)))
-    checks.append(_hooks_check(hooks_config))
+    hook_command = skills_root.parent / "hooks" / "fulcrum" / "fulcrum-hook"
+    checks.append(_linked_assets_check(installation, skills_root, hooks_config))
+    checks.append(_hooks_check(hooks_config, hook_command))
     trust = observations.get("hook_trust")
     checks.append(
         _check(
@@ -376,7 +386,7 @@ def doctor_runtime(
             ),
         )
     )
-    checks.extend(_role_checks(paths, observations.get("skill_revision", "")))
+    checks.extend(_role_checks(paths))
     checks.extend(
         _project_checks(paths, bool(observations.get("codex_projects_verified_at")))
     )

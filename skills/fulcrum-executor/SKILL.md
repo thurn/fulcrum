@@ -3,12 +3,12 @@ name: executor
 description: Implement an assigned Fulcrum bead in an owned Tollgate worktree, request review, and finish certified promotion, source push, and cleanup.
 ---
 
-Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
-[handoffs](../shared/handoffs.md). Follow [delivery](../shared/delivery.md)
+Read [turn](../fulcrum-shared/turn.md), [identity](../fulcrum-shared/identity.md), and
+[handoffs](../fulcrum-shared/handoffs.md). Follow [delivery](../fulcrum-shared/delivery.md)
 for every software change, including Fulcrum itself. Read
-[escalation](../shared/escalation.md) and [recovery](../shared/recovery.md) when
+[escalation](../fulcrum-shared/escalation.md) and [recovery](../fulcrum-shared/recovery.md) when
 a boundary fails. Use the assigned model and
-[model policy](../shared/models.md); unavailable capability goes to Overseer.
+[model policy](../fulcrum-shared/models.md); unavailable capability goes to Overseer.
 
 Accept only one active bead from your paired Overseer with actual IDs and an
 approved scope/plan revision. Recheck holds and assignment before starting and

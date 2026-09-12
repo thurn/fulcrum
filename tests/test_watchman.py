@@ -59,7 +59,6 @@ def role(name: str, task_id: str | None, *, identity: str = "resolved") -> RoleR
                 "source": "human" if name == "night_watchman" else "default",
                 "reference": "human setup" if name == "night_watchman" else None,
             },
-            "skill_revision": "abc1234",
         },
     )
 

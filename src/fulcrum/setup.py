@@ -42,7 +42,7 @@ def _text(value: object, label: str) -> str:
     return value
 
 
-def _human_role(raw: object, role: str, revision: str) -> RoleRun:
+def _human_role(raw: object, role: str) -> RoleRun:
     if not isinstance(raw, dict) or raw.get("human_created") is not True:
         raise SetupError(f"{role} must be explicitly marked human-created")
     task_id = _text(raw.get("task_id"), f"{role}.task_id")
@@ -68,7 +68,6 @@ def _human_role(raw: object, role: str, revision: str) -> RoleRun:
                 raw.get("selected_reasoning"), f"{role}.selected_reasoning"
             ),
             "model_authorization": {"source": "human", "reference": reference},
-            "skill_revision": revision,
         },
     )
 
@@ -161,12 +160,8 @@ def bootstrap_fleet(paths: RuntimePaths, value: object) -> dict[str, Any]:
     installation = read_record(paths, "installation")
     if installation["record_kind"] != "installation":
         raise SetupError("installation record is unavailable")
-    revision = _text(
-        cast(InstallationRecord, installation)["observations"].get("skill_revision"),
-        "installed skill revision",
-    )
-    archon = _human_role(value.get("archon"), "archon", revision)
-    watchman = _human_role(value.get("watchman"), "night_watchman", revision)
+    archon = _human_role(value.get("archon"), "archon")
+    watchman = _human_role(value.get("watchman"), "night_watchman")
     if archon["task_id"] == watchman["task_id"]:
         raise SetupError("Archon and Watchman must be distinct human-created tasks")
 

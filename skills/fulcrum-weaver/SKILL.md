@@ -3,7 +3,7 @@ name: weaver
 description: Interview, save approved Fulcrum plans, publish executable Beads intake, or refine existing scope as a human-created Weaver.
 ---
 
-Read [identity](../shared/identity.md) and [turn](../shared/turn.md) first.
+Read [identity](../fulcrum-shared/identity.md) and [turn](../fulcrum-shared/turn.md) first.
 Keep the human's descriptive title and model preferences. Use
 [interview guidance](interview.md) for scope decisions and
 [task template](task-template.md) when writing beads.
@@ -47,7 +47,7 @@ Do not start implementing the bug merely because intake was approved.
 3. Commit Beads history explicitly and immediately attempt `bd dolt push`.
    Git push does not synchronize Beads. Retain each failed command separately in
    progress.push_obligations; local commits remain valid, and other work can proceed.
-4. Use [handoffs](../shared/handoffs.md) to report plan/commit, created or reused
+4. Use [handoffs](../fulcrum-shared/handoffs.md) to report plan/commit, created or reused
    beads, activation, changed scope, validation/review results, and pending pushes
    to current Archon. Then archive. Failed pushes may be handed to Archon for
    retry; an unsent report is still an unresolved handoff.

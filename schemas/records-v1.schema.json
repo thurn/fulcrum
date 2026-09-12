@@ -159,7 +159,7 @@
               "type": "array",
               "items": {
                 "type": "object",
-                "required": ["role", "project_id", "host_id", "task_id", "identity_state", "role_number", "run_id", "pair_id", "title", "selected_model", "selected_reasoning", "model_authorization", "skill_revision"],
+                "required": ["role", "project_id", "host_id", "task_id", "identity_state", "role_number", "run_id", "pair_id", "title", "selected_model", "selected_reasoning", "model_authorization"],
                 "properties": {
                   "role": { "enum": ["archon", "executor", "inquisitor", "night_watchman", "overseer", "sage", "weaver"] },
                   "project_id": { "type": "string", "minLength": 1 },
@@ -182,8 +182,7 @@
                     },
                     "additionalProperties": false
                   },
-                  "agent_recommendation": { "type": ["string", "null"], "minLength": 1 },
-                  "skill_revision": { "type": "string", "minLength": 1 }
+                  "agent_recommendation": { "type": ["string", "null"], "minLength": 1 }
                 },
                 "additionalProperties": false
               }

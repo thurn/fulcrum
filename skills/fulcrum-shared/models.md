@@ -12,4 +12,4 @@ report to Archon, never permission for silent substitution.
 Named fleet roles are Codex tasks, not subagents. Initialize implementation
 roles with create_thread target project, actual saved projectId, and explicit
 environment type local; the Executor owns subsequent Tollgate worktree creation.
-Retain returned task/host IDs, chosen model/reasoning, run/pair, and skill revision.
+Retain returned task/host IDs, chosen model/reasoning, and run/pair identity.

@@ -26,7 +26,7 @@ class CliTest(unittest.TestCase):
             with redirect_stdout(output):
                 result = main(["version"])
         self.assertEqual(result, 0)
-        self.assertEqual(output.getvalue(), "fulcrum 0.3.0 (revision abc123)\n")
+        self.assertEqual(output.getvalue(), "fulcrum 0.4.0 (revision abc123)\n")
 
     def test_revision_environment_override(self) -> None:
         with patch.dict("os.environ", {"FULCRUM_BUILD_REVISION": "build-7"}):
@@ -34,7 +34,7 @@ class CliTest(unittest.TestCase):
 
     def test_version_without_revision_remains_valid(self) -> None:
         with patch("fulcrum.version.source_revision", return_value=None):
-            self.assertEqual(version_text(), "fulcrum 0.3.0")
+            self.assertEqual(version_text(), "fulcrum 0.4.0")
 
     def test_missing_git_falls_back_to_package_version(self) -> None:
         with patch("fulcrum.version.subprocess.run", side_effect=FileNotFoundError):

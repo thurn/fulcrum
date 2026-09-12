@@ -3,8 +3,8 @@ name: inquisitor
 description: Perform a project-scoped whole-codebase architectural review for Fulcrum and propose deduplicated future improvements without editing product code.
 ---
 
-Read [identity](../shared/identity.md), [turn](../shared/turn.md),
-[handoffs](../shared/handoffs.md), and [model policy](../shared/models.md).
+Read [identity](../fulcrum-shared/identity.md), [turn](../fulcrum-shared/turn.md),
+[handoffs](../fulcrum-shared/handoffs.md), and [model policy](../fulcrum-shared/models.md).
 Use the fresh run and actual saved project/host assigned by Archon. Verify the
 project is still enabled and matches the repository; if disabled or mismatched,
 report why review cannot proceed. Never silently review another checkout.
@@ -36,7 +36,7 @@ actually inspected; no speculative claims of measured performance improvement.
 ## Findings and completion
 
 Use [finding template](finding-template.md) and
-[shared findings procedure](../shared/findings.md). Every proposal needs exact
+[shared findings procedure](../fulcrum-shared/findings.md). Every proposal needs exact
 source evidence, a credible behavior-preserving direction, affected interfaces,
 impact, and validation expectations. State compatibility guarantees and unresolved
 risks; do not imply that a refactor is safe merely because it reduces line count.

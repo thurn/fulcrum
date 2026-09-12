@@ -114,8 +114,8 @@ On 2026-09-11 a disposable Codex task received a real handoff through
 `send_message_to_thread`; `read_thread` verified the requested acknowledgment,
 then the task was archived. No production registry or brain data was changed.
 
-The wheel installs shared references under `share/fulcrum/skills/shared`.
-Install the complete skills tree together, preserving relative references.
+The runtime links the complete skill tree from the retained Git checkout into
+the Codex skills directory, preserving relative references.
 The helper only constructs records; the role uses the existing atomic writer
 and the supported Codex tools. It does not claim that a send caused action.
 
@@ -285,25 +285,24 @@ This coding task had no supported way to compel the current desktop thread to
 compact or to open its interactive `/hooks` trust reviewer. No trust bypass was
 used, and CLI invocation is not represented as desktop delivery. Consequently,
 desktop latency, delivered context size, and correction-turn evidence remain
-`unavailable`, not passing. Until a human reviews the installed hash and performs
+`unavailable`, not passing. Until a human reviews the hook definition and performs
 the desktop exercise in [hooks.md](hooks.md), the installed role skills and the
 Night Watchman patrol are the verified fallback for context and missed handoffs.
 
 ## Task 19 — Repeatable installation and doctor
 
-`tests/test_install_doctor.py` creates a retained synthetic source with matching
-release and remote refs, installs twice, and confirms the active assignment and
-recurring-job bytes are unchanged, services and hooks are not duplicated, all
-seven skills are present, and no database restart is reported. It updates the
-recorded package to 0.2.0 while retaining active role skill revisions for doctor
-reconciliation. A schema-0 config is backed up before its explicit conversion;
-an unknown schema remains byte-for-byte unchanged and errors. A `.worktrees`
-source is rejected.
+`tests/test_install_doctor.py` creates a retained synthetic Git source with
+matching release and remote refs, installs twice, and confirms the active
+assignment and recurring-job bytes are unchanged, services and hooks are not
+duplicated, every skill and hook directory is linked to that source, source
+edits are immediately visible, and no database restart is reported. An unknown
+schema remains byte-for-byte unchanged and errors. A `.worktrees` source is
+rejected.
 
 The passing doctor fixture uses three Git/Codex/Tollgate mappings, human-marked
 resolved Archon and Watchman identities, one externally observed hourly
-schedule, Beads-returned connectivity, matching package/source/skill revisions,
-and no push obligations. Failure output is partitioned into
+schedule, Beads-returned connectivity, matching package/source identity,
+repository links, and no push obligations. Failure output is partitioned into
 `required_failures`, `optional_gaps`, and `push_failures`.
 
 Read-only live checks on 2026-09-11 observed Beads 1.2.2, Dolt 2.2.0, a running
@@ -317,8 +316,8 @@ Task 20, not optional gaps.
 
 The promoted 0.2.0 package was then installed three times from the retained
 `/Users/dthurn/fulcrum` checkout at certified revision `543da4b`. Each result
-reported the same seven roles and skill revision, one hook source, no migration,
-and `database_restarted: false`. The first repeated invocation accidentally
+reported the same seven roles, one hook source, no migration, and
+`database_restarted: false`. The first repeated invocation accidentally
 recorded a misspelled expected brain remote; the next invocation corrected that
 configuration through the same safe update path before doctor ran. No brain,
 role, project, assignment, or schedule record was changed.
@@ -352,7 +351,7 @@ does not duplicate roles or projects.
 
 Schedule and hook observations are recorded separately after the skill has used
 supported Codex automation inspection and the user has reviewed the exact hook
-hash in `/hooks`. The evidence writer refuses a non-current Archon or a registry
+definition in `/hooks`. The evidence writer refuses a non-current Archon or a registry
 without exactly one resolved human Watchman. Live readiness overlays only the
 four runtime-dependent rows of the historical matrix and fails closed when a
 doctor check is missing or failing.

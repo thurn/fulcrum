@@ -112,8 +112,8 @@ the retained source, candidate, or log, not a copied transcript or source patch.
 pyproject.toml                 Python package, Black, pinned development tools
 .pyre_configuration           Pyre source and environment configuration
 src/fulcrum/                  CLI, records, readers, observations, dashboard service
-skills/<role>/SKILL.md         Seven portable role entry points
-skills/shared/                Small shared workflow/reference documents
+skills/fulcrum-<role>/SKILL.md Seven portable role entry points
+skills/fulcrum-shared/         Small shared workflow/reference documents
 hooks/                        One installable hook definition source
 templates/brain/               Plan, memory, and NEWS examples
 schemas/                      Versioned record and read-model contracts
@@ -128,7 +128,7 @@ dashboard/                    beads-ui fork; introduced only after Task 21
 
 Use Python's standard library for ordinary filesystem and process work. Add
 small dependencies where justified, such as safe YAML parsing, rather than
-creating a framework. Expose a `fulcrum` CLI and a `fulcrum-hook` entry point.
+creating a framework. Expose a `fulcrum` CLI and a repository-owned hook wrapper.
 Commands below define interfaces to implement, not commands assumed to exist.
 
 Configuration precedence is explicit CLI path override, then a named Fulcrum
@@ -226,7 +226,7 @@ operational coordination.
 | --- | --- | --- |
 | Installation configuration | Brain/state roots, host ID, configured services and observations | Setup/human |
 | Project registry | Stable project ID, repository path, host, Codex project ID, Tollgate ID, enabled state | Current Archon |
-| Role/run registry | Current Archon, registered roles, actual task/host IDs, role numbers, run/pair IDs, title, selected model/reasoning, skill revision | Current Archon |
+| Role/run registry | Current Archon, registered roles, actual task/host IDs, role numbers, run/pair IDs, title, and selected model/reasoning | Current Archon |
 | Holds and recurring jobs | Scope, reason, release condition, permitted exceptions; cadence anchor, next due and active run | Current Archon |
 | Assignment | Bead/plan IDs, approved plan commit, Executor/Overseer IDs, scope reference, review history, exact mandate | Pair's Overseer |
 | Progress | Phase, phase start, expected next actor/action, handoff needed/sent, delivery error, timestamps, owned resources | That role task |
@@ -461,7 +461,7 @@ reconcile the fleet without writing code or running builds.
 
 **Work:**
 
-1. Add `skills/archon/SKILL.md` with identity checks at each turn, compact
+1. Add `skills/fulcrum-archon/SKILL.md` with identity checks at each turn, compact
    briefing/memory, project registration, summaries, and NEWS ownership.
 2. Implement cooperative handover: contact the previous Archon, establish
    relinquished writes or verify inactivity, then replace registration and
@@ -491,7 +491,7 @@ beads without starting work simply because a plan was saved.
 
 **Work:**
 
-1. Add `skills/weaver/SKILL.md`, a task-writing template, and portable interview
+1. Add `skills/fulcrum-weaver/SKILL.md`, a task-writing template, and portable interview
    guidance: one material question at a time, recommended answer, repository
    exploration for discoverable facts.
 2. In Plan mode, interview without writing files or beads. Ask queued versus
@@ -523,7 +523,7 @@ contract, including failures and cleanup.
 
 **Work:**
 
-1. Add `skills/overseer/SKILL.md` and `skills/executor/SKILL.md`. Adapt the
+1. Add `skills/fulcrum-overseer/SKILL.md` and `skills/fulcrum-executor/SKILL.md`. Adapt the
    normative worktree and promotion behavior into portable references; do not
    depend on the author's absolute `$wt` or `$implement-plan` paths.
 2. Cover one active bead per pair; a fresh owned Tollgate worktree from captured
@@ -627,7 +627,7 @@ becoming a second scheduler.
 
 **Work:**
 
-1. Add `skills/night-watchman/SKILL.md` and read-only patrol helpers. Compare
+1. Add `skills/fulcrum-night-watchman/SKILL.md` and read-only patrol helpers. Compare
    registry/progress with supported Codex and Tollgate evidence, pending role
    provisioning, expected waits, archived tasks, and known failed pushes.
 2. Distinguish a healthy idle review wait from an unexplained stop. Respect
@@ -659,7 +659,7 @@ pushed, and cleaned up through Tollgate. See `docs/validation.md`.
 
 **Work:**
 
-1. Add `skills/sage/SKILL.md` with fleet-wide scope since the previous
+1. Add `skills/fulcrum-sage/SKILL.md` with fleet-wide scope since the previous
    postmortem. Examine Fulcrum's scripts, skills, context, handoffs, resource
    use, hook latency/correction turns, and Tollgate friction explicitly.
 2. Read existing reports/logs first. Distinguish measured timing/token evidence
@@ -690,7 +690,7 @@ produces useful future tasks.
 
 **Work:**
 
-1. Add `skills/inquisitor/SKILL.md` and a findings template, using the design's
+1. Add `skills/fulcrum-inquisitor/SKILL.md` and a findings template, using the design's
    whole-codebase scope and project-specific context.
 2. Guide analysis toward architectural importance: responsibilities, brittle
    boundaries, duplicated logic, type modeling, and opportunities to remove
@@ -718,7 +718,8 @@ receive at most one reminder about a potentially missing handoff.
 
 **Work:**
 
-1. Implement `fulcrum-hook` using only local event JSON and existing readers.
+1. Implement the repository-owned hook wrapper using only local event JSON and
+   existing readers.
    Install one hook source preserving unrelated hooks. Resolve actual task
    identity, not a repository/title guess.
 2. Handle `SessionStart` with source `compact`: relevant role, assignment,
@@ -768,13 +769,14 @@ without losing active work.
    problem before the readiness gate. Do not invent health or start unrelated
    production work as a setup side effect. Excluding an initial target requires
    an explicit scope decision, not silently disabling it to pass setup.
-4. Install from retained certified source/builds, not a disposable worktree.
-   Preserve local state and brain during updates, record skill revisions for
-   active runs, and reconcile material workflow changes before applying them.
-5. Add small explicit schema conversions with backup when needed; unsupported
-   formats produce errors. Document Beads/Dolt backup, migration, lifecycle
-   commands and version checks, hook retrust, targeted rollback, and uninstall
-   preserving user data. A Fulcrum package update does not restart the database.
+4. Install from a retained certified Git checkout, not a disposable worktree or
+   wheel-only environment. Symlink Codex's Fulcrum skill and hook directories to
+   that checkout so repository edits apply immediately without revision
+   tracking or copied-file manifests.
+5. Reject unsupported record schemas without rewriting them. Document
+   Beads/Dolt backup, migration, lifecycle commands and version checks, hook
+   review, targeted rollback, and uninstall preserving user data. A Fulcrum
+   package update does not restart the database.
 6. Provide usable CLI diagnostics before the Dashboard exists. Dashboard
    service installation is implemented in Task 29; do not build a generic
    database service manager as a prerequisite.

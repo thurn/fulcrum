@@ -7,8 +7,10 @@ small context readers, role entry points, and diagnostics described in
 
 ## Install
 
-Fulcrum currently targets CPython 3.12. Create a clean environment and install
-the package with its exactly pinned development tools:
+Fulcrum currently targets CPython 3.12. Keep a Git clone as the permanent
+runtime source; copied skills and wheel-only installations are unsupported.
+Create a clean environment inside that clone and install the package with its
+exactly pinned development tools:
 
 ```sh
 python3.12 -m venv .venv
@@ -26,6 +28,10 @@ lock file for reproducible validation.
 .venv/bin/fulcrum version
 scripts/check
 ```
+
+Run the repository-linked installation workflow in
+[`docs/setup.md`](docs/setup.md) to point the Codex skill and hook directories
+at this checkout. Changes in the checkout are then live without reinstalling.
 
 State commands accept global `--brain-root` and `--state-root` overrides before
 the subcommand. They emit JSON on stdout and diagnostics on stderr:

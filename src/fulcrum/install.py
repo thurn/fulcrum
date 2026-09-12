@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -27,6 +25,10 @@ ROLES = (
     "weaver",
 )
 SETUP_SKILLS = ("fulcrum-setup",)
+SHARED_SKILLS = ("fulcrum-shared",)
+LINKED_SKILLS: tuple[str, ...] = (
+    tuple(f"fulcrum-{role}" for role in ROLES) + SETUP_SKILLS + SHARED_SKILLS
+)
 
 
 class InstallationError(RuntimeError):
@@ -62,6 +64,11 @@ def verify_certified_source(source_root: Path, revision: str) -> str:
     root = source_root.resolve(strict=True)
     if ".worktrees" in root.parts:
         raise InstallationError("refusing to install from a disposable .worktrees path")
+    git_root = Path(_run_git(root, "rev-parse", "--show-toplevel")).resolve()
+    if git_root != root:
+        raise InstallationError(
+            f"source root must be the retained Git repository root ({git_root})"
+        )
     actual = _run_git(root, "rev-parse", "HEAD")
     if actual != revision:
         raise InstallationError(f"source HEAD is {actual}; expected {revision}")
@@ -74,107 +81,74 @@ def verify_certified_source(source_root: Path, revision: str) -> str:
     return actual
 
 
-def _skill_revision(source_root: Path) -> str:
-    digest = hashlib.sha256()
-    for role in ROLES:
-        root = source_root / "skills" / role
-        skill = root / "SKILL.md"
-        if not skill.is_file():
-            raise InstallationError(f"missing role skill: {skill}")
-        for path in sorted(item for item in root.rglob("*") if item.is_file()):
-            digest.update(str(path.relative_to(source_root)).encode())
-            digest.update(path.read_bytes())
-    shared = source_root / "skills" / "shared"
-    if not shared.is_dir():
-        raise InstallationError(f"missing shared skill references: {shared}")
-    for path in sorted(item for item in shared.rglob("*") if item.is_file()):
-        digest.update(str(path.relative_to(source_root)).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def _atomic_copy(
-    source: Path, target: Path, *, rewrite_shared_links: bool = False
-) -> None:
+def _install_directory_link(source: Path, target: Path) -> None:
+    source = source.resolve(strict=True)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            dir=target.parent, prefix=f".{target.name}.", delete=False
-        ) as handle:
-            temporary = Path(handle.name)
-            data = source.read_bytes()
-            if rewrite_shared_links and source.suffix == ".md":
-                data = data.replace(b"../shared/", b"../fulcrum-shared/")
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, target)
-    except Exception:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        raise
-
-
-def install_skills(source_root: Path, skills_root: Path) -> str:
-    """Update only Fulcrum-owned skill directories and keep unrelated skills."""
-
-    revision = _skill_revision(source_root)
-    for skill in (*ROLES, *SETUP_SKILLS):
-        source = source_root / "skills" / skill
-        if not (source / "SKILL.md").is_file():
-            raise InstallationError(f"missing Fulcrum skill: {source / 'SKILL.md'}")
-        target_name = skill if skill.startswith("fulcrum-") else f"fulcrum-{skill}"
-        target = skills_root / target_name
-        copied: set[Path] = set()
-        for path in sorted(item for item in source.rglob("*") if item.is_file()):
-            relative = path.relative_to(source)
-            _atomic_copy(path, target / relative, rewrite_shared_links=True)
-            copied.add(relative)
-        manifest = target / ".fulcrum-files.json"
-        previous: list[str] = []
-        if manifest.is_file():
-            try:
-                value = json.loads(manifest.read_text(encoding="utf-8"))
-                if isinstance(value, list):
-                    previous = [item for item in value if isinstance(item, str)]
-            except (OSError, json.JSONDecodeError):
-                previous = []
-        for name in previous:
-            stale = target / name
-            if stale.is_file() and Path(name) not in copied:
-                stale.unlink()
-        manifest.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        manifest.write_text(
-            json.dumps(sorted(str(path) for path in copied), indent=2) + "\n",
-            encoding="utf-8",
+    if target.is_symlink():
+        if target.resolve(strict=False) == source:
+            return
+        raise InstallationError(f"refusing to replace unrelated symlink: {target}")
+    if target.exists():
+        raise InstallationError(
+            f"link target already exists and is not the expected symlink: {target}"
         )
-    shared_source = source_root / "skills" / "shared"
-    shared_target = skills_root / "fulcrum-shared"
-    for path in sorted(item for item in shared_source.rglob("*") if item.is_file()):
-        _atomic_copy(path, shared_target / path.relative_to(shared_source))
-    return revision
-
-
-def _migration_backup(config_file: Path, original: bytes, now: str) -> Path:
-    stamp = now.replace(":", "").replace("-", "")
-    target = config_file.parent / "backups" / f"config-schema-v0-{stamp}.json"
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if not target.exists():
-        target.write_bytes(original)
-        os.chmod(target, 0o600)
-    return target
-
-
-def _load_installation(
-    config_file: Path, now: str
-) -> tuple[InstallationRecord | None, Path | None]:
-    if not config_file.is_file():
-        return None, None
-    original = config_file.read_bytes()
+    temporary = target.parent / f".{target.name}.fulcrum-link-{os.getpid()}"
+    temporary.unlink(missing_ok=True)
     try:
-        raw: object = json.loads(original)
+        temporary.symlink_to(source, target_is_directory=True)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _validate_link_target(source: Path, target: Path) -> None:
+    expected = source.resolve(strict=True)
+    if target.is_symlink() and target.resolve(strict=False) != expected:
+        raise InstallationError(f"refusing to replace unrelated symlink: {target}")
+    if target.exists() and not target.is_symlink():
+        raise InstallationError(
+            f"link target already exists and is not the expected symlink: {target}"
+        )
+
+
+def install_links(
+    source_root: Path, skills_root: Path, hooks_config: Path
+) -> tuple[list[Path], Path, Path]:
+    """Link Codex-visible Fulcrum assets directly to the retained Git checkout."""
+
+    codex_root = skills_root.parent.expanduser().absolute()
+    if hooks_config.parent.resolve(strict=False) != codex_root.resolve(strict=False):
+        raise InstallationError("skills and hooks must use the same Codex home")
+    links: list[tuple[Path, Path]] = []
+    skill_links: list[Path] = []
+    for name in LINKED_SKILLS:
+        source = source_root / "skills" / name
+        if not source.is_dir():
+            raise InstallationError(f"missing Fulcrum skill directory: {source}")
+        if name != "fulcrum-shared" and not (source / "SKILL.md").is_file():
+            raise InstallationError(f"missing Fulcrum skill: {source / 'SKILL.md'}")
+        target = skills_root / name
+        links.append((source, target))
+        skill_links.append(target)
+
+    hook_source = source_root / "hooks"
+    hook_command = hook_source / "fulcrum-hook"
+    if not hook_command.is_file() or not os.access(hook_command, os.X_OK):
+        raise InstallationError(f"missing executable Fulcrum hook: {hook_command}")
+    hook_link = codex_root / "hooks" / "fulcrum"
+    links.append((hook_source, hook_link))
+    for source, target in links:
+        _validate_link_target(source, target)
+    for source, target in links:
+        _install_directory_link(source, target)
+    return skill_links, hook_link, hook_link / "fulcrum-hook"
+
+
+def _load_installation(config_file: Path) -> InstallationRecord | None:
+    if not config_file.is_file():
+        return None
+    try:
+        raw: object = json.loads(config_file.read_bytes())
     except json.JSONDecodeError as error:
         raise InstallationError(
             f"invalid installation record; preserved: {error}"
@@ -184,29 +158,12 @@ def _load_installation(
             "unsupported installation record; preserved without changes"
         )
     version = raw.get("schema_version")
-    if version == 1:
-        loaded = load_record(config_file)
-        return cast(InstallationRecord, loaded), None
-    if version != 0:
+    if version != 1:
         raise InstallationError(
             f"unsupported installation schema {version!r}; preserved without changes"
         )
-    required = {"brain_root", "state_root", "host_id"}
-    if not required.issubset(raw):
-        raise InstallationError("schema 0 installation is incomplete; preserved")
-    backup = _migration_backup(config_file, original, now)
-    converted = {
-        "record_kind": "installation",
-        "schema_version": 1,
-        "writer_id": "setup",
-        "updated_at": now,
-        "brain_root": raw["brain_root"],
-        "state_root": raw["state_root"],
-        "host_id": raw["host_id"],
-        "configured_services": raw.get("configured_services", []),
-        "observations": raw.get("observations", {}),
-    }
-    return cast(InstallationRecord, validate_record(converted)), backup
+    loaded = load_record(config_file)
+    return cast(InstallationRecord, loaded)
 
 
 def install_runtime(
@@ -216,7 +173,6 @@ def install_runtime(
     certified_revision: str,
     skills_root: Path,
     hooks_config: Path,
-    hook_command: Path,
     host_id: str,
     expected_brain_remote: str,
     sage_anchor: str,
@@ -228,27 +184,33 @@ def install_runtime(
 
     observed_at = now or utc_now()
     verified_revision = verify_certified_source(source_root, certified_revision)
-    current, backup = _load_installation(paths.config_file, observed_at)
+    current = _load_installation(paths.config_file)
     if current is not None:
         if Path(current["brain_root"]).resolve() != paths.brain_root.resolve():
             raise InstallationError("update would change the configured brain root")
         if Path(current["state_root"]).resolve() != paths.state_root.resolve():
             raise InstallationError("update would change the configured state root")
-    skill_revision = install_skills(source_root, skills_root)
+    skill_links, hook_link, hook_command = install_links(
+        source_root, skills_root, hooks_config
+    )
+    previous_hook_config = hooks_config.read_bytes() if hooks_config.is_file() else None
     install_hook_source(hooks_config, hook_command)
+    hook_config_changed = previous_hook_config != hooks_config.read_bytes()
     observations = dict(current["observations"]) if current is not None else {}
     observations.update(
         {
             "package_version": __version__,
             "source_revision": verified_revision,
-            "skill_revision": skill_revision,
             "installed_source_root": str(source_root.resolve()),
+            "skills_root": str(skills_root.resolve(strict=False)),
+            "hook_link": str(hook_link),
             "brain_remote": expected_brain_remote,
             "sage_cadence_anchor": sage_anchor,
             "hook_source": str(hooks_config.resolve()),
-            "hook_trust": "review_required",
         }
     )
+    if hook_config_changed:
+        observations["hook_trust"] = "review_required"
     if codex_projects_verified_at is not None:
         observations["codex_projects_verified_at"] = codex_projects_verified_at
     if watchman_schedule_id is not None:
@@ -277,11 +239,9 @@ def install_runtime(
         "ok": True,
         "package_version": __version__,
         "source_revision": verified_revision,
-        "skill_revision": skill_revision,
-        "skills_installed": list(ROLES),
-        "setup_skills_installed": list(SETUP_SKILLS),
+        "skill_links": [str(path) for path in skill_links],
+        "hook_link": str(hook_link),
         "hook_source": str(hooks_config.resolve()),
-        "hook_retrust_required": True,
-        "migration_backup": str(backup) if backup is not None else None,
+        "hook_retrust_required": hook_config_changed,
         "database_restarted": False,
     }

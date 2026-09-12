@@ -29,7 +29,7 @@ class SetupTest(unittest.TestCase):
                 "state_root": str(self.paths.state_root),
                 "host_id": "local",
                 "configured_services": ["beads", "codex", "hooks", "tollgate"],
-                "observations": {"skill_revision": "revision-1"},
+                "observations": {},
             },
         )
 

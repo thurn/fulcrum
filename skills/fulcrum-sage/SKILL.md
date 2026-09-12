@@ -3,9 +3,9 @@ name: sage
 description: Review fleet workflow since the prior Fulcrum postmortem, conduct bounded debrief interviews, and publish deduplicated future improvements.
 ---
 
-Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
-[handoffs](../shared/handoffs.md). Use the Archon-assigned run and
-[model policy](../shared/models.md). Archon owns the daily cadence; do not create
+Read [turn](../fulcrum-shared/turn.md), [identity](../fulcrum-shared/identity.md), and
+[handoffs](../fulcrum-shared/handoffs.md). Use the Archon-assigned run and
+[model policy](../fulcrum-shared/models.md). Archon owns the daily cadence; do not create
 another schedule or start implementation. Scope is the whole fleet since the
 previous postmortem; state the interval, evidence cutoff, and coverage gaps.
 
@@ -24,7 +24,7 @@ first; interview only to resolve material evidence gaps. Debrief never revives
 implementation, candidate authorization, or an old mandate. A missing respondent
 cannot hold up the postmortem; retain archival recovery obligations for patrol.
 
-Use [findings](../shared/findings.md) to create/update project-labeled future work.
+Use [findings](../fulcrum-shared/findings.md) to create/update project-labeled future work.
 Fulcrum itself is a required review area. Explain the expected benefit without
 claiming an unmeasured speedup. Keep proposals distinct from active assignments.
 Save a concise brain postmortem with interval, evidence/limits, findings and bead

@@ -39,7 +39,6 @@ class HookTest(unittest.TestCase):
                     "selected_model": "model",
                     "selected_reasoning": "high",
                     "model_authorization": {"source": "default", "reference": None},
-                    "skill_revision": "abc123",
                 }
             ],
         }

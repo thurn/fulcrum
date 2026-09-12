@@ -48,7 +48,7 @@ def merged_hook_config(existing: object, hook_command: Path) -> dict[str, Any]:
     hooks = cast(dict[str, Any], dict(raw_hooks))
     session_groups = _remove_fulcrum_handlers(hooks.get("SessionStart", []))
     stop_groups = _remove_fulcrum_handlers(hooks.get("Stop", []))
-    command = shlex.quote(str(hook_command.resolve(strict=False)))
+    command = shlex.quote(str(hook_command.expanduser().absolute()))
     session_groups.append(
         {
             "matcher": "^compact$",
