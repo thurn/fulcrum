@@ -211,6 +211,28 @@ def _wait_ready(
     )
 
 
+def _dispatch_is_ready(response: dict[str, Any]) -> bool:
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return False
+    dispatch = data.get("dispatch_enabled")
+    return isinstance(dispatch, dict) and dispatch.get("value") == "1"
+
+
+def _wait_for_archon_policies(paths: RuntimePaths, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = request_sync(
+            paths.socket,
+            {"command": "status", "events": 0, "view": "capabilities"},
+            timeout=10,
+        )
+        if _dispatch_is_ready(status):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def run_setup(
     paths: RuntimePaths, *, input_path: Path | None, non_interactive: bool
 ) -> dict[str, Any]:
@@ -238,6 +260,10 @@ def run_setup(
     )
     data = initialized.get("data", {})
     ready = bool(isinstance(data, dict) and data.get("ready"))
+    if not ready:
+        ready = _wait_for_archon_policies(
+            paths, timeout=float(config.turn_check_after_seconds)
+        )
     return {
         "ok": ready,
         "ready": ready,

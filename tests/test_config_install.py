@@ -14,9 +14,18 @@ from fulcrum.config import (
     save_installation,
 )
 from fulcrum.install import CONTROLLER_LABEL, install_hook_config, service_definitions
+from fulcrum.setup import _dispatch_is_ready
 
 
 class ConfigInstallTest(unittest.TestCase):
+    def test_setup_waits_for_controller_dispatch_readiness(self) -> None:
+        self.assertTrue(
+            _dispatch_is_ready({"data": {"dispatch_enabled": {"value": "1"}}})
+        )
+        self.assertFalse(
+            _dispatch_is_ready({"data": {"dispatch_enabled": {"value": "0"}}})
+        )
+
     def test_round_trip_has_no_format_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

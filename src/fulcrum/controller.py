@@ -27,6 +27,7 @@ from fulcrum.intake import (
 )
 from fulcrum.lifecycle import accept_finish, observe_action_terminal
 from fulcrum.prompts import build_prompt, load_template
+from fulcrum.readiness import state_readiness
 from fulcrum.reset import reset_brain
 from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
 from fulcrum.scheduling import (
@@ -1812,22 +1813,8 @@ class Controller:
             save_installation(self.paths.config_file, self.config)
 
     def _update_readiness(self) -> None:
-        global_limit = self.store.row(
-            "SELECT value FROM meta WHERE key = 'global_limit'"
-        )
-        projects = self.store.rows("SELECT * FROM projects")
-        policies = self.store.rows("SELECT * FROM policies WHERE active = 1")
-        archon = self.store.row(
-            "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
-        )
-        ready = bool(
-            global_limit
-            and projects
-            and all(row["enabled"] for row in projects)
-            and policies
-            and archon
-            and self.runtime.ready
-        )
+        state_ready, _ = state_readiness(self.store)
+        ready = state_ready and self.runtime.ready
         self.store.execute(
             "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             ("1" if ready else "0",),
