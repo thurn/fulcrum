@@ -453,7 +453,8 @@ Plan-mode role activation causes no brain or state writes.
 
 ### Task 10 [skills] — Implement the Archon role and project enrollment
 
-**Status:** pending
+**Status:** done — cooperative transfer and enrollment scenarios pass; commit
+`794a499` certified, source synchronized, and worktree cleaned by Tollgate.
 
 **Outcome:** one current strategic coordinator can register projects and
 reconcile the fleet without writing code or running builds.

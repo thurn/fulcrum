@@ -91,3 +91,15 @@ Fulcrum, Tollgate, and Battlement. No duplicate project was created and no
 production role was activated. IDs differ from the earlier compatibility audit;
 resolve them at enrollment rather than copying historical report values. Current
 Archon enrollment remains a Task 19 setup operation.
+
+## Task 11 — Weaver intake and refinement
+
+`tests/test_weaver.py` generates a standalone bug contract, parses approved
+future/queued plan files, checks eligibility without dispatch, reuses a bead
+after an interrupted create, and routes an active refinement to reconciliation
+without changing its mandate. The Beads responses are controlled fixtures; no
+production work is published. Existing Task 06 checks cover independent pushes
+and Task 09 covers Plan-mode registration refusal. Skill frontmatter is validated
+with skill-creator's quick_validate.py. Manual contract review confirms that
+substantial plans require two distinct reviews, whereas direct intake does not,
+and approval to save future work does not authorize implementation.
