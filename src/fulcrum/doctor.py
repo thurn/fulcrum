@@ -101,11 +101,27 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
             str(target),
         )
     for name in REMOVED_SKILLS:
+        target = codex_root / name
         check(
             f"removed_skill:{name}",
-            not (codex_root / name).exists(),
-            str(codex_root / name),
+            not target.exists() and not target.is_symlink(),
+            str(target),
         )
+    hook_target = Path.home() / ".codex" / "hooks" / "fulcrum-hook"
+    cli_target = Path.home() / ".codex" / "bin" / "fulcrum"
+    check(
+        "hook_link",
+        hook_target.is_symlink()
+        and hook_target.resolve(strict=False).is_relative_to(Path(config.source_root)),
+        str(hook_target),
+    )
+    check(
+        "cli_link",
+        cli_target.is_symlink()
+        and cli_target.resolve(strict=False)
+        == Path(config.source_root) / ".venv" / "bin" / "fulcrum",
+        str(cli_target),
+    )
     agents = Path.home() / "Library" / "LaunchAgents"
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
         check(
