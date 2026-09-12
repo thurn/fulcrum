@@ -226,3 +226,25 @@ same underlying finding through `publish_finding`: both returned one actual
 issue ID, the issue remained future work, and the second observation appeared
 in its notes. Its local Beads history was committed; the fixture has no remote
 and was not represented as production-pushed work.
+
+## Task 17 — Whole-codebase Inquisitor review
+
+`tests/fixtures/inquisitor/review.md` records a complete review of the small
+synthetic shop. It selects an older duplicated normalization/domain boundary
+in checkout and invoicing over a trivial recent README change. The proposed
+direction preserves public outputs and coercion/error behavior, identifies
+affected interfaces, and calls for contract comparisons rather than arbitrary
+file splitting. It makes no claim to review production project architecture.
+
+`tests/test_inquisitor.py` copies the fixture into a disposable Git repository,
+creates older source and newer documentation commits, exercises the cited
+accepted/rejected input contracts, constructs a future finding referencing the
+older source, rejects a cross-project match without writing, and verifies no
+reviewed or out-of-scope files changed. The shared Task 16 checks cover repeated
+finding updates and preservation of active assignments. No findings remains a
+valid outcome when supported by the recorded scope and evidence.
+
+Black, Pyre, and all 101 focused tests pass. A clean wheel installation into
+an isolated prefix outside the developer home imported the interview/finding
+helpers and resolved all 42 relative skill links, including Sage, Inquisitor,
+and the updated Watchman interview guidance.

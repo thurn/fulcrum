@@ -651,7 +651,9 @@ setup reruns without duplicating the hourly wake.
 
 ### Task 16 [skills] — Implement Sage postmortems and bounded interviews
 
-**Status:** pending
+**Status:** done — bounded interviews, restored archival state, future-finding
+deduplication, and live disposable probes verified; commit `b803b1d` certified,
+pushed, and cleaned up through Tollgate. See `docs/validation.md`.
 
 **Outcome:** workflow problems become actionable, deduplicated future work.
 

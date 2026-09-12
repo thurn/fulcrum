@@ -36,6 +36,7 @@ where = ["src"]
 "share/fulcrum/skills/executor" = ["skills/executor/*.md"]
 "share/fulcrum/skills/night-watchman" = ["skills/night-watchman/*.md"]
 "share/fulcrum/skills/sage" = ["skills/sage/*.md"]
+"share/fulcrum/skills/inquisitor" = ["skills/inquisitor/*.md"]
 "share/fulcrum/skills/shared" = ["skills/shared/*.md"]
 
 [tool.black]
