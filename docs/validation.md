@@ -61,3 +61,18 @@ The evaluator returns every blocking reason independently and deep-copy checks
 confirm that it does not change beads, activation, assignments, mandates, or
 plans. Reconciliation targets only assignments for the changed plan and
 preserves existing mandates while requesting a pause when scope may have moved.
+
+## Task 09 — Identity and portable handoffs
+
+`tests/test_roles.py` exercises pending and ambiguous creation responses,
+nonroutable client IDs, duplicate resolution, retained pair numbering, Plan-mode
+activation refusal, and uncertain delivery reconciliation. These are controlled
+tool-response fixtures; the live create tool returned an immediate actual ID.
+On 2026-09-11 a disposable Codex task received a real handoff through
+`send_message_to_thread`; `read_thread` verified the requested acknowledgment,
+then the task was archived. No production registry or brain data was changed.
+
+The wheel installs shared references under `share/fulcrum/skills/shared`.
+Install the complete skills tree together, preserving relative references.
+The helper only constructs records; the role uses the existing atomic writer
+and the supported Codex tools. It does not claim that a send caused action.

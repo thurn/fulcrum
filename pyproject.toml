@@ -30,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.data-files]
 "share/fulcrum/schemas" = ["schemas/*.json"]
+"share/fulcrum/skills/shared" = ["skills/shared/*.md"]
 
 [tool.black]
 line-length = 88
