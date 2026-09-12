@@ -7,6 +7,7 @@ import os
 import plistlib
 import shlex
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -236,7 +237,9 @@ def install_services(
     return installed
 
 
-def start_services(definitions: dict[str, str]) -> None:
+def start_services(
+    definitions: dict[str, str], *, app_server_endpoint: str | None = None
+) -> None:
     domain = f"gui/{os.getuid()}"
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
         check = subprocess.run(
@@ -245,6 +248,12 @@ def start_services(definitions: dict[str, str]) -> None:
             check=False,
         )
         if check.returncode != 0:
+            if (
+                label == APP_SERVER_LABEL
+                and app_server_endpoint
+                and _app_server_ready(app_server_endpoint)
+            ):
+                continue
             result = subprocess.run(
                 ["launchctl", "bootstrap", domain, definitions[label]],
                 capture_output=True,
@@ -261,3 +270,17 @@ def start_services(definitions: dict[str, str]) -> None:
                 capture_output=True,
                 check=False,
             )
+
+
+def _app_server_ready(endpoint: str) -> bool:
+    url = (
+        endpoint.replace("ws://", "http://", 1)
+        .replace("wss://", "https://", 1)
+        .rstrip("/")
+        + "/readyz"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            return response.status == 200
+    except Exception:
+        return False

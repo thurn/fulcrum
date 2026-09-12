@@ -221,7 +221,7 @@ def run_setup(
     _prepare_brain(config)
     links = install_links(config)
     services = install_services(config, paths)
-    start_services(services)
+    start_services(services, app_server_endpoint=config.app_server_endpoint)
     _wait_ready(config, paths)
     initialized = request_sync(
         paths.socket, {"command": "setup_initialize"}, timeout=30
