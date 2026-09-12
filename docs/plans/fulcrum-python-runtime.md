@@ -118,10 +118,70 @@ export; current operational state contains no Watchman registration or duty.
 
 ## Shared Desktop Runtime
 
-The controller attaches to the configured app-server used by Codex desktop. It
-must not start an unrelated server when that endpoint is unavailable. The
-control experiment demonstrates this attachment on the inspected installation;
-it does not establish a permanent compatibility guarantee.
+Fulcrum setup provisions one shared Codex app-server and the Fulcrum controller
+as two separate per-user macOS `launchd` services. The controller and desktop
+are clients of that same app-server. `fulcrum serve` connects to its configured
+endpoint; it does not spawn a private server on connection failure.
+
+```mermaid
+flowchart LR
+    launchd --> server[Codex app-server]
+    launchd --> controller[fulcrum serve]
+    controller <-->|WebSocket| server
+    desktop[Codex desktop] <-->|WebSocket| server
+```
+
+### Service ownership and desktop connection
+
+The app-server service runs this command with the configured installed Codex
+binary and loopback endpoint (default port `4500`):
+
+```sh
+"$CODEX_BIN" app-server --listen ws://127.0.0.1:4500
+```
+
+The command runs the server; `launchd` supplies background operation and restart
+on failure. Install separate LaunchAgent definitions for it and `fulcrum serve`,
+using resolved executable paths and argument arrays. Retain the binary path,
+endpoint, desktop executable, and service configuration outside resettable brain
+state. Do not use shell backgrounding or a Python child-process supervisor.
+
+The desktop must explicitly join the listener. The
+[working topology experiment](../codex-desktop-python-control.md#working-listener-topology)
+verified this launch on the inspected installation:
+
+```sh
+CODEX_APP_SERVER_WS_URL=ws://127.0.0.1:4500 \
+  /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+```
+
+Setup provides a desktop launch wrapper carrying that environment variable and
+the configured executable path. A variable in `.zshrc` does not configure an
+already-running app or guarantee the environment of a Dock launch. If the desktop
+is using a private runtime, report that it must be relaunched through the wrapper
+after its existing work is drained. Do not silently terminate or migrate those
+conversations. Verify this connection mechanism on the installed desktop build;
+the experiment establishes observed behavior, not a permanent desktop contract.
+
+Setup is repeatable: reuse the configured services and endpoint. A conflicting
+listener requires explicit resolution; do not kill it, choose a different port,
+or launch a second runtime implicitly. Check app-server readiness through
+`/readyz`, then the protocol handshake. A successful health check proves the
+listener is ready, not that the desktop shares it. Before enabling managed work,
+verify both clients connect to the same listener and can observe the same test
+thread ID/activity as in the experiment.
+
+Restarting `fulcrum serve` leaves app-server and running Codex turns intact.
+Restarting app-server is a separate explicit service operation or crash recovery;
+it may affect unrelated desktop conversations. After either restart, the
+controller reconciles retained activity before sending new work. Fulcrum fleet
+reboots replace only its managed agents and preserve both service configurations.
+
+### WebSocket adapter contract
+
+Use the [official app-server protocol](https://learn.chatgpt.com/docs/app-server)
+and the installed binary's generated schemas for concrete request/response types.
+Keep the experimentally verified desktop connection behind the same small adapter.
 
 - Use the app-server protocol behind a small adapter. Keep the endpoint local
   and preserve saved-project context, tools, permissions, and user history.
@@ -140,6 +200,50 @@ it does not establish a permanent compatibility guarantee.
   routine scans through all archived conversations.
 - Keep accepted requests, terminal turns, idle tasks, and completed assignments
   distinct. An accepted `turn/start` response is not a completed operation.
+
+Each connection follows this sequence:
+
+1. Connect to the configured WebSocket URL with the maintained client library.
+   Send one `initialize` request identifying Fulcrum and its required capabilities,
+   wait for its response, then send the `initialized` notification before other
+   protocol calls. Repeat this handshake on each new connection.
+2. Keep one reader receiving JSON-RPC responses, notifications, and server
+   requests. Correlate responses with connection-local request IDs; use separate
+   retained thread/turn IDs for lifecycle tracking. The wire protocol omits the
+   `jsonrpc` field. A slow request must not stop event consumption.
+3. Process supported server requests according to configured runtime approval/tool
+   behavior and the installed schema. Unsupported requests receive an explicit
+   protocol error and a surfaced capability condition; never silently approve
+   them or leave them unanswered. Do not build a second interactive approval UI.
+4. Reconcile retained active threads and unresolved operations through targeted
+   reads, then enable eligible starts. Subscribe/resume relevant threads as
+   required by the installed protocol so their events reach this client.
+5. On disconnect, disable new starts and retain uncertain operations and capacity.
+   Reconnect to the same endpoint with bounded backoff, initialize again, and
+   reconcile before dispatch. Do not replay mutating requests just because their
+   replies were lost; use the existing single-pass reconciliation rule.
+
+| Fulcrum operation | App-server interface and required result |
+| --- | --- |
+| Check available models | `model/list`; validate configured models and reasoning settings |
+| Create a managed thread | `thread/start` with explicit project working context/settings; retain returned thread ID before proceeding |
+| Set canonical title | `thread/name/set`; verify `thread/name/updated` or targeted `thread/read` |
+| Read runtime state/history | `thread/read`; use bounded `thread/loaded/list` or filtered `thread/list` only where discovery is required |
+| Restore an archived thread | `thread/unarchive`, then `thread/resume` when loading is required; verify retained identity and readiness |
+| Load an existing unloaded thread | `thread/resume`; re-establish event observation and confirm readiness before a turn |
+| Configure role context | `thread/settings/update` where supported; apply effective model/effort, working directory, and permissions through the installed start/resume/turn schemas and verify results |
+| Send an action brief | `turn/start` on the stored thread ID; retain returned native turn ID; acceptance does not complete the action |
+| Observe work | `turn/started`, `turn/completed`, `thread/status/changed`, and relevant item/helper events; targeted reads resolve missing or reordered events |
+| Interrupt authorized work | `turn/interrupt` with the stored thread/active native turn IDs; wait for actual termination and helper inactivity |
+| Archive completed work | `thread/archive`; confirm `thread/archived` or a supported targeted read before marking archived |
+
+Do not use `turn/steer` for ordinary fleet delivery: the idle-only rule uses a new
+`turn/start` after prior work and helpers finish. Helpers remain native runtime
+helpers; verify their parent linkage and terminal observations in the integration
+harness rather than treating a parent's idle event as proof that helpers stopped.
+Protocol IDs and parameters remain inside Python; finish commands need none.
+
+### Runtime readiness
 
 The experiment observed an idle notification before the corresponding turn
 completion. Dispatch therefore needs corroborating state rather than a fixed
@@ -208,8 +312,9 @@ runtime behavior works.
 
 ## Setup, Identity, Names, and Models
 
-Setup establishes the controller's connection, enrolled projects, and current
-Archon binding. It creates Archon through Python, using explicitly configured
+Setup installs/starts the shared app-server and controller services, verifies the
+desktop connection, enrolls projects, and establishes the current Archon binding.
+It creates Archon through Python, using explicitly configured
 model and reasoning effort. There is no default Archon model and no Watchman
 creation step.
 
@@ -244,6 +349,9 @@ the fleet with fresh agent conversations; restarting only the controller while
 resuming the same agents is insufficient. These are explicit local admin
 actions and work without approval or cooperation from the current Archon.
 Reuse controller lifecycle and runtime-adapter operations, with no reboot agent.
+None of these modes restarts or stops the shared app-server or desktop process;
+their unrelated conversations are outside the fleet reboot's scope. Reset also
+preserves service definitions, connection settings, and the desktop launch wrapper.
 
 | Mode | Stopping behavior | Retained state |
 | --- | --- | --- |
@@ -1367,7 +1475,8 @@ implementation boundaries and exit checks.
 
 ### Process, storage, and command boundaries
 
-- `fulcrum serve` runs `controller.py` as the single supervised process with an
+- `fulcrum serve` runs `controller.py` as the sole controller writer, supervised
+  independently of the shared Codex app-server service, with an
   asyncio loop. It accepts local CLI requests over a Unix-domain socket, receives runtime events,
   runs due timers and the 30-second fallback pass, and advances ready operations.
   Run existing blocking native helpers outside
@@ -1456,7 +1565,8 @@ Every agent-result transition still waits for normal turn/helper completion.
 ### Ordered implementation tasks
 
 1. **Verify and wrap the runtime boundaries.** Implement the small runtime and
-   Tollgate adapters and a disposable integration harness. Verify a shared
+   Tollgate adapters and a disposable integration harness. Add the concrete
+   handshake, method mapping, event reader, and reconnect behavior above. Verify a shared
    desktop task, working-directory changes, native helper observation, and
    interruption; prove the automatic Weaver naming trigger in Plan Mode.
    Verify native worktree creation/submission from Python and exact candidate
@@ -1469,7 +1579,9 @@ Every agent-result transition still waits for normal turn/helper completion.
    selection. Replace the operational portions of `records.py`/`state.py` rather
    than dual-writing their JSON files. Exit with restart persistence, rejected
    retired/unregistered thread bindings and incompatible outcomes, and a runnable
-   foreground daemon for development.
+   foreground daemon for development. Add setup's two LaunchAgent definitions
+   and desktop launch wrapper; verify repeatable service setup and shared-runtime
+   readiness without enabling a duplicate app-server.
 3. **Complete one real bead end to end.** Wire single-command small-task intake
    and the shared graph-intake handler, one Archon-approved
    assignment, Executor submission, independent Overseer review, and native
@@ -1530,6 +1642,8 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| First/repeated setup, conflicting listener, or desktop on a private runtime | Two supervised services and a configured desktop launcher; verify shared thread visibility before dispatch; reuse known services; report conflicts without killing listeners or silently moving desktop work |
+| Controller/app-server restart, reconnect with lost mutation reply, and each fleet reboot mode | Controller restart leaves app-server alive; reconnect initializes once and reconciles before starts; no replayed mutation; fleet reboot/reset preserves services and unrelated desktop conversations |
 | Missed intake/completion event, idle fleet with queued work, slow native read, and duplicate fallback observations | Next 30-second pass finds actionable work or its concrete blocker; approved work starts directly and unapproved work reaches idle Archon; no overlapping passes, duplicate starts, or reopening exhausted ambiguous operations |
 | Long turn, active helper after parent completion, continuous tool events, deferred recheck, and unavailable Archon | One inspection at the configured check time; one evidence-backed possible-stall condition; retain capacity; no automatic interruption/replacement; explicit recheck reactivates the condition; Archon's own stall goes to operator status |
 | Weaver completes, pair finishes an intermediate/final bead, specialist requests evidence or reports zero findings, and Archon finishes decisions | Archive completed Weaver/final-run pair/final-report specialist after inactivity; retain pair for approved successors, specialist for continuation, and current Archon |
@@ -1561,10 +1675,15 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 Run this before expanding the controller beyond a single bead. Use disposable
 Codex tasks, an enrolled disposable source repository with actual Tollgate
-configuration, and isolated brain, state, and remotes.
+configuration, and isolated brain, state, and remotes. Exercise desktop/server
+relaunch in an isolated development environment; ordinary task checks can attach
+to the already verified shared runtime without disrupting existing conversations.
 
-1. Connect to the shared desktop runtime. Create/name Archon with explicit model
-   settings, establish initial limits/policies, and confirm `$archon` links to
+1. Install/start the two services, launch the development desktop against
+   the configured listener, and verify both clients observe the same thread.
+   Exercise controller restart and reconnect without restarting app-server.
+   Create/name Archon with explicit model settings, establish initial limits/policies,
+   and confirm `$archon` links to
    that same task without converting the invoking conversation.
 2. Invoke Weaver with `sol` in Plan Mode. Verify immediate canonical naming via
    controller activation, no authoring publication/finish obligation, and the
