@@ -61,6 +61,9 @@ and expected behavior; the appendices define the corresponding contracts.
   storage and the distinction between Git and Dolt synchronization.
 - [Codex app-server documentation][codex-server] and
   [scheduled tasks][codex-schedules]: runtime observation and scheduled wakes.
+- [Python control of the live Codex desktop runtime](codex-desktop-python-control.md):
+  direct app-server experiments for shared-desktop task creation, messaging,
+  model and effort selection, status observation, naming, and archival.
 - The local [wt skill][wt] and [implement-plan skill][implement-plan]: existing
   worktree, review, messaging, and promotion contracts adapted by Fulcrum.
 - [Tollgate's design][tollgate-design]: exact-candidate certification, resource
