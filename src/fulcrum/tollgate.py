@@ -30,13 +30,13 @@ class Tollgate:
         self.executable: str = selected
         self.timeout = timeout
 
-    def run(
+    def _run_json(
         self,
         arguments: list[str],
         *,
         repository_id: str | None = None,
         cwd: Path | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         command = [self.executable, "--json", "--no-launch"]
         if repository_id is not None:
             command.extend(["--repository", repository_id])
@@ -67,12 +67,27 @@ class Tollgate:
             raise TollgateError(
                 f"Tollgate returned invalid JSON for {arguments[0]}"
             ) from error
+        return result
+
+    def run(
+        self,
+        arguments: list[str],
+        *,
+        repository_id: str | None = None,
+        cwd: Path | None = None,
+    ) -> dict[str, Any]:
+        result = self._run_json(arguments, repository_id=repository_id, cwd=cwd)
         if not isinstance(result, dict):
             raise TollgateError(f"Tollgate returned a non-object for {arguments[0]}")
         return result
 
-    def repositories(self) -> dict[str, Any]:
-        return self.run(["repo", "list"])
+    def repositories(self) -> list[dict[str, Any]]:
+        result = self._run_json(["repo", "list"])
+        if not isinstance(result, list) or not all(
+            isinstance(item, dict) for item in result
+        ):
+            raise TollgateError("Tollgate returned a non-list for repo")
+        return result
 
     def status(
         self, repository_id: str, candidate_id: str | None = None
