@@ -514,7 +514,9 @@ conversation. Saving a future plan does not dispatch implementation.
 
 ### Task 12 [skills] — Implement assignment, review, and certified completion roles
 
-**Status:** pending
+**Status:** done — delivery roles, review accounting, replacement mandates,
+and disposable Git/Tollgate exercises verified; commit `4a6771f` certified,
+source synchronized, and owned worktree cleanup completed. See `docs/validation.md`.
 
 **Outcome:** Overseer and Executor skills express the complete code-delivery
 contract, including failures and cleanup.

@@ -131,3 +131,26 @@ resolved every relative skill reference and imported the installed delivery
 helper. Black, Pyre, and all 71 focused tests pass. The live remote outage was
 reported as Tollgate preflight-pending (not a falsely claimed promoted change);
 post-promotion push/cleanup-pending closure is covered by controlled observations.
+
+### Tasks 09–12 delivery evidence
+
+Each task was committed separately, validated by Fulcrum's configured Tollgate
+gate (`scripts/check`), promoted with a certificate, pushed to configured
+`origin/master`, and reported with completed worktree cleanup:
+
+| Task | Source commit | Result |
+| --- | --- | --- |
+| 09 | `17ccfb0` | Certified, synchronized, cleaned |
+| 10 | `794a499` | Certified, synchronized, cleaned |
+| 11 | `8041896` | Certified, synchronized, cleaned |
+| 12 | `4a6771f` | Certified, synchronized, cleaned |
+
+The disposable remote-outage candidate remained blocked in preflight and was
+canceled after inspection; it was never described as promoted. Both disposable
+worktrees and the temporary Tollgate registration were removed. The earlier
+corrected candidate had a real certificate and its restored remote matched its
+release. Full candidate/log identities remain in local Tollgate evidence.
+
+Status updates follow verified push and cleanup, so Task 12's final `done` label
+is recorded in this separate documentation commit rather than claimed before
+its delivery completed.
