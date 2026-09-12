@@ -1,369 +1,243 @@
-"""Idempotent constructors for the human-authorized fleet bootstrap."""
+"""Guided, repeatable one-command installation."""
 
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import datetime, timezone
-from typing import Any, cast
+import json
+import shutil
+import subprocess
+import time
+import urllib.request
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
-from fulcrum.config import RuntimePaths
-from fulcrum.coordination import enroll_project
-from fulcrum.records import (
-    InstallationRecord,
-    HoldsJobsRecord,
-    Project,
-    ProjectRegistryRecord,
-    RoleRun,
-    RoleRunRegistryRecord,
-    validate_record,
+from fulcrum.config import (
+    InstallationConfig,
+    ProjectConfig,
+    RuntimePaths,
+    load_installation,
+    save_installation,
 )
-from fulcrum.roles import initialize_progress
-from fulcrum.state import atomic_write_record, read_record, selected_record_path
-from fulcrum.watchman import ensure_recurring_jobs
+from fulcrum.install import (
+    install_links,
+    install_services,
+    start_services,
+    verify_editable_source,
+)
+from fulcrum.ipc import request_sync
 
 
 class SetupError(RuntimeError):
-    """Bootstrap observations cannot safely initialize the fleet."""
+    pass
 
 
-def _timestamp(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise SetupError(f"{label} is required")
+def _prompt(label: str, default: str | None = None) -> str:
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip()
+    return value or default or ""
+
+
+def _load_input(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise SetupError(f"{label} must be an ISO-8601 timestamp") from error
-    if parsed.tzinfo is None:
-        raise SetupError(f"{label} must include a timezone")
-    return value
-
-
-def _timestamp_value(value: object, label: str) -> datetime:
-    timestamp = _timestamp(value, label)
-    return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(
-        timezone.utc
-    )
-
-
-def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise SetupError(f"{label} is required")
-    return value
-
-
-def _human_role(raw: object, role: str) -> RoleRun:
-    if not isinstance(raw, dict) or raw.get("human_created") is not True:
-        raise SetupError(f"{role} must be explicitly marked human-created")
-    task_id = _text(raw.get("task_id"), f"{role}.task_id")
-    reference = _text(
-        raw.get("authorization_reference"), f"{role}.authorization_reference"
-    )
-    return cast(
-        RoleRun,
-        {
-            "role": role,
-            "project_id": _text(raw.get("project_id"), f"{role}.project_id"),
-            "host_id": _text(raw.get("host_id"), f"{role}.host_id"),
-            "task_id": task_id,
-            "identity_state": "resolved",
-            "role_number": None,
-            "run_id": f"persistent-{role}",
-            "pair_id": None,
-            "title": _text(raw.get("title"), f"{role}.title"),
-            "selected_model": _text(
-                raw.get("selected_model"), f"{role}.selected_model"
-            ),
-            "selected_reasoning": _text(
-                raw.get("selected_reasoning"), f"{role}.selected_reasoning"
-            ),
-            "model_authorization": {"source": "human", "reference": reference},
-        },
-    )
-
-
-def _merge_roles(
-    existing: RoleRunRegistryRecord | None,
-    archon: RoleRun,
-    watchman: RoleRun,
-    now: str,
-) -> RoleRunRegistryRecord:
-    archon_id = cast(str, archon["task_id"])
-    if existing is not None and existing["current_archon_task_id"] != archon_id:
-        raise SetupError("another current Archon exists; use cooperative handover")
-    roles = list(existing["roles"]) if existing is not None else []
-    for desired in (archon, watchman):
-        conflicts = [
-            role
-            for role in roles
-            if role["role"] == desired["role"] and role["task_id"] != desired["task_id"]
-        ]
-        if conflicts and desired["role"] != "archon":
-            raise SetupError(f"conflicting {desired['role']} registration exists")
-        roles = [role for role in roles if role["task_id"] != desired["task_id"]]
-        roles.append(desired)
-    return cast(
-        RoleRunRegistryRecord,
-        validate_record(
-            {
-                "record_kind": "role_run_registry",
-                "schema_version": 1,
-                "writer_id": archon_id,
-                "updated_at": now,
-                "current_archon_task_id": archon_id,
-                "roles": roles,
-            }
-        ),
-    )
-
-
-def _project(raw: object) -> tuple[Project, list[str]]:
-    if not isinstance(raw, dict) or not isinstance(raw.get("observations"), dict):
-        raise SetupError("each project requires current observations")
-    project: Project = {
-        "project_id": _text(raw.get("project_id"), "project_id"),
-        "repo_path": _text(raw.get("repo_path"), "repo_path"),
-        "host_id": _text(raw.get("host_id"), "host_id"),
-        "codex_project_id": _text(raw.get("codex_project_id"), "codex_project_id"),
-        "tollgate_repo_id": _text(raw.get("tollgate_repo_id"), "tollgate_repo_id"),
-        "enabled": False,
-    }
-    observations = cast(dict[str, Any], raw["observations"])
-    enrolled, reasons = enroll_project(
-        project,
-        git_root=observations.get("git_root"),
-        codex_id=observations.get("codex_id"),
-        codex_path=observations.get("codex_path"),
-        codex_host=observations.get("codex_host"),
-        codex_is_git=observations.get("codex_is_git"),
-        tollgate_id=observations.get("tollgate_id"),
-        tollgate_path=observations.get("tollgate_path"),
-        tollgate_healthy=observations.get("tollgate_healthy"),
-    )
-    if reasons:
-        enrolled["ineligibility_reason"] = "; ".join(reasons)
-    return enrolled, reasons
-
-
-def _merge_projects(
-    existing: ProjectRegistryRecord | None, projects: list[Project]
-) -> list[Project]:
-    incoming = {project["project_id"] for project in projects}
-    preserved = (
-        [
-            project
-            for project in existing["projects"]
-            if project["project_id"] not in incoming
-        ]
-        if existing is not None
-        else []
-    )
-    return [*preserved, *projects]
-
-
-def bootstrap_fleet(paths: RuntimePaths, value: object) -> dict[str, Any]:
-    """Create or reconcile all persistent state required for fleet patrols."""
-
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SetupError(f"cannot read setup config {path}: {error}") from error
     if not isinstance(value, dict):
-        raise SetupError("bootstrap input must be an object")
-    now = _timestamp(value.get("observed_at"), "observed_at")
-    installation = read_record(paths, "installation")
-    if installation["record_kind"] != "installation":
-        raise SetupError("installation record is unavailable")
-    installation = cast(InstallationRecord, installation)
-    configured_anchor = value.get("sage_cadence_anchor")
-    if configured_anchor is None:
-        configured_anchor = installation["observations"].get("sage_cadence_anchor")
-    sage_anchor = _timestamp_value(configured_anchor, "sage_cadence_anchor")
-    archon = _human_role(value.get("archon"), "archon")
-    watchman = _human_role(value.get("watchman"), "night_watchman")
-    if archon["task_id"] == watchman["task_id"]:
-        raise SetupError("Archon and Watchman must be distinct human-created tasks")
+        raise SetupError("setup config must contain an object")
+    return value
 
-    raw_projects = value.get("projects")
-    if not isinstance(raw_projects, list) or len(raw_projects) != 3:
-        raise SetupError("bootstrap requires exactly three initial projects")
-    projects: list[Project] = []
-    problems: dict[str, list[str]] = {}
-    for raw in raw_projects:
-        project, reasons = _project(raw)
-        if project["project_id"] in {item["project_id"] for item in projects}:
-            raise SetupError(f"duplicate project {project['project_id']}")
-        projects.append(project)
-        if reasons:
-            problems[project["project_id"]] = reasons
-    required_projects = {"fulcrum", "tollgate", "battlement"}
-    if {project["project_id"] for project in projects} != required_projects:
-        raise SetupError("initial projects must be Fulcrum, Tollgate, and Battlement")
 
-    existing: RoleRunRegistryRecord | None = None
-    role_path = selected_record_path(paths, "role_run_registry", None)
-    if role_path.is_file():
-        loaded = read_record(paths, "role_run_registry")
-        if loaded["record_kind"] != "role_run_registry":
-            raise SetupError("invalid role registry")
-        existing = cast(RoleRunRegistryRecord, loaded)
-    registry = _merge_roles(existing, archon, watchman, now)
-    existing_projects: ProjectRegistryRecord | None = None
-    project_path = selected_record_path(paths, "project_registry", None)
-    if project_path.is_file():
-        loaded_projects = read_record(paths, "project_registry")
-        if loaded_projects["record_kind"] != "project_registry":
-            raise SetupError("invalid project registry")
-        existing_projects = cast(ProjectRegistryRecord, loaded_projects)
-    project_registry = cast(
-        ProjectRegistryRecord,
-        validate_record(
-            {
-                "record_kind": "project_registry",
-                "schema_version": 1,
-                "writer_id": archon["task_id"],
-                "updated_at": now,
-                "projects": _merge_projects(existing_projects, projects),
-            }
+def _project(value: dict[str, Any]) -> ProjectConfig:
+    try:
+        path = str(Path(value["repo_path"]).expanduser().resolve(strict=True))
+        project_id = str(value.get("project_id") or Path(path).name)
+    except (KeyError, OSError) as error:
+        raise SetupError(f"invalid project selection: {error}") from error
+    return ProjectConfig(
+        project_id=project_id,
+        repo_path=path,
+        codex_project_id=value.get("codex_project_id"),
+        tollgate_repo_id=value.get("tollgate_repo_id"),
+        validation_command=list(value.get("validation_command", [])),
+        source_remote=value.get("source_remote"),
+        enabled=bool(value.get("enabled", True)),
+    )
+
+
+def collect_config(
+    paths: RuntimePaths, supplied: dict[str, Any], *, non_interactive: bool
+) -> InstallationConfig:
+    current = load_installation(paths.config_file)
+    source = str(Path(supplied.get("source_root", current.source_root)).resolve())
+    brain = str(
+        Path(supplied.get("brain_root", current.brain_root)).expanduser().resolve()
+    )
+    projects_raw = supplied.get("projects")
+    projects = (
+        [_project(item) for item in projects_raw]
+        if isinstance(projects_raw, list)
+        else current.projects
+    )
+    archon_model = supplied.get("archon_model", current.archon_model)
+    archon_effort = supplied.get(
+        "archon_reasoning_effort", current.archon_reasoning_effort
+    )
+    brain_remote = supplied.get("brain_remote", current.brain_remote)
+    if not non_interactive:
+        if not archon_model:
+            archon_model = _prompt("Archon model")
+        if not archon_effort:
+            archon_effort = _prompt("Archon reasoning effort", "high")
+        if not brain_remote:
+            brain_remote = _prompt("Private brain Git remote")
+        if not projects:
+            selected = _prompt("Repository to enroll", source)
+            projects = [_project({"repo_path": selected})]
+    missing: list[str] = []
+    if not archon_model:
+        missing.append("archon_model")
+    if not archon_effort:
+        missing.append("archon_reasoning_effort")
+    if not brain_remote:
+        missing.append("brain_remote")
+    if not projects:
+        missing.append("projects")
+    for project in projects:
+        if not project.validation_command:
+            missing.append(f"projects[{project.project_id}].validation_command")
+    if missing:
+        raise SetupError(
+            "setup incomplete; missing required choices: " + ", ".join(missing)
+        )
+    codex = supplied.get("codex_bin") or (shutil.which("codex") or current.codex_bin)
+    desktop = supplied.get("desktop_executable", current.desktop_executable)
+    return replace(
+        current,
+        source_root=source,
+        brain_root=brain,
+        state_root=str(paths.state_root),
+        codex_bin=str(Path(codex).resolve()),
+        desktop_executable=str(Path(desktop).resolve()),
+        app_server_endpoint=supplied.get(
+            "app_server_endpoint", current.app_server_endpoint
+        ),
+        archon_model=str(archon_model),
+        archon_reasoning_effort=str(archon_effort),
+        brain_remote=str(brain_remote),
+        projects=projects,
+        turn_check_after_seconds=int(
+            supplied.get("turn_check_after_seconds", current.turn_check_after_seconds)
         ),
     )
 
-    holds_path = selected_record_path(paths, "holds_jobs", None)
-    if holds_path.is_file():
-        loaded_holds = read_record(paths, "holds_jobs")
-        if loaded_holds["record_kind"] != "holds_jobs":
-            raise SetupError("invalid holds/jobs registry")
-        holds_jobs = cast(HoldsJobsRecord, loaded_holds)
-    else:
-        holds_jobs = cast(
-            HoldsJobsRecord,
-            validate_record(
-                {
-                    "record_kind": "holds_jobs",
-                    "schema_version": 1,
-                    "writer_id": cast(str, archon["task_id"]),
-                    "updated_at": now,
-                    "holds": [],
-                    "recurring_jobs": [],
-                }
-            ),
+
+def _prepare_brain(config: InstallationConfig) -> None:
+    root = Path(config.brain_root)
+    if not root.exists():
+        result = subprocess.run(
+            ["git", "clone", str(config.brain_remote), str(root)],
+            capture_output=True,
+            text=True,
+            check=False,
         )
-    holds_jobs["writer_id"] = cast(str, archon["task_id"])
-    holds_jobs = ensure_recurring_jobs(
-        holds_jobs,
-        sage_anchor=sage_anchor,
-        enabled_project_ids=[
-            project["project_id"]
-            for project in project_registry["projects"]
-            if project["enabled"]
+        if result.returncode != 0:
+            root.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", str(root)], capture_output=True, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "remote",
+                    "add",
+                    "origin",
+                    str(config.brain_remote),
+                ],
+                capture_output=True,
+                check=True,
+            )
+    subprocess.run(
+        [
+            shutil.which("bd") or "bd",
+            "-C",
+            str(root),
+            "bootstrap",
+            "--non-interactive",
         ],
-        now=now,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
-    progress_records = []
-    for role, action in (
-        (archon, "Complete fleet bootstrap and readiness gate"),
-        (watchman, "Run the hourly patrol and report meaningful changes"),
-    ):
-        progress_path = selected_record_path(
-            paths, "progress", cast(str, role["task_id"])
-        )
-        if progress_path.is_file():
-            progress_records.append(read_record(paths, "progress", role["task_id"]))
-            continue
-        progress = initialize_progress(role, now)
-        progress["phase"] = "implementing"
-        progress["expected_next_action"] = action
-        progress_records.append(progress)
 
-    records = [registry, project_registry, holds_jobs, *progress_records]
-    try:
-        for record in records:
-            atomic_write_record(paths, record)
-    except Exception as error:
-        raise SetupError(f"fleet bootstrap state write failed: {error}") from error
-    return {
-        "ok": not problems,
-        "current_archon_task_id": archon["task_id"],
-        "watchman_task_id": watchman["task_id"],
-        "projects": projects,
-        "project_problems": problems,
-    }
+def _ready_url(endpoint: str) -> str:
+    return (
+        endpoint.replace("ws://", "http://", 1)
+        .replace("wss://", "https://", 1)
+        .rstrip("/")
+        + "/readyz"
+    )
 
 
-def record_setup_evidence(
-    paths: RuntimePaths,
-    *,
-    archon_task_id: str,
-    watchman_schedule_id: str,
-    codex_projects_verified_at: str,
-    hooks_verified_at: str | None = None,
-    hooks_evidence: str | None = None,
-    first_patrol_observed_at: str | None = None,
-    first_patrol_evidence: str | None = None,
+def _wait_ready(
+    config: InstallationConfig, paths: RuntimePaths, timeout: float = 20
+) -> None:
+    deadline = time.monotonic() + timeout
+    last = "not observed"
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                _ready_url(config.app_server_endpoint), timeout=1
+            ) as response:
+                if response.status == 200 and paths.socket.exists():
+                    return
+        except Exception as error:
+            last = str(error)
+        time.sleep(0.2)
+    raise SetupError(
+        f"setup incomplete; shared runtime/controller readiness failed: {last}"
+    )
+
+
+def run_setup(
+    paths: RuntimePaths, *, input_path: Path | None, non_interactive: bool
 ) -> dict[str, Any]:
-    """Record setup observations and explicit first-patrol evidence."""
-
-    projects_at = _timestamp(codex_projects_verified_at, "codex_projects_verified_at")
-    schedule_id = _text(watchman_schedule_id, "watchman_schedule_id")
-    if (hooks_verified_at is None) != (hooks_evidence is None):
-        raise SetupError(
-            "hook verification timestamp and evidence must be supplied together"
-        )
-    if (first_patrol_observed_at is None) != (first_patrol_evidence is None):
-        raise SetupError(
-            "first patrol timestamp and evidence must be supplied together"
-        )
-    registry = read_record(paths, "role_run_registry")
-    if registry["record_kind"] != "role_run_registry":
-        raise SetupError("role registry is unavailable")
-    roles = cast(RoleRunRegistryRecord, registry)
-    if roles["current_archon_task_id"] != archon_task_id:
-        raise SetupError("only the current Archon may finish bootstrap")
-    watchmen = [
-        role
-        for role in roles["roles"]
-        if role["role"] == "night_watchman"
-        and role["identity_state"] == "resolved"
-        and role["task_id"]
-        and role["role_number"] is None
-        and role["model_authorization"]["source"] == "human"
-    ]
-    if len(watchmen) != 1:
-        raise SetupError("exactly one resolved human-created Watchman is required")
-    loaded = read_record(paths, "installation")
-    if loaded["record_kind"] != "installation":
-        raise SetupError("installation record is unavailable")
-    installation = deepcopy(cast(InstallationRecord, loaded))
-    installation["writer_id"] = "setup"
-    installation["updated_at"] = projects_at
-    installation["observations"].update(
-        {
-            "codex_projects_verified_at": projects_at,
-            "watchman_schedule": "ready",
-            "watchman_schedule_id": schedule_id,
-        }
+    supplied = _load_input(input_path)
+    config = collect_config(paths, supplied, non_interactive=non_interactive)
+    verify_editable_source(Path(config.source_root))
+    for command in (
+        config.codex_bin,
+        shutil.which("git"),
+        shutil.which("bd"),
+        shutil.which("tg") or "/Applications/Tollgate.app/Contents/MacOS/tg",
+    ):
+        if not command or not Path(command).exists():
+            raise SetupError(
+                f"setup incomplete; required dependency unavailable: {command}"
+            )
+    save_installation(paths.config_file, config)
+    _prepare_brain(config)
+    links = install_links(config)
+    services = install_services(config, paths)
+    start_services(services)
+    _wait_ready(config, paths)
+    initialized = request_sync(
+        paths.socket, {"command": "setup_initialize"}, timeout=30
     )
-    if hooks_verified_at is not None and hooks_evidence is not None:
-        hook_at = _timestamp(hooks_verified_at, "hooks_verified_at")
-        evidence = _text(hooks_evidence, "hooks_evidence")
-        installation["updated_at"] = hook_at
-        installation["observations"].update(
-            {
-                "hook_trust": "desktop_verified",
-                "hook_verified_at": hook_at,
-                "hook_evidence": evidence,
-            }
-        )
-    if first_patrol_observed_at is not None and first_patrol_evidence is not None:
-        patrol_at = _timestamp(first_patrol_observed_at, "first_patrol_observed_at")
-        patrol_evidence = _text(first_patrol_evidence, "first_patrol_evidence")
-        installation["first_watchman_patrol"] = {
-            "watchman_task_id": cast(str, watchmen[0]["task_id"]),
-            "observed_at": patrol_at,
-            "outcome": "success",
-            "evidence": patrol_evidence,
-        }
-        installation["updated_at"] = patrol_at
-    target = atomic_write_record(paths, installation)
+    data = initialized.get("data", {})
+    ready = bool(isinstance(data, dict) and data.get("ready"))
     return {
-        "ok": True,
-        "path": str(target),
-        "observations": installation["observations"],
-        "first_watchman_patrol": installation.get("first_watchman_patrol"),
+        "ok": ready,
+        "ready": ready,
+        "status": (
+            "ready"
+            if ready
+            else "setup incomplete; Archon must establish capacity and recurring policies"
+        ),
+        "archon": data.get("archon") if isinstance(data, dict) else None,
+        "projects": [project.project_id for project in config.projects],
+        "cli": links["cli"],
+        "desktop_launcher": services["desktop_wrapper"],
     }

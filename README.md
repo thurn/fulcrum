@@ -1,77 +1,51 @@
 # Fulcrum
 
-Fulcrum is local coordination infrastructure for durable multi-agent workflows.
-The initial package provides the foundation for typed operational records,
-small context readers, role entry points, and diagnostics described in
-[`docs/implementation-plan.md`](docs/implementation-plan.md).
+Fulcrum is a local Python controller for coordinated Codex work. It connects to
+the same app-server as the desktop, stores operational truth in SQLite, and owns
+task creation, naming, scheduling, message delivery, recovery, and archival.
+Agents retain implementation, review, planning, and strategic judgment.
+
+The complete design is [`docs/plans/fulcrum-python-runtime.md`](docs/plans/fulcrum-python-runtime.md).
 
 ## Install
 
-Fulcrum currently targets CPython 3.12. Keep a Git clone as the permanent
-runtime source; copied skills and wheel-only installations are unsupported.
-Create a clean environment inside that clone and install the package with its
-exactly pinned development tools:
+On macOS, retain this Git checkout and run:
 
 ```sh
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --requirement requirements-dev.lock
-.venv/bin/python -m pip install --no-deps --editable .
+./scripts/setup
 ```
 
-The equivalent convenience extra is `pip install --editable '.[dev]'`; use the
-lock file for reproducible validation.
+The guided first run installs the checkout's Python environment, saves ordinary
+configuration, prepares or restores the private brain, enrolls selected projects,
+links the human entry skills and context hook, installs separate LaunchAgents for
+Codex app-server and `fulcrum serve`, and creates a desktop launch wrapper. It
+then creates Archon and remains incomplete until Archon records capacity and
+recurring policies. Re-running the command inspects and reuses prior work.
 
-## Use and validate
+For unattended setup:
 
 ```sh
-.venv/bin/fulcrum --help
-.venv/bin/fulcrum version
-scripts/check
+./scripts/setup --config /absolute/setup.json --non-interactive
 ```
 
-Run the repository-linked installation workflow in
-[`docs/setup.md`](docs/setup.md) to point the Codex skill and hook directories
-at this checkout and create the stable `~/.codex/bin/fulcrum` link. Changes in
-the checkout are then live without reinstalling. Use that command by absolute
-path unless `~/.codex/bin` is known to be on `PATH`.
-
-State commands accept global `--brain-root` and `--state-root` overrides before
-the subcommand. They emit JSON on stdout and diagnostics on stderr:
+## Operate
 
 ```sh
-fulcrum --state-root /absolute/state state read --kind progress --id task-123
-fulcrum --state-root /absolute/state state write --input progress.json
-fulcrum --brain-root /absolute/brain --state-root /absolute/state \
-  context --task task-123
-fulcrum --brain-root /absolute/brain --state-root /absolute/state \
-  plans list --project fulcrum
-fulcrum --brain-root /absolute/brain brain status \
-  --expected-remote git@github.com:owner/private-brain.git
+fulcrum status --json
+fulcrum doctor --json
+fulcrum archon
+fulcrum intake --project fulcrum --title "Fix empty results" \
+  --description "Show the empty state when search has no matches and test both paths."
+fulcrum sage
+fulcrum inquisitor --project fulcrum
+fulcrum reboot --soft
 ```
 
-`fulcrum brain init` initializes only a missing `.beads` store and then performs
-the same verification. It refuses a different Git or Dolt remote, a non-server
-backend, and a non-loopback endpoint. Beads remains responsible for automatic
-startup, PID and port selection, logs, and recovery.
+Managed agents finish their current controller-bound action with the exact
+`fulcrum finish ...` form included in their brief. They never pass task, turn,
+assignment, or dispatch IDs and cannot write operational state directly.
 
-`fulcrum plans list` reads safe YAML frontmatter from
-`plans/<project>/<plan_id>.md`, validates registered project IDs, activation,
-duplicate IDs, and dependency cycles, and returns JSON without modifying or
-dispatching the plan. Task context reads bounded global, role, and per-project
-memory from `memory/`; NEWS and plan fixtures define the same deterministic
-Markdown contract used by later dashboard adapters.
-
-`fulcrum version` includes the source Git revision when it can resolve the
-installed checkout, or when packaging supplies `FULCRUM_BUILD_REVISION`.
-`scripts/check` creates an ignored `.venv-check`, installs the pinned tools, and
-runs Black, Pyre, and the focused unit tests. The same command is the Tollgate
-gate; Dashboard checks are intentionally deferred until Dashboard code exists.
-
-Operational setup and the registration bootstrap boundary are documented in
-[`docs/setup.md`](docs/setup.md).
-
-After installing a certified release, invoke `$fulcrum-setup` in the
-human-created task that should become the first Archon. The skill verifies the
-installation and three project integrations, guides creation of the persistent
-Watchman, installs its single hourly heartbeat, records hook evidence, evaluates
-the live readiness gate, and then transitions the task to `$archon`.
+`scripts/check` formats, type-checks, and tests the package. Python and prompt
+edits in the retained clone are live; the controller safely re-execs on Python
+changes. Dependency metadata changes require reinstalling the lock file and
+editable package.

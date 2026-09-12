@@ -1,6 +1,6 @@
 interface:
   display_name: "Fulcrum Setup"
-  short_description: "Verify and bootstrap a Fulcrum fleet"
-  default_prompt: "Use $fulcrum-setup to verify and bootstrap this Fulcrum fleet."
+  short_description: "Install the Python-driven Fulcrum runtime"
+  default_prompt: "Use $fulcrum-setup to install or repair this Fulcrum environment."
 policy:
   allow_implicit_invocation: false

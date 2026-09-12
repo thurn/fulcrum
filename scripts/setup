@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python_command=${FULCRUM_PYTHON:-python3.12}
+
+if ! command -v "$python_command" >/dev/null 2>&1; then
+  echo "fulcrum setup: supported Python 3.12 is unavailable" >&2
+  exit 2
+fi
+
+if [ ! -x "$repo_root/.venv/bin/python" ]; then
+  "$python_command" -m venv "$repo_root/.venv"
+fi
+
+"$repo_root/.venv/bin/python" -m pip install --disable-pip-version-check \
+  --requirement "$repo_root/requirements-dev.lock"
+"$repo_root/.venv/bin/python" -m pip install --disable-pip-version-check \
+  --no-deps --editable "$repo_root"
+exec "$repo_root/.venv/bin/fulcrum" setup "$@"

@@ -1,269 +1,263 @@
-"""Repeatable installation from retained, certified Fulcrum source."""
+"""Checkout-backed assets and macOS service configuration."""
 
 from __future__ import annotations
 
 import json
 import os
+import plistlib
+import shlex
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from fulcrum.config import RuntimePaths
-from fulcrum.hook_config import install_hook_source
-from fulcrum.records import InstallationRecord, load_record, validate_record
-from fulcrum.state import atomic_write_record
-
-ROLES = (
-    "archon",
-    "executor",
-    "inquisitor",
-    "night-watchman",
-    "overseer",
-    "sage",
-    "weaver",
-)
-SETUP_SKILLS = ("fulcrum-setup",)
-SHARED_SKILLS = ("fulcrum-shared",)
-LINKED_SKILLS: tuple[str, ...] = (
-    tuple(f"fulcrum-{role}" for role in ROLES) + SETUP_SKILLS + SHARED_SKILLS
-)
+from fulcrum.config import InstallationConfig, RuntimePaths
 
 
 class InstallationError(RuntimeError):
-    """Installation inputs cannot produce a safe, repeatable installation."""
+    pass
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+HUMAN_SKILLS = ("fulcrum-setup", "fulcrum-weaver", "fulcrum-archon")
+REMOVED_SKILLS = (
+    "fulcrum-executor",
+    "fulcrum-overseer",
+    "fulcrum-sage",
+    "fulcrum-inquisitor",
+    "fulcrum-night-watchman",
+    "fulcrum-shared",
+)
+APP_SERVER_LABEL = "dev.fulcrum.codex-app-server"
+CONTROLLER_LABEL = "dev.fulcrum.controller"
 
 
-def _run_git(source_root: Path, *arguments: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(source_root), *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise InstallationError(
-            f"could not inspect source Git state: {error}"
-        ) from error
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "no output"
-        raise InstallationError(f"could not inspect source Git state: {detail}")
-    return result.stdout.strip()
-
-
-def verify_certified_source(source_root: Path, revision: str) -> str:
-    """Require an immutable revision in a retained checkout at release and origin."""
-
-    root = source_root.resolve(strict=True)
-    if ".worktrees" in root.parts:
-        raise InstallationError("refusing to install from a disposable .worktrees path")
-    git_root = Path(_run_git(root, "rev-parse", "--show-toplevel")).resolve()
-    if git_root != root:
-        raise InstallationError(
-            f"source root must be the retained Git repository root ({git_root})"
-        )
-    actual = _run_git(root, "rev-parse", "HEAD")
-    if actual != revision:
-        raise InstallationError(f"source HEAD is {actual}; expected {revision}")
-    for reference in ("refs/heads/release", "refs/remotes/origin/master"):
-        resolved = _run_git(root, "rev-parse", "--verify", reference)
-        if resolved != revision:
-            raise InstallationError(
-                f"certified source {revision} does not match {reference} ({resolved})"
-            )
-    return actual
-
-
-def runtime_package_root() -> Path:
-    """Return the package directory used by this Python process."""
-
+def package_root() -> Path:
     return Path(__file__).resolve().parent
 
 
-def verify_editable_import(source_root: Path) -> None:
-    expected = source_root.resolve(strict=True) / "src" / "fulcrum"
-    if runtime_package_root() != expected:
+def verify_editable_source(source_root: Path) -> None:
+    root = source_root.resolve(strict=True)
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or Path(result.stdout.strip()).resolve() != root:
+        raise InstallationError("source root must be the retained Git checkout root")
+    if ".worktrees" in root.parts:
+        raise InstallationError("source root cannot be a disposable worktree")
+    if package_root() != root / "src" / "fulcrum":
         raise InstallationError(
-            f"fulcrum imports from {runtime_package_root()}; expected {expected}"
+            f"Fulcrum imports from {package_root()}, not editable source {root}"
         )
 
 
-def _install_link(source: Path, target: Path, *, directory: bool) -> None:
-    expected = source.resolve(strict=True)
+def _replace_owned_link(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if target.is_symlink():
-        if target.resolve(strict=False) == expected:
+        if target.resolve(strict=False) == source.resolve(strict=False):
             return
-        raise InstallationError(f"refusing to replace unrelated symlink: {target}")
-    if target.exists():
-        raise InstallationError(
-            f"link target already exists and is not the expected symlink: {target}"
-        )
-    temporary = target.parent / f".{target.name}.fulcrum-link-{os.getpid()}"
+        target.unlink()
+    elif target.exists():
+        raise InstallationError(f"refusing to replace non-symlink asset {target}")
+    temporary = target.with_name(f".{target.name}.{os.getpid()}")
     temporary.unlink(missing_ok=True)
-    try:
-        temporary.symlink_to(source.absolute(), target_is_directory=directory)
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _validate_link_target(source: Path, target: Path) -> None:
-    expected = source.resolve(strict=True)
-    if target.is_symlink() and target.resolve(strict=False) != expected:
-        raise InstallationError(f"refusing to replace unrelated symlink: {target}")
-    if target.exists() and not target.is_symlink():
-        raise InstallationError(
-            f"link target already exists and is not the expected symlink: {target}"
-        )
+    temporary.symlink_to(source.absolute(), target_is_directory=source.is_dir())
+    os.replace(temporary, target)
 
 
 def install_links(
-    source_root: Path, skills_root: Path, hooks_config: Path
-) -> tuple[list[Path], Path, Path, Path]:
-    """Link Codex-visible Fulcrum assets directly to the retained Git checkout."""
-
-    codex_root = skills_root.parent.expanduser().absolute()
-    if hooks_config.parent.resolve(strict=False) != codex_root.resolve(strict=False):
-        raise InstallationError("skills and hooks must use the same Codex home")
-    links: list[tuple[Path, Path, bool]] = []
-    skill_links: list[Path] = []
-    for name in LINKED_SKILLS:
-        source = source_root / "skills" / name
-        if not source.is_dir():
-            raise InstallationError(f"missing Fulcrum skill directory: {source}")
-        if name != "fulcrum-shared" and not (source / "SKILL.md").is_file():
-            raise InstallationError(f"missing Fulcrum skill: {source / 'SKILL.md'}")
-        target = skills_root / name
-        links.append((source, target, True))
-        skill_links.append(target)
-
-    hook_source = source_root / "hooks"
-    hook_command = hook_source / "fulcrum-hook"
-    if not hook_command.is_file() or not os.access(hook_command, os.X_OK):
-        raise InstallationError(f"missing executable Fulcrum hook: {hook_command}")
-    hook_link = codex_root / "hooks" / "fulcrum"
-    links.append((hook_source, hook_link, True))
-    cli_source = source_root / ".venv" / "bin" / "fulcrum"
-    if not cli_source.is_file() or not os.access(cli_source, os.X_OK):
-        raise InstallationError(
-            f"missing executable from editable .venv install: {cli_source}"
-        )
-    cli_link = codex_root / "bin" / "fulcrum"
-    links.append((cli_source, cli_link, False))
-    for source, target, _ in links:
-        _validate_link_target(source, target)
-    for source, target, directory in links:
-        _install_link(source, target, directory=directory)
-    return skill_links, hook_link, hook_link / "fulcrum-hook", cli_link
-
-
-def _load_installation(config_file: Path) -> InstallationRecord | None:
-    if not config_file.is_file():
-        return None
-    try:
-        raw: object = json.loads(config_file.read_bytes())
-    except json.JSONDecodeError as error:
-        raise InstallationError(
-            f"invalid installation record; preserved: {error}"
-        ) from error
-    if not isinstance(raw, dict) or raw.get("record_kind") != "installation":
-        raise InstallationError(
-            "unsupported installation record; preserved without changes"
-        )
-    version = raw.get("schema_version")
-    if version != 1:
-        raise InstallationError(
-            f"unsupported installation schema {version!r}; preserved without changes"
-        )
-    loaded = load_record(config_file)
-    return cast(InstallationRecord, loaded)
-
-
-def install_runtime(
-    *,
-    paths: RuntimePaths,
-    source_root: Path,
-    certified_revision: str,
-    skills_root: Path,
-    hooks_config: Path,
-    host_id: str,
-    expected_brain_remote: str,
-    sage_anchor: str,
-    codex_projects_verified_at: str | None = None,
-    watchman_schedule_id: str | None = None,
-    now: str | None = None,
+    config: InstallationConfig, *, codex_root: Path | None = None
 ) -> dict[str, Any]:
-    """Install assets and config without touching the brain or active run records."""
-
-    observed_at = now or utc_now()
-    verify_certified_source(source_root, certified_revision)
-    verify_editable_import(source_root)
-    current = _load_installation(paths.config_file)
-    if current is not None:
-        if Path(current["brain_root"]).resolve() != paths.brain_root.resolve():
-            raise InstallationError("update would change the configured brain root")
-        if Path(current["state_root"]).resolve() != paths.state_root.resolve():
-            raise InstallationError("update would change the configured state root")
-    skill_links, hook_link, hook_command, cli_link = install_links(
-        source_root, skills_root, hooks_config
-    )
-    previous_hook_config = hooks_config.read_bytes() if hooks_config.is_file() else None
-    install_hook_source(hooks_config, hook_command)
-    hook_config_changed = previous_hook_config != hooks_config.read_bytes()
-    observations = dict(current["observations"]) if current is not None else {}
-    observations.pop("skill_revision", None)
-    observations.pop("package_version", None)
-    observations.pop("source_revision", None)
-    observations.update(
-        {
-            "installed_source_root": str(source_root.resolve()),
-            "skills_root": str(skills_root.resolve(strict=False)),
-            "hook_link": str(hook_link),
-            "cli_link": str(cli_link),
-            "brain_remote": expected_brain_remote,
-            "sage_cadence_anchor": sage_anchor,
-            "hook_source": str(hooks_config.resolve()),
-        }
-    )
-    if hook_config_changed:
-        observations["hook_trust"] = "review_required"
-    if codex_projects_verified_at is not None:
-        observations["codex_projects_verified_at"] = codex_projects_verified_at
-    if watchman_schedule_id is not None:
-        observations["watchman_schedule"] = "ready"
-        observations["watchman_schedule_id"] = watchman_schedule_id
-    services = set(current["configured_services"] if current is not None else [])
-    services.update({"beads", "codex", "hooks", "tollgate"})
-    record = cast(
-        InstallationRecord,
-        validate_record(
-            {
-                "record_kind": "installation",
-                "schema_version": 1,
-                "writer_id": "setup",
-                "updated_at": observed_at,
-                "brain_root": str(paths.brain_root),
-                "state_root": str(paths.state_root),
-                "host_id": host_id,
-                "configured_services": sorted(services),
-                "observations": observations,
-            }
-        ),
-    )
-    atomic_write_record(paths, record)
+    source = Path(config.source_root).resolve(strict=True)
+    root = codex_root or Path.home() / ".codex"
+    installed: list[str] = []
+    for name in HUMAN_SKILLS:
+        skill = source / "skills" / name
+        if not (skill / "SKILL.md").is_file():
+            raise InstallationError(f"missing human entry skill {skill}")
+        target = root / "skills" / name
+        _replace_owned_link(skill, target)
+        installed.append(str(target))
+    removed: list[str] = []
+    for name in REMOVED_SKILLS:
+        target = root / "skills" / name
+        if target.is_symlink():
+            resolved = target.resolve(strict=False)
+            if resolved.is_relative_to(source) or not resolved.exists():
+                target.unlink()
+                removed.append(str(target))
+    hook_source = source / "hooks" / "fulcrum-hook"
+    cli_source = source / ".venv" / "bin" / "fulcrum"
+    if not os.access(hook_source, os.X_OK) or not os.access(cli_source, os.X_OK):
+        raise InstallationError("editable CLI and hook executables must exist")
+    hook_target = root / "hooks" / "fulcrum-hook"
+    cli_target = root / "bin" / "fulcrum"
+    obsolete_hook = root / "hooks" / "fulcrum"
+    if obsolete_hook.is_symlink() and obsolete_hook.resolve(
+        strict=False
+    ).is_relative_to(source):
+        obsolete_hook.unlink()
+        removed.append(str(obsolete_hook))
+    _replace_owned_link(hook_source, hook_target)
+    _replace_owned_link(cli_source, cli_target)
+    install_hook_config(root / "hooks.json", hook_target)
     return {
-        "ok": True,
-        "skill_links": [str(path) for path in skill_links],
-        "hook_link": str(hook_link),
-        "cli_link": str(cli_link),
-        "hook_source": str(hooks_config.resolve()),
-        "hook_retrust_required": hook_config_changed,
-        "database_restarted": False,
+        "skills": installed,
+        "removed": removed,
+        "hook": str(hook_target),
+        "cli": str(cli_target),
     }
+
+
+def install_hook_config(path: Path, hook_command: Path) -> None:
+    """Preserve unrelated hooks and install only one marked compact handler."""
+
+    existing: Any = (
+        json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    )
+    if not isinstance(existing, dict) or not isinstance(
+        existing.get("hooks", {}), dict
+    ):
+        raise InstallationError(f"Codex hook configuration is invalid: {path}")
+    hooks = dict(existing.get("hooks", {}))
+    for event in list(hooks):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            continue
+        retained = []
+        for group in groups:
+            if not isinstance(group, dict):
+                retained.append(group)
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                retained.append(group)
+                continue
+            remaining = [
+                item
+                for item in handlers
+                if not (
+                    isinstance(item, dict)
+                    and str(item.get("statusMessage", "")).startswith("Fulcrum:")
+                )
+            ]
+            if remaining:
+                retained.append({**group, "hooks": remaining})
+        if retained:
+            hooks[event] = retained
+        else:
+            hooks.pop(event, None)
+    hooks["SessionStart"] = [
+        *hooks.get("SessionStart", []),
+        {
+            "matcher": "^compact$",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": shlex.quote(str(hook_command.absolute())),
+                    "timeout": 2,
+                    "additionalContextLimit": 5000,
+                    "statusMessage": "Fulcrum: restoring current action",
+                }
+            ],
+        },
+    ]
+    existing["hooks"] = hooks
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}")
+    temporary.write_text(
+        json.dumps(existing, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def service_definitions(
+    config: InstallationConfig, paths: RuntimePaths
+) -> dict[str, dict[str, Any]]:
+    source = Path(config.source_root)
+    python = source / ".venv" / "bin" / "python"
+    logs = paths.logs_root
+    return {
+        APP_SERVER_LABEL: {
+            "Label": APP_SERVER_LABEL,
+            "ProgramArguments": [
+                config.codex_bin,
+                "app-server",
+                "--listen",
+                config.app_server_endpoint,
+            ],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "StandardOutPath": str(logs / "app-server.log"),
+            "StandardErrorPath": str(logs / "app-server-error.log"),
+        },
+        CONTROLLER_LABEL: {
+            "Label": CONTROLLER_LABEL,
+            "ProgramArguments": [str(python), "-m", "fulcrum.cli", "serve"],
+            "WorkingDirectory": str(source),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "StandardOutPath": str(logs / "controller.log"),
+            "StandardErrorPath": str(logs / "controller-error.log"),
+            "EnvironmentVariables": {"FULCRUM_CONFIG": str(paths.config_file)},
+        },
+    }
+
+
+def install_services(
+    config: InstallationConfig,
+    paths: RuntimePaths,
+    *,
+    launch_agents: Path | None = None,
+) -> dict[str, str]:
+    target_root = launch_agents or Path.home() / "Library" / "LaunchAgents"
+    target_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    paths.logs_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    installed: dict[str, str] = {}
+    for label, definition in service_definitions(config, paths).items():
+        target = target_root / f"{label}.plist"
+        encoded = plistlib.dumps(definition, fmt=plistlib.FMT_XML, sort_keys=True)
+        if not target.is_file() or target.read_bytes() != encoded:
+            temporary = target.with_name(f".{target.name}.{os.getpid()}")
+            temporary.write_bytes(encoded)
+            os.replace(temporary, target)
+        installed[label] = str(target)
+    wrapper = paths.control_root / "open-codex-with-fulcrum"
+    wrapper.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    script = f'#!/bin/sh\nexec env CODEX_APP_SERVER_WS_URL={json.dumps(config.app_server_endpoint)} {json.dumps(config.desktop_executable)} "$@"\n'
+    if not wrapper.is_file() or wrapper.read_text(encoding="utf-8") != script:
+        temporary = wrapper.with_name(f".{wrapper.name}.{os.getpid()}")
+        temporary.write_text(script, encoding="utf-8")
+        os.chmod(temporary, 0o700)
+        os.replace(temporary, wrapper)
+    installed["desktop_wrapper"] = str(wrapper)
+    return installed
+
+
+def start_services(definitions: dict[str, str]) -> None:
+    domain = f"gui/{os.getuid()}"
+    for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
+        check = subprocess.run(
+            ["launchctl", "print", f"{domain}/{label}"],
+            capture_output=True,
+            check=False,
+        )
+        if check.returncode != 0:
+            result = subprocess.run(
+                ["launchctl", "bootstrap", domain, definitions[label]],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise InstallationError(
+                    f"could not start {label}: {result.stderr.strip() or result.stdout.strip()}"
+                )
+        else:
+            subprocess.run(
+                ["launchctl", "kickstart", f"{domain}/{label}"],
+                capture_output=True,
+                check=False,
+            )

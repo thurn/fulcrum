@@ -1,261 +1,296 @@
-"""Command-line entry point for Fulcrum."""
+"""Local command-line entry point for the Python-owned Fulcrum runtime."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import cast
+from typing import Any
 
-from fulcrum.brain import brain_status, initialize_brain
-from fulcrum.config import resolve_paths
-from fulcrum.context import read_task_context
-from fulcrum.documents import discover_plans
-from fulcrum.doctor import doctor_runtime
-from fulcrum.install import install_runtime
-from fulcrum.records import ProjectRegistryRecord, load_record
-from fulcrum.readiness import load_and_evaluate, load_with_doctor_evidence
-from fulcrum.resources import collect_resources
-from fulcrum.state import atomic_write_record, read_record
-from fulcrum.setup import bootstrap_fleet, record_setup_evidence
-from fulcrum.version import version_text
+from fulcrum.config import load_installation, resolve_paths
+from fulcrum.controller import run_controller
+from fulcrum.doctor import doctor
+from fulcrum.ipc import request_sync
+from fulcrum.setup import run_setup
+from fulcrum.store import Store
+
+
+def _thread_id() -> str | None:
+    for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TASK_ID"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level command parser."""
-
     parser = argparse.ArgumentParser(
         prog="fulcrum",
-        description="Coordinate durable local agent workflows.",
+        description="Coordinate work through one local Python controller.",
     )
-    parser.add_argument("--brain-root", help="override the configured brain root")
-    parser.add_argument("--state-root", help="override the configured local state root")
-    subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("version", help="show package and source version")
-    readiness_parser = subparsers.add_parser(
-        "readiness", help="evaluate an infrastructure evidence matrix"
+    parser.add_argument("--brain-root")
+    parser.add_argument("--state-root")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("serve", help="run the foreground controller")
+    setup = commands.add_parser(
+        "setup", help="install or resume the complete local runtime"
     )
-    readiness_parser.add_argument("--matrix", required=True)
-    readiness_parser.add_argument(
-        "--doctor-report", help="overlay runtime-dependent rows from doctor JSON"
+    setup.add_argument("--config")
+    setup.add_argument("--non-interactive", action="store_true")
+    doctor_parser = commands.add_parser(
+        "doctor", help="inspect actual installation capabilities"
     )
-
-    setup_parser = subparsers.add_parser(
-        "setup", help="bootstrap human roles and record verified setup evidence"
+    doctor_parser.add_argument("--json", action="store_true")
+    status = commands.add_parser("status", help="read current controller state")
+    status.add_argument("--json", action="store_true")
+    status.add_argument("--events", type=int, default=20)
+    status.add_argument("--queue", action="store_true")
+    status.add_argument("--capabilities", action="store_true")
+    status.add_argument("--run", type=int)
+    commands.add_parser("archon", help="locate the current Archon task")
+    weaver = commands.add_parser("weaver", help="register a human-created Weaver task")
+    weaver_sub = weaver.add_subparsers(dest="weaver_command", required=True)
+    register = weaver_sub.add_parser("register")
+    register.add_argument("--project")
+    register.add_argument("--description", default="Task intake")
+    register.add_argument("--model", default="gpt-5.6-sol")
+    register.add_argument("--effort", default="high")
+    register.add_argument("--plan-mode", action="store_true")
+    commands.add_parser("instructions", help="render the current action brief")
+    intake = commands.add_parser(
+        "intake", help="file one task or a complete task graph"
     )
-    setup_commands = setup_parser.add_subparsers(dest="setup_command", required=True)
-    setup_bootstrap = setup_commands.add_parser(
-        "bootstrap", help="initialize verified role and project registries"
+    intake.add_argument("--project")
+    intake.add_argument("--title")
+    intake.add_argument("--description")
+    intake.add_argument("--input")
+    intake.add_argument("--intake-key")
+    intake.add_argument("--depends-on", action="append", default=[])
+    intake.add_argument("--context", action="append", default=[])
+    intake.add_argument(
+        "--activation", choices=("pending", "future"), default="pending"
     )
-    setup_bootstrap.add_argument("--input", required=True)
-    setup_evidence = setup_commands.add_parser(
-        "record-evidence", help="record the observed schedule and desktop hook exercise"
-    )
-    setup_evidence.add_argument("--archon-task-id", required=True)
-    setup_evidence.add_argument("--watchman-schedule-id", required=True)
-    setup_evidence.add_argument("--codex-projects-verified-at", required=True)
-    setup_evidence.add_argument("--hooks-verified-at")
-    setup_evidence.add_argument("--hooks-evidence")
-    setup_evidence.add_argument("--first-patrol-observed-at")
-    setup_evidence.add_argument("--first-patrol-evidence")
-
-    install_parser = subparsers.add_parser(
-        "install", help="install or update from retained certified source"
-    )
-    install_parser.add_argument("--source-root", required=True)
-    install_parser.add_argument("--certified-revision", required=True)
-    install_parser.add_argument("--skills-root", required=True)
-    install_parser.add_argument("--hooks-config", required=True)
-    install_parser.add_argument("--host-id", default="local")
-    install_parser.add_argument("--expected-brain-remote", required=True)
-    install_parser.add_argument("--sage-anchor", required=True)
-    install_parser.add_argument("--codex-projects-verified-at")
-    install_parser.add_argument("--watchman-schedule-id")
-
-    doctor_parser = subparsers.add_parser(
-        "doctor", help="report required failures, optional gaps, and failed pushes"
-    )
-    doctor_parser.add_argument("--expected-brain-remote", required=True)
-    doctor_parser.add_argument("--skills-root", required=True)
-    doctor_parser.add_argument("--hooks-config", required=True)
-
-    state_parser = subparsers.add_parser("state", help="read or write local records")
-    state_commands = state_parser.add_subparsers(dest="state_command", required=True)
-    read_parser = state_commands.add_parser("read", help="read one validated record")
-    read_parser.add_argument("--kind", required=True, help="record kind")
-    read_parser.add_argument("--id", help="record identifier for non-singletons")
-    write_parser = state_commands.add_parser(
-        "write", help="atomically write one record"
-    )
-    write_parser.add_argument("--input", required=True, help="UTF-8 JSON input file")
-
-    context_parser = subparsers.add_parser("context", help="read concise task context")
-    context_parser.add_argument("--task", required=True, help="exact Codex task ID")
-
-    plans_parser = subparsers.add_parser("plans", help="discover Markdown plans")
-    plans_commands = plans_parser.add_subparsers(dest="plans_command", required=True)
-    list_plans = plans_commands.add_parser("list", help="list validated plan metadata")
-    list_plans.add_argument("--project", help="limit results to one project ID")
-
-    resources_parser = subparsers.add_parser(
-        "resources", help="observe bounded local host and Tollgate resource facts"
-    )
-    resources_parser.add_argument(
-        "--tollgate-repo", help="exact Tollgate repository ID to observe"
-    )
-    resources_parser.add_argument(
-        "--owned-pid",
-        action="append",
-        default=[],
-        type=int,
-        help="owned process ID to include even when its command is not recognized",
-    )
-
-    brain_parser = subparsers.add_parser("brain", help="inspect or initialize Beads")
-    brain_commands = brain_parser.add_subparsers(dest="brain_command", required=True)
-    for name, help_text in (
-        ("status", "verify server mode and connectivity"),
-        ("init", "initialize a missing server-mode store, then verify it"),
+    for role in ("executor", "overseer"):
+        intake.add_argument(f"--{role}-model")
+        intake.add_argument(f"--{role}-reasoning-effort")
+    finish = commands.add_parser("finish", help="submit the bound action's result")
+    finish_sub = finish.add_subparsers(dest="outcome", required=True)
+    for name in ("ready_for_review", "checkpointed", "future_plan"):
+        item = finish_sub.add_parser(name)
+        item.add_argument("--evidence", required=True)
+    repair = finish_sub.add_parser("permitted_repair_complete")
+    repair.add_argument("--repair-category", required=True)
+    repair.add_argument("--repair-rationale", required=True)
+    repair.add_argument("--evidence", required=True)
+    for name in ("blocked", "exception"):
+        item = finish_sub.add_parser(name)
+        item.add_argument("--reason", required=True)
+    approved = finish_sub.add_parser("approved")
+    approved.add_argument("--assessment", required=True)
+    approved.add_argument("--allow-repair", action="append", default=[])
+    for name in (
+        "changes_requested",
+        "incomplete",
+        "decisions",
+        "report",
+        "evidence_needed",
+        "interview_answer",
     ):
-        command = brain_commands.add_parser(name, help=help_text)
-        command.add_argument(
-            "--expected-remote",
-            required=True,
-            help="exact private Git remote expected for the brain",
-        )
+        item = finish_sub.add_parser(name)
+        item.add_argument("--input", required=True)
+    deferred = finish_sub.add_parser("deferred")
+    deferred.add_argument("--reason", required=True)
+    deferred.add_argument("--input", required=True)
+    finish_sub.add_parser("intake_complete")
+    for name in ("sage", "inquisitor"):
+        specialist = commands.add_parser(name, help=f"request a one-off {name} run")
+        specialist.add_argument("--project")
+        specialist.add_argument("--scope")
+    reboot = commands.add_parser("reboot", help="replace the managed fleet")
+    reboot_modes = reboot.add_mutually_exclusive_group(required=True)
+    reboot_modes.add_argument("--soft", action="store_true")
+    reboot_modes.add_argument("--hard", action="store_true")
+    reboot_modes.add_argument("--reset", action="store_true")
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the Fulcrum CLI."""
+def _request(paths: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    payload.setdefault("thread_id", _thread_id())
+    response = request_sync(paths.socket, payload)
+    data = response.get("data")
+    return data if isinstance(data, dict) else {"result": data}
 
+
+def _intake_payload(args: argparse.Namespace) -> dict[str, Any]:
+    if args.input:
+        value = json.loads(Path(args.input).read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("intake input must contain an object")
+        return value
+    if not args.title or not args.description:
+        raise ValueError("single-task intake requires --title and --description")
+    result: dict[str, Any] = {
+        "project": args.project,
+        "title": args.title,
+        "description": args.description,
+        "activation": args.activation,
+        "depends_on": args.depends_on,
+        "context": args.context,
+    }
+    for name in (
+        "executor_model",
+        "executor_reasoning_effort",
+        "overseer_model",
+        "overseer_reasoning_effort",
+    ):
+        value = getattr(args, name)
+        if value:
+            result[name] = value
+    return result
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command == "version":
-        print(version_text())
-        return 0
-    if args.command == "readiness":
-        try:
-            result = (
-                load_with_doctor_evidence(Path(args.matrix), Path(args.doctor_report))
-                if args.doctor_report
-                else load_and_evaluate(Path(args.matrix))
+    paths = resolve_paths(
+        brain_override=args.brain_root, state_override=args.state_root
+    )
+    try:
+        if args.command == "serve":
+            config = load_installation(paths.config_file)
+            asyncio.run(run_controller(paths, config))
+            return 0
+        if args.command == "setup":
+            result = run_setup(
+                paths,
+                input_path=Path(args.config) if args.config else None,
+                non_interactive=args.non_interactive,
             )
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0 if result["ready"] else 2
-        except Exception as error:
-            print(f"fulcrum: {error}", file=sys.stderr)
-            return 2
-    if args.command == "setup":
-        try:
-            paths = resolve_paths(
-                brain_override=args.brain_root,
-                state_override=args.state_root,
+        elif args.command == "doctor":
+            result = doctor(paths)
+        elif args.command == "status" and not paths.socket.exists():
+            with Store(paths.database, readonly=True) as store:
+                result = store.status(event_limit=args.events)
+            result["stale"] = True
+            result = _status_view(result, args)
+        elif args.command == "status":
+            result = _request(
+                paths,
+                {
+                    "command": "status",
+                    "events": args.events,
+                    "view": (
+                        "queue"
+                        if args.queue
+                        else "capabilities" if args.capabilities else "full"
+                    ),
+                    "run": args.run,
+                },
             )
-            if args.setup_command == "bootstrap":
-                result = bootstrap_fleet(
-                    paths, json.loads(Path(args.input).read_text())
-                )
-            else:
-                result = record_setup_evidence(
+        elif args.command == "archon":
+            result = _request(paths, {"command": "archon"})
+        elif args.command == "weaver":
+            result = _request(
+                paths,
+                {
+                    "command": "weaver_register",
+                    "project": args.project,
+                    "description": args.description,
+                    "model": args.model,
+                    "effort": args.effort,
+                    "writable": not args.plan_mode,
+                },
+            )
+        elif args.command == "instructions":
+            result = _request(paths, {"command": "instructions"})
+        elif args.command == "intake":
+            payload = _intake_payload(args)
+            if "tasks" in payload:
+                result = _request(
                     paths,
-                    archon_task_id=args.archon_task_id,
-                    watchman_schedule_id=args.watchman_schedule_id,
-                    codex_projects_verified_at=args.codex_projects_verified_at,
-                    hooks_verified_at=args.hooks_verified_at,
-                    hooks_evidence=args.hooks_evidence,
-                    first_patrol_observed_at=args.first_patrol_observed_at,
-                    first_patrol_evidence=args.first_patrol_evidence,
-                )
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0 if result["ok"] else 2
-        except Exception as error:
-            print(f"fulcrum: {error}", file=sys.stderr)
-            return 2
-    if args.command in {"install", "doctor"}:
-        try:
-            paths = resolve_paths(
-                brain_override=args.brain_root,
-                state_override=args.state_root,
-            )
-            if args.command == "install":
-                result = install_runtime(
-                    paths=paths,
-                    source_root=Path(args.source_root),
-                    certified_revision=args.certified_revision,
-                    skills_root=Path(args.skills_root),
-                    hooks_config=Path(args.hooks_config),
-                    host_id=args.host_id,
-                    expected_brain_remote=args.expected_brain_remote,
-                    sage_anchor=args.sage_anchor,
-                    codex_projects_verified_at=args.codex_projects_verified_at,
-                    watchman_schedule_id=args.watchman_schedule_id,
+                    {
+                        "command": "intake_graph",
+                        "graph": payload,
+                        "intake_key": args.intake_key,
+                    },
                 )
             else:
-                result = doctor_runtime(
-                    paths=paths,
-                    expected_brain_remote=args.expected_brain_remote,
-                    hooks_config=Path(args.hooks_config),
-                    skills_root=Path(args.skills_root),
+                result = _request(
+                    paths,
+                    {
+                        "command": "intake",
+                        "task": payload,
+                        "intake_key": args.intake_key,
+                    },
                 )
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0 if result.get("ready", result.get("ok", False)) else 2
-        except Exception as error:
-            print(f"fulcrum: {error}", file=sys.stderr)
-            return 2
-    if args.command == "resources":
-        try:
-            result = collect_resources(
-                repository_id=args.tollgate_repo,
-                owned_pids=args.owned_pid,
+        elif args.command == "finish":
+            options = {
+                key: value
+                for key, value in vars(args).items()
+                if key not in {"command", "outcome", "brain_root", "state_root"}
+                and value is not None
+            }
+            result = _request(
+                paths,
+                {"command": "finish", "outcome": args.outcome, "options": options},
             )
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0
-        except Exception as error:
-            print(f"fulcrum: {error}", file=sys.stderr)
-            return 2
-    if args.command in {"state", "context", "brain", "plans"}:
-        try:
-            paths = resolve_paths(
-                brain_override=args.brain_root,
-                state_override=args.state_root,
+        elif args.command in {"sage", "inquisitor"}:
+            scope = {
+                "global": args.project is None,
+                "projects": [args.project] if args.project else [],
+            }
+            result = _request(
+                paths,
+                {
+                    "command": "specialist",
+                    "kind": args.command,
+                    "scope": json.dumps(scope),
+                    "prompt": args.scope,
+                },
             )
-            if args.command == "state" and args.state_command == "read":
-                result = read_record(paths, args.kind, args.id)
-            elif args.command == "state" and args.state_command == "write":
-                input_record = load_record(Path(args.input))
-                target = atomic_write_record(paths, input_record)
-                result = {"ok": True, "path": str(target)}
-            elif args.command == "context":
-                result = read_task_context(paths, args.task)
-            elif args.command == "plans":
-                registry = read_record(paths, "project_registry")
-                if registry["record_kind"] != "project_registry":
-                    raise ValueError("expected project_registry record")
-                project_registry = cast(ProjectRegistryRecord, registry)
-                known_projects = {
-                    project["project_id"] for project in project_registry["projects"]
-                }
-                result = discover_plans(paths.brain_root, known_projects)
-                if args.project is not None:
-                    result["plans"] = [
-                        plan
-                        for plan in result["plans"]
-                        if plan["project"] == args.project
-                    ]
-            elif args.brain_command == "init":
-                result = initialize_brain(paths.brain_root, args.expected_remote)
-            else:
-                result = brain_status(paths.brain_root, args.expected_remote)
-            print(json.dumps(result, indent=2, sort_keys=True))
-            return 0
-        except Exception as error:
-            print(f"fulcrum: {error}", file=sys.stderr)
+        elif args.command == "reboot":
+            mode = "soft" if args.soft else "hard" if args.hard else "reset"
+            result = _request(paths, {"command": "reboot", "mode": mode})
+        else:
+            parser.error("unsupported command")
             return 2
-    parser.print_help()
-    return 0
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("ready", result.get("ok", True)) else 2
+    except Exception as error:
+        print(f"fulcrum: {error}", file=sys.stderr)
+        return 2
+
+
+def _status_view(result: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    if args.queue:
+        return {
+            "dispatch_enabled": result.get("dispatch_enabled"),
+            "assignments": result.get("assignments", []),
+            "pending_updates": result.get("pending_updates", []),
+            "holds": result.get("holds", []),
+        }
+    if args.capabilities:
+        return {
+            "controller_state": result.get("controller_state"),
+            "dispatch_enabled": result.get("dispatch_enabled"),
+            "projects": result.get("projects", []),
+            "slot_usage": result.get("slot_usage", {}),
+            "policies": result.get("policies", []),
+        }
+    if args.run is not None:
+        result["runs"] = [
+            row for row in result.get("runs", []) if row.get("id") == args.run
+        ]
+        result["assignments"] = [
+            row
+            for row in result.get("assignments", [])
+            if row.get("run_id") == args.run
+        ]
+    return result
 
 
 if __name__ == "__main__":

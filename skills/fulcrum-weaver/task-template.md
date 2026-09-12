@@ -1,8 +1,8 @@
 # <implementation-ready title>
 
 Labels: `project:<id>` and either `plan:<id>` or, for standalone work,
-`activation:queued|future`. A standalone bead without an activation label is
-queued by default; use `activation:future` only when the human explicitly saves
+`activation:pending|future`. A standalone bead without an activation label is
+pending by default; use `activation:future` only when the human explicitly saves
 the work for later. Use the normal Beads type, priority, status, and dependency
 fields.
 

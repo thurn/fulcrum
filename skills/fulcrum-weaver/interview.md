@@ -7,7 +7,7 @@ questions in mixed requests before actions that depend on those answers.
 
 Establish outcome, included/excluded behavior, constraints, dependencies, and
 observable acceptance criteria. Confirm project identity. For ordinary direct
-intake, treat missing standalone activation as queued; record `future` only when
+intake, treat missing standalone activation as pending; record `future` only when
 the human explicitly asks to save the work for later. Separate approval to save
 the plan from execution eligibility.
 For refinement, identify the current plan and affected approved assignments.
