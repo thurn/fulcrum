@@ -79,6 +79,29 @@ class CliTest(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertIn("wrong remote", diagnostic.getvalue())
 
+    def test_resources_emits_bounded_observation_json(self) -> None:
+        output = io.StringIO()
+        observed = {
+            "observed_at": "2026-09-11T20:00:00Z",
+            "relevant_processes": {"available": True, "processes": []},
+        }
+        with (
+            patch("fulcrum.cli.collect_resources", return_value=observed) as collect,
+            redirect_stdout(output),
+        ):
+            result = main(
+                [
+                    "resources",
+                    "--tollgate-repo",
+                    "repo-1",
+                    "--owned-pid",
+                    "42",
+                ]
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(output.getvalue()), observed)
+        collect.assert_called_once_with(repository_id="repo-1", owned_pids=[42])
+
 
 if __name__ == "__main__":
     unittest.main()

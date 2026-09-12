@@ -85,12 +85,23 @@ class RoleRunRegistryRecord(TypedDict):
     roles: list[RoleRun]
 
 
+class HoldException(TypedDict):
+    recovery_scope: str
+    permitted_resources: list[str]
+
+
 class Hold(TypedDict):
     hold_id: str
     scope: str
     reason: str
     release_condition: str
     permitted_exceptions: list[str]
+    owner_id: NotRequired[str]
+    release_mode: NotRequired[Literal["human", "evidence"]]
+    exceptions: NotRequired[list[HoldException]]
+    released_at: NotRequired[str | None]
+    released_by: NotRequired[str | None]
+    release_evidence: NotRequired[str | None]
 
 
 class RecurringJob(TypedDict):

@@ -551,7 +551,9 @@ there are no direct writes to release or unauthorized source-branch pushes.
 
 ### Task 13 [code] — Add resource observations, holds, and verified pause/resume
 
-**Status:** pending
+**Status:** done — bounded local/Tollgate observations, composable hold
+lifecycles, and verified checkpoint, quiet, and resume helpers are implemented
+with controlled-process coverage.
 
 **Outcome:** the Archon has enough facts to coordinate capacity and quiet
 intervals; no helper schedules independently.

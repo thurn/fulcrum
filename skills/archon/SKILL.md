@@ -49,6 +49,12 @@ work by priority and age; explain exceptions. Check complete intake, dependencie
 plan activation, composed holds, ownership, and observed resource compatibility.
 Future plans never dispatch from discovery. Investigate unknown integrations or
 resources instead of treating them as idle. Record why work starts or waits.
+Run `fulcrum resources` before resource-intensive dispatch, retaining raw output
+only as local operational evidence. Give each pair a concrete heavy-command
+expectation. Prioritize incidents and work that unblocks active assignments,
+then ready work by priority, dependency impact, age, and current pressure; record
+the reason whenever dispatch departs from that order. Tollgate remains the queue
+and resource authority rather than Fulcrum adding per-command permits.
 
 Initialize one explicit project-scoped run before creating its matching numbered
 Overseer/Executor pair. Use saved project context with environment type local;
@@ -60,3 +66,10 @@ while reconciling active refinements. Adjudicate third-review failures and
 escalations from actual evidence; narrow scope, delegate investigation, or record
 an allowed model upgrade. Only Archon decides blocked execution needs human input;
 material product changes require human intent or an approved plan revision.
+
+For a pause, write every applicable hold before stopping new dispatch. Request
+inventory within five minutes and intended-change preservation within ten. For
+host quiet, pause Tollgate through its supported control and require observed
+process exit plus queue/run drainage; acknowledgment or elapsed time is not quiet.
+Release only the exact satisfied hold. Resume only after worktree, assignment,
+candidate, and certified-base identities have all been rechecked.

@@ -14,6 +14,7 @@ from fulcrum.config import resolve_paths
 from fulcrum.context import read_task_context
 from fulcrum.documents import discover_plans
 from fulcrum.records import ProjectRegistryRecord, load_record
+from fulcrum.resources import collect_resources
 from fulcrum.state import atomic_write_record, read_record
 from fulcrum.version import version_text
 
@@ -48,6 +49,20 @@ def build_parser() -> argparse.ArgumentParser:
     list_plans = plans_commands.add_parser("list", help="list validated plan metadata")
     list_plans.add_argument("--project", help="limit results to one project ID")
 
+    resources_parser = subparsers.add_parser(
+        "resources", help="observe bounded local host and Tollgate resource facts"
+    )
+    resources_parser.add_argument(
+        "--tollgate-repo", help="exact Tollgate repository ID to observe"
+    )
+    resources_parser.add_argument(
+        "--owned-pid",
+        action="append",
+        default=[],
+        type=int,
+        help="owned process ID to include even when its command is not recognized",
+    )
+
     brain_parser = subparsers.add_parser("brain", help="inspect or initialize Beads")
     brain_commands = brain_parser.add_subparsers(dest="brain_command", required=True)
     for name, help_text in (
@@ -71,6 +86,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(version_text())
         return 0
+    if args.command == "resources":
+        try:
+            result = collect_resources(
+                repository_id=args.tollgate_repo,
+                owned_pids=args.owned_pid,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+        except Exception as error:
+            print(f"fulcrum: {error}", file=sys.stderr)
+            return 2
     if args.command in {"state", "context", "brain", "plans"}:
         try:
             paths = resolve_paths(

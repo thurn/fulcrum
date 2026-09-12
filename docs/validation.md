@@ -62,6 +62,19 @@ confirm that it does not change beads, activation, assignments, mandates, or
 plans. Reconciliation targets only assignments for the changed plan and
 preserves existing mandates while requesting a pause when scope may have moved.
 
+## Task 13 — Resources, holds, and pause/resume
+
+`tests/test_resources.py` launches a controlled owned process and proves a host
+cannot be reported quiet until the process exits and Tollgate queue/run counts
+have drained. Other checks cover unavailable measurements, overlapping holds,
+evidence and explicit human release, bounded structured recovery exceptions,
+five/ten-minute checkpoint deadlines, the non-candidate status of unvalidated
+work, and complete identity checks before resume.
+
+`fulcrum resources` bounds subprocesses to three seconds and captured output to
+256 KiB. Its CPU, memory-pressure, process, and Tollgate fields report missing
+observations as unavailable. Raw observations remain local operational evidence.
+
 ## Task 09 — Identity and portable handoffs
 
 `tests/test_roles.py` exercises pending and ambiguous creation responses,

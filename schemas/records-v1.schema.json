@@ -156,10 +156,27 @@
                 "required": ["hold_id", "scope", "reason", "release_condition", "permitted_exceptions"],
                 "properties": {
                   "hold_id": { "type": "string", "minLength": 1 },
-                  "scope": { "type": "string", "minLength": 1 },
+                  "scope": { "type": "string", "pattern": "^(fleet|host:[A-Za-z0-9._-]+|project:[A-Za-z0-9._-]+|plan:[A-Za-z0-9._-]+|assignment:[A-Za-z0-9._-]+)$" },
                   "reason": { "type": "string", "minLength": 1 },
                   "release_condition": { "type": "string", "minLength": 1 },
-                  "permitted_exceptions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                  "permitted_exceptions": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                  "owner_id": { "type": "string", "minLength": 1 },
+                  "release_mode": { "enum": ["human", "evidence"] },
+                  "exceptions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["recovery_scope", "permitted_resources"],
+                      "properties": {
+                        "recovery_scope": { "type": "string", "minLength": 1 },
+                        "permitted_resources": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "released_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+                  "released_by": { "type": ["string", "null"], "minLength": 1 },
+                  "release_evidence": { "type": ["string", "null"], "minLength": 1 }
                 },
                 "additionalProperties": false
               }

@@ -12,6 +12,10 @@ Accept only one active bead from your paired Overseer with actual IDs and an
 approved scope/plan revision. Recheck holds and assignment before starting and
 after interruption. You own your progress, executor evidence, implementation
 status in Beads, and runtime resources; Overseer owns assignment and mandate.
+Record process IDs for every owned heavy command or demo service. Stay within
+the assignment's heavy-command expectation; before exceeding it, report the
+observed pressure and proposed command to Overseer for Archon coordination.
+Fulcrum does not issue per-command permits and cannot replace Tollgate admission.
 
 Create a fresh Tollgate worktree from the captured certified release for each
 new assignment. Implement, investigate, and validate there. Do not take over
@@ -41,3 +45,7 @@ Overseer and record the expected wait. Do not silently stop with an unsent
 handoff or infer success from silence. On a scoped pause, checkpoint at a safe
 boundary, reconcile candidates that might promote, and preserve owned changes;
 never stop the shared brain database during worktree cleanup.
+Inventory within five minutes and preserve intended changes within ten, marking
+unvalidated checkpoints non-promotable. Stop relevant owned processes and report
+their exact IDs. Resume only after the hold is released and the worktree,
+assignment contract, candidate state, and certified base are reverified.

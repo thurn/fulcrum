@@ -305,8 +305,10 @@ def summarize_eligibility(
         scopes.add(f"plan:{plan_id}")
     exceptions = {bead["bead_id"], f"bead:{bead['bead_id']}"}
     for hold in holds:
-        if hold["scope"] in scopes and not exceptions.intersection(
-            hold["permitted_exceptions"]
+        if (
+            hold.get("released_at") is None
+            and hold["scope"] in scopes
+            and not exceptions.intersection(hold["permitted_exceptions"])
         ):
             _reason(
                 reasons,

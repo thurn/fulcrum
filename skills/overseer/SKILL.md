@@ -14,6 +14,10 @@ plan activation/prerequisites, holds, and resources. Record the exact bead,
 approved plan commit, scope reference, and actual pair IDs. Send that contract
 to Executor. Read existing assignment and mandate after interruption; never
 create a second owner or silently substitute a current working plan revision.
+Before the next bead, repeat eligibility and current resource observations.
+Prefer incidents and unblocking work, then priority/dependency impact and age;
+retain the Archon's reason for any departure. Give the Executor the run's heavy
+command expectation and coordinate with Archon before exceeding it.
 
 Review the exact submitted source OID against the approved contract and retained
 checks. Inspect read-only: do not edit or run builds in the Executor's worktree.
@@ -43,3 +47,8 @@ cleanup. Verify completion evidence before assigning the next bead. Report run
 completion or escalation to Archon before archival. On blockage inspect actual
 state and plausible recovery; escalate evidence, not an unsupported claim that
 nothing can be done. Only Archon requests human intervention for blocked execution.
+During pause, require a five-minute inventory and ten-minute preserved-change
+checkpoint, including dirty paths, commits, candidate state, and owned process
+IDs. An unvalidated checkpoint is never a candidate. Verify relevant process
+exit before reporting the pair quiet; on resume recheck all applicable holds,
+worktree, contract, candidate, and certified base.
