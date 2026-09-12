@@ -332,6 +332,11 @@ NEWS, or project-summary updates authored in Archon's result using existing
 brain conventions. Preserve useful strategic memory without requiring Archon to
 perform Git administration or rewrite unchanged summaries every turn.
 
+Sage and Inquisitor prompts require concrete evidence for proposed tasks and
+explicitly permit zero findings. Ask them to distinguish demonstrated problems
+from speculative improvements using the publication rule below. Include this
+instruction in their report-producing turns, without another skill-reading step.
+
 ## Scheduling, Capacity, and Holds
 
 Archon is the final approver of task scheduling. Python performs eligibility
@@ -748,9 +753,19 @@ Preserve configured anchors across restart.
 - Findings include the problem, evidence, expected benefit, affected project,
   and acceptance criteria. Deduplicate against existing issues using stable
   problem identity and explicit reconciliation, not another generated hash.
-- Publish actionable findings as pending unless explicitly deferred. Archon
-  still approves execution. Specialist default implementation model is Sol/high
-  unless its approved policy selects another supported model; persist it on the
+- Specialists may propose tasks only for demonstrated defects, observed workflow
+  friction, or specific unmet requirements. Concrete code-level evidence is
+  sufficient; neither a production incident nor a numerical measurement is
+  required. Hypothetical scaling concerns, possible future abstractions, and
+  other speculative improvements remain observations in the report and create
+  no beads, including future beads.
+- The specialist judges whether its evidence demonstrates a problem. Python
+  requires nonempty problem and evidence fields for submitted findings and
+  publishes that explicit list; it does not classify prose, extract tasks from
+  report observations, or invoke an additional evidence-review agent.
+- Publish those findings as pending unless explicitly deferred. Archon still
+  approves execution. Specialist default implementation model is Sol/high unless
+  its approved policy selects another supported model; persist it on the
   resulting beads and permit normal Archon revision.
 - Retain reports, including explicit empty findings. Publication retries reuse
   the report and occurrence without repeating model analysis.
@@ -937,6 +952,10 @@ actual desktop and Tollgate boundaries described in Manual QA.
   pair handoff, and unavailable helper observations retaining the reservation.
 - Test future-work exclusion, default pending findings, partial intake, stable
   retries, graph changes, unsupported model settings, and title restoration.
+- Verify specialist prompts include the evidence requirement and allow zero
+  findings. Reject submitted findings without problem or evidence fields;
+  report observations alone must never create beads. These checks establish the
+  publication contract, not the semantic quality of a model's evidence.
 - Advance an injected clock through downtime, delayed specialist dispatch,
   publication failure, single-round interviews, collection timeout, and no
   duplicate recurring occurrences or repeat interviews. Expire pending
@@ -1043,6 +1062,10 @@ that recovery preserves identity, authority, and completed work.
 - Make Sage and project Inquisitors overdue. Verify one occurrence per policy,
   normal capacity accounting, whole-project Inquisitor scope, and pending
   findings that still require Archon approval before implementation.
+- Give a specialist a concrete code defect and a speculative future scaling
+  concern. Inspect its report and published findings: the defect may become a
+  pending task with evidence; the unsupported scaling concern remains a report
+  observation. A report with no demonstrated problems creates no beads.
 - Request a single Sage interview round with an active subject, an archived
   subject, and an unavailable subject. Verify idle-only delivery, correct prior
   archival restoration, no new questions, and one Sage continuation containing
