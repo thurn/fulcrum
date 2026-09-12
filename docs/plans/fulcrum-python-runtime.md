@@ -152,8 +152,10 @@ uncertainty instead of retrying an operation that might already have happened.
   information before sending the request. Prefer creation without a first turn.
 - Persist the returned ID, set the canonical title, and register the task before
   starting model work. No model turn is needed to discover its own identity.
-- On a lost response, reconcile through supported request evidence and targeted
-  history; use bounded discovery only when the ID itself is unavailable.
+- On a lost response, make one automatic reconciliation pass through supported
+  request evidence and targeted history. When the ID is unavailable, use at most
+  one supported filtered discovery request; do not broaden filters or paginate
+  through unrelated conversations to search for a match.
 - Exactly one corroborated match can resolve an unknown creation. Multiple
   matches are an exception. An empty list or elapsed time does not prove the
   request was rejected.
@@ -162,12 +164,26 @@ uncertainty instead of retrying an operation that might already have happened.
 - Do not use a matching prompt alone as proof when identical prompts could
   legitimately occur; require the intended task, baseline turn history, and
   available operation correlation.
+- If that pass cannot establish the result, hold the affected work, retain the
+  operation and any reservation or message batch, and expose one operator-action
+  condition in local status and the dashboard. Record that the pass was used so
+  a restart does not repeat discovery. If disconnected, wait for reconnection
+  before the pass; an unavailable endpoint is not evidence about the operation.
+- The condition identifies the attempted operation, retained evidence, and what
+  the operator must resolve: attach the actual task/turn or establish that the
+  request did not take effect before permitting a retry. Use the explicit local
+  admin path; do not wake agents to search or guess. Unrelated approved work may
+  continue within remaining capacity and applicable holds.
 
 ```text
 turn/start response lost
 reservation and message batch remain unresolved
 thread/read identifies the accepted turn after the retained baseline
 controller attaches that turn; no second message is sent
+
+otherwise: result still ambiguous after the bounded pass
+controller retains the reservation and shows one operator action
+restart preserves the hold; no broader search or duplicate send occurs
 ```
 
 Endpoint failure disables new managed starts. The controller reconnects and
@@ -486,9 +502,10 @@ acknowledge unseen updates. Validate decisions against current scope and holds;
 stale decisions remain historical and return a concise conflict for resolution.
 
 A lost send response leaves the batch unresolved until runtime reconciliation.
-Never resend solely because the agent has not acknowledged it yet. If its turn
-ends without a required outcome, use the shared completion-recovery policy. The
-same unchanged exception does not create repeated Archon wakes.
+Apply the single-pass and operator-resolution rule above; never resend solely
+because the agent has not acknowledged it yet. If its confirmed turn ends
+without a required outcome, use the shared completion-recovery policy. The same
+unchanged exception does not create repeated Archon wakes.
 
 ## Finish Commands and Lifecycle Hooks
 
@@ -825,6 +842,9 @@ ask whether work is still happening.
   needs explicit authority and an ownership path supported by existing tools.
 - Reconcile interrupted operations before retry. Retain the same operation ID,
   expected inputs, observed result, and next action across controller restarts.
+- Ambiguous runtime requests use the single automatic reconciliation pass above.
+  An exhausted pass remains held for operator resolution across restarts;
+  periodic recovery must not reopen discovery or turn it into an Archon loop.
 - A controller crash cannot create a second scheduler: the process lock and
   reconciliation gate precede dispatch after service restart.
 
@@ -934,6 +954,10 @@ actual desktop and Tollgate boundaries described in Manual QA.
 - Deliver idle and terminal notifications in both orders. Lose creation and send
   responses before persistence, replay events after restart, and verify no
   duplicate starts, lost batches, or premature capacity release.
+- Leave a runtime request ambiguous after its single reconciliation pass.
+  Verify one operator condition, retained reservation/batch, no expanded search
+  or restart-triggered repeat pass, and continued unrelated approved work when
+  remaining capacity permits.
 - Test busy-recipient coalescing, full-capacity scheduling suppression,
   exception delivery, explicit deferral, and updates arriving during a
   recipient's turn.
@@ -1040,6 +1064,11 @@ that recovery preserves identity, authority, and completed work.
 - Lose creation and turn-start responses, disconnect the controller, and replay
   events after restart. Verify one task and one accepted batch, or explicit
   unresolved state with retained capacity; never an optimistic duplicate retry.
+- Leave one lost response unresolved after bounded reconciliation. Verify the
+  operator action names the operation and missing evidence, survives restart,
+  and holds only affected work subject to its retained capacity and conflicts.
+  Resolve it through the local admin path using the actual external result;
+  no search agent or duplicate runtime request should be created.
 - Omit finish once with working hooks and once with unavailable hooks. Each
   attempt gets at most one correction total. A second failure creates one
   exception; a Plan-mode authoring stop gets none.
