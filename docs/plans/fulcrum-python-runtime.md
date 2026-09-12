@@ -80,7 +80,7 @@ for Codex, Tollgate, Git, or Beads.
 
 - Beads remains the editable issue source of truth. Store approved scope
   snapshots and actual execution facts in SQLite, not another editable tracker.
-- Python owns registrations, scheduling decisions, reservations, outcome
+- Python owns registrations, recorded scheduling approvals, reservations, outcome
   records, pending messages, recurring occurrences, and delivery obligations.
 - Agents invoke narrow commands. They do not edit operational records, set their
   own completion flags, or write another role's state.
@@ -359,7 +359,8 @@ the current installation:
 ```sh
 fulcrum weaver register --model sol
 fulcrum instructions
-fulcrum --dispatch 17 intake --input tasks.json
+fulcrum --dispatch 17 intake --title "Fix empty search results" \
+  --description "Show an empty-state message when search returns no matches; preserve matching results. Verify both cases."
 fulcrum --dispatch 17 finish intake_complete
 ```
 
@@ -385,8 +386,32 @@ Plan-mode agent to bypass its restrictions or silently postpone the name if the
 trigger is unavailable. Report that specific capability gap. Documents, beads,
 and source changes still require the approved writable authoring phase.
 
-- Standalone intake requires project, title, intended outcome, bounded scope,
-  and acceptance criteria. Dependencies and context are included when needed.
+- Small-task filing takes one `intake` command with a title and short description
+  stating the intended change, bounded scope, and what counts as done. Do not
+  require separate outcome/scope/acceptance fields, a Markdown plan, a JSON file,
+  helper reviews, or an extra model turn to record an already-understood task.
+  The author supplies meaningful content; Python checks required fields without
+  invoking a model to expand or classify the description.
+- Infer the project and selected Executor model from the registered authoring
+  context. Accept `--project` when the project is ambiguous; never guess among
+  multiple projects. A human may also file directly with
+  `fulcrum intake --project <project> --model sol --title <title>
+  --description <description>` without creating a Weaver conversation. Direct
+  filing is an explicit local CLI operation, grants no scheduling approval, and
+  uses the same intake handler. Managed authoring retains its dispatch binding;
+  specialist findings retain their evidence-backed publication contract.
+- Optional `--depends-on <bead-id>` arguments and `--context <reference>` supply
+  dependencies and supporting material. Use `intake --input tasks.json` for a
+  substantial plan's complete task graph; both forms share validation and native
+  publication code. Weaver is useful for clarification and substantial planning,
+  not a mandatory extra conversation before filing a small task.
+- Return the actual Beads ID and current publication/scheduling status after
+  durable local filing. Do not wait for remote pushes, Archon acknowledgment,
+  runtime task creation, or execution. Python retains ownership of remaining publication
+  obligations and exposes failures in status; filing success is not dispatch
+  readiness. Eligibility still enforces required publication and scope facts.
+  Filing during an authoring turn does not end that turn; the existing finish
+  command closes the author's work when done.
 - All tasks, including tasks from plans and specialists, are pending by default.
   Only explicit future designation excludes them from scheduling proposals.
 - Pending means eligible for Archon consideration. It does not approve work.
@@ -503,6 +528,42 @@ stored content; additions or material scope changes require a new decision.
 Python may start approved work, route review and repairs, and resume bounded
 recovery without another approval for each turn.
 
+### Fast filing and dispatch
+
+Separate durable filing, scheduling approval, and execution startup. Filing
+records pending work immediately; it neither waits for approval nor creates a
+new planning conversation. An approved run's next eligible action goes directly
+through Python to dispatch, without another Archon decision or preparation turn.
+New unapproved work normally needs one concise Archon decision before startup.
+
+When Archon is idle and relevant execution capacity is available, deliver the
+actionable scheduling brief immediately, including whatever updates are already
+pending. Do not wait to collect a larger wave. Arrivals while Archon is busy
+accumulate for its next useful brief, under the frozen-batch rules below.
+The brief includes current usage and unfinished assignments, approved waiting
+work, new proposals with their exact scope/dependencies, and the decisions needed.
+Straightforward approvals should not require discovery calls or a conversation
+with Weaver. Large evidence can remain linked; approval scope must be complete.
+
+React to filing, approval, observed turn/helper completion, dependency changes,
+and released capacity or holds. Re-evaluate affected work and advance eligible
+approved actions promptly; do not place polling intervals or batching delays
+between an approval and dispatch, between pair handoffs, or between sequential
+approved tasks. These events do not themselves require an Archon turn. Preserve
+the full-capacity suppression and explicit approval rules; speed does not grant
+authority or bypass constraints.
+
+Target subsecond local small-task filing and Python scheduling bookkeeping in a
+healthy development environment. This is an implementation target, not a measured
+claim or an end-to-end model-start guarantee. Measure command-to-durable-Beads-ID
+latency and event-to-dispatch-request latency separately from Archon reasoning,
+native worktree preparation, runtime task creation, and model startup. Report
+external preparation time explicitly, rather than hiding it in a bookkeeping
+measurement. Record timings in the existing disposable integration flow; no new
+benchmark service, speculative prewarming, or pool of idle agents is required.
+
+### Dispatch eligibility and ordering
+
 Before every managed start, recheck activation, dependencies, unique ownership,
 project health, holds, conflicts, capacity, and current approval. Prefer
 Archon's recorded ordering. At equal priority, resume actionable started work
@@ -593,10 +654,13 @@ fleet tasks. A durable outgoing queue survives busy recipients and restarts.
   findings, and distinct requested actions.
 - Assemble one bounded batch when the recipient can use it. Do not send new task
   input while that recipient or its native helpers are active.
-- Coalesce ordinary Archon updates for up to 30 seconds before an eligible
-  delivery. Actionable pair handoffs need no artificial delay.
-- Urgent exceptions bypass the coalescing delay but still wait for an idle
-  Archon. Apply required operational holds immediately in Python.
+- Deliver useful updates immediately when Archon is idle and their actionability
+  conditions hold. Batch updates already pending; do not add a timer to collect
+  more arrivals. Busy recipients provide natural batching. Actionable pair
+  handoffs likewise have no artificial delay.
+- Urgent exceptions remain deliverable even when execution capacity is full,
+  but still wait for an idle Archon. Apply required operational holds immediately
+  in Python.
 - Include concise action items, counts, and links to complete records. Never
   silently omit part of the scope Archon is being asked to approve.
 - Suppress scheduling-only delivery when there is no eligible project/global
@@ -1245,7 +1309,8 @@ Every agent-result transition still waits for normal turn/helper completion.
    selection. Replace the operational portions of `records.py`/`state.py` rather
    than dual-writing their JSON files. Exit with restart persistence, rejected
    stale/foreign dispatches, and a runnable foreground daemon for development.
-3. **Complete one real bead end to end.** Wire Weaver intake, one Archon-approved
+3. **Complete one real bead end to end.** Wire single-command small-task intake
+   and the shared graph-intake handler, one Archon-approved
    assignment, Executor submission, independent Overseer review, and native
    delivery/closure. Use packaged prompts through `context.py` and the concrete
    finish forms. Reuse `beads.py`/`brain.py` native publication helpers,
@@ -1255,7 +1320,8 @@ Every agent-result transition still waits for normal turn/helper completion.
 4. **Add scheduling and bounded recovery.** Adapt `eligibility.py` and
    `coordination.py` for approved runs, capacity, composed holds, idle-only
    batches, and the transition table above. Completion requires the existing
-   full delivery contract. Add the shared
+   full delivery contract. Deliver actionable briefs without a batching timer
+   and dispatch approved actions directly on relevant events. Add the shared
    one-correction allowance and operator resolution for ambiguous operations.
    Exit with the relevant failure matrix below passing.
 5. **Add soft, hard, and reset reboot.** Implement the exact behaviors above,
@@ -1294,6 +1360,8 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Small-task filing through authoring context and direct human CLI | One command returns a durable Beads ID; no plan/file/helper/extra conversation required; remote publication failure remains Python-owned; exact scope still needs Archon approval |
+| Idle Archon receives eligible new work; approved work becomes runnable | Immediate useful scheduling brief with complete approval scope; approved actions dispatch without another Archon turn or artificial delay; record local and external startup timings separately |
 | Two starts race; idle and terminal events arrive in either order | Unique bead ownership and pair reservation; no handoff before parent/helpers terminate |
 | Creation/send response is lost or events replay after restart | Attach a corroborated result once, or retain reservation/batch and one operator condition after the bounded pass; no expanded search or repeat send |
 | Busy Archon, full capacity, changing updates, and mid-turn additions | Idle-only useful batches; decisions cannot acknowledge unseen updates; deferral does not cause identical wakes |
@@ -1322,10 +1390,13 @@ configuration, and isolated brain, state, and remotes.
    that same task without converting the invoking conversation.
 2. Invoke Weaver with `sol` in Plan Mode. Verify immediate canonical naming via
    controller activation, no authoring publication/finish obligation, and the
-   same numeral after writable approval. Publish one small documentation bead.
+   same numeral after writable approval. File one small documentation bead using
+   the single-command title/description form and record time to its durable ID.
 3. Verify the bead stays pending until Archon approves its exact scope. Start
    Executor in the Python-created Tollgate worktree with the correct model and
-   a complete action brief, without an Overseer preparation turn.
+   a complete action brief, without an Overseer preparation turn. Measure filing
+   to Archon dispatch, Archon decision time, Python bookkeeping, native preparation,
+   and runtime/model startup separately; verify no deliberate batching delay.
 4. Submit the candidate and call the generated finish command. Delay parent or
    helper completion and verify Overseer does not start; then review the exact
    candidate independently and approve with explicit repair permissions.
