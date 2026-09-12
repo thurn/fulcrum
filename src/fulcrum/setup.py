@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, cast
 
 from fulcrum.config import RuntimePaths
 from fulcrum.coordination import enroll_project
 from fulcrum.records import (
     InstallationRecord,
+    HoldsJobsRecord,
     Project,
     ProjectRegistryRecord,
     RoleRun,
@@ -18,6 +19,7 @@ from fulcrum.records import (
 )
 from fulcrum.roles import initialize_progress
 from fulcrum.state import atomic_write_record, read_record, selected_record_path
+from fulcrum.watchman import ensure_recurring_jobs
 
 
 class SetupError(RuntimeError):
@@ -34,6 +36,13 @@ def _timestamp(value: object, label: str) -> str:
     if parsed.tzinfo is None:
         raise SetupError(f"{label} must include a timezone")
     return value
+
+
+def _timestamp_value(value: object, label: str) -> datetime:
+    timestamp = _timestamp(value, label)
+    return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(
+        timezone.utc
+    )
 
 
 def _text(value: object, label: str) -> str:
@@ -88,7 +97,7 @@ def _merge_roles(
             for role in roles
             if role["role"] == desired["role"] and role["task_id"] != desired["task_id"]
         ]
-        if conflicts:
+        if conflicts and desired["role"] != "archon":
             raise SetupError(f"conflicting {desired['role']} registration exists")
         roles = [role for role in roles if role["task_id"] != desired["task_id"]]
         roles.append(desired)
@@ -152,7 +161,7 @@ def _merge_projects(
 
 
 def bootstrap_fleet(paths: RuntimePaths, value: object) -> dict[str, Any]:
-    """Create or reconcile the initial role and project registries."""
+    """Create or reconcile all persistent state required for fleet patrols."""
 
     if not isinstance(value, dict):
         raise SetupError("bootstrap input must be an object")
@@ -160,6 +169,11 @@ def bootstrap_fleet(paths: RuntimePaths, value: object) -> dict[str, Any]:
     installation = read_record(paths, "installation")
     if installation["record_kind"] != "installation":
         raise SetupError("installation record is unavailable")
+    installation = cast(InstallationRecord, installation)
+    configured_anchor = value.get("sage_cadence_anchor")
+    if configured_anchor is None:
+        configured_anchor = installation["observations"].get("sage_cadence_anchor")
+    sage_anchor = _timestamp_value(configured_anchor, "sage_cadence_anchor")
     archon = _human_role(value.get("archon"), "archon")
     watchman = _human_role(value.get("watchman"), "night_watchman")
     if archon["task_id"] == watchman["task_id"]:
@@ -208,16 +222,61 @@ def bootstrap_fleet(paths: RuntimePaths, value: object) -> dict[str, Any]:
             }
         ),
     )
-    atomic_write_record(paths, registry)
-    atomic_write_record(paths, project_registry)
-    progress_path = selected_record_path(
-        paths, "progress", cast(str, archon["task_id"])
+
+    holds_path = selected_record_path(paths, "holds_jobs", None)
+    if holds_path.is_file():
+        loaded_holds = read_record(paths, "holds_jobs")
+        if loaded_holds["record_kind"] != "holds_jobs":
+            raise SetupError("invalid holds/jobs registry")
+        holds_jobs = cast(HoldsJobsRecord, loaded_holds)
+    else:
+        holds_jobs = cast(
+            HoldsJobsRecord,
+            validate_record(
+                {
+                    "record_kind": "holds_jobs",
+                    "schema_version": 1,
+                    "writer_id": cast(str, archon["task_id"]),
+                    "updated_at": now,
+                    "holds": [],
+                    "recurring_jobs": [],
+                }
+            ),
+        )
+    holds_jobs["writer_id"] = cast(str, archon["task_id"])
+    holds_jobs = ensure_recurring_jobs(
+        holds_jobs,
+        sage_anchor=sage_anchor,
+        enabled_project_ids=[
+            project["project_id"]
+            for project in project_registry["projects"]
+            if project["enabled"]
+        ],
+        now=now,
     )
-    if not progress_path.is_file():
-        progress = initialize_progress(archon, now)
+
+    progress_records = []
+    for role, action in (
+        (archon, "Complete fleet bootstrap and readiness gate"),
+        (watchman, "Run the hourly patrol and report meaningful changes"),
+    ):
+        progress_path = selected_record_path(
+            paths, "progress", cast(str, role["task_id"])
+        )
+        if progress_path.is_file():
+            progress_records.append(read_record(paths, "progress", role["task_id"]))
+            continue
+        progress = initialize_progress(role, now)
         progress["phase"] = "implementing"
-        progress["expected_next_action"] = "Complete fleet bootstrap and readiness gate"
-        atomic_write_record(paths, progress)
+        progress["expected_next_action"] = action
+        progress_records.append(progress)
+
+    records = [registry, project_registry, holds_jobs, *progress_records]
+    try:
+        for record in records:
+            atomic_write_record(paths, record)
+    except Exception as error:
+        raise SetupError(f"fleet bootstrap state write failed: {error}") from error
     return {
         "ok": not problems,
         "current_archon_task_id": archon["task_id"],

@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fulcrum.config import RuntimePaths
 from fulcrum.setup import SetupError, bootstrap_fleet, record_setup_evidence
@@ -29,7 +30,7 @@ class SetupTest(unittest.TestCase):
                 "state_root": str(self.paths.state_root),
                 "host_id": "local",
                 "configured_services": ["beads", "codex", "hooks", "tollgate"],
-                "observations": {},
+                "observations": {"sage_cadence_anchor": "2026-09-11T08:00:00Z"},
             },
         )
 
@@ -80,7 +81,7 @@ class SetupTest(unittest.TestCase):
             "authorization_reference": "user invoked setup in this task",
         }
 
-    def test_bootstrap_is_idempotent_and_initializes_archon_progress(self) -> None:
+    def test_bootstrap_is_idempotent_and_initializes_patrol_state(self) -> None:
         first = bootstrap_fleet(self.paths, self.input())
         second = bootstrap_fleet(self.paths, self.input())
         self.assertTrue(first["ok"])
@@ -94,6 +95,121 @@ class SetupTest(unittest.TestCase):
         self.assertTrue(all(project["enabled"] for project in projects["projects"]))
         progress = read_record(self.paths, "progress", "task-archon")
         self.assertEqual(progress["role"], "archon")
+        watchman_progress = read_record(self.paths, "progress", "task-watchman")
+        self.assertEqual(watchman_progress["role"], "night_watchman")
+        jobs = read_record(self.paths, "holds_jobs")
+        self.assertEqual(jobs["holds"], [])
+        self.assertEqual(
+            [job["job_id"] for job in jobs["recurring_jobs"]],
+            [
+                "sage:fleet",
+                "inquisitor:battlement",
+                "inquisitor:fulcrum",
+                "inquisitor:tollgate",
+            ],
+        )
+        self.assertEqual(
+            {job["job_id"]: job["next_due"] for job in jobs["recurring_jobs"]},
+            {
+                "sage:fleet": "2026-09-11T08:00:00Z",
+                "inquisitor:battlement": "2026-09-11T20:00:00Z",
+                "inquisitor:fulcrum": "2026-09-11T20:00:00Z",
+                "inquisitor:tollgate": "2026-09-11T20:00:00Z",
+            },
+        )
+
+    def test_bootstrap_reconciles_partial_patrol_state_without_erasing_holds(
+        self,
+    ) -> None:
+        bootstrap_fleet(self.paths, self.input())
+        jobs = read_record(self.paths, "holds_jobs")
+        jobs["holds"].append(
+            {
+                "hold_id": "incident:startup",
+                "scope": "fleet",
+                "reason": "startup investigation",
+                "release_condition": "investigation complete",
+                "permitted_exceptions": [],
+            }
+        )
+        jobs["recurring_jobs"] = jobs["recurring_jobs"][:1]
+        atomic_write_record(self.paths, jobs)
+        (self.paths.state_root / "progress" / "task-watchman.json").unlink()
+
+        bootstrap_fleet(self.paths, self.input())
+
+        reconciled = read_record(self.paths, "holds_jobs")
+        self.assertEqual(reconciled["holds"][0]["hold_id"], "incident:startup")
+        self.assertEqual(len(reconciled["recurring_jobs"]), 4)
+        self.assertEqual(
+            len({job["job_id"] for job in reconciled["recurring_jobs"]}),
+            4,
+        )
+        self.assertEqual(
+            read_record(self.paths, "progress", "task-watchman")["role"],
+            "night_watchman",
+        )
+
+    def test_bootstrap_reconciles_handover_with_historical_archon_and_stale_owner(
+        self,
+    ) -> None:
+        bootstrap_fleet(self.paths, self.input())
+        roles = read_record(self.paths, "role_run_registry")
+        roles["current_archon_task_id"] = "task-current-archon"
+        current_archon = dict(
+            next(role for role in roles["roles"] if role["role"] == "archon")
+        )
+        current_archon["task_id"] = "task-current-archon"
+        current_archon["title"] = "Fulcrum Current Archon"
+        roles["roles"].append(current_archon)
+        roles["writer_id"] = "task-current-archon"
+        atomic_write_record(self.paths, roles, handover_from="task-archon")
+
+        handover = self.input()
+        handover["archon"] = self.role("archon", "task-current-archon")
+        bootstrap_fleet(self.paths, handover)
+
+        reconciled_roles = read_record(self.paths, "role_run_registry")
+        archons = [
+            role["task_id"]
+            for role in reconciled_roles["roles"]
+            if role["role"] == "archon"
+        ]
+        self.assertEqual(archons, ["task-archon", "task-current-archon"])
+        self.assertEqual(
+            reconciled_roles["current_archon_task_id"], "task-current-archon"
+        )
+        reconciled_jobs = read_record(self.paths, "holds_jobs")
+        self.assertEqual(reconciled_jobs["writer_id"], "task-current-archon")
+        self.assertEqual(len(reconciled_jobs["recurring_jobs"]), 4)
+
+    def test_bootstrap_requires_explicit_sage_anchor(self) -> None:
+        self.paths.config_file.write_text(
+            self.paths.config_file.read_text().replace(
+                '"sage_cadence_anchor": "2026-09-11T08:00:00Z"',
+                '"other": "configured"',
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(SetupError, "sage_cadence_anchor is required"):
+            bootstrap_fleet(self.paths, self.input())
+
+    def test_partial_bootstrap_write_is_not_reported_as_success(self) -> None:
+        writes = 0
+
+        def fail_after_first(*args: object, **kwargs: object) -> object:
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError("interrupted bootstrap")
+            return atomic_write_record(*args, **kwargs)  # type: ignore[arg-type]
+
+        with patch("fulcrum.setup.atomic_write_record", side_effect=fail_after_first):
+            with self.assertRaisesRegex(SetupError, "state write failed"):
+                bootstrap_fleet(self.paths, self.input())
+        self.assertFalse(
+            (self.paths.state_root / "registry" / "projects.json").exists()
+        )
 
     def test_unhealthy_project_is_retained_disabled(self) -> None:
         result = bootstrap_fleet(self.paths, self.input(healthy=False))
