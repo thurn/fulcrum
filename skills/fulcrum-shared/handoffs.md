@@ -5,6 +5,12 @@ completion report is a separate one-way message: send it at most once to the
 current Archon when routable, do not await acknowledgement, and do not create
 progress, assignment, or delivery-retry state.
 
+Handoffs are direct messages to the exact registered recipient. Fulcrum roles
+must not call Codex `wait_threads` or `mcp__codex_app__wait_threads` to await
+delivery, inspect a zero-timeout snapshot, babysit another task, resolve an
+uncertain handoff, or wait for a current-turn result. Use one-shot inspection
+when needed and retain the expected next actor/action in progress.
+
 1. Check the recipient's resolved task/host ID and current bead/run/candidate.
    Record intended actor/action, handoff_needed=true, handoff_sent=false before
    sending. Include approved scope, evidence, and the exact requested action.

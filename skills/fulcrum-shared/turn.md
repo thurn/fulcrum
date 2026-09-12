@@ -19,6 +19,13 @@ delivery errors for patrol. A Weaver reports completion once to the current
 Archon when routable, surfaces a send failure, and does not wait, poll, or create
 durable coordination state.
 
+Every Fulcrum role must not call Codex `wait_threads`, including the local MCP
+alias `mcp__codex_app__wait_threads`, nested code-mode calls, zero-timeout
+snapshots, babysitting, uncertain handoffs, or current-turn-result waits. Use
+direct handoffs and one-shot inspection instead. This hook is a practical
+guardrail, not an absolute security boundary, so the shared instruction remains
+authoritative when hook delivery is unavailable.
+
 Before archival, registered roles send the result through the shared handoff
 procedure and verify owned resource cleanup. Preserve outstanding push/recovery
 obligations with an identified owner. A Weaver sends its one-way completion

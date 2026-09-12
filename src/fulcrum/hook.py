@@ -13,6 +13,13 @@ from fulcrum.records import InterviewRecord, ProgressRecord, load_record
 from fulcrum.state import read_record
 
 MAX_CONTEXT_CHARACTERS = 3600
+WAIT_THREADS_TOOL_NAMES: frozenset[str] = frozenset(
+    {"wait_threads", "mcp__codex_app__wait_threads"}
+)
+WAIT_THREADS_DENIAL_REASON = (
+    "Fulcrum roles must not use wait_threads; use direct handoffs and one-shot "
+    "inspection instead."
+)
 TERMINAL_OR_INACTIVE_PHASES = {
     "canceled",
     "cancelled",
@@ -62,6 +69,46 @@ def _event_task_id(event: Mapping[str, Any]) -> str | None:
 
     value = event.get("session_id")
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _is_exactly_registered_role(paths: RuntimePaths, task_id: str) -> bool:
+    """Return true only for one resolved role with this exact task identity."""
+
+    try:
+        loaded = read_record(paths, "role_run_registry")
+    except Exception:
+        return False
+    if loaded["record_kind"] != "role_run_registry":
+        return False
+    roles = loaded.get("roles")
+    if not isinstance(roles, list):
+        return False
+    matches = [
+        role
+        for role in roles
+        if isinstance(role, dict)
+        and role.get("task_id") == task_id
+        and role.get("identity_state") == "resolved"
+    ]
+    return len(matches) == 1
+
+
+def _pre_tool_use_response(
+    paths: RuntimePaths, event: Mapping[str, Any]
+) -> dict[str, Any]:
+    tool_name = event.get("tool_name")
+    if not isinstance(tool_name, str) or tool_name not in WAIT_THREADS_TOOL_NAMES:
+        return {"continue": True}
+    task_id = _event_task_id(event)
+    if task_id is None or not _is_exactly_registered_role(paths, task_id):
+        return {"continue": True}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": WAIT_THREADS_DENIAL_REASON,
+        }
+    }
 
 
 def _memory_excerpt(memory: Mapping[str, Any]) -> str | None:
@@ -170,9 +217,11 @@ def _stop_response(paths: RuntimePaths, event: Mapping[str, Any]) -> dict[str, A
 
 
 def handle_event(event: Mapping[str, Any], *, paths: RuntimePaths) -> dict[str, Any]:
-    """Return the documented response for the two supported lifecycle events."""
+    """Return the documented response for supported Codex hook events."""
 
     name = event.get("hook_event_name")
+    if name == "PreToolUse":
+        return _pre_tool_use_response(paths, event)
     if name == "SessionStart":
         return _compact_context(paths, event)
     if name == "Stop":

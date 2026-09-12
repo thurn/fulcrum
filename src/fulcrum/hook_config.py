@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 FULCRUM_STATUS_PREFIX = "Fulcrum:"
+WAIT_THREADS_MATCHER = "^(wait_threads|mcp__codex_app__wait_threads)$"
 
 
 def _is_fulcrum_handler(handler: object) -> bool:
@@ -30,8 +31,9 @@ def _remove_fulcrum_handlers(groups: object) -> list[dict[str, Any]]:
         if not isinstance(handlers, list):
             retained.append(group)
             continue
+        had_fulcrum_handler = any(_is_fulcrum_handler(item) for item in handlers)
         group["hooks"] = [item for item in handlers if not _is_fulcrum_handler(item)]
-        if group["hooks"]:
+        if group["hooks"] or not had_fulcrum_handler:
             retained.append(group)
     return retained
 
@@ -48,6 +50,7 @@ def merged_hook_config(existing: object, hook_command: Path) -> dict[str, Any]:
     hooks = cast(dict[str, Any], dict(raw_hooks))
     session_groups = _remove_fulcrum_handlers(hooks.get("SessionStart", []))
     stop_groups = _remove_fulcrum_handlers(hooks.get("Stop", []))
+    pre_tool_use_groups = _remove_fulcrum_handlers(hooks.get("PreToolUse", []))
     command = shlex.quote(str(hook_command.expanduser().absolute()))
     session_groups.append(
         {
@@ -75,8 +78,22 @@ def merged_hook_config(existing: object, hook_command: Path) -> dict[str, Any]:
             ]
         }
     )
+    pre_tool_use_groups.append(
+        {
+            "matcher": WAIT_THREADS_MATCHER,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 2,
+                    "statusMessage": "Fulcrum: prohibiting wait_threads",
+                }
+            ],
+        }
+    )
     hooks["SessionStart"] = session_groups
     hooks["Stop"] = stop_groups
+    hooks["PreToolUse"] = pre_tool_use_groups
     result["hooks"] = hooks
     return result
 

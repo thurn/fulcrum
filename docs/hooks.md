@@ -1,8 +1,9 @@
 # Fulcrum Lifecycle Hooks
 
-Fulcrum uses two small Codex hook behaviors: a short refresher after context
-compaction and a bounded reminder when an Executor or Overseer may have
-forgotten a handoff. The Sage uses existing logs to assess whether these help.
+Fulcrum uses three small Codex hook behaviors: a short refresher after context
+compaction, a bounded reminder when an Executor or Overseer may have forgotten
+a handoff, and a narrow guardrail against a recurring `wait_threads` misuse. The
+Sage uses existing logs to assess whether these help.
 
 Hooks support the role skills. They do not verify the entire workflow, inspect
 every tool call, or make scheduling and promotion decisions.
@@ -25,12 +26,14 @@ Enable only the hooks that address demonstrated problems:
 | --- | --- | --- |
 | `SessionStart`, matching `compact` | Restore important role instructions and current context. | After compaction. |
 | `Stop` | Remind an implementation pair to communicate before stopping. | Normal stops; intervenes only in active Executor/Overseer runs. |
+| `PreToolUse`, matching `wait_threads` | Deny the wait tool for an exactly registered Fulcrum role. | Before a matching tool call. |
 
 Initial role context comes from invoking the role skill. There is no routine
-per-prompt refresher, per-tool policy check, or extra helper-start prompt.
+per-prompt refresher, broad per-tool policy check, or extra helper-start prompt.
 The installed stop handler also receives unrelated root-task stops, but
 returns immediately without a reminder for those tasks and Plan-mode
-interviews. Codex does not provide a role matcher for `Stop`.
+interviews. Codex does not provide a role matcher for `Stop`; the `PreToolUse`
+matcher is narrow and tool-specific.
 
 The configured command is `~/.codex/hooks/fulcrum/fulcrum-hook`. Its parent is
 a symlink into the retained Fulcrum Git checkout, where the wrapper starts the
@@ -42,7 +45,7 @@ information is not a reason to invent task state or block the fleet.
 
 `~/.codex/hooks.json` may contain unrelated user hooks, so it is never replaced
 or symlinked into Fulcrum. Installation preserves that file and maintains only
-the two marked command definitions; mutable Fulcrum behavior stays behind the
+the three marked command definitions; mutable Fulcrum behavior stays behind the
 linked directory.
 
 ## Refresh After Compaction
@@ -92,6 +95,22 @@ additionalContextLimit = 1000
 The Archon remains a persistent user-created task. Fresh-task handover remains
 available when drift or runtime problems warrant it; there is no automatic
 weekly replacement.
+
+## Prohibit `wait_threads` for Fulcrum roles
+
+The `PreToolUse` handler matches only the canonical Codex tool name
+`wait_threads` and the local MCP alias `mcp__codex_app__wait_threads`. Before
+either call runs, it reads the existing role registry and denies the call only
+when `session_id` exactly identifies one resolved registered Fulcrum role. This
+also covers a matching tool call nested inside code-mode execution. Unknown,
+missing, malformed, or ambiguous registration fails open so unrelated tasks are
+not blocked.
+
+The guardrail applies to every registered role class and has no exceptions for
+babysitting, zero-timeout snapshots, uncertain handoffs, or current-turn
+results. It does not block `list_threads`, `read_thread`, messaging, ordinary
+shell waits, Tollgate waits, or collaboration-agent waits. Those operations
+remain available through direct handoffs and one-shot inspection.
 
 ## Bounded Handoff Reminder
 
@@ -171,7 +190,7 @@ implement or enable by default:
 
 | Opportunity | Why it is omitted |
 | --- | --- |
-| Broad `PreToolUse` policies | Frequent execution, brittle command interpretation, and overlap with skills and Tollgate. A specific recurring mistake could justify a narrow check later. |
+| Broad `PreToolUse` policies | Frequent execution, brittle command interpretation, and overlap with skills and Tollgate. The one narrow `wait_threads` guard is limited to the demonstrated recurring mistake. |
 | `UserPromptSubmit` refresher | Role activation and compaction refresh supply context without repeating instructions every turn. |
 | `SubagentStart` or `SubagentStop` policy | The parent supplies the assignment; native completion returns the result. |
 | Messaging-result `PostToolUse` receipts | Extra matching and state machinery exceeds what a reminder needs. |
@@ -188,7 +207,8 @@ every lifecycle event needs instrumentation.
 
 Install one Fulcrum hook source through Codex's supported review/trust flow.
 Keep existing unrelated hooks intact. Resolve real task identity during setup;
-do not apply private role context based only on a repository path or title.
+do not apply private role context or the wait guardrail based only on a
+repository path or title.
 
 The helpers run synchronously with short explicit timeouts, normally two
 seconds as a ceiling rather than a performance target. Keep them local and
@@ -197,8 +217,10 @@ start services, run builds, or commit and push from a hook.
 
 The inspected CLI reports hooks as stable and enabled, but actual desktop
 loading and event delivery still need verification. Unknown or failed hook
-coverage must not be presented as working protection. Role skills, Codex's
-normal permissions, and Tollgate remain in effect when hooks are unavailable.
+coverage must not be presented as working protection. This is a practical
+guardrail, not an absolute security boundary: specialized tool paths or an
+untrusted/unavailable hook can bypass it. Role skills, Codex's normal
+permissions, and Tollgate remain in effect when hooks are unavailable.
 
 Keep validation focused: verify a real desktop compaction receives the brief
 refresher; a disposable Executor receives at most one handoff reminder; an

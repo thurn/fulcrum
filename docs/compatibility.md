@@ -125,11 +125,11 @@ The installed desktop integration exposes these separate contracts:
 | Select models | Task creation and follow-up accept only listed model/reasoning combinations; preserve returned task/host IDs rather than inferring them from titles. | Required for authorized dispatch. |
 | List and identify | `list_threads` returns task ID, host, status, project context, title, and retrieval summary. | Required for identity recovery. |
 | Message | `send_message_to_thread` accepts exact task ID, optional host, prompt, and optional model/reasoning override. | Required for handoffs. |
-| Read and wait | `read_thread` reads recent turns; `wait_threads` waits on exact task IDs and returns cursors/status. | Required for coordination; not transcript scraping. |
+| Read and inspect | `read_thread` reads recent turns and `list_threads` provides one-shot task state. Fulcrum roles must not call `wait_threads` or the local MCP alias `mcp__codex_app__wait_threads`. | Required for coordination; not transcript scraping. |
 | Archive | `set_thread_archived` archives or restores an exact task. | Required for lifecycle cleanup. |
 | Scheduled wakes | Desktop `automation_update` supports an in-thread heartbeat or a standalone project cron task. | Required only when recurring work is enabled. |
 | Observe existing desktop work | Task listing/reading and, during active voice only, foreground screen capture can observe some runtime state. Coverage is partial and availability may change. | Optional observation; never a dispatch prerequisite. |
-| Hooks | `SessionStart` can match source `compact` and add bounded context; `Stop` receives `stop_hook_active` and can request one continuation with `decision: block`. | Planned, but delivery must be tested in Task 14. |
+| Hooks | `SessionStart` can match source `compact`, `Stop` receives `stop_hook_active`, and `PreToolUse` can deny a matching MCP tool before execution. | Installed guardrails remain subject to trust and desktop-delivery verification. |
 | Remote viewing | The CLI accepts authenticated `ws://`/`wss://` app-server transports, but no non-loopback endpoint or remote authentication is configured here. | Optional and unsupported in this baseline. |
 
 Official OpenAI documentation confirms that hooks are enabled by default,
@@ -140,9 +140,11 @@ and `Stop` has no matcher and can continue a turn once. See
 The installed CLI and desktop tool schemas are the authority for the exact
 fields recorded above.
 
-Desktop hook loading and delivery were not changed or exercised during this
-read-only audit. Until Task 14 verifies real `SessionStart` and `Stop` events,
-skills and persisted progress—not hooks—remain the workflow protection.
+Desktop hook loading and delivery were not exercised during this audit. Until
+the user reviews the definition in `/hooks` and verifies real `SessionStart`,
+`Stop`, and `PreToolUse` events, skills and persisted progress—not hooks—remain
+the workflow protection. The wait guard is practical rather than an absolute
+security boundary.
 
 ## Setup checklist and owned follow-up probes
 

@@ -8,8 +8,13 @@ import unittest
 from pathlib import Path
 
 from fulcrum.config import RuntimePaths
-from fulcrum.hook import HANDOFF_REMINDER, handle_event
-from fulcrum.hook_config import install_hook_source
+from fulcrum.hook import (
+    HANDOFF_REMINDER,
+    WAIT_THREADS_DENIAL_REASON,
+    WAIT_THREADS_TOOL_NAMES,
+    handle_event,
+)
+from fulcrum.hook_config import WAIT_THREADS_MATCHER, install_hook_source
 from fulcrum.state import atomic_write_record
 
 
@@ -71,6 +76,104 @@ class HookTest(unittest.TestCase):
             "permission_mode": "default",
             **values,
         }
+
+    def pre_tool_event(
+        self, task_id: str, tool_name: str, **values: object
+    ) -> dict[str, object]:
+        return {
+            "hook_event_name": "PreToolUse",
+            "session_id": task_id,
+            "tool_name": tool_name,
+            "tool_input": {"timeout_ms": 0},
+            "permission_mode": "plan",
+            **values,
+        }
+
+    def test_pre_tool_use_denies_wait_threads_for_every_registered_role(self) -> None:
+        role_names = (
+            "archon",
+            "executor",
+            "inquisitor",
+            "night_watchman",
+            "overseer",
+            "sage",
+            "weaver",
+        )
+        roles = [
+            dict(
+                self.registry["roles"][0],
+                role=role_name,
+                task_id=f"task-{role_name}",
+                role_number=index,
+            )
+            for index, role_name in enumerate(role_names, start=1)
+        ]
+        atomic_write_record(self.paths, dict(self.registry, roles=roles))
+
+        for role in roles:
+            for tool_name in WAIT_THREADS_TOOL_NAMES:
+                with self.subTest(role=role["role"], tool_name=tool_name):
+                    result = handle_event(
+                        self.pre_tool_event(role["task_id"], tool_name),
+                        paths=self.paths,
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "deny",
+                                "permissionDecisionReason": WAIT_THREADS_DENIAL_REASON,
+                            }
+                        },
+                    )
+
+    def test_pre_tool_use_matches_only_exact_wait_tool_names_and_sessions(self) -> None:
+        for tool_name in (
+            "list_threads",
+            "read_thread",
+            "mcp__codex_app__list_threads",
+            "mcp__codex_app__wait_threads_extra",
+            "wait_threads ",
+        ):
+            with self.subTest(tool_name=tool_name):
+                self.assertEqual(
+                    handle_event(
+                        self.pre_tool_event("task-executor", tool_name),
+                        paths=self.paths,
+                    ),
+                    {"continue": True},
+                )
+        self.assertEqual(
+            handle_event(
+                self.pre_tool_event("unrelated-task", "wait_threads"),
+                paths=self.paths,
+            ),
+            {"continue": True},
+        )
+        self.assertEqual(
+            handle_event(
+                self.pre_tool_event("task-executor", "wait_threads", source="nested"),
+                paths=self.paths,
+            )["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+
+    def test_pre_tool_use_fails_open_for_missing_or_malformed_registration(
+        self,
+    ) -> None:
+        event = self.pre_tool_event("task-executor", "wait_threads")
+        self.assertEqual(
+            handle_event({**event, "session_id": None}, paths=self.paths),
+            {"continue": True},
+        )
+        self.assertEqual(
+            handle_event({**event, "tool_name": None}, paths=self.paths),
+            {"continue": True},
+        )
+        registry_path = self.paths.state_root / "registry" / "roles.json"
+        registry_path.write_text("not-json", encoding="utf-8")
+        self.assertEqual(handle_event(event, paths=self.paths), {"continue": True})
 
     def test_compaction_uses_exact_identity_and_bounded_context(self) -> None:
         result = handle_event(
@@ -164,7 +267,14 @@ class HookTest(unittest.TestCase):
                         "Stop": [
                             {"hooks": [{"type": "command", "command": "/other/hook"}]}
                         ],
-                        "PreToolUse": [{"matcher": "Bash", "hooks": []}],
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [
+                                    {"type": "command", "command": "/other/bash"}
+                                ],
+                            }
+                        ],
                     },
                 }
             ),
@@ -179,7 +289,14 @@ class HookTest(unittest.TestCase):
             twice["hooks"]["Stop"][0]["hooks"][0]["command"], "/other/hook"
         )
         self.assertEqual(len(twice["hooks"]["Stop"]), 2)
-        self.assertIn("PreToolUse", twice["hooks"])
+        self.assertEqual(
+            twice["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "/other/bash",
+        )
+        self.assertEqual(
+            twice["hooks"]["PreToolUse"][1]["matcher"], WAIT_THREADS_MATCHER
+        )
+        self.assertEqual(len(twice["hooks"]["PreToolUse"]), 2)
 
 
 if __name__ == "__main__":

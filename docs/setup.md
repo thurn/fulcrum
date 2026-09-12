@@ -213,10 +213,12 @@ The command creates `fulcrum-*` symlinks under the selected Codex skills
 directory and a `hooks/fulcrum` symlink under the same Codex home. Every link
 points directly into the retained checkout. It also creates
 `<codex-home>/bin/fulcrum` pointing to the checkout's editable `.venv` command.
-It merges two small handler entries into the user-level hooks file while
-preserving unrelated hooks. Running the command twice is a no-op for links and
-does not create roles, schedules, services, or project registrations. It never
-restarts Beads.
+It merges three small handler entries into the user-level hooks file while
+preserving unrelated hooks. The third is a narrow `PreToolUse` guard for the
+canonical `wait_threads` name and local `mcp__codex_app__wait_threads` alias;
+it denies only for an exactly registered Fulcrum role. Running the command
+twice is a no-op for links and does not create roles, schedules, services, or
+project registrations. It never restarts Beads.
 
 Edits to a linked skill or hook script are visible immediately. The editable
 Python install likewise uses the checkout's current `src/fulcrum` code on the
@@ -233,9 +235,9 @@ directory is known to be on `PATH`. Fulcrum does not pull Git, synchronize
 dependencies on each invocation, or hot-reload an already running process.
 
 The user-level `hooks.json` remains a stable merge point because it may contain
-unrelated hooks. Fulcrum owns only its two marked definitions there; all mutable
-behavior is reached through the linked `hooks/fulcrum` directory. Never replace
-or symlink the whole hooks file.
+unrelated hooks. Fulcrum owns only its three marked definitions there; all
+mutable behavior is reached through the linked `hooks/fulcrum` directory. Never
+replace or symlink the whole hooks file.
 
 The Archon and Night Watchman task IDs must come from human-created Codex tasks
 and use human model authorization in the role registry. After the Watchman task
@@ -265,9 +267,11 @@ manager.
 
 When installation changes the user-level hook definition, it marks hook trust
 as requiring review. Use `/hooks` in Codex to inspect and trust that definition,
-then perform the compact/Stop desktop exercise. Re-running an unchanged install
-does not invalidate already recorded trust, and editing the linked hook
-implementation does not require reinstalling it. Never use a trust bypass as
+then perform the compact/Stop/`wait_threads` desktop exercise with both a
+registered role and an unrelated task. Re-running an unchanged install does
+not invalidate already recorded trust, and editing the linked hook
+implementation does not require reinstalling it. The guard is a practical
+guardrail, not an absolute security boundary; never use a trust bypass as
 readiness evidence.
 
 ## Guided fleet bootstrap

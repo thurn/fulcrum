@@ -12,7 +12,7 @@ from typing import Any, Literal, TypedDict, cast
 
 from fulcrum.brain import brain_status
 from fulcrum.config import RuntimePaths
-from fulcrum.hook_config import FULCRUM_STATUS_PREFIX
+from fulcrum.hook_config import FULCRUM_STATUS_PREFIX, WAIT_THREADS_MATCHER
 from fulcrum.install import LINKED_SKILLS, ROLES, SETUP_SKILLS, runtime_package_root
 from fulcrum.records import (
     ExecutorEvidenceRecord,
@@ -81,29 +81,67 @@ def _hooks_check(path: Path, expected_command: Path) -> Check:
         if not isinstance(value, dict) or not isinstance(value.get("hooks"), dict):
             raise ValueError("missing hooks object")
         hooks = cast(dict[str, Any], value["hooks"])
-        marked = []
+        marked: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         for event in ("SessionStart", "Stop"):
             groups = hooks.get(event, [])
             if isinstance(groups, list):
                 for group in groups:
                     if isinstance(group, dict) and isinstance(group.get("hooks"), list):
                         marked.extend(
-                            handler
+                            (
+                                event,
+                                cast(dict[str, Any], group),
+                                handler,
+                            )
                             for handler in group["hooks"]
                             if isinstance(handler, dict)
                             and str(handler.get("statusMessage", "")).startswith(
                                 FULCRUM_STATUS_PREFIX
                             )
                         )
-        if len(marked) != 2:
-            raise ValueError(f"expected two Fulcrum handlers, found {len(marked)}")
-        if any(handler.get("timeout") != 2 for handler in marked):
+        pre_tool_use_groups = hooks.get("PreToolUse", [])
+        if isinstance(pre_tool_use_groups, list):
+            for group in pre_tool_use_groups:
+                if not isinstance(group, dict) or not isinstance(
+                    group.get("hooks"), list
+                ):
+                    continue
+                marked.extend(
+                    (
+                        "PreToolUse",
+                        cast(dict[str, Any], group),
+                        handler,
+                    )
+                    for handler in group["hooks"]
+                    if isinstance(handler, dict)
+                    and str(handler.get("statusMessage", "")).startswith(
+                        FULCRUM_STATUS_PREFIX
+                    )
+                )
+        counts = Counter(event for event, _, _ in marked)
+        expected_counts = Counter({"SessionStart": 1, "Stop": 1, "PreToolUse": 1})
+        if counts != expected_counts:
+            raise ValueError(
+                "expected one Fulcrum handler for each SessionStart, Stop, and "
+                f"PreToolUse event, found {dict(counts)}"
+            )
+        if any(handler.get("timeout") != 2 for _, _, handler in marked):
             raise ValueError("Fulcrum handlers do not use the two-second ceiling")
         if any(
             shlex.split(str(handler.get("command", ""))) != [str(expected_command)]
-            for handler in marked
+            for _, _, handler in marked
         ):
             raise ValueError("Fulcrum handlers do not use the repository hook link")
+        pre_tool_use = [
+            (group, handler)
+            for event, group, handler in marked
+            if event == "PreToolUse"
+        ]
+        if len(pre_tool_use) != 1:
+            raise ValueError("expected one Fulcrum PreToolUse handler")
+        pre_group, _ = pre_tool_use[0]
+        if pre_group.get("matcher") != WAIT_THREADS_MATCHER:
+            raise ValueError("Fulcrum PreToolUse matcher is not wait_threads-only")
         return _check("required", "hooks_config", "pass", str(path))
     except Exception as error:
         return _check("required", "hooks_config", "fail", str(error))

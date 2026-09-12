@@ -268,6 +268,19 @@ class InstallDoctorTest(unittest.TestCase):
         self.assertFalse(second["hook_retrust_required"])
         self.assertFalse(second["database_restarted"])
 
+    def test_doctor_requires_the_narrow_wait_threads_guard(self) -> None:
+        self.prepare_valid_fleet_state()
+        config = json.loads(self.hooks.read_text(encoding="utf-8"))
+        config["hooks"]["PreToolUse"][0]["matcher"] = "^wait_threads$"
+        self.hooks.write_text(json.dumps(config), encoding="utf-8")
+
+        report = self.run_doctor()
+
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertFalse(report["ready"])
+        self.assertEqual(checks["hooks_config"]["status"], "fail")
+        self.assertIn("matcher", checks["hooks_config"]["detail"])
+
     def test_unsupported_schema_is_preserved(self) -> None:
         incompatible = b'{"record_kind":"installation","schema_version":44}\n'
         self.paths.config_file.write_bytes(incompatible)
