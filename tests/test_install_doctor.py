@@ -80,6 +80,9 @@ class InstallDoctorTest(unittest.TestCase):
         first = self.install()
         first_assignment = assignment_path.read_bytes()
         first_jobs = jobs_path.read_bytes()
+        installed = json.loads(self.paths.config_file.read_text())
+        installed["observations"]["skill_revision"] = "obsolete"
+        self.paths.config_file.write_text(json.dumps(installed), encoding="utf-8")
         second = self.install()
         self.assertEqual(first_assignment, assignment_path.read_bytes())
         self.assertEqual(first_jobs, jobs_path.read_bytes())
@@ -89,6 +92,7 @@ class InstallDoctorTest(unittest.TestCase):
             ["beads", "codex", "hooks", "tollgate"],
         )
         self.assertEqual(installation["observations"]["package_version"], "0.4.0")
+        self.assertNotIn("skill_revision", installation["observations"])
         self.assertEqual(len(json.loads(self.hooks.read_text())["hooks"]["Stop"]), 1)
         self.assertEqual(len(first["skill_links"]), len(LINKED_SKILLS))
         for name in LINKED_SKILLS:

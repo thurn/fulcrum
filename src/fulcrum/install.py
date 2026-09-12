@@ -197,6 +197,7 @@ def install_runtime(
     install_hook_source(hooks_config, hook_command)
     hook_config_changed = previous_hook_config != hooks_config.read_bytes()
     observations = dict(current["observations"]) if current is not None else {}
+    observations.pop("skill_revision", None)
     observations.update(
         {
             "package_version": __version__,
