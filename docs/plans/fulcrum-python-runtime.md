@@ -288,13 +288,16 @@ create Watchman. Return the new Archon link and any incomplete action.
 
 ### Canonical names
 
-Python allocates names before managed work starts. Use one persistent increasing
-numeral sequence for numbered threads. Each non-Archon managed thread receives
-its own allocation, including each member of an Executor/Overseer pair. Archon
-has no numeral and consumes no allocation. Never recycle an allocated numeral,
-including after archival or failed provisioning. The explicit `--reset` wipe is
-the exception: its next numbered thread begins at 1. Soft and hard reboot continue
-the existing sequence; runtime task IDs distinguish old archived conversations.
+Python allocates names before managed work starts. Keep a separate persistent
+increasing counter for each numbered role: `WVR`, `EXE`, `OVR`, `SAGE`, and `INQ`.
+Each counter starts at 1, so `SAGE0001` and `INQ0001` can coexist. Creating a thread
+advances only its role's counter. Each member of an Executor/Overseer pair receives
+an allocation from its own role's counter; pairing does not require matching
+numbers. Archon has no counter or allocation. Never recycle a number within its
+role, including after archival or failed provisioning. The explicit `--reset`
+wipe is the exception: each role's next allocation starts at 1. Soft and hard
+reboot preserve all role counters; runtime task IDs distinguish old archived
+conversations.
 
 Archon's title is exactly `👑 ARCHON 👑`, with no description or number. Other
 titles use `<emoji> [<ROLE><number>] <concise description>`, with uppercase role
@@ -1167,8 +1170,9 @@ are explicitly resolved by an operator.
   the inventory appear clean.
 - Preserve projects, plans, Beads identities/dependencies, model constraints,
   strategic memory, cadence anchors, and historical review/delivery evidence.
-- Initialize the numeral counter above all historical allocated numerals.
-  Historical names remain history; new managed names follow the shared sequence.
+- Initialize each role's counter above that role's historical allocated numerals,
+  or at 1 if none exist. Historical names remain history; new managed names use
+  independent role counters.
 - Disable Watchman's heartbeat, legacy specialist launch paths, and legacy
   scheduler ownership before enabling the controller. Verify their disablement.
   Remove the Watchman automation through its supported interface, archive its
@@ -1245,7 +1249,7 @@ columns; bounded outcome payloads and approved scope can be JSON/text.
 
 | Records | Required identity and invariant |
 | --- | --- |
-| Tasks and name allocations | Unique native task ID; one global increasing sequence with a separate allocation per non-Archon thread; Archon has none; pair relationship stored explicitly |
+| Tasks and name allocations | Unique native task ID; persistent counter per numbered role; unique (role, number) allocation per thread, allocated atomically; Archon has none; pair relationship stored explicitly |
 | Runs and assignments | Ordered approved beads and scope snapshot; at most one unfinished assignment per bead; current Executor/Overseer bindings |
 | Dispatches and outcomes | Immutable task/action/scope binding, delivered prompt, native turn ID, attempt/correction link; one accepted outcome per dispatch |
 | Reservations and holds | At most one unreleased dispatch per pair; global/project counts derive from reservations; holds do not erase assignment stage |
@@ -1365,7 +1369,7 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
-| Registration, rename, compaction, reboot, and number above 9999 | Exact role emoji/code/brackets/spacing; at least four digits without rollover; separate pair allocations persist; Archon remains exactly `👑 ARCHON 👑` without consuming a number |
+| Registration, rename, compaction, reboot, and number above 9999 | Exact role emoji/code/brackets/spacing; at least four digits without rollover; concurrent same-role registrations get distinct numbers; `SAGE0001` and `INQ0001` coexist; registration advances only its role's counter; allocations persist; Archon remains exactly `👑 ARCHON 👑` without consuming a number |
 | Small-task filing through authoring context and direct human CLI | One command returns a durable Beads ID; no plan/file/helper/extra conversation required; remote publication failure remains Python-owned; exact scope still needs Archon approval |
 | Idle Archon receives eligible new work; approved work becomes runnable | Immediate useful scheduling brief with complete approval scope; approved actions dispatch without another Archon turn or artificial delay; record local and external startup timings separately |
 | Two starts race; idle and terminal events arrive in either order | Unique bead ownership and pair reservation; no handoff before parent/helpers terminate |
@@ -1415,6 +1419,6 @@ Then exercise two projects and sequential beads, compaction, native helper
 termination, source repair, and all three reboot modes. For reset, seed plans,
 beads, memory, histories, queues, and dirty disposable worktrees; verify removal
 locally and through native brain synchronization, with a fresh `👑 ARCHON 👑`
-and the next numbered role receiving `0001`. Preserve measured timings and
+and each numbered role's next allocation receiving `0001`. Preserve measured timings and
 unavailable capabilities. Mock success records
 cannot replace these native checks or establish automatic Weaver activation.
