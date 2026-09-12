@@ -82,6 +82,8 @@ class InstallDoctorTest(unittest.TestCase):
         first_jobs = jobs_path.read_bytes()
         installed = json.loads(self.paths.config_file.read_text())
         installed["observations"]["skill_revision"] = "obsolete"
+        installed["observations"]["package_version"] = "obsolete"
+        installed["observations"]["source_revision"] = "obsolete"
         self.paths.config_file.write_text(json.dumps(installed), encoding="utf-8")
         second = self.install()
         self.assertEqual(first_assignment, assignment_path.read_bytes())
@@ -91,8 +93,9 @@ class InstallDoctorTest(unittest.TestCase):
             installation["configured_services"],
             ["beads", "codex", "hooks", "tollgate"],
         )
-        self.assertEqual(installation["observations"]["package_version"], "0.4.0")
         self.assertNotIn("skill_revision", installation["observations"])
+        self.assertNotIn("package_version", installation["observations"])
+        self.assertNotIn("source_revision", installation["observations"])
         self.assertEqual(len(json.loads(self.hooks.read_text())["hooks"]["Stop"]), 1)
         self.assertEqual(len(first["skill_links"]), len(LINKED_SKILLS))
         for name in LINKED_SKILLS:
@@ -199,7 +202,6 @@ class InstallDoctorTest(unittest.TestCase):
         )
         self.paths.config_file.write_text(json.dumps(config), encoding="utf-8")
         with (
-            patch("fulcrum.doctor.source_revision", return_value=self.revision),
             patch("fulcrum.doctor._tool_version", return_value="version"),
             patch(
                 "fulcrum.doctor._tollgate_project_status",

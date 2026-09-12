@@ -219,7 +219,6 @@ class EmergencyTest(unittest.TestCase):
                 service_restored=False,
                 provisional_reviewed=True,
                 normally_certified=False,
-                installed_version_matches=False,
             ),
             "install_reviewed_provisional_repair",
         )
@@ -228,7 +227,6 @@ class EmergencyTest(unittest.TestCase):
                 service_restored=True,
                 provisional_reviewed=True,
                 normally_certified=False,
-                installed_version_matches=False,
             ),
             "certify_normally",
         )
@@ -237,7 +235,6 @@ class EmergencyTest(unittest.TestCase):
                 service_restored=True,
                 provisional_reviewed=True,
                 normally_certified=True,
-                installed_version_matches=True,
             ),
             "cleanup_emergency_resources",
         )

@@ -268,12 +268,10 @@ def emergency_next_step(
     service_restored: bool,
     provisional_reviewed: bool,
     normally_certified: bool,
-    installed_version_matches: bool,
 ) -> Literal[
     "review_provisional_repair",
     "install_reviewed_provisional_repair",
     "certify_normally",
-    "reconcile_installed_version",
     "cleanup_emergency_resources",
 ]:
     """Keep provisional repair distinct from normal certification and cleanup."""
@@ -284,6 +282,4 @@ def emergency_next_step(
         return "install_reviewed_provisional_repair"
     if not normally_certified:
         return "certify_normally"
-    if not installed_version_matches:
-        return "reconcile_installed_version"
     return "cleanup_emergency_resources"

@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-from fulcrum import __version__
 from fulcrum.config import RuntimePaths
 from fulcrum.hook_config import install_hook_source
 from fulcrum.records import InstallationRecord, load_record, validate_record
@@ -183,7 +182,7 @@ def install_runtime(
     """Install assets and config without touching the brain or active run records."""
 
     observed_at = now or utc_now()
-    verified_revision = verify_certified_source(source_root, certified_revision)
+    verify_certified_source(source_root, certified_revision)
     current = _load_installation(paths.config_file)
     if current is not None:
         if Path(current["brain_root"]).resolve() != paths.brain_root.resolve():
@@ -198,10 +197,10 @@ def install_runtime(
     hook_config_changed = previous_hook_config != hooks_config.read_bytes()
     observations = dict(current["observations"]) if current is not None else {}
     observations.pop("skill_revision", None)
+    observations.pop("package_version", None)
+    observations.pop("source_revision", None)
     observations.update(
         {
-            "package_version": __version__,
-            "source_revision": verified_revision,
             "installed_source_root": str(source_root.resolve()),
             "skills_root": str(skills_root.resolve(strict=False)),
             "hook_link": str(hook_link),
@@ -238,8 +237,6 @@ def install_runtime(
     atomic_write_record(paths, record)
     return {
         "ok": True,
-        "package_version": __version__,
-        "source_revision": verified_revision,
         "skill_links": [str(path) for path in skill_links],
         "hook_link": str(hook_link),
         "hook_source": str(hooks_config.resolve()),

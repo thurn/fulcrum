@@ -301,8 +301,8 @@ rejected.
 
 The passing doctor fixture uses three Git/Codex/Tollgate mappings, human-marked
 resolved Archon and Watchman identities, one externally observed hourly
-schedule, Beads-returned connectivity, matching package/source identity,
-repository links, and no push obligations. Failure output is partitioned into
+schedule, Beads-returned connectivity, repository links, and no push
+obligations. Failure output is partitioned into
 `required_failures`, `optional_gaps`, and `push_failures`.
 
 Read-only live checks on 2026-09-11 observed Beads 1.2.2, Dolt 2.2.0, a running

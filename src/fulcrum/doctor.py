@@ -8,7 +8,6 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
-from fulcrum import __version__
 from fulcrum.brain import brain_status
 from fulcrum.config import RuntimePaths
 from fulcrum.hook_config import FULCRUM_STATUS_PREFIX
@@ -22,7 +21,6 @@ from fulcrum.records import (
     load_record,
 )
 from fulcrum.state import read_record
-from fulcrum.version import source_revision
 
 
 class Check(TypedDict):
@@ -306,19 +304,6 @@ def doctor_runtime(
             "checks": [failure],
         }
     observations = installation["observations"]
-    revision = source_revision()
-    configured_revision = observations.get("source_revision")
-    versions_match = observations.get("package_version") == __version__ and (
-        revision is None or revision == configured_revision
-    )
-    checks.append(
-        _check(
-            "required",
-            "installed_version",
-            "pass" if versions_match else "fail",
-            f"package={__version__}; runtime_source={revision}; configured_source={configured_revision}",
-        )
-    )
     missing_setup_skills = [
         skill
         for skill in SETUP_SKILLS
