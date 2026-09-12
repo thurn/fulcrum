@@ -289,31 +289,36 @@ create Watchman. Return the new Archon link and any incomplete action.
 ### Canonical names
 
 Python allocates names before managed work starts. Use one persistent increasing
-numeral sequence. An Executor/Overseer pair shares one allocated numeral; every
-other managed task receives its own. Never recycle an allocated numeral,
+numeral sequence for numbered threads. Each non-Archon managed thread receives
+its own allocation, including each member of an Executor/Overseer pair. Archon
+has no numeral and consumes no allocation. Never recycle an allocated numeral,
 including after archival or failed provisioning. The explicit `--reset` wipe is
-the exception: its new fleet begins at 1. Soft and hard reboot continue the
-existing sequence; runtime task IDs distinguish old archived conversations.
+the exception: its next numbered thread begins at 1. Soft and hard reboot continue
+the existing sequence; runtime task IDs distinguish old archived conversations.
 
-Use these role prefixes and a concise description:
+Archon's title is exactly `👑 ARCHON 👑`, with no description or number. Other
+titles use `<emoji> [<ROLE><number>] <concise description>`, with uppercase role
+codes `WVR`, `EXE`, `OVR`, `SAGE`, and `INQ`. Zero-pad the number to at least four
+digits (`0001`, `0134`); values above `9999` expand without truncation or rollover.
+Use exactly these emojis and spacing:
 
 ```text
-👑 Archon 1 — Fleet scheduling
-🧵 Weaver 2 — Simplify search indexing
-⚒️ Executor 3 — Search indexing
-🔎 Overseer 3 — Search indexing
-🦉 Sage 4 — Workflow postmortem
-🧐 Inquisitor 5 — Fulcrum architecture
+👑 ARCHON 👑
+🧵 [WVR0002] Simplify search indexing
+⚒️ [EXE0134] Search indexing
+🔎 [OVR0029] Search indexing
+📖 [SAGE0017] Workflow postmortem
+🛡️ [INQ0085] Fulcrum architecture
 ```
 
-Runtime ID remains authoritative. Preserve numeral and role prefix through
-compaction, restart, restore, and description changes. Python stores the pair
-relationship separately. Native subagents are helpers within a parent task and
-do not receive fleet numerals.
+Runtime ID remains authoritative. Preserve the allocated number and role code
+through compaction, restart, restore, and description changes. Python stores the pair
+relationship explicitly; matching numbers or descriptions do not identify pairs.
+Native subagents are helpers within a parent task and do not receive fleet numerals.
 
 If a managed title changes unexpectedly, reconcile it to the retained role,
-numeral, and approved description on the next relevant event. Do not perform a
-fleet-wide rename scan on every tick. Publish and verify the name before
+number, and approved description, or Archon's fixed title, on the next relevant
+event. Do not perform a fleet-wide rename scan on every tick. Publish and verify the name before
 reporting registration complete.
 
 ### Model policy
@@ -485,7 +490,7 @@ Retaining the exact dispatched input for operation reconciliation remains
 required; it is not a mechanism for constructing later prompts as deltas.
 
 ```text
-You are Overseer 3. Review candidate c-42 for bead fc-31.
+You are OVR0029. Review candidate c-42 for bead fc-31.
 Scope and source references are attached; inspect the actual changes.
 Return approved, changes_requested, or incomplete using fulcrum finish.
 Do not contact Executor or operate Tollgate. End after finish succeeds.
@@ -1033,7 +1038,7 @@ Sage first uses retained evidence, then may request one consolidated interview
 per selected task per postmortem. There is no follow-up questioning round.
 
 ```text
-Sage records requests for Executor 3 and Overseer 3, then ends
+Sage records requests for EXE0134 and OVR0029, then ends
 Python queues each interview until eligible and available
 subjects answer once through finish; Python restores prior archival state
 Sage resumes once with answers and explicitly missing responses
@@ -1240,7 +1245,7 @@ columns; bounded outcome payloads and approved scope can be JSON/text.
 
 | Records | Required identity and invariant |
 | --- | --- |
-| Tasks and name allocations | Unique native task ID; one global increasing name allocation; pair members reference the same allocation |
+| Tasks and name allocations | Unique native task ID; one global increasing sequence with a separate allocation per non-Archon thread; Archon has none; pair relationship stored explicitly |
 | Runs and assignments | Ordered approved beads and scope snapshot; at most one unfinished assignment per bead; current Executor/Overseer bindings |
 | Dispatches and outcomes | Immutable task/action/scope binding, delivered prompt, native turn ID, attempt/correction link; one accepted outcome per dispatch |
 | Reservations and holds | At most one unreleased dispatch per pair; global/project counts derive from reservations; holds do not erase assignment stage |
@@ -1360,6 +1365,7 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Registration, rename, compaction, reboot, and number above 9999 | Exact role emoji/code/brackets/spacing; at least four digits without rollover; separate pair allocations persist; Archon remains exactly `👑 ARCHON 👑` without consuming a number |
 | Small-task filing through authoring context and direct human CLI | One command returns a durable Beads ID; no plan/file/helper/extra conversation required; remote publication failure remains Python-owned; exact scope still needs Archon approval |
 | Idle Archon receives eligible new work; approved work becomes runnable | Immediate useful scheduling brief with complete approval scope; approved actions dispatch without another Archon turn or artificial delay; record local and external startup timings separately |
 | Two starts race; idle and terminal events arrive in either order | Unique bead ownership and pair reservation; no handoff before parent/helpers terminate |
@@ -1408,6 +1414,7 @@ configuration, and isolated brain, state, and remotes.
 Then exercise two projects and sequential beads, compaction, native helper
 termination, source repair, and all three reboot modes. For reset, seed plans,
 beads, memory, histories, queues, and dirty disposable worktrees; verify removal
-locally and through native brain synchronization, with a fresh Archon numbered
-1. Preserve measured timings and unavailable capabilities. Mock success records
+locally and through native brain synchronization, with a fresh `👑 ARCHON 👑`
+and the next numbered role receiving `0001`. Preserve measured timings and
+unavailable capabilities. Mock success records
 cannot replace these native checks or establish automatic Weaver activation.
