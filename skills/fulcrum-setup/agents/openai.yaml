@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fulcrum Setup"
+  short_description: "Verify and bootstrap a Fulcrum fleet"
+  default_prompt: "Use $fulcrum-setup to verify and bootstrap this Fulcrum fleet."

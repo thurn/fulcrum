@@ -207,8 +207,9 @@ python3.12 -m venv /absolute/retained/fulcrum/.venv
   --codex-projects-verified-at 2026-09-11T19:45:00Z
 ```
 
-The command installs all seven role skills under Fulcrum-owned skill
-directories, merges the two handlers into one hook source, records package,
+The command installs all seven role skills and the `fulcrum-setup` bootstrap
+skill under Fulcrum-owned skill directories, merges the two handlers into one
+hook source, records package,
 source, and skill revisions, and preserves unrelated skills and hooks. Running
 it twice is expected and does not create roles, schedules, services, or project
 registrations. It never restarts Beads. Existing active runs retain their
@@ -245,6 +246,38 @@ Hook definitions are hash-trusted. Every install marks hook trust as requiring
 review: use `/hooks` in Codex to inspect and trust the exact new definition,
 then perform the compact/Stop desktop exercise. Never use a trust bypass as
 readiness evidence.
+
+## Guided fleet bootstrap
+
+Invoke `$fulcrum-setup` in the human-created task that should become the first
+Archon. The skill performs the repeatable preflight, discovers current Codex and
+Tollgate identities, and uses `fulcrum setup bootstrap --input <file>` to create
+the initial owned role and project registries. It cannot create either
+persistent role: the invoking task supplies the human-created Archon identity,
+and the user creates the distinct Watchman task when prompted.
+
+The skill inspects existing automations, applies the idempotent Watchman plan
+through Codex's supported automation API, and records the returned schedule ID.
+Hook configuration is machine-verifiable, but trust and desktop delivery remain
+a human checkpoint in `/hooks`. After the exact hook hash has been trusted and
+exercised, `fulcrum setup record-evidence` records the optional timestamp and
+human evidence without claiming that CLI execution proves desktop delivery.
+When that exercise is unavailable, the same command records project and
+schedule evidence while leaving the documented hook fallback visible.
+
+The checked-in readiness matrix retains its historical evidence. To evaluate
+the current machine, save `fulcrum doctor` JSON outside the repository and
+overlay only its four runtime-dependent rows:
+
+```sh
+fulcrum readiness \
+  --matrix /absolute/retained/fulcrum/docs/readiness-evidence.json \
+  --doctor-report /absolute/temporary/doctor.json
+```
+
+Required doctor failures remain failures; optional desktop/runtime observations
+may remain unsupported only with their documented fallbacks. A ready result lets
+the invoking task load `$archon` and continue as the first coordinator.
 
 Before a supported record conversion, Fulcrum writes the original installation
 record under `state/backups/`. The only automatic conversion is the explicit

@@ -340,3 +340,19 @@ unsupported rows with explicit skill/patrol and reported-state fallbacks. Every
 other infrastructure row passes. No separate production pilot, Dashboard code,
 Dashboard UI fork, service, or production Dashboard bead was created; Task 21
 remains blocked.
+
+## Guided Fulcrum setup skill
+
+The `fulcrum-setup` skill is installed alongside the seven role skills. Its
+bootstrap command accepts only two distinct explicitly human-created roles,
+preserves an existing current Archon, validates exactly three fresh project
+mappings through the enrollment helper, retains unhealthy projects as disabled,
+and initializes only the new Archon's owned progress. Repeating the same input
+does not duplicate roles or projects.
+
+Schedule and hook observations are recorded separately after the skill has used
+supported Codex automation inspection and the user has reviewed the exact hook
+hash in `/hooks`. The evidence writer refuses a non-current Archon or a registry
+without exactly one resolved human Watchman. Live readiness overlays only the
+four runtime-dependent rows of the historical matrix and fails closed when a
+doctor check is missing or failing.

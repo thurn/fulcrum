@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -84,3 +86,107 @@ def load_and_evaluate(path: Path) -> dict[str, Any]:
             f"could not read readiness matrix {path}: {error}"
         ) from error
     return evaluate_readiness(value)
+
+
+def apply_doctor_evidence(
+    value: object, doctor: object, *, observed_at: str | None = None
+) -> dict[str, Any]:
+    """Overlay live diagnostics on the runtime-dependent gate entries."""
+
+    baseline = evaluate_readiness(value)
+    if not isinstance(doctor, dict) or not isinstance(doctor.get("checks"), list):
+        raise ReadinessError("doctor report must contain checks")
+    checks: dict[str, dict[str, Any]] = {}
+    for raw in doctor["checks"]:
+        if not isinstance(raw, dict) or not isinstance(raw.get("name"), str):
+            raise ReadinessError("doctor report contains an invalid check")
+        name = cast(str, raw["name"])
+        if name in checks:
+            raise ReadinessError(f"doctor report contains duplicate check {name}")
+        checks[name] = cast(dict[str, Any], raw)
+
+    matrix = deepcopy(value)
+    if not isinstance(matrix, dict) or not isinstance(matrix.get("entries"), list):
+        raise ReadinessError("readiness matrix requires entries")
+
+    def passed(*names: str) -> bool:
+        return all(checks.get(name, {}).get("status") == "pass" for name in names)
+
+    def details(*names: str) -> str:
+        return "; ".join(
+            f"{name}: {checks.get(name, {}).get('detail', 'missing')}" for name in names
+        )
+
+    updates = {
+        "human-roles-schedule": (
+            (
+                "pass"
+                if passed("human_role_enrollment", "watchman_hourly_schedule")
+                else "fail"
+            ),
+            details("human_role_enrollment", "watchman_hourly_schedule"),
+        ),
+        "initial-project-registry": (
+            "pass" if passed("initial_project_integrations") else "fail",
+            details("initial_project_integrations"),
+        ),
+        "desktop-hooks": (
+            "pass" if passed("desktop_hook_delivery") else "unsupported",
+            details("desktop_hook_delivery"),
+        ),
+        "runtime-visibility": (
+            "pass" if passed("runtime_observation") else "unsupported",
+            details("runtime_observation"),
+        ),
+    }
+    seen_updates: set[str] = set()
+    for raw in matrix["entries"]:
+        if not isinstance(raw, dict) or raw.get("id") not in updates:
+            continue
+        identifier = cast(str, raw["id"])
+        status, detail = updates[identifier]
+        raw["status"] = status
+        raw["detail"] = detail
+        evidence = raw.get("evidence")
+        if isinstance(evidence, list):
+            evidence.append("live fulcrum doctor report")
+        seen_updates.add(identifier)
+    missing = set(updates) - seen_updates
+    if missing:
+        raise ReadinessError(
+            "readiness matrix is missing runtime entries: " + ", ".join(sorted(missing))
+        )
+    required_failures = doctor.get("required_failures")
+    if not isinstance(required_failures, list):
+        raise ReadinessError("doctor report must contain required_failures")
+    doctor_ready = doctor.get("ready") is True and not required_failures
+    matrix["entries"].append(
+        {
+            "id": "live-doctor",
+            "requirement": "All current required Fulcrum diagnostics pass",
+            "required": True,
+            "status": "pass" if doctor_ready else "fail",
+            "detail": (
+                "all required doctor checks pass"
+                if doctor_ready
+                else "required doctor failures remain"
+            ),
+            "evidence": ["live fulcrum doctor report"],
+        }
+    )
+    matrix["evaluated_at"] = observed_at or datetime.now(timezone.utc).isoformat()
+    result = evaluate_readiness(matrix)
+    result["baseline_ready"] = baseline["ready"]
+    result["evaluated_at"] = matrix["evaluated_at"]
+    return result
+
+
+def load_with_doctor_evidence(
+    matrix_path: Path, doctor_path: Path, *, observed_at: str | None = None
+) -> dict[str, Any]:
+    try:
+        matrix: object = json.loads(matrix_path.read_text(encoding="utf-8"))
+        doctor: object = json.loads(doctor_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReadinessError(f"could not read runtime evidence: {error}") from error
+    return apply_doctor_evidence(matrix, doctor, observed_at=observed_at)

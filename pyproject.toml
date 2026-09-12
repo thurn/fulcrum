@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fulcrum"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local coordination infrastructure for durable agent workflows"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -37,6 +37,9 @@ where = ["src"]
 "share/fulcrum/skills/night-watchman" = ["skills/night-watchman/*.md"]
 "share/fulcrum/skills/sage" = ["skills/sage/*.md"]
 "share/fulcrum/skills/inquisitor" = ["skills/inquisitor/*.md"]
+"share/fulcrum/skills/fulcrum-setup" = ["skills/fulcrum-setup/*.md"]
+"share/fulcrum/skills/fulcrum-setup/agents" = ["skills/fulcrum-setup/agents/*.yaml"]
+"share/fulcrum/skills/fulcrum-setup/references" = ["skills/fulcrum-setup/references/*.md"]
 "share/fulcrum/skills/shared" = ["skills/shared/*.md"]
 
 [tool.black]

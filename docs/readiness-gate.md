@@ -18,6 +18,12 @@ to pass only after repeating the cited exercise; do not edit a status merely to
 admit Dashboard work. Optional `unsupported` results are allowed only where the
 matrix names the active fallback.
 
+The checked-in file preserves this historical baseline. `$fulcrum-setup`
+evaluates current runtime readiness by saving a fresh `fulcrum doctor` report
+outside the repository and passing it with `--doctor-report`. That overlay may
+change only the human-role/schedule, project-registry, desktop-hook, and runtime
+visibility rows; all other evidence remains unchanged.
+
 ## Gate matrix
 
 | Boundary | Result | Evidence |

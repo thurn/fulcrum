@@ -17,9 +17,10 @@ from fulcrum.doctor import doctor_runtime
 from fulcrum.hook_config import install_hook_source
 from fulcrum.install import install_runtime
 from fulcrum.records import ProjectRegistryRecord, load_record
-from fulcrum.readiness import load_and_evaluate
+from fulcrum.readiness import load_and_evaluate, load_with_doctor_evidence
 from fulcrum.resources import collect_resources
 from fulcrum.state import atomic_write_record, read_record
+from fulcrum.setup import bootstrap_fleet, record_setup_evidence
 from fulcrum.version import version_text
 
 
@@ -38,6 +39,26 @@ def build_parser() -> argparse.ArgumentParser:
         "readiness", help="evaluate an infrastructure evidence matrix"
     )
     readiness_parser.add_argument("--matrix", required=True)
+    readiness_parser.add_argument(
+        "--doctor-report", help="overlay runtime-dependent rows from doctor JSON"
+    )
+
+    setup_parser = subparsers.add_parser(
+        "setup", help="bootstrap human roles and record verified setup evidence"
+    )
+    setup_commands = setup_parser.add_subparsers(dest="setup_command", required=True)
+    setup_bootstrap = setup_commands.add_parser(
+        "bootstrap", help="initialize verified role and project registries"
+    )
+    setup_bootstrap.add_argument("--input", required=True)
+    setup_evidence = setup_commands.add_parser(
+        "record-evidence", help="record the observed schedule and desktop hook exercise"
+    )
+    setup_evidence.add_argument("--archon-task-id", required=True)
+    setup_evidence.add_argument("--watchman-schedule-id", required=True)
+    setup_evidence.add_argument("--codex-projects-verified-at", required=True)
+    setup_evidence.add_argument("--hooks-verified-at")
+    setup_evidence.add_argument("--hooks-evidence")
 
     install_parser = subparsers.add_parser(
         "install", help="install or update from retained certified source"
@@ -127,9 +148,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "readiness":
         try:
-            result = load_and_evaluate(Path(args.matrix))
+            result = (
+                load_with_doctor_evidence(Path(args.matrix), Path(args.doctor_report))
+                if args.doctor_report
+                else load_and_evaluate(Path(args.matrix))
+            )
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["ready"] else 2
+        except Exception as error:
+            print(f"fulcrum: {error}", file=sys.stderr)
+            return 2
+    if args.command == "setup":
+        try:
+            paths = resolve_paths(
+                brain_override=args.brain_root,
+                state_override=args.state_root,
+            )
+            if args.setup_command == "bootstrap":
+                result = bootstrap_fleet(
+                    paths, json.loads(Path(args.input).read_text())
+                )
+            else:
+                result = record_setup_evidence(
+                    paths,
+                    archon_task_id=args.archon_task_id,
+                    watchman_schedule_id=args.watchman_schedule_id,
+                    codex_projects_verified_at=args.codex_projects_verified_at,
+                    hooks_verified_at=args.hooks_verified_at,
+                    hooks_evidence=args.hooks_evidence,
+                )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["ok"] else 2
         except Exception as error:
             print(f"fulcrum: {error}", file=sys.stderr)
             return 2

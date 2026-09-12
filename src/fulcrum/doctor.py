@@ -11,7 +11,7 @@ from fulcrum import __version__
 from fulcrum.brain import brain_status
 from fulcrum.config import RuntimePaths
 from fulcrum.hook_config import FULCRUM_STATUS_PREFIX
-from fulcrum.install import ROLES
+from fulcrum.install import ROLES, SETUP_SKILLS
 from fulcrum.records import (
     ExecutorEvidenceRecord,
     InstallationRecord,
@@ -210,9 +210,12 @@ def _project_checks(paths: RuntimePaths, codex_projects_verified: bool) -> list[
             failures.append(
                 f"{project['project_id']}: integration must be repaired before readiness"
             )
-    if len(registry["projects"]) != 3:
+    required_projects = {"fulcrum", "tollgate", "battlement"}
+    present_projects = {project["project_id"] for project in registry["projects"]}
+    missing_projects = required_projects - present_projects
+    if missing_projects:
         failures.append(
-            f"expected exactly three initial projects, found {len(registry['projects'])}"
+            "missing initial projects: " + ", ".join(sorted(missing_projects))
         )
     if not codex_projects_verified:
         failures.append("Codex project listing has not been externally verified")
@@ -306,6 +309,23 @@ def doctor_runtime(
             "installed_version",
             "pass" if versions_match else "fail",
             f"package={__version__}; runtime_source={revision}; configured_source={configured_revision}",
+        )
+    )
+    missing_setup_skills = [
+        skill
+        for skill in SETUP_SKILLS
+        if not (skills_root / skill / "SKILL.md").is_file()
+    ]
+    checks.append(
+        _check(
+            "required",
+            "setup_skill",
+            "fail" if missing_setup_skills else "pass",
+            (
+                "missing: " + ", ".join(missing_setup_skills)
+                if missing_setup_skills
+                else "Fulcrum setup skill installed"
+            ),
         )
     )
     try:

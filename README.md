@@ -61,3 +61,9 @@ gate; Dashboard checks are intentionally deferred until Dashboard code exists.
 
 Operational setup and the registration bootstrap boundary are documented in
 [`docs/setup.md`](docs/setup.md).
+
+After installing a certified release, invoke `$fulcrum-setup` in the
+human-created task that should become the first Archon. The skill verifies the
+installation and three project integrations, guides creation of the persistent
+Watchman, installs its single hourly heartbeat, records hook evidence, evaluates
+the live readiness gate, and then transitions the task to `$archon`.

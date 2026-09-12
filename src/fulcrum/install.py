@@ -26,6 +26,7 @@ ROLES = (
     "sage",
     "weaver",
 )
+SETUP_SKILLS = ("fulcrum-setup",)
 
 
 class InstallationError(RuntimeError):
@@ -117,12 +118,15 @@ def _atomic_copy(
 
 
 def install_skills(source_root: Path, skills_root: Path) -> str:
-    """Update only Fulcrum-owned role directories and keep unrelated skills."""
+    """Update only Fulcrum-owned skill directories and keep unrelated skills."""
 
     revision = _skill_revision(source_root)
-    for role in ROLES:
-        source = source_root / "skills" / role
-        target = skills_root / f"fulcrum-{role}"
+    for skill in (*ROLES, *SETUP_SKILLS):
+        source = source_root / "skills" / skill
+        if not (source / "SKILL.md").is_file():
+            raise InstallationError(f"missing Fulcrum skill: {source / 'SKILL.md'}")
+        target_name = skill if skill.startswith("fulcrum-") else f"fulcrum-{skill}"
+        target = skills_root / target_name
         copied: set[Path] = set()
         for path in sorted(item for item in source.rglob("*") if item.is_file()):
             relative = path.relative_to(source)
@@ -275,6 +279,7 @@ def install_runtime(
         "source_revision": verified_revision,
         "skill_revision": skill_revision,
         "skills_installed": list(ROLES),
+        "setup_skills_installed": list(SETUP_SKILLS),
         "hook_source": str(hooks_config.resolve()),
         "hook_retrust_required": True,
         "migration_backup": str(backup) if backup is not None else None,

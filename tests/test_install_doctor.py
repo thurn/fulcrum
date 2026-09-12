@@ -92,12 +92,13 @@ class InstallDoctorTest(unittest.TestCase):
             installation["configured_services"],
             ["beads", "codex", "hooks", "tollgate"],
         )
-        self.assertEqual(installation["observations"]["package_version"], "0.2.0")
+        self.assertEqual(installation["observations"]["package_version"], "0.3.0")
         self.assertEqual(len(json.loads(self.hooks.read_text())["hooks"]["Stop"]), 1)
         self.assertEqual(
-            sorted(path.name for path in self.skills.glob("fulcrum-*/SKILL.md")),
-            ["SKILL.md"] * 7,
+            len(list(self.skills.glob("fulcrum-*/SKILL.md"))),
+            8,
         )
+        self.assertEqual(first["setup_skills_installed"], ["fulcrum-setup"])
         for skill in self.skills.glob("fulcrum-*/SKILL.md"):
             for relative in re.findall(r"\]\((\.\./[^)]+)\)", skill.read_text()):
                 self.assertTrue((skill.parent / relative).resolve().is_file())
@@ -163,16 +164,16 @@ class InstallDoctorTest(unittest.TestCase):
         }
         atomic_write_record(self.paths, roles)
         projects = []
-        for index in range(3):
-            repo = self.root / f"project-{index}"
+        for name in ("fulcrum", "tollgate", "battlement"):
+            repo = self.root / name
             (repo / ".git").mkdir(parents=True)
             projects.append(
                 {
-                    "project_id": f"project-{index}",
+                    "project_id": name,
                     "repo_path": str(repo),
                     "host_id": "local",
-                    "codex_project_id": f"codex-{index}",
-                    "tollgate_repo_id": f"tg-{index}",
+                    "codex_project_id": f"codex-{name}",
+                    "tollgate_repo_id": f"tg-{name}",
                     "enabled": True,
                 }
             )
@@ -200,9 +201,7 @@ class InstallDoctorTest(unittest.TestCase):
             patch(
                 "fulcrum.doctor._tollgate_project_status",
                 side_effect=lambda repository_id: {
-                    "path": str(
-                        self.root / f"project-{repository_id.removeprefix('tg-')}"
-                    ),
+                    "path": str(self.root / repository_id.removeprefix("tg-")),
                     "execution_state": "active",
                     "block_reasons": [],
                     "remote_enabled": True,
