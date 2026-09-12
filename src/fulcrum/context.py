@@ -98,12 +98,15 @@ def read_task_context(paths: RuntimePaths, task_id: str) -> dict[str, Any]:
     except Exception as error:
         errors.append(_error(holds_path, error))
 
-    global_memory_path = safe_child(paths.brain_root, "memory.md")
+    role_name = role["role"]
+    global_memory_path = safe_child(paths.brain_root, "memory", "global.md")
+    role_memory_path = safe_child(paths.brain_root, "memory", role_name, "global.md")
     project_memory_path = safe_child(
-        paths.brain_root, "projects", project_id, "memory.md"
+        paths.brain_root, "memory", role_name, "projects", f"{project_id}.md"
     )
     memory = {
         "global": _read_optional_memory(global_memory_path, errors),
+        "role": _read_optional_memory(role_memory_path, errors),
         "project": _read_optional_memory(project_memory_path, errors),
     }
     return {

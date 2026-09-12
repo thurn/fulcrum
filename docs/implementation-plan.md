@@ -355,7 +355,9 @@ retry obligation. Retrying interrupted intake does not duplicate existing beads.
 
 ### Task 07 [code] — Implement Markdown plans, memory, and NEWS readers
 
-**Status:** pending
+**Status:** done — safe plan and NEWS parsing, concise memory views, CLI plan
+listing, templates, and sanitized parity fixtures are implemented in
+`src/fulcrum/documents.py`, `templates/brain/`, and `tests/fixtures/brain/`.
 
 **Outcome:** people can maintain ordinary Markdown while Fulcrum discovers
 plans and supplies useful role/project context.

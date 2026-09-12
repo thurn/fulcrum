@@ -7,11 +7,13 @@ import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 from fulcrum.brain import brain_status, initialize_brain
 from fulcrum.config import resolve_paths
 from fulcrum.context import read_task_context
-from fulcrum.records import load_record
+from fulcrum.documents import discover_plans
+from fulcrum.records import ProjectRegistryRecord, load_record
 from fulcrum.state import atomic_write_record, read_record
 from fulcrum.version import version_text
 
@@ -41,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     context_parser = subparsers.add_parser("context", help="read concise task context")
     context_parser.add_argument("--task", required=True, help="exact Codex task ID")
 
+    plans_parser = subparsers.add_parser("plans", help="discover Markdown plans")
+    plans_commands = plans_parser.add_subparsers(dest="plans_command", required=True)
+    list_plans = plans_commands.add_parser("list", help="list validated plan metadata")
+    list_plans.add_argument("--project", help="limit results to one project ID")
+
     brain_parser = subparsers.add_parser("brain", help="inspect or initialize Beads")
     brain_commands = brain_parser.add_subparsers(dest="brain_command", required=True)
     for name, help_text in (
@@ -64,7 +71,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "version":
         print(version_text())
         return 0
-    if args.command in {"state", "context", "brain"}:
+    if args.command in {"state", "context", "brain", "plans"}:
         try:
             paths = resolve_paths(
                 brain_override=args.brain_root,
@@ -78,6 +85,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = {"ok": True, "path": str(target)}
             elif args.command == "context":
                 result = read_task_context(paths, args.task)
+            elif args.command == "plans":
+                registry = read_record(paths, "project_registry")
+                if registry["record_kind"] != "project_registry":
+                    raise ValueError("expected project_registry record")
+                project_registry = cast(ProjectRegistryRecord, registry)
+                known_projects = {
+                    project["project_id"] for project in project_registry["projects"]
+                }
+                result = discover_plans(paths.brain_root, known_projects)
+                if args.project is not None:
+                    result["plans"] = [
+                        plan
+                        for plan in result["plans"]
+                        if plan["project"] == args.project
+                    ]
             elif args.brain_command == "init":
                 result = initialize_brain(paths.brain_root, args.expected_remote)
             else:

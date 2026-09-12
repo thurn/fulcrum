@@ -35,3 +35,15 @@ one dependency edge. Temporary data was moved to Trash after verification.
 Calling the installed helper twice with the same stable intake key returned the
 same issue ID and kept one dependency edge, confirming interrupted intake is
 idempotent against the selected Beads version.
+
+## Task 07 — Markdown plans, memory, and NEWS
+
+The sanitized fixture tree under `tests/fixtures/brain/` contains queued and
+future plans in two projects, a cross-project prerequisite, global/role/project
+memory, project-summary links, and multi-project NEWS entries. `scripts/check`
+verifies discovery without file changes, file-specific diagnostics for invalid
+frontmatter, duplicate IDs, unknown projects, invalid activation, cycles,
+preserved NEWS Markdown and dates, concise role context, and JSON CLI output.
+
+The readers are deterministic and bounded to 256 KB per document. They use
+safe YAML loading, invoke no model, and never rewrite the source Markdown.
