@@ -22,6 +22,14 @@ existing Node backend.
 Agents make decisions; small scripts assist with repetitive operations.
 There is no additional background service making scheduling decisions.
 
+Dashboard implementation starts from the screen and design-system mockups in
+[`docs/mockups/`](mockups/) as concept art. They establish the intended visual
+direction, information hierarchy, composition, responsive treatment, and
+component language. They are not pixel-accurate interface contracts; the
+[dashboard specification](dashboard.md), live product data, responsive behavior,
+and accessibility requirements govern whenever a mockup is incomplete or
+conflicts with the written design.
+
 ## Related Information
 
 These documents form one specification. The main document explains ownership
@@ -35,6 +43,20 @@ and expected behavior; the appendices define the corresponding contracts.
   and selective diagnostics for the Sage.
 - [Dashboard and design system](dashboard.md): views, information hierarchy,
   visual tokens, motion, data access, and authenticated remote viewing.
+- Dashboard concept art is the starting point for the implementation's screen
+  composition and visual system:
+  - [Status screen, desktop](mockups/landing-desktop.png) and
+    [Status screen, mobile](mockups/landing-iphone.png): agent-fleet hierarchy,
+    navigation, responsive card treatment, and featured improvements.
+  - [Projects screen](mockups/projects-desktop.png): project summaries, work
+    counts, future direction, constraints, and recent improvements.
+  - [Newsfeed screen](mockups/newsfeed-desktop.png): featured updates, filters,
+    search, and work-item cards.
+  - [Design-system primitives](mockups/design-system-primitives.png): surfaces,
+    semantic colors, typography, spacing, focus treatment, and role emblems.
+  - [Design-system components](mockups/design-system-components.png):
+    navigation, filters, status indicators, cards, and the
+    featured-improvement banner.
 - [Beads][beads] and its [sync documentation][beads-sync]: authoritative issue
   storage and the distinction between Git and Dolt synchronization.
 - [Codex app-server documentation][codex-server] and
