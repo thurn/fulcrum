@@ -524,22 +524,33 @@ Use role-specific outcomes rather than a generic success flag:
 
 Expected waits are successful retained states, not errors. An identical finish
 retry returns its existing result; conflicting reuse is rejected. An outcome
-accepted for a turn is frozen. Later tool activity inconsistent with that
-outcome invalidates advancement and requires reconciliation.
+accepted for a turn is frozen.
 
-After finish, Python advances only when the matching turn completed normally,
-its helpers ended, and any required native facts match. An interrupted or failed
-turn after finish retains the outcome for inspection but does not automatically
-approve, close, or hand off work. A brief normal final response is permitted.
+After finish, Python advances only after these explicit checks pass:
 
-An accepted outcome made unusable by later failure or inconsistent activity
-enters reconciliation. First resolve actual turn, helper, candidate, and side
-effect state; do not repeat the preceding operation. If facts are known and only
-a corrected semantic report is needed, use the same single correction allowance
-described below. Its recovery turn may submit a new outcome that explicitly
-supersedes the old one; preserve both records. An exhausted allowance,
-unresolved side effect, or changed scope requiring judgment becomes an Archon
-exception. Normal final prose does not invalidate an otherwise valid outcome.
+- The accepted outcome belongs to the dispatched task, turn, and assignment.
+- The matching turn completed normally and its native helpers are terminal.
+- For candidate outcomes, the native candidate's immutable source OID matches
+  the recorded outcome and the candidate is the assignment's expected candidate.
+- Current approval and holds permit the next action, with native delivery facts
+  checked at the delivery boundary described below.
+
+Missing observations wait for reconciliation. Explicit contradictions hold the
+assignment for resolution. An interrupted or failed turn retains its outcome
+for inspection without automatically approving, closing, or handing off work.
+Python does not interpret arbitrary later tool calls or final prose to decide
+whether the agent invalidated its report. Do not build a transcript classifier,
+shell-command parser, or general post-finish activity detector. A later worktree
+edit does not alter an already submitted immutable candidate or authorize a new
+one; advancement remains bound to the recorded candidate.
+
+Reconciliation reads the specific runtime, assignment, and native candidate
+facts that failed the checks above; it does not repeat the preceding operation.
+If those facts are resolved and only a corrected semantic report is needed, use
+the same single correction allowance described below. Its recovery turn may
+submit a new outcome that explicitly supersedes the old one; preserve both
+records. An exhausted allowance, unresolved external operation, or changed scope
+requiring judgment becomes an Archon exception.
 
 ### Bounded enforcement
 
@@ -900,9 +911,10 @@ actual desktop and Tollgate boundaries described in Manual QA.
   exception delivery, explicit deferral, and updates arriving during a
   recipient's turn.
 - Test finish success, missing hook, hook-used correction, failed correction,
-  changed source after finish, interrupted turn, and non-Fulcrum/Plan-mode
-  stops. Verify superseding-outcome history and rejection of another correction
-  when the shared allowance was already consumed.
+  candidate/source identity mismatch, interrupted turn, and non-Fulcrum/Plan-mode
+  stops. Verify that a later worktree edit cannot substitute source for the
+  recorded immutable candidate. Verify superseding-outcome history and rejection
+  of another correction when the shared allowance was already consumed.
 - Exercise review counts, missing evidence, covered and uncovered replacements,
   model changes only by Archon decision, and source repair followed by native
   certification. A pending native dependency cannot gain implicit authority.
@@ -997,8 +1009,11 @@ that recovery preserves identity, authority, and completed work.
 - Omit finish once with working hooks and once with unavailable hooks. Each
   attempt gets at most one correction total. A second failure creates one
   exception; a Plan-mode authoring stop gets none.
-- Interrupt after an accepted finish and alter source after ready-for-review.
-  Verify neither case silently grants review, completion, or handoff authority.
+- Interrupt after an accepted finish and separately inject a candidate/source
+  identity mismatch. Verify neither case grants advancement. Edit the worktree
+  after ready-for-review and verify review still targets the recorded immutable
+  candidate; the edit is neither included nor automatically treated as report
+  invalidation.
 - Request missing review evidence, reject three new sources, and retry an
   infrastructure failure. Confirm only substantive rejections count and Archon
   decides the next approach or model change.
