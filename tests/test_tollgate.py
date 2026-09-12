@@ -18,9 +18,7 @@ class TollgateTests(unittest.TestCase):
         )
 
         with patch("fulcrum.tollgate.subprocess.run", return_value=completed):
-            self.assertEqual(
-                tollgate.repositories(), [{"state": {"id": "repo-1"}}]
-            )
+            self.assertEqual(tollgate.repositories(), [{"state": {"id": "repo-1"}}])
 
     def test_object_operations_reject_list_response(self) -> None:
         tollgate = Tollgate("/usr/bin/tg")
