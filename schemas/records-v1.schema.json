@@ -243,7 +243,9 @@
                   "job_id": { "type": "string", "minLength": 1 },
                   "cadence_anchor": { "$ref": "#/$defs/timestamp" },
                   "next_due": { "$ref": "#/$defs/timestamp" },
-                  "active_run_id": { "type": ["string", "null"], "minLength": 1 }
+                  "active_run_id": { "type": ["string", "null"], "minLength": 1 },
+                  "role": { "enum": ["sage", "inquisitor"] },
+                  "scope": { "type": "string", "pattern": "^(fleet|project:[A-Za-z0-9._-]+)$" }
                 },
                 "additionalProperties": false
               }
@@ -329,6 +331,7 @@
             "handoff_needed": { "type": "boolean" },
             "handoff_sent": { "type": "boolean" },
             "delivery_error": { "type": ["string", "null"], "minLength": 1 },
+            "expected_by": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
             "owned_resources": {
               "type": "array",
               "items": {
@@ -363,6 +366,21 @@
                 { "type": "null" },
                 { "$ref": "#/$defs/escalation" }
               ]
+            },
+            "patrol_conditions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["identity", "fingerprint", "code", "message", "references"],
+                "properties": {
+                  "identity": { "type": "string", "minLength": 1 },
+                  "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                  "code": { "type": "string", "minLength": 1 },
+                  "message": { "type": "string", "minLength": 1 },
+                  "references": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                },
+                "additionalProperties": false
+              }
             }
           },
           "additionalProperties": false

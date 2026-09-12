@@ -120,6 +120,16 @@ class RecurringJob(TypedDict):
     cadence_anchor: str
     next_due: str
     active_run_id: str | None
+    role: NotRequired[Literal["sage", "inquisitor"]]
+    scope: NotRequired[str]
+
+
+class PatrolCondition(TypedDict):
+    identity: str
+    fingerprint: str
+    code: str
+    message: str
+    references: list[str]
 
 
 class HoldsJobsRecord(TypedDict):
@@ -229,6 +239,8 @@ class ProgressRecord(TypedDict):
     owned_resources: list[OwnedResource]
     push_obligations: NotRequired[list[PushObligation]]
     escalation: NotRequired[Escalation | None]
+    expected_by: NotRequired[str | None]
+    patrol_conditions: NotRequired[list[PatrolCondition]]
 
 
 class SuspendedInvestigation(TypedDict):

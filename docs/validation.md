@@ -89,6 +89,21 @@ pure tabletop: production service is not disrupted, provisional repair remains
 uncertified, and normal certification plus installed-version reconciliation
 remain mandatory.
 
+## Task 15 — Night Watchman and recurring work
+
+`tests/fixtures/watchman/patrol.json` and `tests/test_watchman.py` exercise a
+registered Archon/Watchman with an injectable clock. Coverage includes the Sage
+24-hour cadence, per-project Inquisitor twelve-hour offset, overlap prevention,
+one catch-up after downtime, next-future advancement, and disabled projects.
+
+Patrol checks distinguish a healthy external review wait from an unexplained or
+deadline-overdue stop, retain uncertainty for unavailable observations, and
+report failed source pushes. Stable identity plus condition fingerprints silence
+unchanged repeats while still reporting changes and resolutions. A real stopped
+fixture targets the registered Archon; a quiet patrol produces no Archon message
+and no human-facing noise. Automation planning creates, updates, or reuses one
+hourly heartbeat without duplicate schedules.
+
 ## Task 09 — Identity and portable handoffs
 
 `tests/test_roles.py` exercises pending and ambiguous creation responses,

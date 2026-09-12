@@ -618,7 +618,9 @@ with preserved evidence. Do not break the production Tollgate service to test it
 
 ### Task 15 [code] — Implement Night Watchman patrol and recurring-work bookkeeping
 
-**Status:** pending
+**Status:** done — the portable Watchman skill, read-only evidence patrol,
+condition-aware deduplication, fake-clock recurring bookkeeping, and idempotent
+hourly automation planning are implemented.
 
 **Outcome:** one hourly patrol detects anomalies and reports due work without
 becoming a second scheduler.

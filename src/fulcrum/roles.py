@@ -70,7 +70,12 @@ def initialize_progress(
 
 
 def prepare_handoff(
-    progress: ProgressRecord, recipient: RoleRun, action: str, now: str
+    progress: ProgressRecord,
+    recipient: RoleRun,
+    action: str,
+    now: str,
+    *,
+    expected_by: str | None = None,
 ) -> ProgressRecord:
     if progress["handoff_needed"] and not progress["handoff_sent"]:
         raise ValueError("inspect unresolved delivery before another handoff")
@@ -86,6 +91,7 @@ def prepare_handoff(
         handoff_needed=True,
         handoff_sent=False,
         delivery_error=None,
+        expected_by=expected_by,
     )
     return cast(ProgressRecord, validate_record(result))
 

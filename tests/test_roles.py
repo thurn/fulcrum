@@ -42,7 +42,14 @@ class RoleTests(unittest.TestCase):
             initialize_progress(role, self.now, plan_mode=True)
         progress = initialize_progress(role, self.now)
         recipient = resolve_identity(self.role, [("recipient", "local")])
-        pending = prepare_handoff(progress, recipient, "Review candidate", self.now)
+        pending = prepare_handoff(
+            progress,
+            recipient,
+            "Review candidate",
+            self.now,
+            expected_by="2026-09-11T21:00:00Z",
+        )
+        self.assertEqual(pending["expected_by"], "2026-09-11T21:00:00Z")
         failed = finish_handoff(pending, self.now, delivered=False)
         with self.assertRaises(ValueError):
             prepare_handoff(failed, recipient, "retry", self.now)

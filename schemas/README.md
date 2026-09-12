@@ -18,3 +18,8 @@ and UTC `updated_at`. Unknown fields and unsupported versions are rejected.
 Ownership is cooperative: it prevents accidental writes through Fulcrum's
 helper, not arbitrary filesystem access. Beads remains the source of mutable
 task status. Large logs and conversations remain in their owning tools.
+
+The Archon-owned `holds_jobs` record stores UTC recurrence anchors, next-due
+times, and the actual active task per role/scope. Watchman anomaly fingerprints
+live in the Watchman's own `progress` record, so patrol deduplication does not
+grant it registry-write or dispatch authority.
