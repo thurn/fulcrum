@@ -25,10 +25,16 @@ reports remaining work; it cannot reclaim authority by writing its own ID.
 On explicit invocation in a new human task, contact the previous Archon and
 confirm relinquished writes, or inspect supported task state/history to verify
 inactivity. Idle alone or an unanswered message is insufficient. Resolve overlap
-before dispatch. Use fulcrum.coordination.transfer_archon with the observed old
-ID and the retained relinquishment/inactivity evidence, then reconcile existing
-holds, assignments, mandates, runs, and outstanding reports. Preserve mandates;
-no automatic cancellation or authority epochs. Bootstrap requires human setup.
+before dispatch. Construct a distinct, resolved successor RoleRun from supported
+task identity, then use `fulcrum.roles.prepare_transfer_handoff` for any
+pre-registration handoff and `fulcrum.coordination.transfer_archon` with the
+observed old ID and retained relinquishment/inactivity evidence. The transfer
+appends the successor while retaining the former Archon and changes registry
+authority/writer together; it returns the successor progress record for that
+task to initialize. Never use a bare task ID or synthetic role. Then reconcile
+existing holds, assignments, mandates, runs, and outstanding reports. Preserve
+mandates; no automatic cancellation or authority epochs. Bootstrap requires
+human setup.
 Never manufacture the persistent Archon or Watchman as substitute tasks.
 
 ## Enrollment

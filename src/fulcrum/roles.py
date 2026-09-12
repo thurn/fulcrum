@@ -5,7 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import cast
 
-from fulcrum.records import ProgressRecord, RoleRun, validate_record
+from fulcrum.records import (
+    ProgressRecord,
+    RoleRun,
+    RoleRunRegistryRecord,
+    validate_record,
+)
 
 REGISTERED_ROLES: frozenset[str] = frozenset(
     {"archon", "executor", "inquisitor", "night_watchman", "overseer", "sage"}
@@ -15,6 +20,34 @@ REGISTERED_ROLES: frozenset[str] = frozenset(
 def _require_registered_role(role: RoleRun, label: str = "role") -> None:
     if role["role"] not in REGISTERED_ROLES:
         raise ValueError(f"{label} must be a registered role; Weaver is ephemeral")
+
+
+def validate_resolved_role(
+    role: RoleRun, *, expected_role: str | None = None
+) -> RoleRun:
+    """Validate a fully resolved role without requiring registry membership."""
+    if not isinstance(role, dict):
+        raise ValueError("role must be a role record")
+    if expected_role is not None and role.get("role") != expected_role:
+        raise ValueError(f"role must be a resolved {expected_role} RoleRun")
+    if role.get("identity_state") != "resolved" or not role.get("task_id"):
+        raise ValueError("role identity must be resolved before handover")
+    task_id = cast(str, role["task_id"])
+    try:
+        probe = validate_record(
+            {
+                "record_kind": "role_run_registry",
+                "schema_version": 1,
+                "writer_id": task_id,
+                "updated_at": "1970-01-01T00:00:00Z",
+                "current_archon_task_id": task_id,
+                "roles": [role],
+            }
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("role is not a valid resolved RoleRun") from error
+    registry = cast(RoleRunRegistryRecord, probe)
+    return registry["roles"][0]
 
 
 def resolve_identity(role: RoleRun, matches: list[tuple[str, str]]) -> RoleRun:
@@ -99,6 +132,33 @@ def prepare_handoff(
     result.update(
         updated_at=now,
         expected_next_actor=recipient["task_id"],
+        expected_next_action=action,
+        handoff_needed=True,
+        handoff_sent=False,
+        delivery_error=None,
+        expected_by=expected_by,
+    )
+    return cast(ProgressRecord, validate_record(result))
+
+
+def prepare_transfer_handoff(
+    progress: ProgressRecord,
+    successor: RoleRun,
+    action: str,
+    now: str,
+    *,
+    expected_by: str | None = None,
+) -> ProgressRecord:
+    """Prepare a handoff to a resolved Archon before registry insertion."""
+    resolved = validate_resolved_role(successor, expected_role="archon")
+    if progress["handoff_needed"] and not progress["handoff_sent"]:
+        raise ValueError("inspect unresolved delivery before another handoff")
+    if not action.strip():
+        raise ValueError("handoff requires an action")
+    result = deepcopy(progress)
+    result.update(
+        updated_at=now,
+        expected_next_actor=resolved["task_id"],
         expected_next_action=action,
         handoff_needed=True,
         handoff_sent=False,

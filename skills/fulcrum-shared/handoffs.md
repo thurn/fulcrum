@@ -26,6 +26,9 @@ when needed and retain the expected next actor/action in progress.
 
 fulcrum.roles.prepare_handoff and finish_handoff produce owned progress records
 for registered roles; call the atomic writer before sending and after the
-outcome. They never send messages or invent delivery receipts. A pending
-unconfirmed handoff must be reconciled before preparing another one. They are
-not used by ephemeral Weavers.
+outcome. For cooperative Archon transfer, use
+fulcrum.roles.prepare_transfer_handoff with the distinct resolved successor
+RoleRun before registry insertion; do not synthesize a temporary registry role.
+They never send messages or invent delivery receipts. A pending unconfirmed
+handoff must be reconciled before preparing another one. They are not used by
+ephemeral Weavers.

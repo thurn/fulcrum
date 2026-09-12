@@ -7,6 +7,7 @@ from fulcrum.roles import (
     next_role_number,
     initialize_progress,
     prepare_handoff,
+    prepare_transfer_handoff,
     finish_handoff,
 )
 from fulcrum.records import validate_record
@@ -58,6 +59,45 @@ class RoleTests(unittest.TestCase):
         self.assertTrue(sent["handoff_sent"])
         self.assertEqual(sent["expected_next_actor"], "recipient")
         self.assertFalse(progress["handoff_needed"])
+
+    def test_transfer_handoff_targets_unregistered_resolved_successor(self):
+        role = resolve_identity(self.role, [("real", "local")])
+        progress = initialize_progress(role, self.now)
+        successor = dict(
+            role,
+            role="archon",
+            task_id="successor",
+            identity_state="resolved",
+            role_number=None,
+            run_id="persistent-archon-successor",
+            pair_id=None,
+            title="Successor Archon",
+        )
+        successor.pop("client_thread_id", None)
+        registered_archon = dict(
+            successor,
+            task_id="registered-archon",
+            run_id="persistent-archon-registered",
+            title="Registered Archon",
+        )
+        ordinary = prepare_handoff(
+            progress,
+            registered_archon,
+            "Report current work",
+            self.now,
+        )
+        self.assertEqual(ordinary["expected_next_actor"], "registered-archon")
+        self.assertEqual(ordinary["expected_next_action"], "Report current work")
+        pending = prepare_transfer_handoff(
+            progress,
+            successor,
+            "Receive authority",
+            self.now,
+            expected_by="2026-09-11T21:00:00Z",
+        )
+        self.assertEqual(pending["expected_next_actor"], "successor")
+        self.assertEqual(pending["expected_next_action"], "Receive authority")
+        self.assertEqual(pending["expected_by"], "2026-09-11T21:00:00Z")
 
     def test_weaver_cannot_enter_registered_role_state(self):
         weaver = dict(self.role, role="weaver", task_id="task-weaver")
