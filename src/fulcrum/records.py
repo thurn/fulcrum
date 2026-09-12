@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict, cast
 
@@ -320,21 +318,14 @@ class RecordValidationError(ValueError):
 
 
 def schema_root() -> Path:
-    """Find checked-in schemas or their installed data-file location."""
+    """Return schemas from the retained checkout backing the editable package."""
 
-    override = os.environ.get("FULCRUM_SCHEMA_ROOT")
-    if override:
-        return Path(override).expanduser().resolve()
-
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "schemas"
-        if (candidate / "records-v1.schema.json").is_file():
-            return candidate
-
-    installed = Path(sys.prefix) / "share" / "fulcrum" / "schemas"
-    if (installed / "records-v1.schema.json").is_file():
-        return installed
-    raise FileNotFoundError("could not locate Fulcrum record schemas")
+    root = Path(__file__).resolve().parents[2] / "schemas"
+    if not (root / "records-v1.schema.json").is_file():
+        raise FileNotFoundError(
+            "Fulcrum schemas require an editable install from a retained checkout"
+        )
+    return root
 
 
 def _format_error(error: Any) -> str:

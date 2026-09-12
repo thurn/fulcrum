@@ -40,6 +40,11 @@ JSON and the task's existing Fulcrum registration and progress. It makes no
 model calls, network requests, Beads queries, or transcript scans. Missing
 information is not a reason to invent task state or block the fleet.
 
+`~/.codex/hooks.json` may contain unrelated user hooks, so it is never replaced
+or symlinked into Fulcrum. Installation preserves that file and maintains only
+the two marked command definitions; mutable Fulcrum behavior stays behind the
+linked directory.
+
 ## Refresh After Compaction
 
 For a registered role, emit a short reminder of its responsibilities, current

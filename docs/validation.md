@@ -295,9 +295,10 @@ Night Watchman patrol are the verified fallback for context and missed handoffs.
 matching release and remote refs, installs twice, and confirms the active
 assignment and recurring-job bytes are unchanged, services and hooks are not
 duplicated, every skill and hook directory is linked to that source, source
-edits are immediately visible, and no database restart is reported. An unknown
-schema remains byte-for-byte unchanged and errors. A `.worktrees` source is
-rejected.
+edits are immediately visible, the stable CLI and editable import resolve into
+the same checkout, schemas resolve from its source tree, and no database restart
+is reported. An unknown schema remains byte-for-byte unchanged and errors. A
+`.worktrees` source is rejected.
 
 The passing doctor fixture uses three Git/Codex/Tollgate mappings, human-marked
 resolved Archon and Watchman identities, one externally observed hourly

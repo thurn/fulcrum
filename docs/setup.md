@@ -210,10 +210,12 @@ python3.12 -m venv /absolute/retained/fulcrum/.venv
 
 The command creates `fulcrum-*` symlinks under the selected Codex skills
 directory and a `hooks/fulcrum` symlink under the same Codex home. Every link
-points directly into the retained checkout. It merges two small handler entries
-into the user-level hooks file while preserving unrelated hooks. Running the
-command twice is a no-op for links and does not create roles, schedules,
-services, or project registrations. It never restarts Beads.
+points directly into the retained checkout. It also creates
+`<codex-home>/bin/fulcrum` pointing to the checkout's editable `.venv` command.
+It merges two small handler entries into the user-level hooks file while
+preserving unrelated hooks. Running the command twice is a no-op for links and
+does not create roles, schedules, services, or project registrations. It never
+restarts Beads.
 
 Edits to a linked skill or hook script are visible immediately. The editable
 Python install likewise uses the checkout's current `src/fulcrum` code on the
@@ -222,6 +224,17 @@ hashes, per-run skill snapshots, or stale-content reconciliation. Re-run
 installation only when establishing links or changing the hook definition, not
 after ordinary repository edits. If Codex does not surface a skill edit, restart
 Codex to refresh discovery.
+
+The editable import must resolve to `<retained-source>/src/fulcrum`, and record
+schemas load only from `<retained-source>/schemas`; neither has an installed-copy
+fallback. Invoke `<codex-home>/bin/fulcrum` by absolute path unless that bin
+directory is known to be on `PATH`. Fulcrum does not pull Git, synchronize
+dependencies on each invocation, or hot-reload an already running process.
+
+The user-level `hooks.json` remains a stable merge point because it may contain
+unrelated hooks. Fulcrum owns only its two marked definitions there; all mutable
+behavior is reached through the linked `hooks/fulcrum` directory. Never replace
+or symlink the whole hooks file.
 
 The Archon and Night Watchman task IDs must come from human-created Codex tasks
 and use human model authorization in the role registry. After the Watchman task
@@ -237,7 +250,7 @@ repaired.
 After every install or update, use the CLI before any Dashboard is available:
 
 ```sh
-/absolute/retained/fulcrum/.venv/bin/fulcrum doctor \
+/absolute/codex/bin/fulcrum doctor \
   --expected-brain-remote git@github.com:owner/private-brain.git \
   --skills-root /absolute/codex/skills \
   --hooks-config /absolute/codex/hooks.json

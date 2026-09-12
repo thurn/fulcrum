@@ -80,11 +80,25 @@ def verify_certified_source(source_root: Path, revision: str) -> str:
     return actual
 
 
-def _install_directory_link(source: Path, target: Path) -> None:
-    source = source.resolve(strict=True)
+def runtime_package_root() -> Path:
+    """Return the package directory used by this Python process."""
+
+    return Path(__file__).resolve().parent
+
+
+def verify_editable_import(source_root: Path) -> None:
+    expected = source_root.resolve(strict=True) / "src" / "fulcrum"
+    if runtime_package_root() != expected:
+        raise InstallationError(
+            f"fulcrum imports from {runtime_package_root()}; expected {expected}"
+        )
+
+
+def _install_link(source: Path, target: Path, *, directory: bool) -> None:
+    expected = source.resolve(strict=True)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if target.is_symlink():
-        if target.resolve(strict=False) == source:
+        if target.resolve(strict=False) == expected:
             return
         raise InstallationError(f"refusing to replace unrelated symlink: {target}")
     if target.exists():
@@ -94,7 +108,7 @@ def _install_directory_link(source: Path, target: Path) -> None:
     temporary = target.parent / f".{target.name}.fulcrum-link-{os.getpid()}"
     temporary.unlink(missing_ok=True)
     try:
-        temporary.symlink_to(source, target_is_directory=True)
+        temporary.symlink_to(source.absolute(), target_is_directory=directory)
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -112,13 +126,13 @@ def _validate_link_target(source: Path, target: Path) -> None:
 
 def install_links(
     source_root: Path, skills_root: Path, hooks_config: Path
-) -> tuple[list[Path], Path, Path]:
+) -> tuple[list[Path], Path, Path, Path]:
     """Link Codex-visible Fulcrum assets directly to the retained Git checkout."""
 
     codex_root = skills_root.parent.expanduser().absolute()
     if hooks_config.parent.resolve(strict=False) != codex_root.resolve(strict=False):
         raise InstallationError("skills and hooks must use the same Codex home")
-    links: list[tuple[Path, Path]] = []
+    links: list[tuple[Path, Path, bool]] = []
     skill_links: list[Path] = []
     for name in LINKED_SKILLS:
         source = source_root / "skills" / name
@@ -127,7 +141,7 @@ def install_links(
         if name != "fulcrum-shared" and not (source / "SKILL.md").is_file():
             raise InstallationError(f"missing Fulcrum skill: {source / 'SKILL.md'}")
         target = skills_root / name
-        links.append((source, target))
+        links.append((source, target, True))
         skill_links.append(target)
 
     hook_source = source_root / "hooks"
@@ -135,12 +149,19 @@ def install_links(
     if not hook_command.is_file() or not os.access(hook_command, os.X_OK):
         raise InstallationError(f"missing executable Fulcrum hook: {hook_command}")
     hook_link = codex_root / "hooks" / "fulcrum"
-    links.append((hook_source, hook_link))
-    for source, target in links:
+    links.append((hook_source, hook_link, True))
+    cli_source = source_root / ".venv" / "bin" / "fulcrum"
+    if not cli_source.is_file() or not os.access(cli_source, os.X_OK):
+        raise InstallationError(
+            f"missing executable from editable .venv install: {cli_source}"
+        )
+    cli_link = codex_root / "bin" / "fulcrum"
+    links.append((cli_source, cli_link, False))
+    for source, target, _ in links:
         _validate_link_target(source, target)
-    for source, target in links:
-        _install_directory_link(source, target)
-    return skill_links, hook_link, hook_link / "fulcrum-hook"
+    for source, target, directory in links:
+        _install_link(source, target, directory=directory)
+    return skill_links, hook_link, hook_link / "fulcrum-hook", cli_link
 
 
 def _load_installation(config_file: Path) -> InstallationRecord | None:
@@ -183,13 +204,14 @@ def install_runtime(
 
     observed_at = now or utc_now()
     verify_certified_source(source_root, certified_revision)
+    verify_editable_import(source_root)
     current = _load_installation(paths.config_file)
     if current is not None:
         if Path(current["brain_root"]).resolve() != paths.brain_root.resolve():
             raise InstallationError("update would change the configured brain root")
         if Path(current["state_root"]).resolve() != paths.state_root.resolve():
             raise InstallationError("update would change the configured state root")
-    skill_links, hook_link, hook_command = install_links(
+    skill_links, hook_link, hook_command, cli_link = install_links(
         source_root, skills_root, hooks_config
     )
     previous_hook_config = hooks_config.read_bytes() if hooks_config.is_file() else None
@@ -204,6 +226,7 @@ def install_runtime(
             "installed_source_root": str(source_root.resolve()),
             "skills_root": str(skills_root.resolve(strict=False)),
             "hook_link": str(hook_link),
+            "cli_link": str(cli_link),
             "brain_remote": expected_brain_remote,
             "sage_cadence_anchor": sage_anchor,
             "hook_source": str(hooks_config.resolve()),
@@ -239,6 +262,7 @@ def install_runtime(
         "ok": True,
         "skill_links": [str(path) for path in skill_links],
         "hook_link": str(hook_link),
+        "cli_link": str(cli_link),
         "hook_source": str(hooks_config.resolve()),
         "hook_retrust_required": hook_config_changed,
         "database_restarted": False,

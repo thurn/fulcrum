@@ -37,10 +37,13 @@ class InstallDoctorTest(unittest.TestCase):
         self.source.mkdir()
         shutil.copytree(REPO_ROOT / "skills", self.source / "skills")
         shutil.copytree(REPO_ROOT / "hooks", self.source / "hooks")
+        package = self.source / "src" / "fulcrum"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
         git(self.source, "init", "-q")
         git(self.source, "config", "user.email", "test@example.test")
         git(self.source, "config", "user.name", "Test")
-        git(self.source, "add", "skills", "hooks")
+        git(self.source, "add", "skills", "hooks", "src")
         git(self.source, "commit", "-qm", "test source")
         self.revision = git(self.source, "rev-parse", "HEAD")
         git(self.source, "update-ref", "refs/heads/release", self.revision)
@@ -51,24 +54,34 @@ class InstallDoctorTest(unittest.TestCase):
         self.codex_root = self.root / "codex"
         self.skills = self.codex_root / "skills"
         self.hooks = self.codex_root / "hooks.json"
+        cli = self.source / ".venv" / "bin" / "fulcrum"
+        cli.parent.mkdir(parents=True)
+        cli.write_text("#!/bin/sh\n", encoding="utf-8")
+        cli.chmod(0o700)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
     def install(self) -> dict[str, object]:
-        return install_runtime(
-            paths=self.paths,
-            source_root=self.source,
-            certified_revision=self.revision,
-            skills_root=self.skills,
-            hooks_config=self.hooks,
-            host_id="local",
-            expected_brain_remote="git@example.test:brain.git",
-            sage_anchor="2026-09-12T08:00:00Z",
-            now=NOW,
-        )
+        with patch(
+            "fulcrum.install.runtime_package_root",
+            return_value=(self.source / "src" / "fulcrum").resolve(),
+        ):
+            return install_runtime(
+                paths=self.paths,
+                source_root=self.source,
+                certified_revision=self.revision,
+                skills_root=self.skills,
+                hooks_config=self.hooks,
+                host_id="local",
+                expected_brain_remote="git@example.test:brain.git",
+                sage_anchor="2026-09-12T08:00:00Z",
+                now=NOW,
+            )
 
-    def test_install_twice_updates_version_without_touching_active_state(self) -> None:
+    def test_install_twice_links_live_source_without_touching_active_state(
+        self,
+    ) -> None:
         self.paths.state_root.mkdir(parents=True)
         assignment_path = self.paths.state_root / "assignments" / "assignment-1.json"
         assignment_path.parent.mkdir()
@@ -106,6 +119,11 @@ class InstallDoctorTest(unittest.TestCase):
             )
         hook_link = self.codex_root / "hooks" / "fulcrum"
         self.assertTrue(hook_link.is_symlink())
+        cli_link = self.codex_root / "bin" / "fulcrum"
+        self.assertTrue(cli_link.is_symlink())
+        self.assertEqual(
+            cli_link.resolve(), (self.source / ".venv" / "bin" / "fulcrum").resolve()
+        )
         configured_command = json.loads(self.hooks.read_text())["hooks"]["Stop"][0][
             "hooks"
         ][0]["command"]
@@ -138,6 +156,20 @@ class InstallDoctorTest(unittest.TestCase):
         with self.assertRaisesRegex(InstallationError, "not the expected symlink"):
             self.install()
         self.assertEqual(marker.read_text(), "unrelated\n")
+
+    def test_noneditable_package_import_is_rejected(self) -> None:
+        with self.assertRaisesRegex(InstallationError, "imports from"):
+            install_runtime(
+                paths=self.paths,
+                source_root=self.source,
+                certified_revision=self.revision,
+                skills_root=self.skills,
+                hooks_config=self.hooks,
+                host_id="local",
+                expected_brain_remote="remote",
+                sage_anchor=NOW,
+                now=NOW,
+            )
 
     def test_disposable_source_is_rejected(self) -> None:
         disposable = self.root / ".worktrees" / "candidate"
@@ -202,6 +234,14 @@ class InstallDoctorTest(unittest.TestCase):
         )
         self.paths.config_file.write_text(json.dumps(config), encoding="utf-8")
         with (
+            patch(
+                "fulcrum.doctor.runtime_package_root",
+                return_value=(self.source / "src" / "fulcrum").resolve(),
+            ),
+            patch(
+                "fulcrum.doctor.schema_root",
+                return_value=(self.source / "schemas").resolve(),
+            ),
             patch("fulcrum.doctor._tool_version", return_value="version"),
             patch(
                 "fulcrum.doctor._tollgate_project_status",

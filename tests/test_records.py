@@ -6,12 +6,20 @@ import json
 import unittest
 from pathlib import Path
 
-from fulcrum.records import RecordValidationError, load_record, validate_record
+from fulcrum.records import (
+    RecordValidationError,
+    load_record,
+    schema_root,
+    validate_record,
+)
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "records"
 
 
 class RecordContractTest(unittest.TestCase):
+    def test_schemas_resolve_directly_from_checkout(self) -> None:
+        self.assertEqual(schema_root(), Path(__file__).parents[1] / "schemas")
+
     def test_all_examples_validate(self) -> None:
         fixtures = sorted(FIXTURE_ROOT.glob("*.json"))
         self.assertEqual(len(fixtures), 8)

@@ -31,7 +31,9 @@ scripts/check
 
 Run the repository-linked installation workflow in
 [`docs/setup.md`](docs/setup.md) to point the Codex skill and hook directories
-at this checkout. Changes in the checkout are then live without reinstalling.
+at this checkout and create the stable `~/.codex/bin/fulcrum` link. Changes in
+the checkout are then live without reinstalling. Use that command by absolute
+path unless `~/.codex/bin` is known to be on `PATH`.
 
 State commands accept global `--brain-root` and `--state-root` overrides before
 the subcommand. They emit JSON on stdout and diagnostics on stderr:

@@ -27,9 +27,6 @@ fulcrum = "fulcrum.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.data-files]
-"share/fulcrum/schemas" = ["schemas/*.json"]
-
 [tool.black]
 line-length = 88
 target-version = ["py312"]

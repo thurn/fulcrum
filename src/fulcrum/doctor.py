@@ -11,7 +11,7 @@ from typing import Any, Literal, TypedDict, cast
 from fulcrum.brain import brain_status
 from fulcrum.config import RuntimePaths
 from fulcrum.hook_config import FULCRUM_STATUS_PREFIX
-from fulcrum.install import LINKED_SKILLS, ROLES, SETUP_SKILLS
+from fulcrum.install import LINKED_SKILLS, ROLES, SETUP_SKILLS, runtime_package_root
 from fulcrum.records import (
     ExecutorEvidenceRecord,
     InstallationRecord,
@@ -19,6 +19,7 @@ from fulcrum.records import (
     ProjectRegistryRecord,
     RoleRunRegistryRecord,
     load_record,
+    schema_root,
 )
 from fulcrum.state import read_record
 
@@ -156,6 +157,18 @@ def _linked_assets_check(
     expected_hook = (source_root / "hooks").resolve(strict=False)
     if not hook_link.is_symlink() or hook_link.resolve(strict=False) != expected_hook:
         failures.append(str(hook_link))
+    cli_link = skills_root.parent / "bin" / "fulcrum"
+    expected_cli = (source_root / ".venv" / "bin" / "fulcrum").resolve(strict=False)
+    if not cli_link.is_symlink() or cli_link.resolve(strict=False) != expected_cli:
+        failures.append(str(cli_link))
+    if runtime_package_root() != source_root / "src" / "fulcrum":
+        failures.append(f"Python import: {runtime_package_root()}")
+    try:
+        actual_schemas = schema_root()
+        if actual_schemas != source_root / "schemas":
+            failures.append(f"schemas: {actual_schemas}")
+    except Exception as error:
+        failures.append(f"schemas: {error}")
     if hooks_config.parent.resolve(strict=False) != skills_root.parent.resolve(
         strict=False
     ):

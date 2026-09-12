@@ -47,6 +47,10 @@ stop with one precise identity instruction. Titles are discovery aids, not IDs.
    hooks file contains exactly one marked Fulcrum `SessionStart` compact handler
    and one marked Fulcrum `Stop` handler using the linked `fulcrum-hook`. Do not
    duplicate hooks per project.
+5. Verify the active Python import resolves to `<source>/src/fulcrum`, schemas
+   resolve to `<source>/schemas`, and `~/.codex/bin/fulcrum` links to
+   `<source>/.venv/bin/fulcrum`. Use that link by absolute path unless its parent
+   is demonstrably on `PATH`.
 
 Repair safe, in-scope installation drift with the documented idempotent
 `fulcrum install` command from retained certified source. Preserve the brain,
@@ -59,6 +63,12 @@ The links are the runtime contract. Edits under the retained checkout's
 read or process invocation; do not copy files, compute content hashes, record
 per-run skill snapshots, or reinstall after an edit. Restart Codex only if its
 skill discovery cache does not show a changed skill.
+
+Keep `~/.codex/hooks.json` as a stable user-level merge point because it may
+contain unrelated hooks. Never replace or symlink the whole file; mutable
+Fulcrum hook behavior belongs under the linked `hooks/fulcrum` directory. Do not
+add automatic Git pulls, dependency synchronization on CLI startup, or process
+hot reload.
 
 ## Human task checkpoint
 
