@@ -312,6 +312,115 @@ runtime behavior works.
 
 ## Setup, Identity, Names, and Models
 
+### One-command installation
+
+From a retained Fulcrum checkout on a new macOS environment, the supported entry
+point is:
+
+```sh
+./scripts/setup
+```
+
+This command installs and configures the complete system, then waits for readiness.
+It is a guided installer on first use, not a list of commands for the user to run.
+Do not require a preinstalled Fulcrum CLI, manual virtualenv setup, hand-written
+bootstrap JSON, copied thread/project IDs, a setup-agent conversation, or a
+previously certified Fulcrum installation. The checkout is the permanent editable
+runtime source. Record its actual Git revision without requiring the user to
+supply a revision or manufacture a release ref before installation can begin.
+
+Keep `scripts/setup` a thin shell bootstrap: locate/install the supported Python,
+create or reuse the checkout's `.venv`, install `requirements-dev.lock` and the
+editable package, then run that environment's `fulcrum setup` implementation.
+Put configuration, dependency setup, enrollment, and readiness logic in existing
+Python modules, shared with `doctor` and repeat invocations. Do not duplicate the
+workflow in a large shell script or require manual activation of the virtualenv.
+
+The first run collects missing user choices in the terminal and saves them as
+ordinary installation configuration. Later runs reuse them. Discover installed
+paths and native IDs through supported tools instead of asking the user for them.
+
+| Setting | First-run behavior |
+| --- | --- |
+| Source, Python environment, Codex binary/desktop paths | Infer from the checkout and installed applications; install missing supported dependencies and verify their actual paths |
+| Brain | Reuse configured state when present; otherwise ask whether to restore an existing brain or create a new one, and ask for the private remote destination; local path defaults to `~/brain` |
+| State/config location | Use the existing `~/Library/Application Support/Fulcrum` default and explicit path/environment overrides |
+| Projects | Select repository paths to enroll, offering the current checkout; infer existing native registrations and remotes; accept any selected set, without a fixed Fulcrum/Tollgate/Battlement requirement |
+| Project validation command | Reuse existing Tollgate configuration or a known repository check entry point; ask when no unambiguous check command exists |
+| Archon model and reasoning | Reuse the saved choice or ask explicitly from supported options; there is no implicit Archon model choice |
+| Other models, endpoint, cadence, liveness checks | Use this plan's defaults unless overridden; establish cadence anchors from initial setup time |
+
+For unattended setup, support the same entry point with an optional config file:
+`./scripts/setup --config /absolute/setup.json --non-interactive`. Use the same
+ordinary configuration fields, with no separate bootstrap schema or version.
+Missing required choices produce one concrete error listing them. Secrets remain
+in native credential stores; external account login or operating-system consent
+may require the user. In interactive mode, open the supported login/consent flow
+and continue after it completes; do not delegate the remaining setup to a checklist.
+
+### What setup performs
+
+Initial setup keeps ordinary execution dispatch disabled until the final
+readiness check passes. The bootstrap Archon turn and disposable runtime check
+are explicit setup actions; starting the services alone does not enable the fleet.
+
+1. **Install dependencies and credentials.** Detect and install supported Python,
+   Git, Codex desktop/bundled CLI, Beads/Dolt, and Tollgate through their supported
+   installation paths, reusing existing valid installations. Verify Codex login
+   and access to the selected private repositories. Implement concrete dependency
+   installers and verify them on a clean development environment; do not leave
+   “install prerequisites manually” as the normal product flow. If a dependency
+   cannot be installed automatically on the selected environment, name that
+   specific unsupported step and leave setup incomplete.
+2. **Prepare the brain and local state.** Clone/restore the selected brain or
+   create the requested new private brain and native Git/Beads remotes. Restore
+   existing Beads history through native bootstrap; a Git clone alone is not a
+   restored issue database. Initialize only genuinely new stores. Create the
+   configured directories and let the controller initialize its SQLite state.
+   Beads owns its Dolt server lifecycle; do not add a third Fulcrum supervisor.
+3. **Install runtime assets.** Install the stable CLI link, retained human-entry
+   skills, packaged prompts, and instruction-refresh hooks. Configure CLI discovery
+   for both terminal use and managed agent shells; service/hook commands use
+   absolute paths. Verify the actual loaded assets. Remove obsolete Fulcrum assets
+   through the cutover rules; never install Watchman or deleted role skills.
+4. **Start the shared runtime.** Install/start both LaunchAgents and create the
+   desktop launch wrapper described above. On a fresh environment, launch the
+   desktop against the shared listener. Verify login, handshake, and shared thread
+   visibility. Existing active private-runtime conversations still require the
+   documented drain/relaunch boundary; a rerun does not silently interrupt them.
+5. **Enroll projects.** Resolve or create supported native Codex project and
+   Tollgate registrations for the selected repositories. Configure the selected
+   validation command and intended delivery/remote policy, then verify actual
+   repository identity and integration health. Do not ask the user to copy native
+   IDs or author readiness evidence. Unsupported native project-registration
+   capabilities are a specific integration failure, not invented API calls.
+6. **Create Archon and establish policies.** Create/name Archon with the selected
+   model, or reuse the retained current binding on rerun. Deliver its initial
+   setup brief with enrolled projects and human constraints. Wait for Archon to
+   establish explicit capacity and recurring policies through its normal finish
+   path. The installer observes the retained result; the user need not start a
+   second setup conversation. Apply those policies before declaring readiness.
+7. **Verify and finish.** Run the shared `doctor`/readiness checks against actual
+   dependencies, brain Git/Beads connectivity and synchronization, projects, loaded
+   assets, shared runtime, controller, and Archon policies. Include a disposable
+   runtime create/name/turn/archive smoke check, without modifying product code
+   or creating a real implementation bead. Exit zero only when the selected
+   installation is ready to accept work. Print the Archon link, enrolled projects,
+   and the usable CLI/desktop-launch commands.
+
+Setup reports each stage and preserves completed work on failure. The same command
+resumes by inspecting configured resources and retained operations; it does not
+create duplicate remotes, registrations, services, or Archon threads. Use the
+existing runtime uncertainty/recovery rules for ambiguous operations. Report
+`setup incomplete` with the precise remaining action and exit nonzero, rather
+than calling an installation ready with disabled selected projects. A rerun
+neither wipes state nor replaces active agents; reset remains the explicit command
+below. Existing legacy installations enter the drain-before-cutover flow through
+this same entry point. `$fulcrum-setup` is an optional pointer to the script,
+not a second installation workflow.
+
+### Setup authority and identity
+
 Setup installs/starts the shared app-server and controller services, verifies the
 desktop connection, enrolls projects, and establishes the current Archon binding.
 It creates Archon through Python, using explicitly configured
@@ -1579,7 +1688,9 @@ Every agent-result transition still waits for normal turn/helper completion.
    selection. Replace the operational portions of `records.py`/`state.py` rather
    than dual-writing their JSON files. Exit with restart persistence, rejected
    retired/unregistered thread bindings and incompatible outcomes, and a runnable
-   foreground daemon for development. Add setup's two LaunchAgent definitions
+   foreground daemon for development. Add the thin `scripts/setup` bootstrap,
+   guided/saved configuration, concrete native dependency installers, and setup's
+   two LaunchAgent definitions
    and desktop launch wrapper; verify repeatable service setup and shared-runtime
    readiness without enabling a duplicate app-server.
 3. **Complete one real bead end to end.** Wire single-command small-task intake
@@ -1626,6 +1737,11 @@ Every agent-result transition still waits for normal turn/helper completion.
    the documented dashboard read contract; dashboard UI work is separate. Exit
    with one controller owner, no legacy launch/writer path, and no requirement
    for deleted skills, Watchman, or old record formats.
+   Finish the one-command installer through brain restore/new creation, project
+   enrollment, Archon policy initialization, and real readiness checks. Replace
+   README/setup documentation's manual steps with `./scripts/setup`; retain
+   lower-level commands for diagnostics. Remove the old manual certification,
+   pre-created-role, evidence-JSON, and fixed-three-project bootstrap requirements.
 
 Each task lands its matching tests and removes replaced behavior as it goes.
 Run focused unit tests during development and `scripts/check` for code changes
@@ -1642,6 +1758,7 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Clean macOS environment, saved non-interactive config, partial setup failure, and rerun | One `scripts/setup` invocation installs dependencies, configures the selected brain/projects/services, creates Archon and policies, and verifies readiness; rerun resumes without duplicates; missing credentials/capabilities produce precise incomplete status |
 | First/repeated setup, conflicting listener, or desktop on a private runtime | Two supervised services and a configured desktop launcher; verify shared thread visibility before dispatch; reuse known services; report conflicts without killing listeners or silently moving desktop work |
 | Controller/app-server restart, reconnect with lost mutation reply, and each fleet reboot mode | Controller restart leaves app-server alive; reconnect initializes once and reconciles before starts; no replayed mutation; fleet reboot/reset preserves services and unrelated desktop conversations |
 | Missed intake/completion event, idle fleet with queued work, slow native read, and duplicate fallback observations | Next 30-second pass finds actionable work or its concrete blocker; approved work starts directly and unapproved work reaches idle Archon; no overlapping passes, duplicate starts, or reopening exhausted ambiguous operations |
@@ -1679,8 +1796,11 @@ configuration, and isolated brain, state, and remotes. Exercise desktop/server
 relaunch in an isolated development environment; ordinary task checks can attach
 to the already verified shared runtime without disrupting existing conversations.
 
-1. Install/start the two services, launch the development desktop against
-   the configured listener, and verify both clients observe the same thread.
+1. Run `./scripts/setup` in the clean development environment and provide only
+   the missing human choices. Verify dependency installation, brain restore/new
+   creation, project enrollment, services, and readiness without manual bootstrap
+   commands or fabricated evidence. Rerun and confirm the same resources are reused.
+   Verify the development desktop and controller observe the same thread.
    Exercise controller restart and reconnect without restarting app-server.
    Create/name Archon with explicit model settings, establish initial limits/policies,
    and confirm `$archon` links to
