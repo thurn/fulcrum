@@ -247,6 +247,8 @@ class Controller:
 
     async def _refresh_task(self, task: dict[str, Any]) -> dict[str, Any]:
         thread = await self.runtime.read_thread(task["native_thread_id"])
+        if thread.get("name") != task["title"]:
+            await self.runtime.set_name(task["native_thread_id"], task["title"])
         facts = thread_facts(thread)
         self.store.execute(
             "UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?, helpers_terminal = ?, archived = ?, updated_at = ? WHERE id = ?",
@@ -861,11 +863,8 @@ class Controller:
                 title=title,
             )
             await self.runtime.set_name(thread["id"], task["title"])
-            verified = await self.runtime.read_thread(thread["id"], include_turns=False)
-            if verified.get("name") != task["title"]:
-                raise AppServerError("canonical thread title was not confirmed")
             self.store.execute(
-                "UPDATE tasks SET state = 'idle', runtime_status = 'idle', updated_at = ? WHERE id = ?",
+                "UPDATE tasks SET state = 'idle', runtime_status = 'unmaterialized', updated_at = ? WHERE id = ?",
                 (utc_now(), task["id"]),
             )
             self.store.execute(
@@ -873,7 +872,7 @@ class Controller:
                 (thread["id"], json.dumps(result), utc_now(), operation),
             )
             task["state"] = "idle"
-            task["runtime_status"] = "idle"
+            task["runtime_status"] = "unmaterialized"
             return task
         except Exception as error:
             state = "uncertain" if isinstance(error, AppServerError) else "failed"
@@ -905,16 +904,17 @@ class Controller:
             title=inputs["title"],
         )
         await self.runtime.set_name(thread_id, inputs["title"])
-        verified = await self.runtime.read_thread(thread_id, include_turns=False)
-        if verified.get("name") != inputs["title"]:
-            raise AppServerError("canonical thread title was not confirmed")
+        facts = thread_facts(thread)
+        runtime_status = (
+            str(facts["runtime_status"]) if thread.get("turns") else "unmaterialized"
+        )
         self.store.execute(
-            "UPDATE tasks SET state = 'idle', runtime_status = 'idle', updated_at = ? WHERE id = ?",
-            (utc_now(), task["id"]),
+            "UPDATE tasks SET state = 'idle', runtime_status = ?, updated_at = ? WHERE id = ?",
+            (runtime_status, utc_now(), task["id"]),
         )
         self.store.execute(
             "UPDATE external_operations SET state = 'complete', native_id = ?, result_json = ?, reconciliation_used = 1, condition = NULL, updated_at = ? WHERE id = ?",
-            (thread_id, json.dumps({"thread": verified}), utc_now(), operation["id"]),
+            (thread_id, json.dumps({"thread": thread}), utc_now(), operation["id"]),
         )
         pair_id = inputs.get("pair_id")
         if isinstance(pair_id, int) and inputs["role"] in {"executor", "overseer"}:
@@ -928,6 +928,7 @@ class Controller:
                 (task["id"], utc_now(), pair_id),
             )
         task["state"] = "idle"
+        task["runtime_status"] = runtime_status
         return task
 
     async def _start_assignment_action(self, assignment: dict[str, Any]) -> None:
@@ -1016,7 +1017,14 @@ class Controller:
         if task["archived"]:
             await self.runtime.unarchive(task["native_thread_id"])
             await self.runtime.resume_thread(task["native_thread_id"])
-        facts = await self._refresh_task(task)
+        facts = (
+            {
+                "last_turn_id": None,
+                "can_start": True,
+            }
+            if task["runtime_status"] == "unmaterialized"
+            else await self._refresh_task(task)
+        )
         if not facts["can_start"]:
             raise StoreError(f"task {task['title']} is not ready for a new turn")
         if assignment and action["kind"] in {"implement", "correct"}:
@@ -1702,8 +1710,43 @@ class Controller:
                 base_instructions="Disposable Fulcrum installation visibility check. Do not start work.",
             )
             thread_id = result["thread"]["id"]
+            self.store.execute(
+                "UPDATE external_operations SET native_id = ?, updated_at = ? WHERE id = ?",
+                (thread_id, utc_now(), operation),
+            )
             await self.runtime.set_name(thread_id, "Fulcrum setup visibility check")
-            observed = await self.runtime.read_thread(thread_id, include_turns=False)
+            turn_id = await self.runtime.start_turn(
+                thread_id,
+                "Reply with exactly: Fulcrum runtime check passed. Do not use tools or modify files.",
+                cwd=project["repo_path"],
+                model=self.config.archon_model or "gpt-5.6-sol",
+                effort=self.config.archon_reasoning_effort or "medium",
+                correlation=f"fulcrum-operation-{operation}",
+            )
+            deadline = asyncio.get_running_loop().time() + 180
+            observed: dict[str, Any] | None = None
+            while asyncio.get_running_loop().time() < deadline:
+                try:
+                    current = await self.runtime.read_thread(thread_id)
+                except AppServerError:
+                    await asyncio.sleep(0.25)
+                    continue
+                facts = thread_facts(current)
+                if (
+                    facts["last_turn_id"] == turn_id
+                    and facts["last_turn_terminal"]
+                    and facts["helpers_terminal"]
+                    and facts["runtime_status"] == "idle"
+                ):
+                    observed = current
+                    break
+                await asyncio.sleep(0.25)
+            if observed is None:
+                raise AppServerError(
+                    "runtime smoke turn did not finish within 180 seconds"
+                )
+            if observed.get("name") != "Fulcrum setup visibility check":
+                raise AppServerError("runtime smoke task title was not retained")
             if observed.get("projectId") != project["codex_project_id"]:
                 raise AppServerError(
                     "setup smoke task project binding was not retained"

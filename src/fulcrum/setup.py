@@ -234,7 +234,7 @@ def run_setup(
     start_services(services, app_server_endpoint=config.app_server_endpoint)
     _wait_ready(config, paths)
     initialized = request_sync(
-        paths.socket, {"command": "setup_initialize"}, timeout=30
+        paths.socket, {"command": "setup_initialize"}, timeout=240
     )
     data = initialized.get("data", {})
     ready = bool(isinstance(data, dict) and data.get("ready"))
