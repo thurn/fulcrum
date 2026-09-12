@@ -394,13 +394,13 @@ the current installation:
 ```sh
 fulcrum weaver register
 fulcrum instructions
-fulcrum --dispatch 17 intake --title "Fix empty search results" \
+fulcrum intake --title "Fix empty search results" \
   --description "Show an empty-state message when search returns no matches; preserve matching results. Verify both cases."
-fulcrum --dispatch 17 finish intake_complete
+fulcrum finish intake_complete
 ```
 
-Here `17` represents the authoring dispatch returned by writable registration;
-the returned instructions contain the complete commands with the actual value.
+Writable registration establishes the thread's current authoring action; the
+returned instructions contain the relevant intake and finish commands.
 
 Registration binds the actual runtime identity, allocates the numeral once, sets
 the canonical name, and returns the relevant instructions in one response. An
@@ -435,7 +435,7 @@ and source changes still require the approved writable authoring phase.
   `fulcrum intake --project <project> --title <title>
   --description <description>` without creating a Weaver conversation. Direct
   filing is an explicit local CLI operation, grants no scheduling approval, and
-  uses the same intake handler. Managed authoring retains its dispatch binding;
+  uses the same intake handler. Managed authoring uses its current thread/action binding;
   specialist findings retain their evidence-backed publication contract.
 - The single-task CLI accepts `--executor-model`, `--executor-reasoning-effort`,
   `--overseer-model`, and `--overseer-reasoning-effort` for resolved preferences;
@@ -734,142 +734,101 @@ stale decisions remain historical and return a concise conflict for resolution.
 A lost send response leaves the batch unresolved until runtime reconciliation.
 Apply the single-pass and operator-resolution rule above; never resend solely
 because the agent has not acknowledged it yet. If its confirmed turn ends
-without a required outcome, use the shared completion-recovery policy. The same
+without a required outcome, use the controller-owned missing-outcome policy. The same
 unchanged exception does not create repeated Archon wakes.
 
 ## Finish Commands and Lifecycle Hooks
 
-`fulcrum finish` is the mandatory end-of-work command for managed role turns. It
-records a semantic outcome and returns a short instruction to end the turn. It
-does not immediately wake another agent or archive the caller.
-
-Bind commands to the registered runtime task and current managed turn. Derive
-identity from the invocation environment and controller dispatch record; do not
-allow an arbitrary `--role` or supplied task ID to select someone else's rights.
-Validate legal outcome kinds, assignment, current source, and expected state.
-This protects cooperative workflow correctness, not against a hostile local
-administrator or an agent deliberately bypassing every available interface.
-
-The inspected shell exposes `CODEX_THREAD_ID` and `CODEX_SESSION_ID`, but no
-turn ID. Allocate an integer dispatch ID before every managed start and render
-it into the prompt's complete command as the global `--dispatch` argument.
-Validate both the runtime task ID from the environment and that dispatch's
-retained task/turn binding. The argument selects recorded context, not another
-role's authority. Reject a stale dispatch; never guess the current turn from a
-task's newest assignment. Hooks use their native `session_id` plus the retained
-active dispatch, and need no agent-authored identity.
-
-Routine outcomes use `fulcrum finish <outcome>` with action-specific arguments:
+`fulcrum finish` records the outcome of a managed action and tells the agent to
+end its turn. Python uses that explicit result to advance the work after the
+thread and its helpers stop. Routine commands need no identity arguments:
 
 ```sh
-fulcrum --dispatch 42 finish ready_for_review --evidence path/to/validation.md
-fulcrum --dispatch 43 finish approved --assessment "Matches the approved scope"
-fulcrum --dispatch 42 finish blocked --reason "Required test service is unavailable"
+fulcrum finish ready_for_review --evidence path/to/validation.md
+fulcrum finish approved --assessment "Matches the approved scope"
+fulcrum finish blocked --reason "Required test service is unavailable"
 ```
 
-These are alternatives for different dispatches, not commands to run in
-sequence. The controller supplies the number; agents author only the outcome's
-arguments. Registration and read-only instruction retrieval do not require a
-managed dispatch ID. Writable Weaver activation creates its authoring dispatch;
-Plan-mode naming alone does not.
+These are alternative outcomes. The agent supplies judgment and evidence;
+Python supplies the workflow context. Substantial findings, scheduling decisions,
+and reports may use `--input <file.json>` as specified in the outcome table below.
+Routine outcomes require no intermediate file.
 
-Python supplies task, turn, assignment, candidate, and source identities from
-the dispatched turn and its retained native-operation receipts. Review refers
-to the candidate captured in that review's dispatch; Executor submission refers
-to the candidate retained by its Python submission helper. Never bind a delayed
-command to whichever assignment or candidate is newest at invocation time.
-Missing or contradictory bindings return an actionable error, not a request for
-the agent to guess IDs. `intake_complete` similarly uses that Weaver turn's
-retained intake result and requires no copied bead list.
+### Bind to the thread's current action
 
-Agents supply judgment, rationale, and evidence references. Python builds and
-validates the durable outcome record. Use `--input` with the appropriate outcome
-for substantial findings, scheduling decisions, and other structured results;
-task graphs remain input to `fulcrum intake`. These files contain authored
-content and referenced decision targets, not duplicated caller identity. A
-routine finish must not require creating an intermediate outcome file. Evidence
-references point to retained artifacts containing the actual checks and results.
+The CLI reads `CODEX_THREAD_ID` from its environment. Python looks up that
+registered thread's current assigned action and checks that the outcome is valid
+for it. For example, `approved` must belong to an assigned review. Reject missing
+identity, a retired thread binding, no assigned action, or an incompatible outcome
+with a concrete error. Agents do not supply a role, thread ID, turn ID, or
+`--dispatch` token to finish.
 
-Use role-specific outcomes rather than a generic success flag:
+Python already allows one managed turn at a time per thread and controls when
+its assignment changes. Keep that assignment until the action is resolved and
+the thread and helpers are inactive. The runtime adapter retains native turn IDs
+returned by the runtime for completion-event correlation and lost-response
+reconciliation. Neither agents nor hooks derive turn IDs, and CLI outcome
+validation needs no agent-facing turn identifier.
 
-- Executor: ready for review, permitted repair complete, blocked, or
-  checkpointed.
-- Overseer: approved with repair permissions, changes requested with findings,
-  incomplete with missing evidence, or an exception requiring judgment.
-- Archon: recorded scheduling/policy decisions, deferrals, and summary updates.
-- Weaver: retained authoring/intake result, future plan, or explicit blocker.
-- Sage/Inquisitor: report and findings, or a retained request for missing
-  evidence.
-- An interview answer identifies its occurrence and answers the consolidated
-  request. It cannot revive the subject's old implementation assignment.
+This assumes agents invoke finish in their assigned turn. Detached processes
+submitting finish later are unsupported. A compatible command pasted into a
+later action on the same thread cannot always be recognized as stale; accept
+that limitation instead of adding command tokens or transcript analysis.
 
-Expected waits are successful retained states, not errors. An identical finish
-retry returns its existing result; conflicting reuse is rejected. An outcome
-accepted for a turn is frozen.
+Bind approval to the exact candidate attached to the assigned review. Bind an
+Executor's result to its retained submission receipt, and `intake_complete` to
+the current authoring action's retained intake. An interview answer belongs to
+the assigned interview, never the subject's old implementation work. Do not infer
+review approval from the worktree's latest contents or from an agent's final prose.
+An identical finish repeated for the same action returns the retained result;
+a conflicting result is rejected. Do not replace an already accepted outcome.
 
-After finish, Python advances only after these explicit checks pass:
+### Advance after completion
 
-- The accepted outcome belongs to the dispatched task, turn, and assignment.
-- The matching turn completed normally and its native helpers are terminal.
-- For candidate outcomes, the native candidate's immutable source OID matches
-  the recorded outcome and the candidate is the assignment's expected candidate.
-- Current approval and holds permit the next action, with native delivery facts
-  checked at the delivery boundary described below.
+Before advancing, Python checks that:
 
-Missing observations wait for reconciliation. Explicit contradictions hold the
-assignment for resolution. An interrupted or failed turn retains its outcome
-for inspection without automatically approving, closing, or handing off work.
-Python does not interpret arbitrary later tool calls or final prose to decide
-whether the agent invalidated its report. Do not build a transcript classifier,
-shell-command parser, or general post-finish activity detector. A later worktree
-edit does not alter an already submitted immutable candidate or authorize a new
-one; advancement remains bound to the recorded candidate.
+- The current action has a valid recorded outcome.
+- Its runtime turn completed normally and the thread and helpers are inactive.
+- A candidate outcome refers to the assignment's expected immutable candidate
+  and recorded source OID.
+- Current approval and holds permit the next action. Native delivery checks
+  still apply at the delivery boundary.
 
-Reconciliation reads the specific runtime, assignment, and native candidate
-facts that failed the checks above; it does not repeat the preceding operation.
-If those facts are resolved and only a corrected semantic report is needed, use
-the same single correction allowance described below. Its recovery turn may
-submit a new outcome that explicitly supersedes the old one; preserve both
-records. An exhausted allowance, unresolved external operation, or changed scope
-requiring judgment becomes an Archon exception.
+Unknown runtime or candidate facts wait for targeted reconciliation. A failed
+or interrupted turn, or contradictory candidate evidence, retains the action,
+result, and work for recovery. Resolve the concrete failure and issue a specific
+recovery action when needed; do not implement a generic corrected-outcome or
+supersession protocol. Existing bounded operational recovery remains applicable.
+Later worktree edits do not change an immutable submitted candidate. Do not scan
+later tool calls or final prose for possible report invalidation.
 
-### Bounded enforcement
+### Missing outcomes and instruction hooks
 
-Hooks restore useful instructions and detect missing outcomes. Their purpose is
-to prevent common mistakes cheaply, not to implement the whole scheduler inside
-synchronous callbacks.
+Python alone handles missing finish. When a managed turn ends normally without
+an outcome, wait for the thread and helpers to be idle, then request the completion
+report once under normal capacity and hold checks. The reminder includes the
+current action, retained evidence, and allowed finish commands; it does not ask
+the agent to repeat its implementation or analysis. Store one `reminder_sent`
+flag on that action before sending. The reminder continues the same action and
+cannot reset that flag; restart and duplicate events cannot create more reminders.
+Uncertain reminder delivery uses the existing runtime reconciliation rule.
 
-- Startup and `SessionStart` compaction handling retrieve Python's current role
-  and assignment instructions. Use local cached controller facts so a refresher
-  does not scan Beads, transcripts, or the fleet.
-- A stop hook checks whether the active managed turn has an accepted outcome. If
-  absent, request the exact finish command once with the relevant allowed
-  outcomes. Do not ask the agent to inspect whether it messaged a peer.
-- Persist one correction allowance per failed managed-work attempt, shared by
-  the hook and controller. A recovery turn is linked to that same attempt and
-  cannot reset the allowance.
-- If a hook already intervened, a later controller observation cannot grant
-  another correction. If hooks were missed and the task is idle, Python may
-  schedule the one correction turn under normal capacity constraints.
-- Failure after that allowance becomes one retained Archon exception. Preserve
-  work; do not infer semantic success from final prose or repeat indefinitely.
-- Use narrow tool guards to deny direct fleet messaging, peer waiting, managed
-  role spawning, and direct archival. Allow the native-helper exception. Do not
-  add a shell-command parser or claim these guards prevent all bypasses.
+If the reminder ends without a valid outcome, retain the work and queue one
+Archon exception. Failed or interrupted turns use the explicit recovery path
+above. Do not infer success from prose or automatically repeat recovery turns.
+Unrelated threads and Plan-mode authoring have no finish obligation or reminder.
+Writable Weaver authoring has a current action; Plan-mode naming alone does not
+create one.
 
-```text
-Executor stops without finish
-stop hook uses the attempt's one correction allowance
-Executor still stops without a valid outcome
-Python retains unfinished work and queues one Archon exception
-```
+Startup and `SessionStart` compaction hooks only restore the current role/action
+instructions from local controller facts. They do not enforce finish at stop,
+send reminders, or maintain correction counters. Keep these reads comfortably
+within the two-second hook ceiling; an unavailable controller produces a clear
+context diagnostic rather than a fleet scan or a second state writer.
 
-Unrelated tasks and Plan-mode authoring stops receive no finish correction.
-Plan-mode Weaver registration/context does not imply an active execution
-obligation. Hooks should normally complete from local facts well below their
-explicit two-second ceiling. If the controller is unavailable, retain
-diagnostics and allow bounded stopping; reconciliation must not assume the hook
-ran.
+Packaged prompts explain coordination boundaries and the native-helper
+exception. Defer tool-blocking guards unless observed mistakes demonstrate their
+need; do not build a shell-command parser or a general bypass-prevention layer.
 
 ## Pair Execution, Review, and Delivery
 
@@ -963,7 +922,7 @@ workflow, Overseer grants the categories, Executor classifies the repair, and
 Python records the permitted replacement after the mechanical checks above.
 
 ```sh
-fulcrum --dispatch 43 finish approved --assessment "Matches the approved indexing task" \
+fulcrum finish approved --assessment "Matches the approved indexing task" \
   --allow-repair ordinary_merge_conflict --allow-repair bounded_in_scope_ci_fix
 ```
 
@@ -1142,7 +1101,7 @@ as an answer.
   subject capacity; an interview does not authorize old code work.
 - Restore archived subjects only when ready to interview. Rearchive only
   subjects Python restored, after their answer turn and helpers finish.
-- Distinguish interview-only outcomes from implementation outcomes and hooks.
+- Distinguish interview-only outcomes and instruction context from implementation work.
 - Resume Sage when all requests are resolved or the collection deadline passes.
   Report absent answers as missing evidence, without reminders to the subject or
   another interview round. Late answers are retained without reopening the
@@ -1223,7 +1182,7 @@ Overseer setup, model-driven CI wait, or acknowledgment-only Archon wake.
 | Patrol agent | Events and targeted reads | Exceptions, recovery time |
 | CI/push monitoring | Native CI observations; Python push retries | Repair wakes |
 | Repeated findings/interviews | Reuse, single round | Findings and turns |
-| Stop reminders | One correction allowance | Misses, hook duration |
+| Missing finish | One controller-owned reminder per action | Missing outcomes, reminder results |
 
 Record task creation, registration, eligible-to-start delay, Archon decision
 wait, implementation, review, correction, CI, push, and cleanup separately.
@@ -1324,10 +1283,10 @@ implementation boundaries and exit checks.
   Do not expose generic SQL or record-write commands to agents. Read-only status
   and hook context can use SQLite read transactions when the daemon is unavailable;
   they must disclose stale or missing observations.
-- Each managed mutation includes the environment task identity and prefilled
-  dispatch ID. Admin commands are explicit local CLI operations and do not
-  impersonate Archon. Hook correction bookkeeping goes through the controller;
-  an unavailable controller does not turn the hook into a second writer.
+- Each managed mutation includes the environment thread identity; the controller
+  resolves its current assigned action. Admin commands are explicit local CLI
+  operations and do not impersonate Archon. Hooks only read instruction context;
+  an unavailable controller does not turn a hook into a second writer.
 
 Use these stored records, with ordinary integer IDs for Fulcrum entities and
 native IDs for external objects. Keep required relationship and query fields in
@@ -1337,10 +1296,10 @@ columns; bounded outcome payloads and approved scope can be JSON/text.
 | --- | --- |
 | Tasks and name allocations | Unique native task ID; persistent counter per numbered role; unique (role, number) allocation per thread, allocated atomically; Archon has none; pair relationship stored explicitly |
 | Runs and assignments | Ordered approved beads and scope snapshot; at most one unfinished assignment per bead; current Executor/Overseer bindings |
-| Dispatches and outcomes | Immutable task/action/scope binding, delivered prompt, native turn ID, attempt/correction link; one accepted outcome per dispatch |
-| Reservations and holds | At most one unreleased dispatch per pair; global/project counts derive from reservations; holds do not erase assignment stage |
-| External operations | Intent, exact target/input, observed result, unresolved condition, and whether its reconciliation pass was used |
-| Updates and batches | Recipient/action identity, frozen batch membership, accepted dispatch and processing outcome |
+| Actions and outcomes | One current action per thread; retained assignment/scope/candidate or batch; one accepted outcome and one reminder flag per action |
+| Reservations and holds | At most one active or uncertain start per pair; global/project counts derive from reservations; holds do not erase assignment stage |
+| External operations | Intent, exact target/input including delivered prompt, observed result and native turn ID when applicable, unresolved condition, and whether its reconciliation pass was used |
+| Updates and batches | Recipient/action identity, frozen batch membership, accepted runtime turn and processing outcome |
 | Specialist occurrences and interviews | Recurring policy or explicit one-off authority/retained scope; at most one unfinished occurrence per recurring policy; one request per occurrence/subject; deadline and prior archival state |
 | Delivery/publication obligations | Existing candidate/report/intake identity, required remaining action, observed failure and retry ownership |
 
@@ -1363,9 +1322,9 @@ prompt command rendering, and finish validation. Implement these concrete forms:
 | Weaver completion | `intake_complete`, `future_plan --evidence <path>`, or `blocked --reason <text>` |
 | Specialist completion | `report --input <report.json>` with authored report content and an explicit findings list, including an empty list |
 | Specialist evidence collection | `evidence_needed --input <requests.json>`; Sage may request its one interview round |
-| Interview answer | `interview_answer --input <answer.json>`; occurrence and subject come from the dispatch |
+| Interview answer | `interview_answer --input <answer.json>`; occurrence and subject come from the current interview action |
 
-All rows use the prefilled `fulcrum --dispatch <id> finish` prefix. The approval
+All rows use the `fulcrum finish` prefix without identity arguments. The approval
 and finding fields described earlier are the required content; the implementer
 must define their typed payloads and valid/invalid fixtures in the same task as
 the command, not add a generic arbitrary-outcome escape hatch. `future_plan`
@@ -1399,11 +1358,12 @@ Every agent-result transition still waits for normal turn/helper completion.
    the activation trigger works. Any missing capability produces a specific
    blocked integration task; do not invent a protocol or a substitute runtime.
 2. **Build the store, daemon, and local CLI.** Add the records and uniqueness
-   constraints above, dispatch binding, process lock, socket request handler,
+   constraints above, current thread/action lookup, process lock, socket request handler,
    status readers, and explicit setup/Archon lookup. Reuse `config.py` path
    selection. Replace the operational portions of `records.py`/`state.py` rather
    than dual-writing their JSON files. Exit with restart persistence, rejected
-   stale/foreign dispatches, and a runnable foreground daemon for development.
+   retired/unregistered thread bindings and incompatible outcomes, and a runnable
+   foreground daemon for development.
 3. **Complete one real bead end to end.** Wire single-command small-task intake
    and the shared graph-intake handler, one Archon-approved
    assignment, Executor submission, independent Overseer review, and native
@@ -1416,8 +1376,8 @@ Every agent-result transition still waits for normal turn/helper completion.
    `coordination.py` for approved runs, capacity, composed holds, idle-only
    batches, and the transition table above. Completion requires the existing
    full delivery contract. Deliver actionable briefs without a batching timer
-   and dispatch approved actions directly on relevant events. Add the shared
-   one-correction allowance and operator resolution for ambiguous operations.
+   and dispatch approved actions directly on relevant events. Add the controller's
+   single missing-outcome reminder and operator resolution for ambiguous operations.
    Exit with the relevant failure matrix below passing.
 5. **Add soft, hard, and reset reboot.** Implement the exact behaviors above,
    including worktree transfer and a full brain reset through its actual Git
@@ -1437,6 +1397,8 @@ Every agent-result transition still waits for normal turn/helper completion.
 7. **Install and cut over.** Follow the drain procedure, replace `install.py`,
    `doctor.py`, `readiness.py`, and hook expectations, remove obsolete role/shared
    skills and all Watchman code, and update affected tests and operational docs.
+   Remove legacy stop enforcement and tool-blocking hook installation; retain
+   instruction-refresh hooks only.
    Retain only human entry points and packaged prompts. Connect status views to
    the documented dashboard read contract; dashboard UI work is separate. Exit
    with one controller owner, no legacy launch/writer path, and no requirement
@@ -1466,12 +1428,13 @@ exercise native boundaries with isolated disposable state and retained evidence.
 | Creation/send response is lost or events replay after restart | Attach a corroborated result once, or retain reservation/batch and one operator condition after the bounded pass; no expanded search or repeat send |
 | Busy Archon, full capacity, changing updates, and mid-turn additions | Idle-only useful batches; decisions cannot acknowledge unseen updates; deferral does not cause identical wakes |
 | Limits fall; ordinary/urgent holds and quiet periods overlap | No new forbidden starts; observed interruption/drainage; releasing one hold does not clear others |
-| Finish missing, hook absent, correction already used, or turn fails after finish | One shared correction allowance; retained evidence and one exception after exhaustion; no Plan-mode or unrelated-task correction |
+| Normal turn omits finish; duplicate idle events, restart, or reminder omits finish | One controller reminder for the same action under capacity/holds, then one exception; no stop-hook enforcement or Plan-mode/unrelated-task reminder |
+| Repeated finish, incompatible outcome, retired thread, or failed/interrupted turn | Identical result for the same action is reused; incompatible/conflicting results and retired bindings fail; failed work/evidence retained for specific recovery; no generic outcome replacement |
 | Candidate identity mismatches or worktree changes after submission | Explicit mismatch holds advancement; review continues to target the recorded immutable candidate, never a newer worktree state |
 | Three substantive review failures, missing evidence, or covered repair | Only new substantive source rejections count; Archon decides after three; permitted repair records rationale/linkage without another Overseer turn |
 | Flaky/failed CI or a later unexplained green result | Diagnosis and concrete repair; no Fulcrum CI retry or automatic diagnostic replay; native certification after repair |
 | Source push, cleanup, or brain publication fails | Reuse retained candidate/report/intake; Python owns the remaining obligation; no duplicate implementation or analysis |
-| Follow-up, compaction, stale command, or missing template | Complete action brief and approved scope; valid prefilled finish command; stale/foreign dispatch fails; installed templates work without role skills |
+| Follow-up, compaction, or missing template | Complete action brief and approved scope; finish command needs no turn/dispatch ID; hooks restore context only; installed templates work without role skills |
 | Partial/duplicate intake, dependency cycle, scope edit, or unsupported model | No partial graph dispatch or silent scope/model change; preserve native Beads identities and explicit future exclusion |
 | Specialist overdue after downtime, duplicate finding, or speculative observation | One occurrence; reuse known findings; only evidence-backed submitted findings produce pending beads; zero findings is valid |
 | Busy/archived/unavailable interview subject and collection timeout | One request per subject; correct restoration; expire unstarted requests; reconcile uncertain starts; one Sage continuation with explicit missing evidence |
