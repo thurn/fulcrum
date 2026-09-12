@@ -73,12 +73,14 @@ and `[inquisitor-2]`. Overseers and Executors share a pair number, such as
 from existing registrations; numbers are not recycled.
 
 - The Archon records role, project, host, actual task ID, title, model, and run.
-- Human-created Weavers keep ordinary descriptive titles. They do not use
-  numbered tags or defer a rename until after Plan mode.
-- A Weaver in Plan mode reads available identity but writes no files until
-  approved. It then writes its own role/progress record and reports its identity
-  and completed work to the Archon, who updates the registry. Until then, hooks
-  do not persist inferred role information during the planning interview.
+- Weavers are short-lived, unregistered actors. They keep ordinary descriptive
+  titles, do not use numbered tags, and never create or update a role
+  registration or durable progress record.
+- A Weaver in Plan mode writes no files until approved. After approval, it can
+  author the plan and Beads in a writable turn without a registration
+  prerequisite. It may send at most one completion report to the current
+  Archon without waiting for acknowledgement; a failed send is surfaced rather
+  than persisted as Weaver coordination state.
 - Use the real task ID returned by creation when available. If creation is
   pending, resolve it through supported task listing or completion results.
   A temporary `clientThreadId` must not be used as a routable task ID.
@@ -120,9 +122,10 @@ instead of repeatedly waiting for a cycle to resolve itself.
 
 A bead belonging to a plan inherits that plan's activation. A bead without a
 plan uses an `activation:queued` or `activation:future` label; absence defaults
-to future work. The Weaver confirms the intended activation during direct
-intake. Sage and Inquisitor findings start as future work; the Archon queues
-them when appropriate. Beads' normal readiness and dependencies still apply.
+to queued work. Direct task intake also queues task lists by default; only an
+explicit human request to save work for later uses `activation:future`. Sage and
+Inquisitor findings start as future work; the Archon queues them when
+appropriate. Beads' normal readiness and dependencies still apply.
 
 The responsible Executor updates implementation status; the Overseer records
 assignment and review decisions. The Archon coordinates reassignment before
@@ -144,10 +147,12 @@ requires_plans: []
 ---
 ```
 
-`activation` is `queued` or `future`. The Weaver asks which is intended during
-planning. Codex's “Implement this plan” approves saving the project document
-and creating its beads; the chosen activation determines whether that work
-should enter the queue. It does not directly start product implementation.
+`activation` is `queued` or `future`. The Weaver records the selected plan
+activation during planning. Codex's “Implement this plan” approves saving the
+project document and creating its beads; the chosen activation determines
+whether that work should enter the queue. It does not directly start product
+implementation. Direct intake outside Plan mode defaults standalone work to
+queued unless the human explicitly asks for future work.
 
 A prerequisite plan is complete when all implementation beads currently linked
 to it have completed their required work. Code beads require certified
@@ -166,12 +171,14 @@ The normal completion sequence is:
 2. Commit the Markdown and immediately attempt its Git push.
 3. Create or update the related beads, commit their Beads history, and
    immediately attempt their Beads push.
-4. Tell the Archon which plan and tasks are ready, then archive the Weaver.
+4. Send one completion report to the current Archon when routable, without
+   waiting for acknowledgement, then archive the ephemeral Weaver.
 
 The Archon checks readiness before assigning work, including whether task
 creation has finished. A newly discovered queued plan with incomplete beads
 waits for the author to finish; it does not require a publication manifest.
-Lightweight task intake follows the same flow without a planning document.
+Lightweight direct intake queues standalone tasks by default and follows the
+same flow without a planning document.
 
 A refinement edits the same document and updates the existing beads. For an
 active assignment, the Weaver tells the Archon what changed. The Archon and
@@ -226,9 +233,10 @@ Archon writes its NEWS update. These are normal intermediate states.
 After interruption, inspect the document, Git history, and related beads, then
 finish whichever steps remain. Existing plan labels and task content are
 enough to identify already-created work; inspect before duplicating it.
-A failed push leaves local work intact. Report which push failed, retry on the
-next relevant action or patrol, and allow other work to continue. The Weaver
-may archive after reporting that pending push to the Archon.
+A failed push leaves local work intact. Report which push failed to the Archon
+in the Weaver's one completion report; do not create Weaver progress or a retry
+handoff. Other work may continue, and the ephemeral Weaver may archive after
+the one send result.
 
 Restoration retrieves both Git files and Beads history through their supported
 tools. A JSONL export can aid interchange, but does not replace a Dolt backup.
@@ -281,20 +289,22 @@ Local checks passed. Review link and evidence are attached.
 Next action: review this candidate and grant a mandate or request fixes.
 ```
 
-Before a handoff, the sender records its phase and intended next actor. It
-sends the message through the normal Codex tool and, after success, records
-the resulting wait or completion. A final response in its own task is not a
-sent report.
+Before a persistent-role handoff, the sender records its phase and intended
+next actor. It sends the message through the normal Codex tool and, after
+success, records the resulting wait or completion. A final response in its own
+task is not a sent report. A Weaver's completion report is one-way and has no
+durable progress receipt or acknowledgement wait.
 
 If delivery is uncertain, inspect the tool result or destination conversation
 before retrying. A repeated message is not a new assignment or promotion
 mandate. Recipients check the current bead and candidate before acting. Codex
 accepting a send does not mean the receiving agent has acted on it.
 
-The [stop reminder](hooks.md#bounded-handoff-reminder) trusts the agent's
-progress state and can ask it to check for a forgotten handoff once. It does
-not maintain a parallel receipt store, match report identifiers, or intercept
-self-archival. The skills retain responsibility for reporting before archival.
+The [stop reminder](hooks.md#bounded-handoff-reminder) trusts registered
+agents' progress state and can ask them to check for a forgotten handoff once.
+It does not maintain a parallel receipt store, match report identifiers, or
+intercept self-archival. Ephemeral Weavers are outside the reminder and retain
+responsibility for their one-way report before archival.
 
 Useful phases include queued, implementing, reviewing, fixing, promoting,
 investigating, completed, and canceled. A wait also records its reason and

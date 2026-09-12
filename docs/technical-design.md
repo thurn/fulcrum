@@ -134,18 +134,19 @@ The execution boundaries are deliberately small:
 
 ## Agent Roles
 
-Roles are persistent responsibilities attached to identifiable Codex tasks.
-Every role starts by reconciling its identity and reading the small amount of
-project memory relevant to its assignment. Registration writes occur only in a
-writable turn; a Weaver invoked in Plan mode defers them until approval.
-Registered roles receive concise refreshers after compaction. Active Executors
-and Overseers also receive a bounded handoff reminder when needed at a normal
-stop. The [hooks appendix](hooks.md) defines this limited scope.
+Roles are responsibilities attached to identifiable Codex tasks, but not every
+role has a durable registration. Persistent and implementation roles start by
+reconciling their identity and reading the small amount of project memory
+relevant to their assignment. Weavers are short-lived, unregistered authoring
+actors and never create role or progress records. Registered roles receive
+concise refreshers after compaction. Active Executors and Overseers also receive
+a bounded handoff reminder when needed at a normal stop. The [hooks appendix](hooks.md)
+defines this limited scope.
 
 | Role | Responsibility | Creation and lifetime |
 | --- | --- | --- |
 | Archon | Fleet strategy, scheduling, recovery, human contact | Human-created; persistent role |
-| Weaver | Interviews, plans, task intake, refinement | Human-created; archives on completion |
+| Weaver | Interviews, plans, task intake, refinement | Ephemeral; archives after one-way completion report |
 | Overseer | Assignments, code review, promotion authority | Archon-created; one execution run |
 | Executor | Implementation, validation, CI repair, cleanup | Archon-created; paired execution run |
 | Night Watchman | Patrols and due recurring-work reports | Human-created; persistent |
@@ -182,13 +183,14 @@ ordinary feature work even when that feature work has already started.
 ### Weaver
 
 The **Weaver** converts human intent into implementation-ready plans and beads.
-Invoking `$weaver` establishes the role. Weaver tasks keep their ordinary
-descriptive titles and are identified by their actual Codex task IDs. They do
-not receive numbered role tags or rename themselves after planning.
+Invoking `$weaver` starts an ephemeral authoring flow. Weaver tasks keep their
+ordinary descriptive titles, do not receive numbered role tags, and do not
+create or update a role registration or durable progress record.
 
 In Codex Plan mode, the Weaver interviews one material decision at a time and
-uses repository exploration to answer discoverable questions. It asks whether
-the approved work should enter the runnable queue or remain a future plan.
+uses repository exploration to answer discoverable questions. It records the
+plan's explicit activation choice, while standalone direct intake defaults to
+queued unless the human explicitly asks to save the work for later.
 
 - No brain files or beads are modified during Plan mode. For a refinement, the
   currently approved revision remains effective throughout the interview.
@@ -202,14 +204,18 @@ the approved work should enter the runnable queue or remain a future plan.
 - Beads include enough scope, dependencies, context, and acceptance criteria for
   a weaker model to execute without reconstructing the planning conversation.
 - The Weaver commits and pushes the Markdown, then commits and pushes the
-  related Beads changes, informs the Archon, and archives. A failed push is
-  reported for retry; it does not erase local work or prohibit archival.
+  related Beads changes. It sends at most one completion report to the current
+  Archon when routable, does not wait for acknowledgement, and archives after
+  the send result. A failed push or report is surfaced without creating durable
+  Weaver coordination state.
 
 Outside Plan mode, the Weaver explicitly states that it is using task intake
 and does not intend to create a project planning document. It answers project
-questions, clarifies task scope, and creates beads directly. This resembles
-the existing `$qq` discussion pattern without requiring large-plan reviews.
-Cold-reader and requirements-verifier passes are skipped for this flow.
+questions, clarifies task scope, and creates beads directly. Standalone tasks
+and task lists are queued by default; only an explicit human request saves them
+for later. This resembles the existing `$qq` discussion pattern without
+requiring large-plan reviews. Cold-reader and requirements-verifier passes are
+skipped for this flow.
 
 Refinement updates the existing plan identity and related beads. Approval of a
 revision that affects an active assignment triggers a targeted pause and
@@ -278,9 +284,12 @@ The actual model and reasoning setting are recorded for each assignment.
 
 | Role | Default model | Reasoning |
 | --- | --- | --- |
-| Archon, Weaver, Night Watchman | Human-selected | Human-selected |
+| Archon, Night Watchman | Human-selected | Human-selected |
 | Overseer, Sage, Inquisitor | `gpt-5.6-sol` | `high` |
 | Executor | `gpt-5.6-luna` | `xhigh` |
+
+Weaver task settings remain with the human-created task and are not copied into
+Fulcrum registration or assignment records.
 
 - Explicit assignment instructions override role defaults. For example,
   “Use Astra High for this bead” authorizes that exact scope.
@@ -313,7 +322,9 @@ constraints change. It need not be prompted to think beyond the current bead.
 Eligibility combines several independent facts:
 
 - The work is ready and queued through its plan or a standalone bead's
-  activation label, rather than saved as future work.
+  activation label, rather than saved as future work. Missing standalone
+  activation resolves to queued; direct intake uses future only when explicitly
+  requested.
 - Its Beads prerequisites and applicable plan-level prerequisites are complete.
 - No human or Archon hold prevents execution in its scope.
 - Its project integrations are available and an Executor can own the work.

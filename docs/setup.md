@@ -99,8 +99,9 @@ history.
 Use one `project:<id>` label on every bead. Plan work carries one `plan:<id>`
 label and inherits activation from that plan. Standalone work may carry one
 `activation:queued` or `activation:future` label; no activation label means
-future work. The checked-in [bead template](../templates/brain/bead.md) includes
-the implementation contract expected at intake.
+queued work. Direct intake uses `activation:future` only when the human
+explicitly asks to save work for later. The checked-in [bead template](../templates/brain/bead.md)
+includes the implementation contract expected at intake.
 
 Server-mode writes use an explicit batch boundary: pass
 `--dolt-auto-commit batch` while creating or updating related issues, then run

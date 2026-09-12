@@ -36,7 +36,7 @@ The configured command is `~/.codex/hooks/fulcrum/fulcrum-hook`. Its parent is
 a symlink into the retained Fulcrum Git checkout, where the wrapper starts the
 editable Python helper. Changes to either are live on the next hook invocation;
 there is no copied executable or reinstall step. The helper reads Codex's event
-JSON and the task's existing Fulcrum registration and progress. It makes no
+JSON and registered task's existing Fulcrum registration and progress. It makes no
 model calls, network requests, Beads queries, or transcript scans. Missing
 information is not a reason to invent task state or block the fleet.
 
@@ -69,8 +69,9 @@ Read current assignment state and holds before continuing.
 
 Aim for roughly 500 tokens, with a 1,000-token output limit. Use existing local
 facts and links; do not inject complete plans, source files, or conversation
-history. If registration is missing, emit no role-specific context. A Weaver
-first invoked in Plan mode relies on its skill until it can register normally.
+history. If registration is missing, emit no role-specific context. Weavers
+are intentionally unregistered and do not receive role-specific hook context
+or stop reminders.
 
 Codex's `SessionStart` event with source `compact` delivers the refresher before
 the next model request, including after automatic compaction during a turn.
@@ -95,8 +96,9 @@ weekly replacement.
 ## Bounded Handoff Reminder
 
 The stop hook is a reminder, not proof that a message was delivered. It uses
-existing progress state to avoid bothering an agent already in a healthy wait
-or finished after reporting its outcome.
+registered agents' existing progress state to avoid bothering an agent already
+in a healthy wait or finished after reporting its outcome. Ephemeral Weavers
+are outside this hook because they have no progress or handoff state.
 
 The agent records whether it has sent its current handoff in its own progress
 record, updating that indication when a new handoff is needed. It marks the
@@ -127,7 +129,8 @@ few local file reads. [Stop-hook behavior][hooks]
 
 A review wait, CI wait, or escalation wait can stop normally after the needed
 communication. The hook grants no new authority and must not restart work
-against a pause, cancellation, or newer user instruction. Interview-only wakes
+against a pause, cancellation, or newer user instruction. Weaver completion
+reports are one-way and do not create a hook-visible wait. Interview-only wakes
 of completed agents are outside active implementation runs.
 
 If a send fails, the agent retains the error and follows normal escalation.

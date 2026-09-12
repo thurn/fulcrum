@@ -22,7 +22,7 @@ a disposable Beads/Dolt remote, then initialize a brain checkout against them.
    commits remain present and the failed command is retained as a
    `push_obligations` entry in the responsible role's progress record.
 
-The repository test suite also checks label ambiguity, future-by-default
+The repository test suite also checks label ambiguity, queued-by-default
 standalone work, plan activation inheritance, bounded command construction,
 unrelated staged-content refusal, local preservation after push failure, and
 single-owner recording of retry obligations.
@@ -141,10 +141,11 @@ future/queued plan files, checks eligibility without dispatch, reuses a bead
 after an interrupted create, and routes an active refinement to reconciliation
 without changing its mandate. The Beads responses are controlled fixtures; no
 production work is published. Existing Task 06 checks cover independent pushes
-and Task 09 covers Plan-mode registration refusal. Skill frontmatter is validated
-with skill-creator's quick_validate.py. Manual contract review confirms that
-substantial plans require two distinct reviews, whereas direct intake does not,
-and approval to save future work does not authorize implementation.
+and Task 09 covers the unregistered Weaver boundary. Skill frontmatter is
+validated with skill-creator's quick_validate.py. Manual contract review
+confirms that substantial plans require two distinct reviews, whereas direct
+intake does not, standalone direct intake is queued by default, and approval to
+save future work does not authorize implementation.
 
 ## Task 12 — Review, replacement, and certified recovery
 

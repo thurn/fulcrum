@@ -54,10 +54,6 @@ ROLE_REMINDERS = {
         "Use bounded evidence and interviews to find underlying workflow problems "
         "without taking over active delivery."
     ),
-    "weaver": (
-        "Clarify scope and dependencies without implementing; Plan mode remains "
-        "read-only and must not register a run."
-    ),
 }
 
 

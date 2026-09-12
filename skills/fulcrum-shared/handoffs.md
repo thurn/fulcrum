@@ -1,5 +1,10 @@
 # Reliable handoffs
 
+This protocol applies to persistent and implementation roles. A Weaver's
+completion report is a separate one-way message: send it at most once to the
+current Archon when routable, do not await acknowledgement, and do not create
+progress, assignment, or delivery-retry state.
+
 1. Check the recipient's resolved task/host ID and current bead/run/candidate.
    Record intended actor/action, handoff_needed=true, handoff_sent=false before
    sending. Include approved scope, evidence, and the exact requested action.
@@ -13,7 +18,8 @@
    it was not delivered. Do not create a second assignment or mandate for a
    duplicate message. Recipient verifies exact assignment/candidate before acting.
 
-fulcrum.roles.prepare_handoff and finish_handoff produce owned progress records;
-call the atomic writer before sending and after the outcome. They never send
-messages or invent delivery receipts. A pending unconfirmed handoff must be
-reconciled before preparing another one.
+fulcrum.roles.prepare_handoff and finish_handoff produce owned progress records
+for registered roles; call the atomic writer before sending and after the
+outcome. They never send messages or invent delivery receipts. A pending
+unconfirmed handoff must be reconciled before preparing another one. They are
+not used by ephemeral Weavers.

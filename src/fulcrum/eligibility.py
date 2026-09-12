@@ -6,7 +6,7 @@ from typing import Literal, TypedDict, cast
 
 from fulcrum.beads import BeadsError, bead_label_facts
 from fulcrum.documents import PlanDocument
-from fulcrum.records import AssignmentRecord, Hold, ProgressRecord
+from fulcrum.records import AssignmentRecord, Hold
 
 
 class CompletionEvidence(TypedDict):
@@ -165,14 +165,6 @@ def _prepared(bead: BeadSnapshot) -> bool:
     )
 
 
-def _active_author(progress: ProgressRecord | None) -> bool:
-    return (
-        progress is not None
-        and progress["role"] == "weaver"
-        and progress["phase"] not in {"completed", "canceled"}
-    )
-
-
 def _reason(
     reasons: list[EligibilityReason], code: str, message: str, *references: str
 ) -> None:
@@ -189,7 +181,6 @@ def summarize_eligibility(
     integration: ProjectIntegration,
     assignments: list[AssignmentRecord],
     resources: ResourceFacts,
-    author_progress: ProgressRecord | None = None,
 ) -> EligibilitySummary:
     """Compose independent facts without changing any source of truth."""
 
@@ -249,11 +240,7 @@ def summarize_eligibility(
                     )
 
             linked = plan_beads.get(plan_id, [])
-            if (
-                not linked
-                or any(not _prepared(item) for item in linked)
-                or _active_author(author_progress)
-            ):
+            if not linked or any(not _prepared(item) for item in linked):
                 _reason(
                     reasons,
                     "awaiting_plan_preparation",

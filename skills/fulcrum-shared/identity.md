@@ -13,15 +13,20 @@ matches are an identity conflict; none after an uncertain create is still
 uncertain, not permission to create a duplicate. Inspect task history and
 creation status before a deliberate retry. Titles are discovery aids only.
 
-The current Archon retains historical registrations and allocates the next
-unused role number. Overseer and Executor share one new pair number; Sage and
-Inquisitor have separate sequences. Never recycle archived numbers. Weavers
-keep their descriptive title and have no role number. Human-created Archon,
-Watchman, and Weaver preserve their selected model and reasoning.
+The current Archon retains registrations for persistent and implementation
+roles and allocates the next unused role number. Overseer and Executor share
+one new pair number; Sage and Inquisitor have separate sequences. Never recycle
+archived numbers. Weavers are ephemeral and unregistered: keep their
+descriptive title, but do not write a role registration or Weaver progress
+record. Human-created Archon and Watchman preserve their selected model and
+reasoning.
 
-Only the current Archon writes the role/run registry. After approved activation
-in a writable turn, a Weaver initializes its own progress record (which includes
-its role) and reports its actual identity to Archon for registration. Plan-mode
-invocation is read-only: no state, brain, Beads, or inferred hook registration.
+Only the current Archon writes the role/run registry. Persistent and
+implementation roles initialize their own progress after identity resolution.
+Plan-mode Weaver invocation is read-only: it writes no state, brain, Beads, or
+inferred role registration. After approval, a Weaver can author plans and beads
+in a writable turn without registration; it may send one completion report to
+the current Archon without waiting for acknowledgement.
 Use fulcrum.roles.resolve_identity and initialize_progress for validated records;
-write them with atomic_write_record or fulcrum state write --input.
+write registered-role records with atomic_write_record or fulcrum state write
+--input.

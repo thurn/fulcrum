@@ -34,23 +34,29 @@ def draft(**changes: object) -> BeadDraft:
         "dependencies": ("brain-2",),
         "acceptance_criteria": "One bead exists after any retry.",
         "validation": "Exercise a retry after the create response is lost.",
-        "activation": "queued",
     }
     values.update(changes)
     return BeadDraft(**values)  # pyre-ignore[6]
 
 
 class BeadConventionTest(unittest.TestCase):
-    def test_standalone_activation_defaults_to_future(self) -> None:
+    def test_standalone_activation_defaults_to_queued(self) -> None:
         facts = bead_label_facts(["project:fulcrum"])
-        self.assertEqual(facts["activation"], "future")
+        self.assertEqual(facts["activation"], "queued")
         self.assertFalse(facts["inherited_activation"])
+
+    def test_standalone_draft_defaults_to_queued(self) -> None:
+        self.assertIn("activation:queued", draft().labels)
 
     def test_plan_bead_inherits_activation(self) -> None:
         facts = bead_label_facts(["project:tollgate", "plan:queue-repair"])
         self.assertEqual(facts["plan_id"], "queue-repair")
         self.assertIsNone(facts["activation"])
         self.assertTrue(facts["inherited_activation"])
+
+    def test_plan_draft_defaults_to_inherited_activation(self) -> None:
+        plan_draft = draft(plan_id="review")
+        self.assertEqual(plan_draft.labels, ("project:fulcrum", "plan:review"))
 
     def test_invalid_or_ambiguous_labels_are_rejected(self) -> None:
         invalid = (
@@ -186,10 +192,10 @@ class PushObligationTest(unittest.TestCase):
             progress: ProgressRecord = {
                 "record_kind": "progress",
                 "schema_version": 1,
-                "writer_id": "task-weaver",
+                "writer_id": "task-executor",
                 "updated_at": "2026-09-11T20:00:00Z",
-                "role_task_id": "task-weaver",
-                "role": "weaver",
+                "role_task_id": "task-executor",
+                "role": "executor",
                 "phase": "completed",
                 "phase_started_at": "2026-09-11T19:00:00Z",
                 "expected_next_actor": None,

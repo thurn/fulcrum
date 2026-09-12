@@ -28,6 +28,45 @@ class SkillPolicyTest(unittest.TestCase):
                 policy = cast(dict[str, Any], raw_policy)
                 self.assertIs(policy.get("allow_implicit_invocation"), False)
 
+    def test_weaver_is_ephemeral_and_direct_intake_is_queued(self) -> None:
+        weaver = (REPO_ROOT / "skills/fulcrum-weaver/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        identity = (REPO_ROOT / "skills/fulcrum-shared/identity.md").read_text(
+            encoding="utf-8"
+        )
+        handoffs = (REPO_ROOT / "skills/fulcrum-shared/handoffs.md").read_text(
+            encoding="utf-8"
+        )
+        weaver = " ".join(weaver.split())
+        identity = " ".join(identity.split())
+        handoffs = " ".join(handoffs.split())
+
+        self.assertIn("short-lived, unregistered authoring actor", weaver)
+        self.assertIn(
+            "do not write a role registration or Weaver progress record", identity
+        )
+        self.assertIn(
+            "do not create progress, assignment, or delivery-retry state", handoffs
+        )
+
+        self.assertIn(
+            "standalone tasks and task lists default to `activation:queued`", weaver
+        )
+        self.assertIn("activation:future` only when the human explicitly asks", weaver)
+        self.assertIn("at most one completion report", weaver)
+        self.assertIn("Do not wait, poll, require acknowledgement, or retry", weaver)
+        self.assertNotIn("future-by-default", weaver)
+        self.assertNotIn("register a run", weaver)
+
+    def test_registered_state_schema_keeps_retained_weaver_records_readable(
+        self,
+    ) -> None:
+        schema = (REPO_ROOT / "schemas/records-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"sage", "weaver"', schema)
+
 
 if __name__ == "__main__":
     unittest.main()

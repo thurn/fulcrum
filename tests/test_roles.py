@@ -9,6 +9,7 @@ from fulcrum.roles import (
     prepare_handoff,
     finish_handoff,
 )
+from fulcrum.records import validate_record
 
 
 class RoleTests(unittest.TestCase):
@@ -57,6 +58,53 @@ class RoleTests(unittest.TestCase):
         self.assertTrue(sent["handoff_sent"])
         self.assertEqual(sent["expected_next_actor"], "recipient")
         self.assertFalse(progress["handoff_needed"])
+
+    def test_weaver_cannot_enter_registered_role_state(self):
+        weaver = dict(self.role, role="weaver", task_id="task-weaver")
+        with self.assertRaisesRegex(ValueError, "Weaver is ephemeral"):
+            resolve_identity(weaver, [("task-weaver", "local")])
+        with self.assertRaisesRegex(ValueError, "Weaver is ephemeral"):
+            initialize_progress(weaver, self.now)
+
+        role = resolve_identity(self.role, [("real", "local")])
+        progress = initialize_progress(role, self.now)
+        with self.assertRaisesRegex(ValueError, "Weaver is ephemeral"):
+            prepare_handoff(progress, weaver, "Report result", self.now)
+
+    def test_retained_weaver_records_remain_readable(self):
+        weaver = dict(self.role, role="weaver", task_id="task-weaver")
+        registry = dict(
+            self.role_registry(),
+            roles=[weaver],
+        )
+        self.assertEqual(validate_record(registry)["roles"][0]["role"], "weaver")
+        progress = {
+            "record_kind": "progress",
+            "schema_version": 1,
+            "writer_id": "task-weaver",
+            "updated_at": self.now,
+            "role_task_id": "task-weaver",
+            "role": "weaver",
+            "phase": "completed",
+            "phase_started_at": self.now,
+            "expected_next_actor": None,
+            "expected_next_action": "Retained historical record",
+            "handoff_needed": False,
+            "handoff_sent": True,
+            "delivery_error": None,
+            "owned_resources": [],
+        }
+        self.assertEqual(validate_record(progress)["role"], "weaver")
+
+    def role_registry(self):
+        return {
+            "record_kind": "role_run_registry",
+            "schema_version": 1,
+            "writer_id": "task-archon",
+            "updated_at": self.now,
+            "current_archon_task_id": "task-archon",
+            "roles": [],
+        }
 
     def test_pair_numbers_preserve_history(self):
         self.role.update(role="executor", role_number=8)

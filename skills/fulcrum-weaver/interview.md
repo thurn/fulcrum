@@ -6,8 +6,10 @@ human to discover them. Capture decisions that change behavior or scope. Answer
 questions in mixed requests before actions that depend on those answers.
 
 Establish outcome, included/excluded behavior, constraints, dependencies, and
-observable acceptance criteria. Confirm project identity and queued versus
-future activation. Separate approval to save the plan from execution eligibility.
+observable acceptance criteria. Confirm project identity. For ordinary direct
+intake, treat missing standalone activation as queued; record `future` only when
+the human explicitly asks to save the work for later. Separate approval to save
+the plan from execution eligibility.
 For refinement, identify the current plan and affected approved assignments.
 
 A substantial plan must survive a cold reader who cannot see the conversation.

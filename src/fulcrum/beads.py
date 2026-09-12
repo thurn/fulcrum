@@ -89,8 +89,8 @@ class BeadDraft:
         labels = [f"project:{self.project_id}"]
         if self.plan_id is not None:
             labels.append(f"plan:{self.plan_id}")
-        elif self.activation is not None:
-            labels.append(f"activation:{self.activation}")
+        else:
+            labels.append(f"activation:{self.activation or 'queued'}")
         return tuple(labels)
 
     @property
@@ -154,7 +154,7 @@ def bead_label_facts(labels: list[str] | tuple[str, ...]) -> BeadLabelFacts:
             "activation": None,
             "inherited_activation": True,
         }
-    activation = activations[0] if activations else "future"
+    activation = activations[0] if activations else "queued"
     if activation not in {"queued", "future"}:
         raise BeadsError(
             f"invalid activation {activation!r}; expected 'queued' or 'future'"

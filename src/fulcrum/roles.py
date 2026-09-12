@@ -7,9 +7,19 @@ from typing import cast
 
 from fulcrum.records import ProgressRecord, RoleRun, validate_record
 
+REGISTERED_ROLES: frozenset[str] = frozenset(
+    {"archon", "executor", "inquisitor", "night_watchman", "overseer", "sage"}
+)
+
+
+def _require_registered_role(role: RoleRun, label: str = "role") -> None:
+    if role["role"] not in REGISTERED_ROLES:
+        raise ValueError(f"{label} must be a registered role; Weaver is ephemeral")
+
 
 def resolve_identity(role: RoleRun, matches: list[tuple[str, str]]) -> RoleRun:
     """Matches must already be scoped by project/run/tag using supported tools."""
+    _require_registered_role(role)
     unique = set(matches)
     if len(unique) != 1:
         raise ValueError(
@@ -43,6 +53,7 @@ def initialize_progress(
 ) -> ProgressRecord:
     if plan_mode:
         raise ValueError("Plan mode cannot activate a role")
+    _require_registered_role(role)
     task = role["task_id"]
     if role["identity_state"] != "resolved" or not task:
         raise ValueError("resolve identity before activation")
@@ -77,6 +88,7 @@ def prepare_handoff(
     *,
     expected_by: str | None = None,
 ) -> ProgressRecord:
+    _require_registered_role(recipient, "recipient")
     if progress["handoff_needed"] and not progress["handoff_sent"]:
         raise ValueError("inspect unresolved delivery before another handoff")
     if recipient["identity_state"] != "resolved" or not recipient["task_id"]:

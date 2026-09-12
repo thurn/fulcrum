@@ -331,7 +331,8 @@ recoverable through both Git and Dolt synchronization.
 
 1. Define and validate `project:<id>`, `plan:<id>`, and standalone
    `activation:queued|future` conventions. Require project identity; absence of
-   standalone activation means future work.
+   standalone activation means queued work, with future reserved for explicit
+   human deferral.
 2. Add a bead template containing problem, outcome, bounded scope, context,
    dependencies, acceptance criteria, validation, and authorized model overrides.
    Use existing Beads types, priorities, statuses, and dependency commands.
@@ -398,7 +399,8 @@ automated scheduler.
 
 1. Implement a read-only eligibility summary combining Beads readiness, plan or
    standalone activation, plan prerequisites, holds, project integration health,
-   assignment ownership, and resource observations.
+   assignment ownership, and resource observations. Eligibility does not depend
+   on a registered Weaver progress record.
 2. Return reasons independently: ready in Beads may still mean held, future,
    integration unavailable, already assigned, or awaiting plan preparation.
    Unknown data must not grant eligibility.
@@ -409,9 +411,9 @@ automated scheduler.
 4. Include approved plan commit in assignments. Specify how a changed plan or
    newly added prerequisite is compared with active scope and routed for
    targeted pause/reconciliation. Preserve unaffected assignments and mandates.
-5. Use normal plan labels, author progress, and existing bead content to detect
-   interrupted preparation. Do not add a publication manifest or cross-store
-   transaction protocol.
+5. Use normal plan labels and existing bead content to detect interrupted
+   preparation. Do not add a publication manifest, Weaver progress requirement,
+   or cross-store transaction protocol.
 
 **Acceptance:** fixtures demonstrate queued versus future, composed holds,
 cross-project prerequisites, a cycle, partial intake, canceled prerequisites,
@@ -430,14 +432,15 @@ instructions independent of personal skill directories.
 
 1. Write shared skill references for registration, starting a turn, handoffs,
    archive obligations, model policy, and reading current assignment/holds.
+   Keep Weaver authoring ephemeral and outside registration/progress handoffs.
 2. Specify immediate and pending identity-resolution flows. Store a real task/host ID only
    after resolution; never send messages to `clientThreadId`. Reconcile unique
    role tags and existing tasks before retrying uncertain provisioning.
 3. Allocate nonrecycled role numbers; pair numbers match. Weaver titles stay
    descriptive. Human-created roles preserve selected model preferences.
-4. Implement record helpers for role/progress initialization. A Weaver may
-   write its own record after approval and report to the Archon; only the
-   Archon updates its registry.
+4. Implement record helpers for registered-role progress initialization. A
+   Weaver writes no role or progress record after approval; it reports its
+   result once to the Archon without awaiting acknowledgement.
 5. Define the handoff sequence: record intended actor/action, send through the
    supported Codex tool, then record success/wait. Uncertain delivery requires
    inspection before retry. A final answer is not a message to another task.
@@ -449,7 +452,8 @@ instructions independent of personal skill directories.
 **Acceptance:** disposable tool exercises resolve pending IDs, detect duplicate
 provisioning attempts, and deliver a real handoff to the intended task. A clean
 installation outside the developer's home paths resolves all shared references.
-Plan-mode role activation causes no brain or state writes.
+Plan-mode Weaver authoring causes no brain or state writes, and approved
+authoring does not require Weaver registration or progress.
 
 ### Task 10 [skills] — Implement the Archon role and project enrollment
 
@@ -494,9 +498,11 @@ beads without starting work simply because a plan was saved.
 1. Add `skills/fulcrum-weaver/SKILL.md`, a task-writing template, and portable interview
    guidance: one material question at a time, recommended answer, repository
    exploration for discoverable facts.
-2. In Plan mode, interview without writing files or beads. Ask queued versus
-   future. Approval authorizes saving the plan and publishing its Beads work graph, with
-   execution eligibility determined separately by activation.
+2. In Plan mode, interview without writing files or beads. Approval authorizes
+   saving the plan and publishing its Beads work graph, with execution
+   eligibility determined separately by activation. Direct intake defaults
+   standalone tasks and task lists to queued; only an explicit human request
+   saves them as future work.
 3. For substantial plans, specify a fresh cold reader given only the document
    and a separate requirements verifier given original inputs and decisions.
    Resolve findings before committing the document.
@@ -504,11 +510,13 @@ beads without starting work simply because a plan was saved.
    questions before dependent actions, clarify scope, and create beads without
    inventing a planning-document requirement or those two review passes.
 5. On refinement, retain plan identity and update existing beads. Notify the
-   Archon about changed active scope. Follow Markdown commit/push, Beads
-   commit/push, report, then archive. Failed pushes remain retry obligations.
+   Archon about changed active scope in one completion report. Follow Markdown
+   commit/push, Beads commit/push, one-way report, then archive. Failed pushes
+   are surfaced without creating Weaver progress or retry state.
 
 **Acceptance:** exercises cover future-plan approval, queued-plan approval,
-direct bug intake, interrupted bead creation, and active-plan refinement.
+queued-by-default direct intake, unregistered Weaver completion reporting,
+interrupted bead creation, and active-plan refinement.
 Generated beads contain enough scope and criteria to execute without the
 conversation. Saving a future plan does not dispatch implementation.
 

@@ -19,7 +19,7 @@ from fulcrum.eligibility import (
     reconcile_plan_revision,
     summarize_eligibility,
 )
-from fulcrum.records import AssignmentRecord, Hold, ProgressRecord
+from fulcrum.records import AssignmentRecord, Hold
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "eligibility" / "scenarios.json").read_text()
@@ -140,25 +140,6 @@ def assignment(
     }
 
 
-def author_progress() -> ProgressRecord:
-    return {
-        "record_kind": "progress",
-        "schema_version": 1,
-        "writer_id": "task-weaver",
-        "updated_at": "2026-09-11T23:00:00Z",
-        "role_task_id": "task-weaver",
-        "role": "weaver",
-        "phase": FIXTURE["partial_intake"]["author_phase"],
-        "phase_started_at": "2026-09-11T23:00:00Z",
-        "expected_next_actor": "task-weaver",
-        "expected_next_action": "Finish publishing plan beads",
-        "handoff_needed": False,
-        "handoff_sent": False,
-        "delivery_error": None,
-        "owned_resources": [],
-    }
-
-
 class EligibilityScenarioTest(unittest.TestCase):
     def summarize(
         self,
@@ -171,7 +152,6 @@ class EligibilityScenarioTest(unittest.TestCase):
         assignments: list[AssignmentRecord] | None = None,
         project_integration: ProjectIntegration | None = None,
         resource_facts: ResourceFacts | None = None,
-        progress: ProgressRecord | None = None,
     ) -> dict[str, object]:
         return summarize_eligibility(
             target,
@@ -182,7 +162,6 @@ class EligibilityScenarioTest(unittest.TestCase):
             integration=project_integration or integration(),
             assignments=assignments or [],
             resources=resource_facts or resources(),
-            author_progress=progress,
         )
 
     def codes(self, summary: dict[str, object]) -> list[str]:
@@ -247,9 +226,17 @@ class EligibilityScenarioTest(unittest.TestCase):
             partial_bead,
             plans=[partial_plan],
             plan_beads={partial_plan["plan_id"]: [partial_bead]},
-            progress=author_progress(),
         )
         self.assertIn("awaiting_plan_preparation", self.codes(partial_summary))
+
+    def test_plan_eligibility_does_not_depend_on_weaver_progress(self) -> None:
+        target_plan = plan()
+        summary = self.summarize(
+            bead(),
+            plans=[target_plan],
+            plan_beads={target_plan["plan_id"]: [bead()]},
+        )
+        self.assertTrue(summary["eligible"])
 
     def test_unknown_integration_and_resources_never_grant_eligibility(self) -> None:
         summary = self.summarize(

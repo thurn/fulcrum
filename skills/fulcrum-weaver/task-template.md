@@ -2,7 +2,9 @@
 
 Labels: `project:<id>` and either `plan:<id>` or, for standalone work,
 `activation:queued|future`. A standalone bead without an activation label is
-future work. Use the normal Beads type, priority, status, and dependency fields.
+queued by default; use `activation:future` only when the human explicitly saves
+the work for later. Use the normal Beads type, priority, status, and dependency
+fields.
 
 Stable intake key: `<source-specific-id>`
 
