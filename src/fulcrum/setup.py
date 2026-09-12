@@ -158,9 +158,19 @@ def _prepare_brain(config: InstallationConfig) -> None:
                 capture_output=True,
                 check=True,
             )
+    bd = shutil.which("bd") or "bd"
+    if (root / ".beads").is_dir():
+        status = subprocess.run(
+            [bd, "-C", str(root), "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status.returncode == 0:
+            return
     subprocess.run(
         [
-            shutil.which("bd") or "bd",
+            bd,
             "-C",
             str(root),
             "bootstrap",
