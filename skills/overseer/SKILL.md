@@ -5,7 +5,9 @@ description: Assign and review one Fulcrum execution run, grant exact scope-boun
 
 Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
 [handoffs](../shared/handoffs.md); use [delivery](../shared/delivery.md) for the
-candidate lifecycle. Preserve the Archon-assigned run, matching pair number,
+candidate lifecycle. Read [escalation](../shared/escalation.md) and
+[recovery](../shared/recovery.md) for failed boundaries. Preserve the
+Archon-assigned run, matching pair number,
 actual Executor identity, and [model policy](../shared/models.md).
 
 Own assignment records and review decisions. Keep one active bead per pair.
@@ -52,3 +54,8 @@ checkpoint, including dirty paths, commits, candidate state, and owned process
 IDs. An unvalidated checkpoint is never a candidate. Verify relevant process
 exit before reporting the pair quiet; on resume recheck all applicable holds,
 worktree, contract, candidate, and certified base.
+When Executor escalation arrives, verify its boundary, attempts, retained work,
+untried recovery, and requested decision. Resolve within scope or forward the
+evidence to Archon; do not relay an unsupported conclusion or ask the human.
+Review any provisional Tollgate repair before runtime installation, while
+keeping ordinary certification mandatory after service restoration.

@@ -23,6 +23,17 @@ RecordKind = Literal[
     "interview",
 ]
 
+RECORD_KINDS = {
+    "installation",
+    "project_registry",
+    "role_run_registry",
+    "holds_jobs",
+    "assignment",
+    "progress",
+    "executor_evidence",
+    "interview",
+}
+
 
 class InstallationRecord(TypedDict):
     record_kind: Literal["installation"]
@@ -164,6 +175,43 @@ class PushObligation(TypedDict):
     detail: str
 
 
+class RecoveryAttempt(TypedDict):
+    at: str
+    hypothesis: str
+    action: str
+    outcome: str
+    evidence: str
+
+
+class Escalation(TypedDict):
+    boundary: str
+    error: str
+    evidence: list[str]
+    attempts: list[RecoveryAttempt]
+    retained_work: list[str]
+    untried_recovery: list[str]
+    requested_decision: str
+    expected_next_actor: str
+
+
+class FailureEvent(TypedDict):
+    boundary: str
+    occurred_at: str
+    evidence: str
+    unchanged_retry_used: bool
+    diagnosis_deadline: str | None
+
+
+class EmergencyAuthorization(TypedDict):
+    outage_evidence: str
+    attempted_recovery: list[str]
+    scope: str
+    repair_owner: str
+    permitted_runtime_changes: list[str]
+    certified_release_oid: str
+    provisional: bool
+
+
 class ProgressRecord(TypedDict):
     record_kind: Literal["progress"]
     schema_version: int
@@ -180,12 +228,19 @@ class ProgressRecord(TypedDict):
     delivery_error: str | None
     owned_resources: list[OwnedResource]
     push_obligations: NotRequired[list[PushObligation]]
+    escalation: NotRequired[Escalation | None]
 
 
 class SuspendedInvestigation(TypedDict):
     task_id: str
     reason: str
     evidence_reference: str
+    project_id: NotRequired[str]
+    worktree_path: NotRequired[str]
+    source_oid: NotRequired[str | None]
+    candidate_id: NotRequired[str | None]
+    review_history: NotRequired[list[ReviewEntry]]
+    failure_history: NotRequired[list[FailureEvent]]
 
 
 class ExecutorEvidenceRecord(TypedDict):
@@ -203,6 +258,8 @@ class ExecutorEvidenceRecord(TypedDict):
     push_state: Literal["not_required", "pending", "complete", "failed"]
     cleanup_state: Literal["not_eligible", "pending", "complete", "failed"]
     suspended_investigations: list[SuspendedInvestigation]
+    failure_history: NotRequired[list[FailureEvent]]
+    emergency_authorization: NotRequired[EmergencyAuthorization | None]
 
 
 class InterviewRecord(TypedDict):
@@ -289,10 +346,8 @@ def validate_record(value: object) -> Record:
 
     schema = json.loads((schema_root() / "records-v1.schema.json").read_text())
     definitions = schema["$defs"]
-    if kind not in definitions or kind in {"timestamp", "base"}:
-        supported = ", ".join(
-            sorted(k for k in definitions if k not in {"timestamp", "base"})
-        )
+    if kind not in RECORD_KINDS:
+        supported = ", ".join(sorted(RECORD_KINDS))
         raise RecordValidationError(
             kind, [f"$.record_kind: unknown kind {kind!r}; expected one of {supported}"]
         )

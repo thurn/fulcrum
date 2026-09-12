@@ -75,6 +75,20 @@ work, and complete identity checks before resume.
 256 KiB. Its CPU, memory-pressure, process, and Tollgate fields report missing
 observations as unavailable. Raw observations remain local operational evidence.
 
+## Task 14 — Escalation and recovery
+
+`tests/fixtures/recovery/tabletop.json` and `tests/test_recovery.py` cover failed
+handoff delivery, repeated candidate CI failure, an unavailable task, source
+push failure, nested investigations, and a simulated Tollgate worktree outage.
+Every path either selects concrete recovery or records the expected next actor
+with its boundary, attempts, retained work, untried recovery, and evidence.
+
+The CI path requires `tg diagnose`, permits one hypothesized unchanged retry,
+and bounds further diagnosis to fifteen minutes. The Tollgate outage case is a
+pure tabletop: production service is not disrupted, provisional repair remains
+uncertified, and normal certification plus installed-version reconciliation
+remain mandatory.
+
 ## Task 09 — Identity and portable handoffs
 
 `tests/test_roles.py` exercises pending and ambiguous creation responses,

@@ -585,7 +585,9 @@ local while concise evidence-linked lessons can enter project memory.
 
 ### Task 14 [skills] — Implement escalation and recovery runbooks
 
-**Status:** pending
+**Status:** done — portable escalation/recovery runbooks, durable failure and
+suspension evidence, bounded CI decisions, and the narrow Tollgate emergency
+path are implemented with tabletop coverage.
 
 **Outcome:** tooling failures lead to bounded diagnosis and preserved work.
 

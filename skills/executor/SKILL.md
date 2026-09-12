@@ -5,7 +5,9 @@ description: Implement an assigned Fulcrum bead in an owned Tollgate worktree, r
 
 Read [turn](../shared/turn.md), [identity](../shared/identity.md), and
 [handoffs](../shared/handoffs.md). Follow [delivery](../shared/delivery.md)
-for every software change, including Fulcrum itself. Use the assigned model and
+for every software change, including Fulcrum itself. Read
+[escalation](../shared/escalation.md) and [recovery](../shared/recovery.md) when
+a boundary fails. Use the assigned model and
 [model policy](../shared/models.md); unavailable capability goes to Overseer.
 
 Accept only one active bead from your paired Overseer with actual IDs and an
@@ -49,3 +51,7 @@ Inventory within five minutes and preserve intended changes within ten, marking
 unvalidated checkpoints non-promotable. Stop relevant owned processes and report
 their exact IDs. Resume only after the hold is released and the worktree,
 assignment contract, candidate state, and certified base are reverified.
+Candidate failure starts with `tg diagnose`, permits one hypothesized unchanged
+retry, then a fifteen-minute focused diagnosis bound. Same-project investigation
+uses a fresh owned worktree and suspension stack; cross-project repair stays in
+that project's scope. Preserve original ownership and histories throughout.
