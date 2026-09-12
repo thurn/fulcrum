@@ -1168,10 +1168,89 @@ Python compares expected workflow state with actual runtime and native delivery
 facts. It should explain a concrete invalid state, not assign another agent to
 ask whether work is still happening.
 
+### Events, timers, and fallback reconciliation
+
+The controller replaces Watchman's mechanical checks with three triggers into
+the same scheduling/recovery functions:
+
+- Relevant events immediately re-evaluate affected work: intake, decisions,
+  turn/helper completion, native delivery results, and changes to holds or capacity.
+- Timers handle known due work: recurring specialists, interview deadlines,
+  scheduled rechecks, and pending Python operations eligible for another attempt.
+- A fallback reconciliation pass runs every 30 seconds in the existing controller
+  loop. It catches missed events and retained work that has not advanced. Normal
+  dispatch never waits for this interval.
+
+On each fallback pass, refresh queued Beads and relevant dependency facts through
+project-scoped native reads, inspect unfinished controller actions and operations,
+and refresh runtime status for managed threads/helpers whose activity needs
+confirmation. Check eligible queued work even when no agent is running. Include
+due publication, delivery, and archive obligations. Do not scan archived thread
+history, reread source repositories, or wake a model to perform these checks.
+An ambiguous operation that exhausted its reconciliation pass remains an operator
+condition; the timer does not grant another attempt or repeat discovery.
+
+Use one in-flight pass. Slow native reads run off the event loop with adapter
+timeouts; a late pass does not create overlapping or catch-up passes. Failed reads
+leave the affected facts unknown and visible while unrelated work can proceed.
+After restart or reconnection, reconcile retained work before resuming affected
+starts. Repeated events and fallback observations use the same retained action
+and operation identities, so they cannot duplicate starts, reports, or archives.
+
+When capacity is idle, apply these ordinary scheduling rules:
+
+| Current facts | Controller action |
+| --- | --- |
+| Approved work is eligible | Dispatch it directly |
+| Unapproved work is eligible, relevant capacity is available, and Archon is idle | Deliver one current scheduling brief immediately |
+| Archon is busy | Retain the brief for idle delivery |
+| Work is blocked | Expose its specific dependency, hold, capacity, approval, integration, or unresolved-operation reason; reconsider on relevant changes |
+| No eligible work or actionable exception exists | Remain idle; do not manufacture an agent turn |
+
+### Suspected stalls and known failures
+
+For controller-started agent turns, schedule one liveness inspection after
+30 minutes by default. Make this duration a simple setup setting,
+`turn_check_after_seconds` (default `1800`); Archon can set a later check time for
+an identified long-running action. This is an inspection threshold, not a timeout
+that interrupts or replaces the agent. Human-driven Weaver conversations and
+Plan-mode authoring do not receive automatic long-turn alerts.
+
+At the due time, read the specific thread and its native helpers. Retain the
+assigned action, elapsed time, last observed runtime event, current tool/helper
+activity when available, and any explicit runtime failure. A parent that stopped
+while helpers remain active still needs this inspection. Do not reset the check
+merely because token or tool events keep arriving; activity does not prove useful
+progress. Native CI and other Python-owned waits use their own operation status
+and deadlines, not the agent-turn threshold.
+
+| Observation | Response |
+| --- | --- |
+| Turn completed normally without an outcome | Use the one missing-outcome reminder after helpers stop |
+| Turn failed or was interrupted | Retain work/evidence and use specific recovery; no blind repeat of the work |
+| Agent reported a blocker | Route the concrete decision to its responsible role |
+| Inspection confirms completion but the completion event was missed | Process that completion through the normal lifecycle |
+| Thread or helper remains active past its check time | Retain one possible-stall condition and notify Archon with the observed evidence; keep its reservation |
+| Runtime cannot establish activity | Retain uncertainty and expose the connection/capability condition; do not claim the agent is dead |
+
+Archon may decide to continue waiting with an explicit next check time, request
+interruption, or approve replacement. The same unresolved condition updates
+status without repeated Archon wakes; an explicit deferred check reactivates that
+condition when due. Completion clears it. Replacement still requires confirmed
+termination and the worktree-transfer checks. Neither elapsed silence nor a
+stream of repetitive activity authorizes automatic replacement. Python does not
+score transcripts or judge whether implementation is making semantic progress;
+Overseer review and Archon judgment cover that question.
+
+If the affected thread is Archon, expose one operator-attention condition instead
+of sending an exception to that same busy or unavailable thread. The service
+supervisor restarts a crashed controller; this does not claim to detect every
+live-but-hung process. Use the explicit reboot commands for operator recovery.
+
+### Recovery boundaries and status
+
 - Reconcile startup state, connection recovery, terminal events, unexpected
   archival, failed turns, missing outcomes, and overdue concrete obligations.
-- A quiet long-running task is not presumed dead. A bounded liveness check may
-  read its state, but elapsed silence alone never authorizes replacement.
 - Retain uncertain ownership and capacity until actual inactivity is known.
   Inventory worktree, candidate, and processes before any approved replacement.
 - Never adopt another Executor's worktree implicitly. Authorized replacement
@@ -1201,7 +1280,8 @@ fulcrum status --capabilities
 
 Expose role/title/ID, project, current bead, stage, runtime activity, helpers,
 slot usage, unfinished-work count, holds, pending decisions, last observation,
-review/source identities, and remaining delivery obligations. Explain why a
+review/source identities, remaining delivery obligations, the last completed
+reconciliation pass, and each suspected stall's evidence and next check. Explain why a
 queued run cannot start. Missing observations are unavailable, never zero or
 complete. Task links must open the actual desktop context.
 
@@ -1289,7 +1369,8 @@ implementation boundaries and exit checks.
 
 - `fulcrum serve` runs `controller.py` as the single supervised process with an
   asyncio loop. It accepts local CLI requests over a Unix-domain socket, receives runtime events,
-  and advances ready operations. Run existing blocking native helpers outside
+  runs due timers and the 30-second fallback pass, and advances ready operations.
+  Run existing blocking native helpers outside
   database transactions and off the event loop; feed their results back to the
   controller. Only this process writes operational SQLite state.
 - `store.py` uses standard-library SQLite with explicit SQL transactions and
@@ -1321,7 +1402,7 @@ columns; bounded outcome payloads and approved scope can be JSON/text.
 | --- | --- |
 | Tasks and name allocations | Unique native task ID; persistent counter per numbered role; unique (role, number) allocation per thread, allocated atomically; Archon has none; pair relationship stored explicitly |
 | Runs and assignments | Ordered approved beads and scope snapshot; at most one unfinished assignment per bead; current Executor/Overseer bindings |
-| Actions and outcomes | One current action per thread; retained assignment/scope/candidate or batch; one accepted outcome and one reminder flag per action |
+| Actions and outcomes | One current action per thread; retained assignment/scope/candidate or batch; one accepted outcome and one reminder flag per action; next liveness check and any retained possible-stall condition |
 | Reservations and holds | At most one active or uncertain start per pair; global/project counts derive from reservations; holds do not erase assignment stage |
 | External operations | Intent, exact target/input including delivered prompt, observed result and native turn ID when applicable, unresolved condition, and whether its reconciliation pass was used |
 | Updates and batches | Recipient/action identity, frozen batch membership, accepted runtime turn and processing outcome |
@@ -1343,7 +1424,7 @@ prompt command rendering, and finish validation. Implement these concrete forms:
 | Overseer approval | `approved --assessment <text>` with zero or more `--allow-repair <category>` arguments |
 | Overseer other result | `changes_requested --input <findings.json>`, `incomplete --input <missing-evidence.json>`, or `exception --reason <text>` |
 | Archon decision | `decisions --input <decisions.json>` containing the proposed run/exception targets, decisions, and optional policy/summary changes |
-| Archon deferral | `deferred --reason <text> --input <reactivation.json>` referring to a concrete capacity, dependency, hold, or operator-change condition |
+| Archon deferral | `deferred --reason <text> --input <reactivation.json>` referring to a concrete capacity, dependency, hold, operator-change condition, or explicit next check time for a suspected stall |
 | Weaver completion | `intake_complete`, `future_plan --evidence <path>`, or `blocked --reason <text>` |
 | Specialist completion | `report --input <report.json>` with authored report content and an explicit findings list, including an empty list |
 | Specialist evidence collection | `evidence_needed --input <requests.json>`; Sage may request its one interview round |
@@ -1405,6 +1486,8 @@ Every agent-result transition still waits for normal turn/helper completion.
    full delivery contract. Deliver actionable briefs without a batching timer
    and dispatch approved actions directly on relevant events. Add the controller's
    single missing-outcome reminder and operator resolution for ambiguous operations.
+   Route the 30-second fallback pass through the same functions; add the overdue
+   inspection and single-condition escalation rules above using an injected clock.
    Exit with the relevant failure matrix below passing.
 5. **Add soft, hard, and reset reboot.** Implement the exact behaviors above,
    including worktree transfer and a full brain reset through its actual Git
@@ -1447,6 +1530,8 @@ exercise native boundaries with isolated disposable state and retained evidence.
 
 | Scenario | Required result |
 | --- | --- |
+| Missed intake/completion event, idle fleet with queued work, slow native read, and duplicate fallback observations | Next 30-second pass finds actionable work or its concrete blocker; approved work starts directly and unapproved work reaches idle Archon; no overlapping passes, duplicate starts, or reopening exhausted ambiguous operations |
+| Long turn, active helper after parent completion, continuous tool events, deferred recheck, and unavailable Archon | One inspection at the configured check time; one evidence-backed possible-stall condition; retain capacity; no automatic interruption/replacement; explicit recheck reactivates the condition; Archon's own stall goes to operator status |
 | Weaver completes, pair finishes an intermediate/final bead, specialist requests evidence or reports zero findings, and Archon finishes decisions | Archive completed Weaver/final-run pair/final-report specialist after inactivity; retain pair for approved successors, specialist for continuation, and current Archon |
 | Helpers still running, publication push fails, one pair archive fails, or restart occurs before archive confirmation | Wait for inactivity; Python-owned sync does not require an agent to remain open; retain each archive operation independently; show completed work with archive pending until runtime confirms; no repeated agent work |
 | Bare `$weaver`, conversational role overrides, and pair reuse | Defaults persist as Sol/high for both roles; the flatbuffers example stores Sol Executor/Astra Overseer with human provenance; apply both models on assignment; unsupported runtime settings remain explicit blockers |
