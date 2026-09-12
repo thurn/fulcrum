@@ -20,6 +20,7 @@ from fulcrum.records import (
 from fulcrum.watchman import (
     WATCHMAN_AUTOMATION_NAME,
     WATCHMAN_AUTOMATION_PROMPT,
+    WATCHMAN_AUTOMATION_SEMANTIC_MARKER,
     AutomationObservation,
     CandidateObservation,
     TaskObservation,
@@ -331,21 +332,107 @@ class PatrolTest(unittest.TestCase):
 
 
 class AutomationTest(unittest.TestCase):
+    def automation(
+        self,
+        *,
+        automation_id: str,
+        name: str = WATCHMAN_AUTOMATION_NAME,
+        target_task_id: str | None = None,
+        prompt: str = WATCHMAN_AUTOMATION_PROMPT,
+        cadence: str = "hourly",
+        active: bool = True,
+    ) -> AutomationObservation:
+        return {
+            "automation_id": automation_id,
+            "name": name,
+            "target_task_id": target_task_id or FIXTURE["watchman_task_id"],
+            "cadence": cadence,
+            "prompt": prompt,
+            "active": active,
+        }
+
     def test_schedule_rerun_does_not_duplicate_hourly_wake(self) -> None:
         watchman = role("night_watchman", FIXTURE["watchman_task_id"])
         create = watchman_automation_plan(watchman, [])
         self.assertEqual(create["action"], "create")
-        installed: AutomationObservation = {
-            "automation_id": "automation-1",
-            "name": WATCHMAN_AUTOMATION_NAME,
-            "target_task_id": FIXTURE["watchman_task_id"],
-            "cadence": "hourly",
-            "prompt": WATCHMAN_AUTOMATION_PROMPT,
-            "active": True,
-        }
+        installed = self.automation(automation_id="automation-1")
         repeated = watchman_automation_plan(watchman, [installed])
         self.assertEqual(repeated["action"], "none")
         self.assertEqual(repeated["automation_id"], "automation-1")
+
+    def test_renamed_semantic_match_updates_in_place(self) -> None:
+        watchman = role("night_watchman", FIXTURE["watchman_task_id"])
+        renamed = self.automation(
+            automation_id="automation-renamed", name="Nightly patrol"
+        )
+
+        plan = watchman_automation_plan(watchman, [renamed])
+
+        self.assertEqual(plan["action"], "update")
+        self.assertEqual(plan["automation_id"], "automation-renamed")
+        self.assertEqual(plan["name"], WATCHMAN_AUTOMATION_NAME)
+
+    def test_stale_prompt_on_named_match_updates_in_place(self) -> None:
+        watchman = role("night_watchman", FIXTURE["watchman_task_id"])
+        stale = self.automation(
+            automation_id="automation-stale",
+            prompt=f"{WATCHMAN_AUTOMATION_SEMANTIC_MARKER} Use the old patrol checklist.",
+        )
+
+        plan = watchman_automation_plan(watchman, [stale])
+
+        self.assertEqual(plan["action"], "update")
+        self.assertEqual(plan["automation_id"], "automation-stale")
+        self.assertEqual(plan["prompt"], WATCHMAN_AUTOMATION_PROMPT)
+
+    def test_retargeted_named_match_requires_reconciliation(self) -> None:
+        watchman = role("night_watchman", FIXTURE["watchman_task_id"])
+        retargeted = self.automation(
+            automation_id="automation-retargeted", target_task_id="task-other"
+        )
+
+        with self.assertRaisesRegex(ValueError, "conflicts with its registered target"):
+            watchman_automation_plan(watchman, [retargeted])
+
+    def test_unrelated_automation_does_not_match_patrol(self) -> None:
+        watchman = role("night_watchman", FIXTURE["watchman_task_id"])
+        unrelated = self.automation(
+            automation_id="automation-unrelated",
+            name="Other reminder",
+            prompt="Remind me about something else.",
+        )
+
+        plan = watchman_automation_plan(watchman, [unrelated])
+
+        self.assertEqual(plan["action"], "create")
+        self.assertIsNone(plan["automation_id"])
+
+    def test_multiple_semantic_matches_require_reconciliation(self) -> None:
+        watchman = role("night_watchman", FIXTURE["watchman_task_id"])
+        matches = [
+            self.automation(automation_id="automation-one"),
+            self.automation(automation_id="automation-two", name="Renamed patrol"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "multiple Watchman schedules"):
+            watchman_automation_plan(watchman, matches)
+
+    def test_conflicting_name_and_target_candidates_require_reconciliation(
+        self,
+    ) -> None:
+        watchman = role("night_watchman", FIXTURE["watchman_task_id"])
+        candidates = [
+            self.automation(automation_id="automation-named"),
+            self.automation(
+                automation_id="automation-semantic",
+                name="Renamed patrol",
+                prompt=WATCHMAN_AUTOMATION_PROMPT,
+            ),
+        ]
+        candidates[0]["target_task_id"] = "task-other"
+
+        with self.assertRaisesRegex(ValueError, "conflicts with its registered target"):
+            watchman_automation_plan(watchman, candidates)
 
     def test_schedule_requires_human_created_resolved_watchman(self) -> None:
         pending = role("night_watchman", None, identity="pending")

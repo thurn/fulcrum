@@ -26,8 +26,9 @@ from fulcrum.interviews import interview_action
 DAY = timedelta(hours=24)
 INQUISITOR_OFFSET = timedelta(hours=12)
 WATCHMAN_AUTOMATION_NAME = "Fulcrum Night Watchman patrol"
+WATCHMAN_AUTOMATION_SEMANTIC_MARKER = "Perform the Fulcrum Night Watchman patrol."
 WATCHMAN_AUTOMATION_PROMPT = (
-    "Perform the Fulcrum Night Watchman patrol. Read current registries and "
+    f"{WATCHMAN_AUTOMATION_SEMANTIC_MARKER} Read current registries and "
     "progress, compare them with supported Codex and Tollgate observations, "
     "and report only new, changed, or resolved anomalies and newly due recurring "
     "work to the registered Archon. Do not dispatch work or write Archon-owned "
@@ -414,7 +415,13 @@ def patrol(
 def watchman_automation_plan(
     watchman: RoleRun, existing: list[AutomationObservation]
 ) -> AutomationPlan:
-    """Create or update one hourly heartbeat attached to the human Watchman task."""
+    """Reconcile one hourly heartbeat attached to the human Watchman task.
+
+    The target task and the stable patrol marker identify a renamed schedule;
+    the canonical name is also an identity claim and cannot conflict with that
+    semantic identity. Configuration differences on the one identified
+    schedule are repaired in place, while ambiguity remains for a human.
+    """
 
     task_id = watchman["task_id"]
     if (
@@ -425,9 +432,26 @@ def watchman_automation_plan(
         or watchman["model_authorization"]["source"] != "human"
     ):
         raise ValueError("schedule requires the resolved human-created Watchman")
-    matching = [item for item in existing if item["name"] == WATCHMAN_AUTOMATION_NAME]
-    if len(matching) > 1:
-        raise ValueError("duplicate Watchman schedules require explicit reconciliation")
+    named = [item for item in existing if item["name"] == WATCHMAN_AUTOMATION_NAME]
+    semantic = [
+        item
+        for item in existing
+        if item["target_task_id"] == task_id
+        and WATCHMAN_AUTOMATION_SEMANTIC_MARKER in item["prompt"]
+    ]
+    if len(named) > 1 or len(semantic) > 1:
+        raise ValueError("multiple Watchman schedules require explicit reconciliation")
+    if named and named[0]["target_task_id"] != task_id:
+        raise ValueError(
+            "Watchman schedule name conflicts with its registered target; "
+            "explicit reconciliation is required"
+        )
+    if named and semantic and named[0]["automation_id"] != semantic[0]["automation_id"]:
+        raise ValueError(
+            "Watchman schedule name and target identity refer to different "
+            "automations; explicit reconciliation is required"
+        )
+    matching = named or semantic
     desired: AutomationPlan = {
         "action": "create",
         "automation_id": None,
@@ -443,6 +467,7 @@ def watchman_automation_plan(
     desired["automation_id"] = current["automation_id"]
     if all(
         (
+            current["name"] == desired["name"],
             current["target_task_id"] == desired["target_task_id"],
             current["cadence"] == desired["cadence"],
             current["prompt"] == desired["prompt"],

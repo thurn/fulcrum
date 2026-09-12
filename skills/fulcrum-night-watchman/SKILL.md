@@ -51,7 +51,11 @@ Install exactly one active hourly Codex heartbeat attached to this resolved
 human-created task. Inspect existing automations first and use
 `fulcrum.watchman.watchman_automation_plan`: create when absent, update the one
 matching Watchman automation when its target/prompt/cadence differs, and make no
-change when exact. Multiple matching schedules require reconciliation rather
-than another create. Apply the plan with the supported automation update tool,
-using the saved patrol prompt and this task as the heartbeat target. Do not make
-standalone Sage/Inquisitor schedules; all due work flows through this patrol.
+change when exact. A renamed heartbeat remains the same patrol only when its
+target is this registered Watchman and its prompt retains the Fulcrum patrol
+semantics. A canonical-name heartbeat with a different target, conflicting
+name/target candidates, or multiple semantic matches requires human
+reconciliation; never create a second schedule or choose among candidates.
+Apply the plan with the supported automation update tool, using the saved patrol
+prompt and this task as the heartbeat target. Do not make standalone
+Sage/Inquisitor schedules; all due work flows through this patrol.

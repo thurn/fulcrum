@@ -113,9 +113,14 @@ discovery. Convert them to the observations accepted by
 
 - `create`: create one active hourly heartbeat attached to the resolved
   Watchman task.
-- `update`: update that exact automation in place.
+- `update`: update that exact automation in place. A renamed automation is
+  identifiable when it still targets this registered Watchman and retains the
+  Fulcrum patrol prompt semantics; canonical name and target identity must
+  agree before updating.
 - `none`: make no change.
-- More than one match: reconcile duplicates; never add another.
+- More than one semantic match, or a canonical-name candidate whose target
+  conflicts with the registered Watchman, is a human reconciliation condition;
+  never arbitrarily select, delete, or add another heartbeat.
 
 Use the plan's exact name and patrol prompt with the supported Codex automation
 tool. Do not create standalone Sage or Inquisitor schedules. View the resulting
