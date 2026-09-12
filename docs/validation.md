@@ -47,3 +47,17 @@ preserved NEWS Markdown and dates, concise role context, and JSON CLI output.
 
 The readers are deterministic and bounded to 256 KB per document. They use
 safe YAML loading, invoke no model, and never rewrite the source Markdown.
+
+## Task 08 — Eligibility and plan reconciliation
+
+The sanitized scenarios under `tests/fixtures/eligibility/` cover queued versus
+future activation, two composed holds, a cross-project prerequisite, a cycle,
+partial intake, a canceled prerequisite, an empty plan, and refinement of an
+active assignment. Focused checks also cover unknown integration/resources,
+an existing owner, closure without complete promotion/push/cleanup evidence,
+and a requirement removed without a recorded scope decision.
+
+The evaluator returns every blocking reason independently and deep-copy checks
+confirm that it does not change beads, activation, assignments, mandates, or
+plans. Reconciliation targets only assignments for the changed plan and
+preserves existing mandates while requesting a pause when scope may have moved.

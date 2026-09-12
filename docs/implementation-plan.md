@@ -387,7 +387,9 @@ Markdown reader invokes a model or rewrites human text.
 
 ### Task 08 [code] — Implement eligibility facts and plan revision reconciliation
 
-**Status:** pending
+**Status:** done — read-only eligibility, completion evidence, interrupted
+preparation detection, and targeted plan-revision reconciliation are
+implemented in `src/fulcrum/eligibility.py` with scenario fixtures.
 
 **Outcome:** roles can explain why work may start without relying on a second
 automated scheduler.

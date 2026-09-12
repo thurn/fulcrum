@@ -1,0 +1,39 @@
+{
+  "queued_vs_future": {
+    "queued_plan": "queued-plan",
+    "future_standalone": "brain-future"
+  },
+  "composed_holds": [
+    {
+      "hold_id": "fleet-maintenance",
+      "scope": "global",
+      "reason": "Fleet maintenance is active.",
+      "release_condition": "Maintenance is verified complete.",
+      "permitted_exceptions": []
+    },
+    {
+      "hold_id": "project-refactor",
+      "scope": "project:fulcrum",
+      "reason": "The project refactor owns shared files.",
+      "release_condition": "The refactor is promoted and synchronized.",
+      "permitted_exceptions": []
+    }
+  ],
+  "cross_project_prerequisite": {
+    "plan_id": "battlement-polish",
+    "requires": "fulcrum-readers"
+  },
+  "cycle": ["cycle-a", "cycle-b"],
+  "partial_intake": {
+    "plan_id": "unfinished-plan",
+    "author_phase": "implementing"
+  },
+  "canceled_prerequisite": "brain-canceled",
+  "empty_plan": "empty-plan",
+  "refinement": {
+    "plan_id": "active-plan",
+    "approved_commit": "1111111111111111111111111111111111111111",
+    "current_commit": "2222222222222222222222222222222222222222",
+    "added_prerequisite": "new-security-plan"
+  }
+}
