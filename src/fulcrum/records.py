@@ -275,6 +275,16 @@ class ExecutorEvidenceRecord(TypedDict):
 
 
 class InterviewRecord(TypedDict):
+    interview_id: NotRequired[str]
+    subject_host_id: NotRequired[str]
+    reminder_due_at: NotRequired[str]
+    finish_due_at: NotRequired[str]
+    reminder_attempted: NotRequired[bool]
+    reopen_state: NotRequired[Literal["not_requested", "uncertain", "confirmed"]]
+    archive_restore_state: NotRequired[Literal["not_needed", "pending", "complete"]]
+    response_reference: NotRequired[str | None]
+    last_evidence_reference: NotRequired[str]
+    outcome: NotRequired[Literal["responded", "missing_response"]]
     record_kind: Literal["interview"]
     schema_version: int
     writer_id: str

@@ -469,7 +469,17 @@
             "subject_task_id": { "type": "string", "minLength": 1 },
             "prior_archived": { "type": "boolean" },
             "reminder_state": { "enum": ["not_due", "due", "sent", "failed"] },
-            "completion_state": { "enum": ["active", "complete", "canceled"] }
+            "completion_state": { "enum": ["active", "complete", "canceled"] },
+            "interview_id": { "type": "string", "minLength": 1 },
+            "subject_host_id": { "type": "string", "minLength": 1 },
+            "reminder_due_at": { "$ref": "#/$defs/timestamp" },
+            "finish_due_at": { "$ref": "#/$defs/timestamp" },
+            "reminder_attempted": { "type": "boolean" },
+            "reopen_state": { "enum": ["not_requested", "uncertain", "confirmed"] },
+            "archive_restore_state": { "enum": ["not_needed", "pending", "complete"] },
+            "response_reference": { "type": ["string", "null"], "minLength": 1 },
+            "last_evidence_reference": { "type": "string", "minLength": 1 },
+            "outcome": { "enum": ["responded", "missing_response"] }
           },
           "additionalProperties": false
         }

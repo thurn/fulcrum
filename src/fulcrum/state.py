@@ -55,7 +55,11 @@ def record_path(paths: RuntimePaths, record: Record) -> Path:
         )
     if kind == "interview":
         interview = cast(InterviewRecord, record)
-        return safe_child(paths.state_root, "interviews", f"{interview['run_id']}.json")
+        return safe_child(
+            paths.state_root,
+            "interviews",
+            f"{interview.get('interview_id', interview['run_id'])}.json",
+        )
     raise RecordValidationError(kind, [f"$.record_kind: unknown kind {kind!r}"])
 
 

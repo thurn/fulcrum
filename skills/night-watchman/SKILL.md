@@ -30,6 +30,12 @@ uncertainty and retained evidence references. If nothing changed and no new work
 is due, do not message the Archon and stay quiet to the human. Never repair
 product code, retry a push, dispatch a role, or write Archon-owned registry state.
 
+Read retained interview records too and pass them to `patrol(interviews=...)`.
+Report due reminders, missing-response completion, uncertain archival state,
+and unfinished restoration to the owning Sage through Archon. Never send the
+reminder or change interview/archival state yourself. Legacy records lacking
+deadlines require inspection, not silently invented prior state.
+
 ## Recurring work
 
 Report the Sage every 24 hours and each enabled project's Inquisitor every 24

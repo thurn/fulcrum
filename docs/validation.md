@@ -196,3 +196,33 @@ release. Full candidate/log identities remain in local Tollgate evidence.
 Status updates follow verified push and cleanup, so Task 12's final `done` label
 is recorded in this separate documentation commit rather than claimed before
 its delivery completed.
+
+## Task 16 — Sage postmortems and bounded interviews
+
+`tests/test_interviews.py` covers distinct subjects within one postmortem,
+write/reload before reopening, uncertain tool outcome, previously unarchived
+subjects, one later reminder (including failure), skipped patrols, deadline
+completion with missing evidence, restoration before closure, and condition-aware
+Watchman reporting/resolution. Legacy records remain readable and request
+inspection rather than inventing deadlines or prior archival state.
+
+`tests/test_findings.py` verifies project-scoped underlying-problem matches,
+future-only new intake, repeated evidence deduplication, and evidence-only updates
+that preserve active scope/ownership/activation. A synthetic Fulcrum finding in
+`tests/fixtures/sage/postmortem.md` separates expected benefit from unavailable
+timing/token metrics and claims no measured speedup.
+
+On 2026-09-11 a real disposable Codex subject was archived, then its interview
+record and unarchive intent were saved before reopening. A debrief-only request
+was delivered. Codex reported a completed turn but exposed no readable reply;
+the exercise retained missing-response evidence. An injected finish clock
+exercised the deadline without waiting two hours. The actual task was restored
+to archived state before the interview was closed. This does not claim a live
+measured interview response or elapsed timeout. Production assignments and the
+brain registry were unchanged.
+
+A separate live disposable Beads repository received two observations of the
+same underlying finding through `publish_finding`: both returned one actual
+issue ID, the issue remained future work, and the second observation appeared
+in its notes. Its local Beads history was committed; the fixture has no remote
+and was not represented as production-pushed work.

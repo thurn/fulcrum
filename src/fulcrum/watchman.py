@@ -10,6 +10,7 @@ from typing import Literal, TypedDict, cast
 
 from fulcrum.records import (
     ExecutorEvidenceRecord,
+    InterviewRecord,
     HoldsJobsRecord,
     PatrolCondition,
     ProgressRecord,
@@ -20,6 +21,7 @@ from fulcrum.records import (
     validate_record,
 )
 from fulcrum.resources import utc_text
+from fulcrum.interviews import interview_action
 
 DAY = timedelta(hours=24)
 INQUISITOR_OFFSET = timedelta(hours=12)
@@ -236,6 +238,7 @@ def patrol(
     previous_conditions: list[PatrolCondition],
     tollgate_observation_available: bool,
     now: datetime,
+    interviews: list[InterviewRecord] | None = None,
 ) -> PatrolResult:
     """Compare supported evidence read-only and emit only meaningful changes."""
 
@@ -365,6 +368,18 @@ def patrol(
             job["job_id"],
             job["next_due"],
         )
+
+    for interview in interviews or []:
+        action = interview_action(interview, now)
+        if action not in {"none", "wait"}:
+            identity = f"interview:{interview.get('interview_id', interview['run_id'])}"
+            conditions[identity] = _condition(
+                identity,
+                "interview_obligation",
+                f"Interview requires {action}; resume owning Sage or coordinate recovery",
+                interview["sage_task_id"],
+                interview["subject_task_id"],
+            )
 
     previous = {condition["identity"]: condition for condition in previous_conditions}
     notifications: list[PatrolNotification] = []
