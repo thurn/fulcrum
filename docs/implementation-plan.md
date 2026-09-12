@@ -681,7 +681,9 @@ speedup. It does not silently expand an active assignment.
 
 ### Task 17 [skills] — Implement Inquisitor architectural review
 
-**Status:** pending
+**Status:** done — portable whole-codebase review and synthetic repository
+exercise verified; commit `7137050` certified, source synchronized, and worktree
+cleanup completed through Tollgate. See `docs/validation.md`.
 
 **Outcome:** each enabled project can receive fresh whole-codebase review that
 produces useful future tasks.

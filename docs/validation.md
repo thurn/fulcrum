@@ -248,3 +248,17 @@ Black, Pyre, and all 101 focused tests pass. A clean wheel installation into
 an isolated prefix outside the developer home imported the interview/finding
 helpers and resolved all 42 relative skill links, including Sage, Inquisitor,
 and the updated Watchman interview guidance.
+
+### Tasks 16–17 delivery evidence
+
+| Task | Source commit | Verified result |
+| --- | --- | --- |
+| 16 | `b803b1d` | Tollgate certified, origin/master synchronized, worktree cleanup completed |
+| 17 | `7137050` | Tollgate certified, origin/master synchronized, worktree cleanup completed |
+
+Both source commits passed the configured `scripts/check` gate. Task 17's final
+`done` status is recorded after verification in this documentation follow-up.
+The live interview subject was restored to archived state; the disposable Beads
+probe used its own embedded database and left no shared database process running.
+Full tool and candidate evidence remains local; the synthetic reviews do not
+claim measured production speedups or grant implementation authority.
