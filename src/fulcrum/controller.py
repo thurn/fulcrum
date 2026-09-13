@@ -697,9 +697,11 @@ class Controller:
             )
 
     async def _reconcile_uncertain_operations(self) -> None:
-        for operation in self.store.rows(
-            "SELECT * FROM external_operations WHERE state = 'uncertain' AND reconciliation_used = 0 ORDER BY id"
-        ):
+        for operation in self.store.rows("""SELECT * FROM external_operations
+               WHERE (state = 'uncertain' AND reconciliation_used = 0)
+               OR (kind = 'tollgate_approve' AND state = 'failed'
+                   AND condition = 'Tollgate candidate ended in promoted')
+               ORDER BY id"""):
             if operation["kind"] == "turn_start":
                 await self._reconcile_turn_start(operation)
             elif operation["kind"] == "thread_start":
@@ -976,6 +978,7 @@ class Controller:
                 "UPDATE assignments SET stage = 'delivering', condition = NULL, updated_at = ? WHERE id = ?",
                 (utc_now(), assignment["id"]),
             )
+            self._release_operator_hold("assignment", int(assignment["id"]))
             await self._close_delivered_assignment(assignment)
             return
         if _candidate_definitively_failed(candidate):
