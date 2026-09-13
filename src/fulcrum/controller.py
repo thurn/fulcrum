@@ -55,6 +55,7 @@ from fulcrum.store import Store, StoreError, utc_now
 from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 INHERITED_LOCK_FD_ENV = "FULCRUM_INHERITED_LOCK_FD"
+FALLBACK_RECONCILIATION_SECONDS = 30
 
 
 class Controller:
@@ -273,14 +274,15 @@ class Controller:
                     f"{method}: {error}",
                     detail={"traceback": traceback.format_exc()},
                 )
+            finally:
+                self.events.task_done()
 
     async def _advancement_loop(self) -> None:
         while True:
             self.store.heartbeat("advancement")
-            try:
-                await asyncio.wait_for(self.advance_requested.wait(), timeout=5)
-            except TimeoutError:
-                pass
+            # Periodic recovery belongs to _fallback_loop. This worker only
+            # consumes coalesced requests caused by actionable state changes.
+            await self.advance_requested.wait()
             self.advance_requested.clear()
             async with self.mutation_lock:
                 if not self.runtime.ready:
@@ -308,7 +310,6 @@ class Controller:
                 entity_type="capability",
                 entity_id="app_server",
             )
-            self.advance_requested.set()
             return True
         thread_id = params.get("threadId")
         if not isinstance(thread_id, str):
@@ -371,7 +372,6 @@ class Controller:
             )
             if action is not None:
                 if facts["last_turn_id"] != turn_id:
-                    self.advance_requested.set()
                     return True
                 observed_status = (
                     str(facts["last_turn_status"])
@@ -445,7 +445,7 @@ class Controller:
 
     async def _fallback_loop(self) -> None:
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(FALLBACK_RECONCILIATION_SECONDS)
             self.store.heartbeat("fallback")
             if self.mutation_lock.locked():
                 continue

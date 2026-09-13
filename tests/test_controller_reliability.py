@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ from fulcrum.controller import (
     _candidate_definitively_failed,
     _find_candidate,
 )
+from fulcrum.kernel import LeaseRequest, acquire_lease
 from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
 from fulcrum.store import StoreError
 from fulcrum.tollgate import TollgateError, TollgateUncertainError
@@ -847,6 +849,170 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(relevant)
+
+    async def test_runtime_notification_stream_is_coalesced_without_losing_fallback_or_evidence(
+        self,
+    ) -> None:
+        decision = acquire_lease(
+            self.controller.store,
+            LeaseRequest(
+                task_id=int(self.executor["id"]),
+                assignment_id=int(self.assignment["id"]),
+                kind="implement",
+                payload={"purpose": "integration test"},
+                project_ids=("p",),
+                pair_id=int(self.assignment["run_id"]),
+            ),
+        )
+        self.assertTrue(decision.admitted)
+        assert decision.action is not None
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.return_value = "turn-stream"
+        self.controller.runtime = runtime
+        self.executor["runtime_status"] = "unmaterialized"
+        await self.controller._dispatch_action(
+            decision.action,
+            task=self.executor,
+            assignment=self.assignment,
+        )
+        turn_start = self.controller.store.row(
+            "SELECT id FROM external_operations WHERE kind = 'turn_start' AND target = ?",
+            (str(decision.action["id"]),),
+        )
+        assert turn_start is not None
+        lifecycle_event = self.controller.store.row(
+            "SELECT id FROM events WHERE kind = 'operation_started' AND entity_type = 'operation' AND entity_id = ?",
+            (str(turn_start["id"]),),
+        )
+        assert lifecycle_event is not None
+
+        reconcile = AsyncMock()
+        advance = AsyncMock()
+        event_worker = asyncio.create_task(self.controller._event_loop())
+        try:
+            with (
+                patch.object(self.controller, "reconcile", new=reconcile),
+                patch.object(self.controller, "advance", new=advance),
+            ):
+                dormant_advancement = asyncio.create_task(
+                    self.controller._advancement_loop()
+                )
+                try:
+                    for sequence in range(1_000):
+                        await self.controller._queue_runtime_event(
+                            "item/agentMessage/delta",
+                            {
+                                "threadId": "executor",
+                                "delta": f"token-{sequence}",
+                            },
+                        )
+                    await asyncio.wait_for(self.controller.events.join(), timeout=2)
+
+                    self.assertFalse(self.controller.advance_requested.is_set())
+                    reconcile.assert_not_awaited()
+                    advance.assert_not_awaited()
+                finally:
+                    dormant_advancement.cancel()
+                    await asyncio.gather(dormant_advancement, return_exceptions=True)
+
+            # Both notifications change retained state, but asyncio.Event holds a
+            # single pending wake-up no matter how many relevant events arrive.
+            for status in ("waiting", "active"):
+                await self.controller._queue_runtime_event(
+                    "thread/status/changed",
+                    {"threadId": "executor", "status": {"type": status}},
+                )
+            await asyncio.wait_for(self.controller.events.join(), timeout=1)
+            self.assertTrue(self.controller.advance_requested.is_set())
+
+            advancement_done = asyncio.Event()
+
+            async def mark_advanced() -> None:
+                advancement_done.set()
+
+            advance.side_effect = mark_advanced
+            with (
+                patch.object(self.controller, "reconcile", new=reconcile),
+                patch.object(self.controller, "advance", new=advance),
+            ):
+                advancement_worker = asyncio.create_task(
+                    self.controller._advancement_loop()
+                )
+                try:
+                    await asyncio.wait_for(advancement_done.wait(), timeout=1)
+                    self.assertEqual(reconcile.await_count, 1)
+                    self.assertEqual(advance.await_count, 1)
+                    self.assertFalse(self.controller.advance_requested.is_set())
+                finally:
+                    advancement_worker.cancel()
+                    await asyncio.gather(advancement_worker, return_exceptions=True)
+        finally:
+            event_worker.cancel()
+            await asyncio.gather(event_worker, return_exceptions=True)
+
+        fallback_intervals: list[int | float] = []
+        fallback_done = asyncio.Event()
+        fallback_reconcile = AsyncMock()
+
+        async def wait_for_fallback(interval: int | float) -> None:
+            fallback_intervals.append(interval)
+            if len(fallback_intervals) > 1:
+                await asyncio.Future()
+
+        async def mark_fallback_advanced() -> None:
+            fallback_done.set()
+
+        with (
+            patch("fulcrum.controller.asyncio.sleep", new=wait_for_fallback),
+            patch.object(self.controller, "reconcile", new=fallback_reconcile),
+            patch.object(
+                self.controller,
+                "advance",
+                new=AsyncMock(side_effect=mark_fallback_advanced),
+            ),
+        ):
+            fallback_worker = asyncio.create_task(self.controller._fallback_loop())
+            try:
+                await asyncio.wait_for(fallback_done.wait(), timeout=1)
+                self.assertEqual(fallback_intervals[0], 30)
+                self.assertEqual(fallback_reconcile.await_count, 1)
+            finally:
+                fallback_worker.cancel()
+                await asyncio.gather(fallback_worker, return_exceptions=True)
+
+        for _ in range(225):
+            self.controller.store.event(
+                "reconciliation_started", "bounded sample noise"
+            )
+            self.controller.store.event(
+                "reconciliation_completed", "bounded sample noise"
+            )
+        scope = json.dumps({"global": False, "projects": ["p"]})
+        occurrence = self.controller.store.execute(
+            "INSERT INTO occurrences(kind, scope, authority, state, created_at, updated_at) VALUES ('sage', ?, 'test', 'queued', 'now', 'now')",
+            (scope,),
+        )
+        retained = self.controller.store.row(
+            "SELECT * FROM occurrences WHERE id = ?", (occurrence.lastrowid,)
+        )
+        assert retained is not None
+        evidence = self.controller._specialist_evidence(
+            json.loads(scope), occurrence=retained
+        )
+        self.assertLessEqual(len(evidence["recent_events"]), 200)
+        self.assertIn(
+            lifecycle_event["id"],
+            [event["id"] for event in evidence["recent_events"]],
+        )
+        self.assertNotIn(
+            "reconciliation_started",
+            [event["kind"] for event in evidence["recent_events"]],
+        )
+        self.assertIn(
+            {"kind": "reconciliation_started", "count": 225},
+            evidence["event_counts"],
+        )
 
     async def test_refresh_repairs_idle_runtime_without_current_action(self) -> None:
         self.controller.store.execute(
