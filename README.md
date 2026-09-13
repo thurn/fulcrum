@@ -41,8 +41,9 @@ Executor, and Overseer tasks.
 fulcrum status --json
 fulcrum doctor --json
 fulcrum archon
-fulcrum intake --project fulcrum --title "Fix empty results" \
-  --description "Show the empty state when search has no matches and test both paths."
+fulcrum intake --input - <<'JSON'
+{"project":"fulcrum","title":"Fix empty results","description":"Show the empty state when search has no matches and test both paths."}
+JSON
 fulcrum sage
 fulcrum inquisitor --project fulcrum
 fulcrum reboot --soft
