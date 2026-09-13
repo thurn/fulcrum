@@ -268,7 +268,21 @@ class CodexRuntime:
     ) -> None:
         await self.request(
             "thread/settings/update",
-            {"threadId": thread_id, "cwd": cwd, "model": model, "effort": effort},
+            {
+                "threadId": thread_id,
+                "cwd": cwd,
+                "model": model,
+                "effort": effort,
+                "summary": "concise",
+                "collaborationMode": {
+                    "mode": "default",
+                    "settings": {
+                        "model": model,
+                        "reasoning_effort": effort,
+                        "developer_instructions": None,
+                    },
+                },
+            },
         )
 
     async def start_turn(
@@ -281,6 +295,12 @@ class CodexRuntime:
         effort: str,
         correlation: str | None = None,
     ) -> str:
+        await self.configure_thread(
+            thread_id,
+            cwd=cwd,
+            model=model,
+            effort=effort,
+        )
         result = await self.request(
             "turn/start",
             {
@@ -289,6 +309,7 @@ class CodexRuntime:
                 "cwd": cwd,
                 "model": model,
                 "effort": effort,
+                "summary": "concise",
                 "turnTrigger": "fulcrum",
                 "clientUserMessageId": correlation,
             },

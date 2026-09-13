@@ -80,6 +80,8 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                     await connection.send(
                         json.dumps({"id": identifier, "result": {"thread": thread}})
                     )
+                elif method == "thread/settings/update":
+                    await connection.send(json.dumps({"id": identifier, "result": {}}))
                 elif method == "turn/start":
                     await connection.send(
                         json.dumps(
@@ -119,6 +121,36 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 correlation="operation-1",
             )
             self.assertEqual(turn, "turn-1")
+            settings_request = next(
+                item
+                for item in received
+                if item.get("method") == "thread/settings/update"
+            )
+            self.assertEqual(
+                settings_request["params"],
+                {
+                    "threadId": "thread-1",
+                    "cwd": "/tmp",
+                    "model": "sol",
+                    "effort": "high",
+                    "summary": "concise",
+                    "collaborationMode": {
+                        "mode": "default",
+                        "settings": {
+                            "model": "sol",
+                            "reasoning_effort": "high",
+                            "developer_instructions": None,
+                        },
+                    },
+                },
+            )
+            turn_request = next(
+                item for item in received if item.get("method") == "turn/start"
+            )
+            self.assertEqual(turn_request["params"]["summary"], "concise")
+            self.assertLess(
+                received.index(settings_request), received.index(turn_request)
+            )
             rejected = await asyncio.wait_for(rejection, 1)
             self.assertEqual(rejected["error"]["code"], -32601)
             self.assertTrue(all("jsonrpc" not in item for item in received))

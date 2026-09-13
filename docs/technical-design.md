@@ -17,6 +17,9 @@ Python creates and names managed Codex tasks. Archon owns scheduling judgment;
 Executor implements; Overseer independently reviews; Weaver authors intake; Sage
 and Inquisitor produce evidence-based reports. Only one execution-pair member may
 run at a time. Native helpers remain children of their parent and retain its slot.
+Before every managed turn, Python selects Codex's built-in Default collaboration
+mode and concise reasoning summaries through app-server thread settings. The
+server owns the mode instructions; Fulcrum does not copy or version their text.
 
 SQLite stores native task/turn IDs, separate role counters, approved scope
 snapshots, pair bindings, assignments, actions/outcomes, reservations, composed
