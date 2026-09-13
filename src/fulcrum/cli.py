@@ -126,7 +126,11 @@ def _request(paths: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 def _intake_payload(args: argparse.Namespace) -> dict[str, Any]:
     if args.input:
-        value = json.loads(Path(args.input).read_text(encoding="utf-8"))
+        value = (
+            json.load(sys.stdin)
+            if args.input == "-"
+            else json.loads(Path(args.input).read_text(encoding="utf-8"))
+        )
         if not isinstance(value, dict):
             raise ValueError("intake input must contain an object")
         return value

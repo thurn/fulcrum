@@ -281,9 +281,19 @@ class CodexRuntime:
     async def read_thread(
         self, thread_id: str, *, include_turns: bool = True
     ) -> dict[str, Any]:
-        result = await self.request(
-            "thread/read", {"threadId": thread_id, "includeTurns": include_turns}
-        )
+        for attempt in range(5):
+            try:
+                result = await self.request(
+                    "thread/read",
+                    {"threadId": thread_id, "includeTurns": include_turns},
+                )
+                break
+            except AppServerError as error:
+                if "rollout at" not in str(error) or "is empty" not in str(error):
+                    raise
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(0.05 * (attempt + 1))
         thread = result.get("thread")
         if not isinstance(thread, dict):
             raise AppServerError(f"thread/read returned no thread for {thread_id}")

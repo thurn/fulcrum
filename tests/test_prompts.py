@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fulcrum.cli import build_parser
+from fulcrum.cli import _intake_payload, build_parser
 from fulcrum.config import RuntimePaths
 from fulcrum.hook import handle_event
 from fulcrum.outcomes import ALLOWED, finish_examples, finish_syntax, validate_outcome
@@ -278,6 +279,16 @@ class PromptsTest(unittest.TestCase):
         self.assertIn(
             "whole-codebase", role_instructions("specialist", role="inquisitor")
         )
+
+    def test_writable_weaver_uses_stdin_json_for_shell_safe_intake(self) -> None:
+        text = weaver_instructions(plan_mode=False, project="p")
+        self.assertIn("fulcrum intake --input -", text)
+        self.assertIn("single-quoted shell heredoc", text)
+        self.assertNotIn('fulcrum intake --title "..."', text)
+
+        args = build_parser().parse_args(["intake", "--input", "-"])
+        with patch("sys.stdin", io.StringIO('{"title":"Use `code` safely"}')):
+            self.assertEqual(_intake_payload(args)["title"], "Use `code` safely")
 
     def test_hook_is_quiet_for_unmanaged_and_actionless_threads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -6,9 +6,11 @@ bounded scope, constraints, dependencies, and observable completion checks.
 
 Match effort to the request. Small understood tasks need no plan document or helper
 review. Outside Plan mode, say you are using direct task intake, answer any project
-questions, then file the task through `fulcrum intake --title "..." --description
-"..."`. The description states the change and what counts as done. Supply --project
-only when needed to resolve ambiguity, and --context/--depends-on when relevant.
+questions, then file the task as JSON through `fulcrum intake --input -` using a
+single-quoted shell heredoc. Never interpolate human-authored task text into shell
+arguments. The object includes project, title, description, activation, depends_on,
+and context; description states the change and what counts as done. Supply project
+only when needed to resolve ambiguity, and context/depends_on when relevant.
 Tasks default to pending; use future only when the human explicitly defers work.
 Filing authorizes consideration by Archon, not source implementation.
 

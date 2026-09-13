@@ -4,13 +4,29 @@ import asyncio
 import json
 import unittest
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from websockets.asyncio.server import serve
 
-from fulcrum.runtime import CodexRuntime, thread_facts
+from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
 
 
 class RuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_read_thread_retries_temporarily_empty_rollout(self) -> None:
+        runtime = CodexRuntime("ws://unused")
+        runtime.request = AsyncMock(
+            side_effect=[
+                AppServerError("rollout at /tmp/new.jsonl is empty"),
+                {"thread": {"id": "thread-1"}},
+            ]
+        )
+
+        with patch("fulcrum.runtime.asyncio.sleep", new=AsyncMock()) as sleep:
+            thread = await runtime.read_thread("thread-1")
+
+        self.assertEqual(thread["id"], "thread-1")
+        sleep.assert_awaited_once_with(0.05)
+
     async def test_protocol_handshake_methods_and_server_request_rejection(
         self,
     ) -> None:
