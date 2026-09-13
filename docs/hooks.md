@@ -1,7 +1,7 @@
 # Hooks
 
 Fulcrum installs one read-only `SessionStart` hook for compaction. For a managed
-current action it supplies a brief role/action reminder and tells the agent to
+current action it supplies a brief role and action reminder and tells the agent to
 continue from the conversation summary. It does not replay the role manual,
 approved scope, history, or command schemas, and does not require a context-fetching
 command. The actual request and necessary facts were delivered in the action message.
