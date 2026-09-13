@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from fulcrum.store import Store
+from fulcrum.kernel import invariant_violations
 
 
 def state_readiness(store: Store) -> tuple[bool, list[str]]:
@@ -64,6 +66,42 @@ def state_readiness(store: Store) -> tuple[bool, list[str]]:
     )
     if archon is None:
         reasons.append("Archon is missing")
+    return not reasons, reasons
+
+
+def progress_readiness(
+    store: Store,
+    *,
+    critical_workers: set[str],
+    maximum_reconciliation_age_seconds: int = 90,
+    now: datetime | None = None,
+) -> tuple[bool, list[str]]:
+    """Evaluate whether the workflow can make progress, not merely answer IPC."""
+
+    reasons = invariant_violations(store)
+    current = now or datetime.now(timezone.utc)
+    reconciliation = store.row(
+        "SELECT value FROM meta WHERE key = 'last_reconciliation'"
+    )
+    if reconciliation is None:
+        reasons.append("reconciliation has never completed")
+    else:
+        try:
+            observed = datetime.fromisoformat(
+                str(reconciliation["value"]).replace("Z", "+00:00")
+            )
+            age = (current - observed).total_seconds()
+            if age > maximum_reconciliation_age_seconds:
+                reasons.append(f"reconciliation is stale by {int(age)} seconds")
+        except (TypeError, ValueError):
+            reasons.append("reconciliation timestamp is invalid")
+    workers = {
+        str(row["worker_name"]): str(row["state"])
+        for row in store.rows("SELECT worker_name, state FROM worker_heartbeats")
+    }
+    for name in sorted(critical_workers):
+        if workers.get(name) != "running":
+            reasons.append(f"critical worker {name} is not running")
     return not reasons, reasons
 
 

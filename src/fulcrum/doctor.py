@@ -22,7 +22,7 @@ from fulcrum.install import (
     service_definitions,
 )
 from fulcrum.prompts import TEMPLATES, load_template
-from fulcrum.readiness import state_readiness
+from fulcrum.readiness import progress_readiness, state_readiness
 from fulcrum.runtime import CodexRuntime
 from fulcrum.store import Store
 from fulcrum.tollgate import Tollgate
@@ -178,8 +178,12 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
     )
     check(
         "shared_runtime_active",
-        runtime_service.returncode == 0 or app_server_ready,
-        APP_SERVER_LABEL if runtime_service.returncode == 0 else endpoint,
+        runtime_service.returncode == 0,
+        (
+            APP_SERVER_LABEL
+            if runtime_service.returncode == 0
+            else f"unmanaged listener may be serving {endpoint}"
+        ),
     )
 
     models: list[dict[str, Any]] = []
@@ -326,6 +330,15 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
                     "SELECT value FROM meta WHERE key = 'dispatch_enabled'"
                 )
                 durable_ready, readiness_reasons = state_readiness(store)
+                progress_ready, progress_reasons = progress_readiness(
+                    store,
+                    critical_workers={
+                        "events",
+                        "fallback",
+                        "advancement",
+                        "source-watch",
+                    },
+                )
             check(
                 "sqlite_integrity",
                 bool(integrity and next(iter(integrity.values())) == "ok"),
@@ -346,6 +359,11 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
                 "durable_readiness",
                 durable_ready,
                 "ready" if durable_ready else "; ".join(readiness_reasons),
+            )
+            check(
+                "workflow_progress",
+                progress_ready,
+                "healthy" if progress_ready else "; ".join(progress_reasons),
             )
             check(
                 "dispatch",

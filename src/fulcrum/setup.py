@@ -19,6 +19,7 @@ from fulcrum.config import (
     save_installation,
 )
 from fulcrum.install import (
+    install_control_plane,
     install_links,
     install_services,
     start_services,
@@ -168,7 +169,7 @@ def _prepare_brain(config: InstallationConfig) -> None:
         )
         if status.returncode == 0:
             return
-    subprocess.run(
+    bootstrapped = subprocess.run(
         [
             bd,
             "-C",
@@ -180,6 +181,26 @@ def _prepare_brain(config: InstallationConfig) -> None:
         text=True,
         check=False,
     )
+    if bootstrapped.returncode != 0:
+        raise SetupError(
+            "Beads bootstrap failed: "
+            + (
+                bootstrapped.stderr.strip()
+                or bootstrapped.stdout.strip()
+                or "no diagnostic output"
+            )
+        )
+    verified = subprocess.run(
+        [bd, "-C", str(root), "status"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verified.returncode != 0:
+        raise SetupError(
+            "Beads bootstrap did not produce a readable project: "
+            + (verified.stderr.strip() or verified.stdout.strip() or "no output")
+        )
 
 
 def _ready_url(endpoint: str) -> str:
@@ -252,6 +273,7 @@ def run_setup(
     save_installation(paths.config_file, config)
     _prepare_brain(config)
     links = install_links(config)
+    install_control_plane(config, paths)
     services, updated_services = install_services(config, paths)
     start_services(
         services,

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 
 class StoreError(RuntimeError):
@@ -99,6 +100,8 @@ CREATE TABLE IF NOT EXISTS assignments (
   repair_permissions TEXT NOT NULL DEFAULT '[]', mandate_candidate_id TEXT,
   mandate_scope TEXT, predecessor_candidate_id TEXT, repair_category TEXT,
   repair_rationale TEXT, repair_evidence TEXT, condition TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+  next_attempt_at TEXT, operator_hold_id INTEGER REFERENCES holds(id),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_assignment_per_bead ON assignments(bead_id) WHERE stage NOT IN ('completed','canceled');
@@ -109,13 +112,16 @@ CREATE TABLE IF NOT EXISTS actions (
     CHECK (state IN ('pending','starting','active','terminal','processed','failed','uncertain','canceled')),
   native_turn_id TEXT, outcome_kind TEXT, outcome_payload TEXT,
   reminder_sent INTEGER NOT NULL DEFAULT 0 CHECK (reminder_sent IN (0, 1)),
-  check_after TEXT, condition TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  check_after TEXT, condition TEXT, attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  next_attempt_at TEXT, operator_hold_id INTEGER REFERENCES holds(id),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_thread ON actions(task_id) WHERE state NOT IN ('processed','canceled');
 CREATE TABLE IF NOT EXISTS reservations (
   id INTEGER PRIMARY KEY, action_id INTEGER NOT NULL UNIQUE REFERENCES actions(id),
   pair_id INTEGER, global_slots INTEGER NOT NULL DEFAULT 1 CHECK (global_slots >= 0),
-  project_ids TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL CHECK (state IN ('reserved','active','uncertain')),
+  project_ids TEXT NOT NULL DEFAULT '[]', conflict_keys TEXT NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL CHECK (state IN ('reserved','active','uncertain')),
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_pair_reservation ON reservations(pair_id) WHERE pair_id IS NOT NULL;
@@ -128,7 +134,28 @@ CREATE TABLE IF NOT EXISTS external_operations (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, input_json TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('intent','sent','complete','failed','uncertain','canceled')),
   result_json TEXT, native_id TEXT, reconciliation_used INTEGER NOT NULL DEFAULT 0 CHECK (reconciliation_used IN (0, 1)),
-  condition TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  condition TEXT, correlation_id TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  next_attempt_at TEXT, last_attempt_at TEXT, completed_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS operation_attempts (
+  id INTEGER PRIMARY KEY, operation_id INTEGER NOT NULL REFERENCES external_operations(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL CHECK (attempt >= 1), state TEXT NOT NULL
+    CHECK (state IN ('started','complete','failed','uncertain')),
+  request_json TEXT NOT NULL, result_json TEXT, stdout TEXT, stderr TEXT, error TEXT,
+  started_at TEXT NOT NULL, finished_at TEXT, duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+  UNIQUE(operation_id, attempt)
+);
+CREATE TABLE IF NOT EXISTS state_transitions (
+  id INTEGER PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+  field_name TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL, reason TEXT NOT NULL,
+  correlation_id TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker_name TEXT PRIMARY KEY, state TEXT NOT NULL CHECK (state IN ('starting','running','degraded','stopped')),
+  started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, completed_at TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
+  last_error TEXT, traceback TEXT
 );
 CREATE TABLE IF NOT EXISTS updates (
   id INTEGER PRIMARY KEY, recipient_task_id INTEGER NOT NULL REFERENCES tasks(id),
@@ -169,7 +196,9 @@ CREATE TABLE IF NOT EXISTS interviews (
 CREATE TABLE IF NOT EXISTS obligations (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, identity TEXT NOT NULL, target TEXT NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('pending','active','complete','failed','uncertain','canceled')),
-  detail TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(kind, identity, target)
+  detail TEXT, retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
+  next_attempt_at TEXT, operator_hold_id INTEGER REFERENCES holds(id),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(kind, identity, target)
 );
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, entity_type TEXT, entity_id TEXT,
@@ -185,8 +214,15 @@ def utc_now() -> str:
 class Store:
     """Transactional access to the controller's only operational store."""
 
-    def __init__(self, path: Path, *, readonly: bool = False) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        readonly: bool = False,
+        event_log: Path | None = None,
+    ) -> None:
         self.path = path
+        self.event_log = event_log
         self.connection: sqlite3.Connection
         if readonly:
             self.connection = sqlite3.connect(
@@ -207,11 +243,61 @@ class Store:
             self.connection.execute("PRAGMA journal_mode = WAL")
             self.connection.execute("PRAGMA synchronous = FULL")
             self.connection.executescript(SCHEMA)
+            self._migrate_existing_database()
             for role in ROLE_CODES:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO role_counters(role, next_number) VALUES (?, 1)",
                     (role,),
                 )
+
+    def _migrate_existing_database(self) -> None:
+        """Add correctness metadata to an existing database without a version gate."""
+
+        additions = {
+            "assignments": {
+                "retry_count": "INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)",
+                "next_attempt_at": "TEXT",
+                "operator_hold_id": "INTEGER REFERENCES holds(id)",
+            },
+            "actions": {
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)",
+                "next_attempt_at": "TEXT",
+                "operator_hold_id": "INTEGER REFERENCES holds(id)",
+            },
+            "reservations": {
+                "conflict_keys": "TEXT NOT NULL DEFAULT '[]'",
+            },
+            "external_operations": {
+                "correlation_id": "TEXT",
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)",
+                "next_attempt_at": "TEXT",
+                "last_attempt_at": "TEXT",
+                "completed_at": "TEXT",
+            },
+            "obligations": {
+                "retry_count": "INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)",
+                "next_attempt_at": "TEXT",
+                "operator_hold_id": "INTEGER REFERENCES holds(id)",
+            },
+        }
+        for table, columns in additions.items():
+            present = {
+                str(row[1])
+                for row in self.connection.execute(f"PRAGMA table_info({table})")
+            }
+            for name, definition in columns.items():
+                if name not in present:
+                    self.connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                    )
+        self.connection.execute(
+            "UPDATE external_operations SET correlation_id = 'operation-' || id WHERE correlation_id IS NULL"
+        )
+        self.connection.execute("DROP INDEX IF EXISTS one_current_action_per_thread")
+        self.connection.execute(
+            """CREATE UNIQUE INDEX one_current_action_per_thread ON actions(task_id)
+               WHERE state IN ('pending','starting','active','terminal','uncertain')"""
+        )
 
     def close(self) -> None:
         self.connection.close()
@@ -253,6 +339,8 @@ class Store:
         detail: dict[str, Any] | None = None,
         now: str | None = None,
     ) -> int:
+        timestamp = now or utc_now()
+        encoded_detail = json.dumps(detail or {}, sort_keys=True)
         cursor = self.execute(
             "INSERT INTO events(kind, entity_type, entity_id, message, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -260,11 +348,39 @@ class Store:
                 entity_type,
                 None if entity_id is None else str(entity_id),
                 message,
-                json.dumps(detail or {}, sort_keys=True),
-                now or utc_now(),
+                encoded_detail,
+                timestamp,
             ),
         )
+        if self.event_log is not None:
+            self._append_event_log(
+                {
+                    "id": int(cursor.lastrowid),
+                    "kind": kind,
+                    "entity_type": entity_type,
+                    "entity_id": None if entity_id is None else str(entity_id),
+                    "message": message,
+                    "detail": _redact(detail or {}),
+                    "created_at": timestamp,
+                }
+            )
         return int(cursor.lastrowid)
+
+    def _append_event_log(self, record: dict[str, Any]) -> None:
+        path = self.event_log
+        assert path is not None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                os.write(descriptor, line.encode("utf-8"))
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # SQLite remains the authoritative event log. A file sink failure must
+            # never roll back the workflow mutation it is describing.
+            pass
 
     def allocate_name(self, role: str, description: str) -> tuple[int | None, str]:
         if role == "archon":
@@ -360,13 +476,236 @@ class Store:
             raise StoreError("thread has no current Fulcrum action")
         return row
 
-    def create_operation(self, kind: str, target: str, inputs: dict[str, Any]) -> int:
+    def create_operation(
+        self,
+        kind: str,
+        target: str,
+        inputs: dict[str, Any],
+        *,
+        correlation_id: str | None = None,
+    ) -> int:
         timestamp = utc_now()
-        cursor = self.execute(
-            "INSERT INTO external_operations(kind, target, input_json, state, created_at, updated_at) VALUES (?, ?, ?, 'intent', ?, ?)",
-            (kind, target, json.dumps(inputs, sort_keys=True), timestamp, timestamp),
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """INSERT INTO external_operations(
+                       kind, target, input_json, state, correlation_id, created_at, updated_at
+                   ) VALUES (?, ?, ?, 'intent', '', ?, ?)""",
+                (
+                    kind,
+                    target,
+                    json.dumps(inputs, sort_keys=True),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            identifier = int(cursor.lastrowid)
+            correlation = correlation_id or f"operation-{identifier}"
+            connection.execute(
+                "UPDATE external_operations SET correlation_id = ? WHERE id = ?",
+                (correlation, identifier),
+            )
+        self.event(
+            "operation_intended",
+            f"recorded {kind} intent",
+            entity_type="operation",
+            entity_id=identifier,
+            detail={
+                "correlation_id": correlation,
+                "kind": kind,
+                "target": target,
+            },
+            now=timestamp,
         )
-        return int(cursor.lastrowid)
+        return identifier
+
+    def begin_operation_attempt(self, operation_id: int) -> int:
+        """Atomically lease one durable external-operation attempt."""
+
+        timestamp = utc_now()
+        with self.transaction() as connection:
+            operation = connection.execute(
+                "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+            ).fetchone()
+            if operation is None:
+                raise StoreError(f"unknown external operation {operation_id}")
+            if operation["state"] in {"complete", "canceled"}:
+                raise StoreError(f"operation {operation_id} is already terminal")
+            attempt = int(operation["attempt_count"]) + 1
+            connection.execute(
+                """UPDATE external_operations SET state = 'sent', attempt_count = ?,
+                   last_attempt_at = ?, next_attempt_at = NULL, updated_at = ? WHERE id = ?""",
+                (attempt, timestamp, timestamp, operation_id),
+            )
+            connection.execute(
+                """INSERT INTO operation_attempts(
+                       operation_id, attempt, state, request_json, started_at
+                   ) VALUES (?, ?, 'started', ?, ?)""",
+                (operation_id, attempt, operation["input_json"], timestamp),
+            )
+        self.event(
+            "operation_started",
+            f"started attempt {attempt}",
+            entity_type="operation",
+            entity_id=operation_id,
+            detail={"attempt": attempt, "correlation_id": operation["correlation_id"]},
+        )
+        return attempt
+
+    def finish_operation_attempt(
+        self,
+        operation_id: int,
+        attempt: int,
+        *,
+        state: str,
+        result: Any = None,
+        stdout: str | None = None,
+        stderr: str | None = None,
+        error: str | None = None,
+        duration_ms: int | None = None,
+        native_id: str | None = None,
+        next_attempt_at: str | None = None,
+    ) -> None:
+        if state not in {"complete", "failed", "uncertain"}:
+            raise StoreError(f"invalid operation result state {state!r}")
+        timestamp = utc_now()
+        encoded_result = (
+            None if result is None else json.dumps(_bounded(result), sort_keys=True)
+        )
+        with self.transaction() as connection:
+            current = connection.execute(
+                "SELECT correlation_id FROM external_operations WHERE id = ?",
+                (operation_id,),
+            ).fetchone()
+            if current is None:
+                raise StoreError(f"unknown external operation {operation_id}")
+            connection.execute(
+                """UPDATE operation_attempts SET state = ?, result_json = ?, stdout = ?, stderr = ?,
+                   error = ?, finished_at = ?, duration_ms = ?
+                   WHERE operation_id = ? AND attempt = ?""",
+                (
+                    state,
+                    encoded_result,
+                    _bounded_text(stdout),
+                    _bounded_text(stderr),
+                    _bounded_text(error),
+                    timestamp,
+                    duration_ms,
+                    operation_id,
+                    attempt,
+                ),
+            )
+            connection.execute(
+                """UPDATE external_operations SET state = ?, result_json = ?, native_id = COALESCE(?, native_id),
+                   condition = ?, next_attempt_at = ?, completed_at = CASE WHEN ? = 'complete' THEN ? ELSE NULL END,
+                   updated_at = ? WHERE id = ?""",
+                (
+                    state,
+                    encoded_result,
+                    native_id,
+                    _bounded_text(error),
+                    next_attempt_at,
+                    state,
+                    timestamp,
+                    timestamp,
+                    operation_id,
+                ),
+            )
+        self.event(
+            f"operation_{state}",
+            f"operation attempt {attempt} {state}",
+            entity_type="operation",
+            entity_id=operation_id,
+            detail={
+                "attempt": attempt,
+                "correlation_id": current["correlation_id"],
+                "duration_ms": duration_ms,
+                "error": _bounded_text(error),
+            },
+        )
+
+    def transition(
+        self,
+        entity_type: str,
+        entity_id: int | str,
+        *,
+        table: str,
+        field: str,
+        to_state: str,
+        reason: str,
+        correlation_id: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist a state change and its audit record in the same transaction."""
+
+        allowed: Final = {
+            ("tasks", "state"),
+            ("actions", "state"),
+            ("assignments", "stage"),
+            ("occurrences", "state"),
+            ("interviews", "state"),
+            ("obligations", "state"),
+            ("batches", "state"),
+        }
+        if (table, field) not in allowed:
+            raise StoreError(f"unsupported audited transition {table}.{field}")
+        timestamp = utc_now()
+        updates = {field: to_state, "updated_at": timestamp, **(extra or {})}
+        assignments = ", ".join(f"{name} = ?" for name in updates)
+        with self.transaction() as connection:
+            row = connection.execute(
+                f"SELECT {field} FROM {table} WHERE id = ?", (entity_id,)
+            ).fetchone()
+            if row is None:
+                raise StoreError(f"unknown {entity_type} {entity_id}")
+            connection.execute(
+                f"UPDATE {table} SET {assignments} WHERE id = ?",
+                (*updates.values(), entity_id),
+            )
+            connection.execute(
+                """INSERT INTO state_transitions(
+                       entity_type, entity_id, field_name, from_state, to_state,
+                       reason, correlation_id, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entity_type,
+                    str(entity_id),
+                    field,
+                    row[field],
+                    to_state,
+                    reason,
+                    correlation_id,
+                    timestamp,
+                ),
+            )
+
+    def heartbeat(
+        self,
+        worker_name: str,
+        *,
+        state: str = "running",
+        error: str | None = None,
+        traceback_text: str | None = None,
+    ) -> None:
+        timestamp = utc_now()
+        self.execute(
+            """INSERT INTO worker_heartbeats(
+                   worker_name, state, started_at, heartbeat_at, failure_count, last_error, traceback
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(worker_name) DO UPDATE SET state = excluded.state,
+               heartbeat_at = excluded.heartbeat_at,
+               completed_at = CASE WHEN excluded.state = 'stopped' THEN excluded.heartbeat_at ELSE NULL END,
+               failure_count = worker_heartbeats.failure_count + CASE WHEN excluded.state = 'degraded' THEN 1 ELSE 0 END,
+               last_error = excluded.last_error, traceback = excluded.traceback""",
+            (
+                worker_name,
+                state,
+                timestamp,
+                timestamp,
+                int(state == "degraded"),
+                _bounded_text(error),
+                _bounded_text(traceback_text, limit=32768),
+            ),
+        )
 
     def status(self, *, event_limit: int = 20) -> dict[str, Any]:
         reservations = self.rows("SELECT * FROM reservations")
@@ -386,6 +725,48 @@ class Store:
                JOIN beads b ON b.bead_id = a.bead_id JOIN runs r ON r.id = a.run_id
                WHERE a.stage NOT IN ('completed','canceled') ORDER BY a.id"""
         )
+        for assignment in assignments:
+            if assignment["operator_hold_id"] is not None:
+                next_step = "operator resolves hold"
+                next_at = None
+            elif assignment["stage"] == "recovering":
+                next_step = "controller retries retained prior stage"
+                next_at = assignment["next_attempt_at"]
+            else:
+                next_step = {
+                    "queued": "scheduler acquires capacity",
+                    "preparing": "controller ensures worktree and role pair",
+                    "implementing": "executor turn completes",
+                    "review_pending": "controller starts independent review",
+                    "reviewing": "overseer turn completes",
+                    "correcting": "executor correction completes",
+                    "delivering": "controller reconciles delivery",
+                }.get(str(assignment["stage"]), "controller reconciles state")
+                next_at = None
+            assignment["progress"] = {
+                "waiting_for": assignment["condition"] or next_step,
+                "next_step": next_step,
+                "next_attempt_at": next_at,
+                "operator_hold_id": assignment["operator_hold_id"],
+            }
+        actions = self.rows(
+            """SELECT * FROM actions WHERE state NOT IN ('processed','canceled')
+               ORDER BY id"""
+        )
+        for action in actions:
+            action["progress"] = {
+                "waiting_for": action["condition"] or action["state"],
+                "next_step": (
+                    "operator resolves hold"
+                    if action["operator_hold_id"] is not None
+                    else (
+                        "controller retries start"
+                        if action["state"] == "pending"
+                        else "controller observes runtime terminal state"
+                    )
+                ),
+                "next_attempt_at": action["next_attempt_at"],
+            }
         return {
             "controller_state": self.row(
                 "SELECT value FROM meta WHERE key = 'controller_state'"
@@ -400,6 +781,7 @@ class Store:
             "tasks": tasks,
             "runs": self.rows("SELECT * FROM runs ORDER BY id"),
             "assignments": assignments,
+            "actions": actions,
             "unfinished_work_count": len(assignments),
             "reservations": reservations,
             "slot_usage": {
@@ -430,6 +812,16 @@ class Store:
             "events": self.rows(
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (event_limit,)
             ),
+            "workers": self.rows(
+                "SELECT * FROM worker_heartbeats ORDER BY worker_name"
+            ),
+            "transitions": self.rows(
+                "SELECT * FROM state_transitions ORDER BY id DESC LIMIT ?",
+                (event_limit,),
+            ),
+            "readiness_reasons": self.row(
+                "SELECT value FROM meta WHERE key = 'readiness_reasons'"
+            ),
         }
 
 
@@ -439,3 +831,39 @@ def _project_slot_usage(reservations: list[dict[str, Any]]) -> dict[str, int]:
         for project in json.loads(reservation["project_ids"]):
             usage[project] = usage.get(project, 0) + 1
     return usage
+
+
+_SENSITIVE_KEYS: Final = frozenset(
+    {"authorization", "password", "secret", "token", "api_key", "access_key"}
+)
+
+
+def _bounded_text(value: str | None, *, limit: int = 16384) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"… <{len(value) - limit} bytes omitted>"
+
+
+def _bounded(value: Any) -> Any:
+    if isinstance(value, str):
+        return _bounded_text(value)
+    if isinstance(value, list):
+        return [_bounded(item) for item in value[:200]]
+    if isinstance(value, dict):
+        return {str(key): _bounded(child) for key, child in list(value.items())[:200]}
+    return value
+
+
+def _redact(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_redact(item) for item in value[:200]]
+    if isinstance(value, dict):
+        return {
+            str(key): (
+                "<redacted>" if str(key).lower() in _SENSITIVE_KEYS else _redact(child)
+            )
+            for key, child in list(value.items())[:200]
+        }
+    return _bounded(value)

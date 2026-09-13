@@ -82,6 +82,17 @@ def observe_action_terminal(
             "UPDATE actions SET state = 'failed', condition = 'finish outcome missing after reminder', updated_at = ? WHERE id = ?",
             (utc_now(), action_id),
         )
+        store.execute("DELETE FROM reservations WHERE action_id = ?", (action_id,))
+        store.execute(
+            "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
+            (utc_now(), action["task_id"]),
+        )
+        if action["assignment_id"] is not None:
+            _schedule_assignment_retry(
+                store,
+                int(action["assignment_id"]),
+                "finish outcome missing after reminder",
+            )
         return {"advanced": False, "condition": "finish outcome missing after reminder"}
     result = _apply_outcome(store, action)
     store.execute("DELETE FROM reservations WHERE action_id = ?", (action_id,))
@@ -111,16 +122,36 @@ def _recover_failed_action(
         "UPDATE actions SET state = 'failed', condition = ?, updated_at = ? WHERE id = ?",
         (reason, timestamp, action["id"]),
     )
+    store.execute("DELETE FROM reservations WHERE action_id = ?", (action["id"],))
+    store.execute(
+        "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
+        (timestamp, action["task_id"]),
+    )
     if action["assignment_id"] is not None:
-        assignment = store.row(
-            "SELECT stage FROM assignments WHERE id = ?", (action["assignment_id"],)
-        )
-        if assignment is not None:
-            store.execute(
-                "UPDATE assignments SET prior_stage = stage, stage = 'recovering', condition = ?, updated_at = ? WHERE id = ?",
-                (reason, timestamp, action["assignment_id"]),
-            )
+        _schedule_assignment_retry(store, int(action["assignment_id"]), reason)
     return {"advanced": False, "condition": reason}
+
+
+def _schedule_assignment_retry(store: Store, assignment_id: int, reason: str) -> None:
+    assignment = store.row(
+        "SELECT stage, retry_count FROM assignments WHERE id = ?", (assignment_id,)
+    )
+    if assignment is None:
+        return
+    attempts = int(assignment["retry_count"] or 0) + 1
+    due = (
+        (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=5 * (2 ** min(attempts - 1, 6)))
+        )
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    store.execute(
+        """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+           retry_count = ?, next_attempt_at = ?, condition = ?, updated_at = ? WHERE id = ?""",
+        (attempts, due, reason, utc_now(), assignment_id),
+    )
 
 
 def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
@@ -201,10 +232,29 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
                 if failures >= 3
                 else None
             )
-            store.execute(
-                "UPDATE assignments SET stage = ?, review_failures = ?, condition = ?, updated_at = ? WHERE id = ?",
-                (stage, failures, condition, timestamp, assignment_id),
-            )
+            if failures >= 3:
+                hold = store.execute(
+                    """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                       VALUES ('assignment', ?, ?, 1, 'Archon decides whether to rescope or cancel', ?)""",
+                    (str(assignment_id), condition, timestamp),
+                )
+                store.execute(
+                    """UPDATE assignments SET stage = ?, review_failures = ?, condition = ?,
+                       operator_hold_id = ?, next_attempt_at = NULL, updated_at = ? WHERE id = ?""",
+                    (
+                        stage,
+                        failures,
+                        condition,
+                        hold.lastrowid,
+                        timestamp,
+                        assignment_id,
+                    ),
+                )
+            else:
+                store.execute(
+                    "UPDATE assignments SET stage = ?, review_failures = ?, condition = ?, updated_at = ? WHERE id = ?",
+                    (stage, failures, condition, timestamp, assignment_id),
+                )
             return {
                 "assignment_id": assignment_id,
                 "stage": stage,
@@ -235,10 +285,20 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
             payload.get("reason") or payload.get("evidence") or "action checkpointed"
         )
         if assignment_id is not None:
-            store.execute(
-                "UPDATE assignments SET prior_stage = stage, stage = 'recovering', condition = ?, updated_at = ? WHERE id = ?",
-                (reason, timestamp, assignment_id),
-            )
+            if outcome == "checkpointed":
+                _schedule_assignment_retry(store, int(assignment_id), reason)
+            else:
+                hold = store.execute(
+                    """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                       VALUES ('assignment', ?, ?, 1, 'Archon or operator supplies a specific recovery decision', ?)""",
+                    (str(assignment_id), reason, timestamp),
+                )
+                store.execute(
+                    """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+                       operator_hold_id = ?, next_attempt_at = NULL, condition = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (hold.lastrowid, reason, timestamp, assignment_id),
+                )
         return {
             "assignment_id": assignment_id,
             "stage": "recovering",

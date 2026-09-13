@@ -259,6 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("unsupported command")
             return 2
         print(json.dumps(result, indent=2, sort_keys=True))
+        if args.command == "reboot" and result.get("complete") is True:
+            return 0
         return 0 if result.get("ready", result.get("ok", True)) else 2
     except Exception as error:
         print(f"fulcrum: {error}", file=sys.stderr)

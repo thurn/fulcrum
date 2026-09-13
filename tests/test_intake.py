@@ -49,6 +49,41 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual(row["executor_model"], "gpt-5.6-sol")
         self.assertEqual(row["overseer_reasoning_effort"], "high")
 
+    def test_successful_same_key_retry_supersedes_failed_publication_records(
+        self,
+    ) -> None:
+        draft = task_from_payload(
+            {"project": "fulcrum", "title": "Stable", "description": "Scope"},
+            intake_key="stable",
+        )
+        first = file_task(self.store, self.beads, draft)  # type: ignore[arg-type]
+        now = "2026-01-01T00:00:00Z"
+        self.store.execute(
+            """INSERT INTO external_operations(
+                   kind, target, input_json, state, correlation_id, created_at, updated_at
+               ) VALUES ('beads_create', 'stable', '{}', 'failed', 'old', ?, ?)""",
+            (now, now),
+        )
+        self.store.execute(
+            """INSERT INTO obligations(kind, identity, target, state, detail, created_at, updated_at)
+               VALUES ('beads_publication', 'stable', 'fulcrum', 'failed', 'old', ?, ?)""",
+            (now, now),
+        )
+        second = file_task(self.store, self.beads, draft)  # type: ignore[arg-type]
+        self.assertEqual(second["bead_id"], first["bead_id"])
+        self.assertEqual(
+            self.store.row("SELECT state FROM obligations WHERE identity = 'stable'")[
+                "state"
+            ],
+            "complete",
+        )
+        self.assertEqual(
+            self.store.row(
+                "SELECT state FROM external_operations WHERE correlation_id = 'old'"
+            )["state"],
+            "canceled",
+        )
+
     def test_graph_is_topological_and_marked_complete(self) -> None:
         result = file_graph(
             self.store,

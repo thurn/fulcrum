@@ -153,12 +153,18 @@ class CodexRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            self.ready = False
-            for future in self.pending.values():
-                if not future.done():
-                    future.set_exception(
-                        AppServerError(f"app-server connection lost: {error}")
-                    )
+            reason = str(error)
+        else:
+            reason = "app-server connection closed"
+        self.ready = False
+        self.websocket = None
+        if self.event_handler is not None:
+            await self.event_handler("fulcrum/runtime/disconnected", {"error": reason})
+        for future in self.pending.values():
+            if not future.done():
+                future.set_exception(
+                    AppServerError(f"app-server connection lost: {reason}")
+                )
 
     async def _reject_server_request(self, identifier: object, method: str) -> None:
         assert self.websocket is not None

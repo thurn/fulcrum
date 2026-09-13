@@ -18,6 +18,8 @@ from fulcrum.config import (
 from fulcrum.install import (
     APP_SERVER_LABEL,
     CONTROLLER_LABEL,
+    control_plane_source,
+    install_control_plane,
     install_hook_config,
     install_services,
     service_definitions,
@@ -111,8 +113,13 @@ class ConfigInstallTest(unittest.TestCase):
             home = (root / "home").resolve()
             definitions = service_definitions(config, paths, user_home=home)
             controller = definitions[CONTROLLER_LABEL]["ProgramArguments"]
-            self.assertIn("fulcrum.cli", controller)
+            self.assertTrue(any("fulcrum.cli" in item for item in controller))
+            self.assertIn("-I", controller)
             self.assertNotIn("app-server", controller)
+            self.assertEqual(
+                definitions[CONTROLLER_LABEL]["WorkingDirectory"],
+                str(paths.control_root),
+            )
             expected_path = service_executable_path(user_home=home)
             self.assertEqual(
                 definitions[CONTROLLER_LABEL]["EnvironmentVariables"]["PATH"],
@@ -211,11 +218,16 @@ class ConfigInstallTest(unittest.TestCase):
                 APP_SERVER_LABEL: str(root / "missing-app-server.plist"),
                 CONTROLLER_LABEL: str(definition),
             }
+            repaired = False
 
             def completed(
                 command: list[str], **_kwargs: object
             ) -> subprocess.CompletedProcess:
-                output = "environment = {\n\tPATH => /stale/bin:/usr/bin\n}\n"
+                nonlocal repaired
+                if command[1] == "bootstrap":
+                    repaired = True
+                path = "/expected/bin:/usr/bin" if repaired else "/stale/bin:/usr/bin"
+                output = f"environment = {{\n\tPATH => {path}\n}}\n"
                 return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
             with (
@@ -231,6 +243,69 @@ class ConfigInstallTest(unittest.TestCase):
             self.assertIn(
                 ["launchctl", "bootstrap", "gui/501", str(definition)], commands
             )
+
+    def test_control_plane_is_an_atomic_snapshot_outside_managed_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            package = source / "src" / "fulcrum"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text("VALUE = 1\n")
+            paths = resolve_paths(
+                state_override=root / "state",
+                environ={"FULCRUM_CONFIG": str(root / "config.json")},
+                user_home=root / "home",
+            )
+            config = InstallationConfig(
+                source_root=str(source),
+                brain_root=str(root / "brain"),
+                state_root=str(paths.state_root),
+                codex_bin="/bin/codex",
+                desktop_executable="/Applications/ChatGPT.app/ChatGPT",
+            )
+            first = install_control_plane(config, paths)
+            self.assertEqual(first, control_plane_source(paths))
+            self.assertEqual((first / "__init__.py").read_text(), "VALUE = 1\n")
+            (package / "__init__.py").write_text("VALUE = 2\n")
+            second = install_control_plane(config, paths)
+            self.assertEqual(second, first)
+            self.assertEqual((second / "__init__.py").read_text(), "VALUE = 2\n")
+            self.assertFalse(second.is_relative_to(source))
+
+    def test_transient_bootstrap_failure_is_observed_then_retried(self) -> None:
+        definitions = {
+            APP_SERVER_LABEL: "/tmp/app-server.plist",
+            CONTROLLER_LABEL: "/tmp/controller.plist",
+        }
+        calls: dict[str, int] = {APP_SERVER_LABEL: 0, CONTROLLER_LABEL: 0}
+
+        def completed(
+            command: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess:
+            if command[1] == "print":
+                label = command[-1].rsplit("/", 1)[-1]
+                if calls[label] >= 2:
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    command, 1, stdout="", stderr="absent"
+                )
+            label = (
+                APP_SERVER_LABEL
+                if command[-1] == definitions[APP_SERVER_LABEL]
+                else CONTROLLER_LABEL
+            )
+            calls[label] += 1
+            code = 5 if calls[label] == 1 else 0
+            return subprocess.CompletedProcess(
+                command, code, stdout="", stderr="transient" if code else ""
+            )
+
+        with (
+            patch("fulcrum.install.os.getuid", return_value=501),
+            patch("fulcrum.install.subprocess.run", side_effect=completed),
+        ):
+            start_services(definitions, updated=frozenset())
+        self.assertEqual(calls, {APP_SERVER_LABEL: 2, CONTROLLER_LABEL: 2})
 
 
 if __name__ == "__main__":

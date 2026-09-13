@@ -8,7 +8,9 @@ import json
 import os
 import signal
 import subprocess
-import sys
+import time
+import traceback
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -25,9 +27,16 @@ from fulcrum.intake import (
     reconcile_beads_creation,
     task_from_payload,
 )
+from fulcrum.install import controller_program_arguments, install_control_plane
 from fulcrum.lifecycle import accept_finish, observe_action_terminal
+from fulcrum.kernel import (
+    LeaseRequest,
+    acquire_lease,
+    invariant_violations,
+    schedule_action_retry,
+)
 from fulcrum.prompts import build_prompt, load_template
-from fulcrum.readiness import state_readiness
+from fulcrum.readiness import progress_readiness, state_readiness
 from fulcrum.reset import reset_brain
 from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
 from fulcrum.scheduling import (
@@ -46,7 +55,9 @@ class Controller:
     def __init__(self, paths: RuntimePaths, config: InstallationConfig) -> None:
         self.paths = paths
         self.config = config
-        self.store = Store(paths.database)
+        self.lock_handle: Any = None
+        self.acquire_process_lock()
+        self.store = Store(paths.database, event_log=paths.logs_root / "workflow.jsonl")
         self.runtime = CodexRuntime(
             config.app_server_endpoint, event_handler=self._queue_runtime_event
         )
@@ -56,9 +67,14 @@ class Controller:
         self.mutation_lock = asyncio.Lock()
         self.server: asyncio.AbstractServer | None = None
         self.stop_event = asyncio.Event()
+        self.advance_requested = asyncio.Event()
         self.starts_enabled = False
-        self.lock_handle: Any = None
-        self._initialize_configuration()
+        self.critical_workers = {
+            "events",
+            "fallback",
+            "advancement",
+            "source-watch",
+        }
 
     def _initialize_configuration(self) -> None:
         timestamp = utc_now()
@@ -86,6 +102,8 @@ class Controller:
         self.store.event("controller_starting", "controller is starting", now=timestamp)
 
     def acquire_process_lock(self) -> None:
+        if self.lock_handle is not None:
+            return
         self.paths.control_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         handle = self.paths.lock.open("a+")
         try:
@@ -100,6 +118,7 @@ class Controller:
 
     async def start(self) -> None:
         self.acquire_process_lock()
+        self._initialize_configuration()
         self.paths.socket.unlink(missing_ok=True)
         self.server = await asyncio.start_unix_server(
             self._handle_client, path=self.paths.socket
@@ -120,11 +139,19 @@ class Controller:
         self.store.execute(
             "INSERT INTO meta(key, value) VALUES ('controller_state', 'ready') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         )
+        workers = {
+            "events": self._event_loop,
+            "fallback": self._fallback_loop,
+            "advancement": self._advancement_loop,
+            "source-watch": self._source_watch_loop,
+        }
         tasks = [
-            asyncio.create_task(self._event_loop(), name="fulcrum-events"),
-            asyncio.create_task(self._fallback_loop(), name="fulcrum-fallback"),
-            asyncio.create_task(self._source_watch_loop(), name="fulcrum-source-watch"),
+            asyncio.create_task(
+                self._supervise_worker(name, worker), name=f"fulcrum-{name}"
+            )
+            for name, worker in workers.items()
         ]
+        self.advance_requested.set()
         try:
             await self.stop_event.wait()
         finally:
@@ -138,11 +165,48 @@ class Controller:
             await self.runtime.close()
             self.paths.socket.unlink(missing_ok=True)
             self.store.close()
+            if self.lock_handle is not None:
+                self.lock_handle.close()
+                self.lock_handle = None
+
+    async def _supervise_worker(self, name: str, worker: Any) -> None:
+        """Restart a failed critical loop and make the failure durably visible."""
+
+        while not self.stop_event.is_set():
+            self.store.heartbeat(name, state="starting")
+            try:
+                self.store.heartbeat(name)
+                await worker()
+                if not self.stop_event.is_set():
+                    raise RuntimeError(f"critical worker {name} returned unexpectedly")
+            except asyncio.CancelledError:
+                self.store.heartbeat(name, state="stopped")
+                raise
+            except BaseException as error:
+                stack = traceback.format_exc()
+                self.starts_enabled = False
+                self.store.execute(
+                    "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0') ON CONFLICT(key) DO UPDATE SET value = '0'"
+                )
+                self.store.heartbeat(
+                    name,
+                    state="degraded",
+                    error=str(error),
+                    traceback_text=stack,
+                )
+                self.store.event(
+                    "critical_worker_failed",
+                    f"{name}: {error}",
+                    entity_type="worker",
+                    entity_id=name,
+                    detail={"traceback": stack},
+                )
+                await asyncio.sleep(1)
 
     async def _connect_runtime(self) -> None:
         try:
             await self.runtime.connect()
-        except AppServerError as error:
+        except Exception as error:
             self.starts_enabled = False
             self.store.event(
                 "runtime_disconnected",
@@ -156,15 +220,52 @@ class Controller:
 
     async def _event_loop(self) -> None:
         while True:
+            self.store.heartbeat("events")
             method, params = await self.events.get()
             try:
                 async with self.mutation_lock:
                     await self._handle_runtime_event(method, params)
-                    await self.advance()
+                    self.advance_requested.set()
             except Exception as error:
-                self.store.event("event_error", f"{method}: {error}")
+                self.store.event(
+                    "event_error",
+                    f"{method}: {error}",
+                    detail={"traceback": traceback.format_exc()},
+                )
+
+    async def _advancement_loop(self) -> None:
+        while True:
+            self.store.heartbeat("advancement")
+            try:
+                await asyncio.wait_for(self.advance_requested.wait(), timeout=5)
+            except TimeoutError:
+                pass
+            self.advance_requested.clear()
+            if self.mutation_lock.locked():
+                self.advance_requested.set()
+                continue
+            async with self.mutation_lock:
+                if not self.runtime.ready:
+                    await self._connect_runtime()
+                await self.reconcile()
+                if await self._maybe_refresh_source():
+                    continue
+                await self.advance()
 
     async def _handle_runtime_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "fulcrum/runtime/disconnected":
+            self.starts_enabled = False
+            self.store.execute(
+                "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0') ON CONFLICT(key) DO UPDATE SET value = '0'"
+            )
+            self.store.event(
+                "runtime_disconnected",
+                str(params.get("error") or "app-server connection lost"),
+                entity_type="capability",
+                entity_id="app_server",
+            )
+            self.advance_requested.set()
+            return
         thread_id = params.get("threadId")
         if not isinstance(thread_id, str):
             return
@@ -267,21 +368,39 @@ class Controller:
     async def _fallback_loop(self) -> None:
         while True:
             await asyncio.sleep(30)
+            self.store.heartbeat("fallback")
             if self.mutation_lock.locked():
                 continue
             async with self.mutation_lock:
                 if not self.runtime.ready:
                     await self._connect_runtime()
                 await self.reconcile()
+                if await self._maybe_refresh_source():
+                    continue
                 await self.advance()
 
     async def reconcile(self) -> None:
+        started = time.monotonic()
+        self.store.event("reconciliation_started", "reconciliation pass started")
         if not self.runtime.ready:
+            self.store.event(
+                "reconciliation_skipped",
+                "runtime is unavailable",
+                detail={"duration_ms": 0},
+            )
             return
+        self._adopt_stranded_operations()
         await self._reconcile_uncertain_operations()
-        for task in self.store.rows(
-            "SELECT * FROM tasks WHERE state IN ('active','uncertain','provisioning')"
-        ):
+        self._retry_recovering_assignments()
+        await self._retry_pending_actions()
+        task_ids = self.store.rows("""SELECT DISTINCT task_id FROM actions
+               WHERE state IN ('starting','active','terminal','uncertain')""")
+        for item in task_ids:
+            task = self.store.row(
+                "SELECT * FROM tasks WHERE id = ?", (item["task_id"],)
+            )
+            if task is None:
+                continue
             try:
                 facts = await self._refresh_task(task)
                 action = self.store.row(
@@ -342,6 +461,110 @@ class Controller:
                 "reset",
             }:
                 await self._begin_reboot(str(record["mode"]), existing=record)
+        violations = invariant_violations(self.store)
+        if violations:
+            self.starts_enabled = False
+            self.store.execute(
+                "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0') ON CONFLICT(key) DO UPDATE SET value = '0'"
+            )
+            self.store.event(
+                "invariant_violation",
+                "workflow invariant check failed",
+                detail={"violations": violations},
+            )
+        self.store.event(
+            "reconciliation_completed",
+            "reconciliation pass completed",
+            detail={
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "violations": violations,
+            },
+        )
+
+    async def _retry_pending_actions(self) -> None:
+        now = utc_now()
+        for action in self.store.rows(
+            """SELECT * FROM actions WHERE state = 'pending'
+               AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY id""",
+            (now,),
+        ):
+            try:
+                await self._dispatch_action(action)
+            except Exception as error:
+                schedule_action_retry(self.store, int(action["id"]), str(error))
+
+    def _retry_recovering_assignments(self) -> None:
+        now = utc_now()
+        for assignment in self.store.rows(
+            """SELECT * FROM assignments WHERE stage = 'recovering'
+               AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?
+               AND operator_hold_id IS NULL ORDER BY id""",
+            (now,),
+        ):
+            prior = assignment["prior_stage"]
+            target = (
+                prior
+                if prior
+                in {
+                    "queued",
+                    "preparing",
+                    "review_pending",
+                    "correcting",
+                    "delivering",
+                }
+                else "queued"
+            )
+            self.store.transition(
+                "assignment",
+                int(assignment["id"]),
+                table="assignments",
+                field="stage",
+                to_state=target,
+                reason="retry deadline reached",
+                extra={"next_attempt_at": None, "condition": None},
+            )
+
+    def _adopt_stranded_operations(self) -> None:
+        """Turn crash residue into explicit reconciliation or safe replay state."""
+
+        timestamp = utc_now()
+        for operation in self.store.rows(
+            "SELECT * FROM external_operations WHERE state = 'sent' ORDER BY id"
+        ):
+            self.store.execute(
+                """UPDATE external_operations SET state = 'uncertain',
+                   condition = 'controller restarted after dispatch; effect requires observation',
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, operation["id"]),
+            )
+            self.store.event(
+                "operation_adopted",
+                "controller adopted an in-flight operation as uncertain",
+                entity_type="operation",
+                entity_id=operation["id"],
+            )
+        for operation in self.store.rows(
+            "SELECT * FROM external_operations WHERE state = 'intent' ORDER BY id"
+        ):
+            self.store.execute(
+                """UPDATE external_operations SET state = 'canceled',
+                   condition = 'confirmed unsent after controller restart', updated_at = ?
+                   WHERE id = ?""",
+                (timestamp, operation["id"]),
+            )
+            if operation["kind"] == "turn_start" and str(operation["target"]).isdigit():
+                self.store.execute(
+                    """UPDATE actions SET state = 'pending', next_attempt_at = ?,
+                       condition = 'retrying confirmed-unsent turn start', updated_at = ?
+                       WHERE id = ? AND state = 'starting'""",
+                    (timestamp, timestamp, int(operation["target"])),
+                )
+            self.store.event(
+                "operation_canceled_unsent",
+                "confirmed-unsent intent released for safe replay",
+                entity_type="operation",
+                entity_id=operation["id"],
+            )
 
     async def _inspect_due_actions(self) -> None:
         now = utc_now()
@@ -399,12 +622,19 @@ class Controller:
                 self._reconcile_worktree_create(operation)
             elif operation["kind"] == "tollgate_approve":
                 await self._reconcile_tollgate_approve(operation)
+            elif operation["kind"] == "tollgate_candidate_create":
+                await self._reconcile_tollgate_candidate(operation)
             elif operation["kind"] == "thread_archive":
                 await self._reconcile_thread_archive(operation)
             elif operation["kind"] == "beads_create":
                 await asyncio.to_thread(self._reconcile_beads_create, operation)
             elif operation["kind"] == "beads_close":
                 await asyncio.to_thread(self._reconcile_beads_close, operation)
+            else:
+                self._retain_uncertain_condition(
+                    operation,
+                    f"no automatic observer is available for {operation['kind']}; operator evidence is required",
+                )
 
     def _reconcile_beads_create(self, operation: dict[str, Any]) -> None:
         if reconcile_beads_creation(self.store, self.beads, operation):
@@ -481,6 +711,7 @@ class Controller:
                 "UPDATE reservations SET state = 'active' WHERE action_id = ?",
                 (action["id"],),
             )
+            self._release_operator_hold("action", int(action["id"]))
             return
         condition = (
             "multiple correlated turns matched the retained start"
@@ -553,6 +784,7 @@ class Controller:
                 "UPDATE external_operations SET state = 'complete', reconciliation_used = 1, result_json = ?, condition = NULL, updated_at = ? WHERE id = ?",
                 (json.dumps({"worktree_path": paths[0]}), utc_now(), operation["id"]),
             )
+            self._release_operator_hold("assignment", int(assignment["id"]))
             return
         condition = (
             "multiple worktrees matched the retained creation intent"
@@ -583,7 +815,8 @@ class Controller:
             assignment["candidate_id"],
         )
         candidate = _candidate_by_id(observed, assignment["candidate_id"])
-        if candidate and candidate.get("promotion_authorized"):
+        delivery_failure = _delivery_contract_failure(candidate, observed)
+        if delivery_failure is None:
             self.store.execute(
                 "UPDATE external_operations SET state = 'complete', reconciliation_used = 1, result_json = ?, condition = NULL, updated_at = ? WHERE id = ?",
                 (json.dumps(observed), utc_now(), operation["id"]),
@@ -592,6 +825,7 @@ class Controller:
                 "UPDATE assignments SET stage = 'delivering', condition = NULL, updated_at = ? WHERE id = ?",
                 (utc_now(), assignment["id"]),
             )
+            await self._close_delivered_assignment(assignment)
             return
         terminal = isinstance(candidate, dict) and candidate.get("state") not in {
             "queued",
@@ -622,6 +856,53 @@ class Controller:
         self.store.execute(
             "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
             (condition, utc_now(), assignment["id"]),
+        )
+
+    async def _reconcile_tollgate_candidate(self, operation: dict[str, Any]) -> None:
+        assignment = self.store.row(
+            """SELECT a.*, r.project_id, p.tollgate_repo_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id JOIN projects p ON p.project_id = r.project_id
+               WHERE a.id = ?""",
+            (int(operation["target"]),),
+        )
+        if assignment is None or self.tollgate is None:
+            self._retain_uncertain_condition(
+                operation, "cannot reconcile candidate creation against its assignment"
+            )
+            return
+        observed = await asyncio.to_thread(
+            self.tollgate.status, assignment["tollgate_repo_id"], None
+        )
+        inputs = json.loads(operation["input_json"])
+        candidate = _find_candidate(
+            observed,
+            inputs.get("worktree_path"),
+            exclude_id=inputs.get("predecessor_candidate_id"),
+        )
+        if candidate is None or not isinstance(candidate.get("id"), str):
+            condition = (
+                "candidate creation remains ambiguous after an exact repository "
+                "observation; operator must attach the candidate or confirm absence"
+            )
+            self._retain_uncertain_condition(operation, condition)
+            self.store.execute(
+                "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
+                (condition, utc_now(), assignment["id"]),
+            )
+            return
+        self._record_candidate(assignment, candidate)
+        timestamp = utc_now()
+        self.store.execute(
+            """UPDATE external_operations SET state = 'complete', native_id = ?,
+               result_json = ?, reconciliation_used = 1, condition = NULL,
+               completed_at = ?, updated_at = ? WHERE id = ?""",
+            (
+                candidate["id"],
+                json.dumps(observed),
+                timestamp,
+                timestamp,
+                operation["id"],
+            ),
         )
 
     async def _reconcile_thread_archive(self, operation: dict[str, Any]) -> None:
@@ -674,27 +955,109 @@ class Controller:
             entity_type="operation",
             entity_id=operation["id"],
         )
+        target_id: int | None = None
+        target_type: str | None = None
+        if operation["kind"] == "turn_start" and str(operation["target"]).isdigit():
+            target_id = int(operation["target"])
+            target_type = "action"
+        elif (
+            operation["kind"]
+            in {
+                "tollgate_worktree_create",
+                "tollgate_candidate_create",
+            }
+            and str(operation["target"]).isdigit()
+        ):
+            target_id = int(operation["target"])
+            target_type = "assignment"
+        if target_id is None or target_type is None:
+            return
+        existing = self.store.row(
+            "SELECT id FROM holds WHERE scope = ? AND target = ? AND released_at IS NULL",
+            (target_type, str(target_id)),
+        )
+        if existing is None:
+            cursor = self.store.execute(
+                """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                   VALUES (?, ?, ?, 1, 'operator resolves ambiguous external effect', ?)""",
+                (target_type, str(target_id), condition, utc_now()),
+            )
+            hold_id = int(cursor.lastrowid)
+        else:
+            hold_id = int(existing["id"])
+        if target_type == "action":
+            self.store.execute(
+                "UPDATE actions SET operator_hold_id = ?, condition = ?, updated_at = ? WHERE id = ?",
+                (hold_id, condition, utc_now(), target_id),
+            )
+        else:
+            assignment = self.store.row(
+                "SELECT stage FROM assignments WHERE id = ?", (target_id,)
+            )
+            if assignment is not None:
+                self.store.execute(
+                    """UPDATE assignments SET prior_stage = CASE WHEN stage = 'recovering' THEN prior_stage ELSE stage END,
+                       stage = 'recovering', operator_hold_id = ?, next_attempt_at = NULL,
+                       condition = ?, updated_at = ? WHERE id = ?""",
+                    (hold_id, condition, utc_now(), target_id),
+                )
 
     async def advance(self) -> None:
         if not self.starts_enabled or not self.runtime.ready:
             return
-        for assignment in ready_assignments(self.store):
+        # Admission is deliberately one-at-a-time. Each started action commits a
+        # lease before the next capacity snapshot is calculated.
+        considered: set[int] = set()
+        while True:
+            ready = [
+                item
+                for item in ready_assignments(self.store)
+                if int(item["id"]) not in considered
+            ]
+            if not ready:
+                break
+            assignment = ready[0]
+            considered.add(int(assignment["id"]))
             if assignment["stage"] == "queued":
-                await self._prepare_assignment(assignment)
+                try:
+                    await self._prepare_assignment(assignment)
+                except Exception as error:
+                    self._schedule_assignment_recovery(assignment, str(error))
             elif assignment["stage"] == "preparing":
-                await self._resume_preparing_assignment(assignment)
+                try:
+                    await self._resume_preparing_assignment(assignment)
+                except Exception as error:
+                    self._schedule_assignment_recovery(assignment, str(error))
             elif assignment["stage"] in {"review_pending", "correcting"}:
-                await self._start_assignment_action(assignment)
+                try:
+                    await self._start_assignment_action(assignment)
+                except Exception as error:
+                    self._schedule_assignment_recovery(assignment, str(error))
         for assignment in self.store.rows(
             "SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id WHERE a.stage = 'delivering'"
         ):
-            await self._deliver(assignment)
-        await self._publish_occurrences()
-        await self._manage_interviews()
-        await self._start_specialists()
-        await self._queue_proposals()
-        await self._deliver_update_batch()
-        await self._archive_ready_tasks()
+            try:
+                await self._deliver(assignment)
+            except Exception as error:
+                self._schedule_assignment_recovery(assignment, str(error))
+        for name, step in (
+            ("occurrence-publication", self._publish_occurrences),
+            ("interviews", self._manage_interviews),
+            ("specialists", self._start_specialists),
+            ("proposals", self._queue_proposals),
+            ("update-delivery", self._deliver_update_batch),
+            ("archival", self._archive_ready_tasks),
+        ):
+            try:
+                await step()
+            except Exception as error:
+                self.store.event(
+                    "advancement_step_failed",
+                    f"{name}: {error}",
+                    entity_type="advancement_step",
+                    entity_id=name,
+                    detail={"traceback": traceback.format_exc()},
+                )
         self._update_readiness()
 
     async def _prepare_assignment(self, assignment: dict[str, Any]) -> None:
@@ -702,7 +1065,7 @@ class Controller:
             "SELECT * FROM projects WHERE project_id = ?", (assignment["project_id"],)
         )
         if project is None or not project["tollgate_repo_id"] or self.tollgate is None:
-            return
+            raise StoreError("Tollgate worktree capability is unavailable")
         timestamp = utc_now()
         self.store.execute(
             "UPDATE assignments SET stage = 'preparing', updated_at = ? WHERE id = ?",
@@ -716,9 +1079,8 @@ class Controller:
                 "name": f"fulcrum-{assignment['id']}",
             },
         )
-        self.store.execute(
-            "UPDATE external_operations SET state = 'sent' WHERE id = ?", (operation,)
-        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
         try:
             tollgate = self.tollgate
             assert tollgate is not None
@@ -734,9 +1096,13 @@ class Controller:
                 "UPDATE assignments SET worktree_path = ?, updated_at = ? WHERE id = ?",
                 (path, utc_now(), assignment["id"]),
             )
-            self.store.execute(
-                "UPDATE external_operations SET state = 'complete', result_json = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(result), utc_now(), operation),
+            self._ensure_worktree_environment(Path(path))
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result=result,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
             assignment["worktree_path"] = path
             await self._ensure_pair(assignment)
@@ -747,11 +1113,18 @@ class Controller:
             )
             await self._start_assignment_action(assignment)
         except Exception as error:
-            self._operation_failed(operation, error)
-            self.store.execute(
-                "UPDATE assignments SET prior_stage = 'preparing', stage = 'recovering', condition = ?, updated_at = ? WHERE id = ?",
-                (str(error), utc_now(), assignment["id"]),
+            self._operation_failed(
+                operation,
+                error,
+                attempt=attempt,
+                started=started,
+                mutation=True,
             )
+            retained = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation,)
+            )
+            if retained is not None:
+                self._reconcile_worktree_create(retained)
 
     async def _resume_preparing_assignment(self, assignment: dict[str, Any]) -> None:
         if not assignment["worktree_path"]:
@@ -954,38 +1327,40 @@ class Controller:
         )
         if existing is not None:
             return
-        payload = {"purpose": kind, "bead_id": assignment["bead_id"]}
-        timestamp = utc_now()
-        cursor = self.store.execute(
-            "INSERT INTO actions(task_id, assignment_id, kind, payload, state, check_after, created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
-            (
-                task["id"],
-                assignment["id"],
-                kind,
-                json.dumps(payload),
-                (
+        payload = {
+            "purpose": kind,
+            "bead_id": assignment["bead_id"],
+            "predecessor_candidate_id": assignment.get("candidate_id"),
+        }
+        decision = acquire_lease(
+            self.store,
+            LeaseRequest(
+                task_id=int(task["id"]),
+                assignment_id=int(assignment["id"]),
+                kind=kind,
+                payload=payload,
+                project_ids=(str(assignment["project_id"]),),
+                pair_id=int(assignment["id"]),
+                conflict_keys=self._assignment_conflict_keys(assignment),
+                check_after=(
                     datetime.now(timezone.utc)
                     + timedelta(seconds=self.config.turn_check_after_seconds)
                 )
                 .isoformat()
                 .replace("+00:00", "Z"),
-                timestamp,
-                timestamp,
             ),
         )
-        action = self.store.row(
-            "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
-        )
-        assert action is not None
-        self.store.execute(
-            "INSERT INTO reservations(action_id, pair_id, global_slots, project_ids, state, created_at) VALUES (?, ?, 1, ?, 'reserved', ?)",
-            (
-                action["id"],
-                assignment["id"],
-                json.dumps([assignment["project_id"]]),
-                timestamp,
-            ),
-        )
+        if not decision.admitted or decision.action is None:
+            self.store.event(
+                "lease_deferred",
+                "; ".join(decision.blockers),
+                entity_type="assignment",
+                entity_id=assignment["id"],
+                detail={"blockers": decision.blockers},
+            )
+            return
+        action = decision.action
+        timestamp = utc_now()
         next_stage = {
             "implement": "implementing",
             "review": "reviewing",
@@ -996,7 +1371,98 @@ class Controller:
             (next_stage, timestamp, assignment["id"]),
         )
         assignment["stage"] = next_stage
-        await self._dispatch_action(action, task=task, assignment=assignment)
+        try:
+            await self._dispatch_action(action, task=task, assignment=assignment)
+        except Exception as error:
+            schedule_action_retry(self.store, int(action["id"]), str(error))
+
+    def _assignment_conflict_keys(self, assignment: dict[str, Any]) -> tuple[str, ...]:
+        bead = self.store.row(
+            "SELECT context_json FROM beads WHERE bead_id = ?",
+            (assignment["bead_id"],),
+        )
+        if bead is None:
+            return ()
+        try:
+            context = json.loads(bead["context_json"])
+        except (TypeError, json.JSONDecodeError):
+            return ()
+        keys: set[str] = set()
+        for item in context if isinstance(context, list) else []:
+            if isinstance(item, str) and item.startswith("conflict:"):
+                raw = item.removeprefix("conflict:").strip()
+                if raw:
+                    keys.add(raw)
+            elif isinstance(item, dict):
+                raw = item.get("conflict_key") or item.get("resource")
+                if isinstance(raw, str) and raw.strip():
+                    keys.add(raw.strip())
+        return tuple(sorted(keys))
+
+    def _ensure_worktree_environment(self, worktree: Path) -> None:
+        """Expose the retained check environment in every managed worktree."""
+
+        source_environment = Path(self.config.source_root) / ".venv"
+        target = worktree / ".venv"
+        if not source_environment.is_dir() or target.exists() or target.is_symlink():
+            return
+        target.symlink_to(source_environment, target_is_directory=True)
+        self.store.event(
+            "worktree_environment_ready",
+            "linked the managed validation environment",
+            entity_type="worktree",
+            entity_id=str(worktree),
+            detail={"environment": str(source_environment)},
+        )
+
+    def _schedule_assignment_recovery(
+        self, assignment: dict[str, Any], reason: str
+    ) -> None:
+        attempts = int(assignment.get("retry_count") or 0) + 1
+        due = (
+            (
+                datetime.now(timezone.utc)
+                + timedelta(seconds=5 * (2 ** min(attempts - 1, 6)))
+            )
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        self.store.transition(
+            "assignment",
+            int(assignment["id"]),
+            table="assignments",
+            field="stage",
+            to_state="recovering",
+            reason=reason,
+            extra={
+                "prior_stage": assignment["stage"],
+                "retry_count": attempts,
+                "next_attempt_at": due,
+                "condition": reason,
+            },
+        )
+
+    def _hold_assignment(self, assignment: dict[str, Any], reason: str) -> None:
+        timestamp = utc_now()
+        with self.store.transaction() as connection:
+            hold = connection.execute(
+                """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                   VALUES ('assignment', ?, ?, 1, 'operator supplies a specific recovery decision', ?)""",
+                (str(assignment["id"]), reason, timestamp),
+            )
+            connection.execute(
+                """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+                   operator_hold_id = ?, next_attempt_at = NULL, condition = ?, updated_at = ?
+                   WHERE id = ?""",
+                (hold.lastrowid, reason, timestamp, assignment["id"]),
+            )
+            connection.execute(
+                """INSERT INTO state_transitions(
+                       entity_type, entity_id, field_name, from_state, to_state,
+                       reason, created_at
+                   ) VALUES ('assignment', ?, 'stage', ?, 'recovering', ?, ?)""",
+                (str(assignment["id"]), assignment["stage"], reason, timestamp),
+            )
 
     async def _dispatch_action(
         self,
@@ -1054,9 +1520,8 @@ class Controller:
             "UPDATE actions SET state = 'starting', updated_at = ? WHERE id = ?",
             (utc_now(), action["id"]),
         )
-        self.store.execute(
-            "UPDATE external_operations SET state = 'sent' WHERE id = ?", (operation,)
-        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
         try:
             turn_id = await self.runtime.start_turn(
                 task["native_thread_id"],
@@ -1066,12 +1531,16 @@ class Controller:
                 effort=task["reasoning_effort"],
                 correlation=f"fulcrum-operation-{operation}",
             )
-            self.store.execute(
-                "UPDATE external_operations SET state = 'complete', native_id = ?, updated_at = ? WHERE id = ?",
-                (turn_id, utc_now(), operation),
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result={"turn_id": turn_id},
+                native_id=turn_id,
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
             self.store.execute(
-                "UPDATE actions SET state = 'active', native_turn_id = ?, updated_at = ? WHERE id = ?",
+                "UPDATE actions SET state = 'active', native_turn_id = ?, next_attempt_at = NULL, condition = NULL, updated_at = ? WHERE id = ?",
                 (turn_id, utc_now(), action["id"]),
             )
             self.store.execute(
@@ -1082,10 +1551,13 @@ class Controller:
                 "UPDATE reservations SET state = 'active' WHERE action_id = ?",
                 (action["id"],),
             )
-        except AppServerError as error:
-            self.store.execute(
-                "UPDATE external_operations SET state = 'uncertain', condition = ?, updated_at = ? WHERE id = ?",
-                (str(error), utc_now(), operation),
+        except Exception as error:
+            self._operation_failed(
+                operation,
+                error,
+                attempt=attempt,
+                started=started,
+                mutation=True,
             )
             self.store.execute(
                 "UPDATE actions SET state = 'uncertain', condition = ?, updated_at = ? WHERE id = ?",
@@ -1095,6 +1567,11 @@ class Controller:
                 "UPDATE reservations SET state = 'uncertain' WHERE action_id = ?",
                 (action["id"],),
             )
+            retained = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation,)
+            )
+            if retained is not None:
+                await self._reconcile_turn_start(retained)
 
     async def _capture_submitted_candidate(self, assignment_id: int) -> bool:
         assignment = self.store.row(
@@ -1110,47 +1587,130 @@ class Controller:
             return False
         tollgate = self.tollgate
         assert tollgate is not None
+        action = self.store.row(
+            """SELECT payload FROM actions WHERE assignment_id = ?
+               AND state IN ('starting','active','terminal','uncertain') ORDER BY id DESC LIMIT 1""",
+            (assignment_id,),
+        )
+        payload = json.loads(action["payload"] or "{}") if action else {}
+        predecessor = payload.get("predecessor_candidate_id")
+        if assignment["candidate_id"] and assignment["candidate_id"] != predecessor:
+            return True
         result = await asyncio.to_thread(
             tollgate.status, project["tollgate_repo_id"], None
         )
         candidate = _find_candidate(
             result,
             assignment["worktree_path"],
-            exclude_id=assignment["candidate_id"],
+            exclude_id=predecessor,
         )
         if candidate is None:
-            reason = (
-                "submitted outcome has no new matching immutable Tollgate candidate"
+            operation = self.store.create_operation(
+                "tollgate_candidate_create",
+                str(assignment_id),
+                {
+                    "repository_id": project["tollgate_repo_id"],
+                    "worktree_path": assignment["worktree_path"],
+                    "revision": "HEAD",
+                    "predecessor_candidate_id": predecessor,
+                },
             )
-            self.store.execute(
-                "UPDATE actions SET state = 'failed', condition = ?, updated_at = ? WHERE assignment_id = ? AND state NOT IN ('processed','canceled')",
-                (reason, utc_now(), assignment_id),
-            )
-            self.store.execute(
-                "UPDATE assignments SET prior_stage = stage, stage = 'recovering', condition = ?, updated_at = ? WHERE id = ?",
-                (reason, utc_now(), assignment_id),
-            )
-            return False
+            attempt = self.store.begin_operation_attempt(operation)
+            started = time.monotonic()
+            try:
+                submitted = await asyncio.to_thread(
+                    tollgate.submit_candidate,
+                    project["tollgate_repo_id"],
+                    "HEAD",
+                    cwd=Path(str(assignment["worktree_path"])),
+                )
+                observed = await asyncio.to_thread(
+                    tollgate.status, project["tollgate_repo_id"], None
+                )
+                candidate = _find_candidate(
+                    observed,
+                    assignment["worktree_path"],
+                    exclude_id=predecessor,
+                )
+                if candidate is None:
+                    raise TollgateUncertainError(
+                        "Tollgate accepted candidate creation but the exact candidate "
+                        "was not observable"
+                    )
+                self.store.finish_operation_attempt(
+                    operation,
+                    attempt,
+                    state="complete",
+                    result={"submission": submitted, "status": observed},
+                    native_id=str(candidate.get("id")),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+            except Exception as error:
+                self._operation_failed(
+                    operation,
+                    error,
+                    attempt=attempt,
+                    started=started,
+                    mutation=True,
+                )
+                retained = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation,)
+                )
+                if retained is not None and retained["state"] == "uncertain":
+                    await self._reconcile_tollgate_candidate(retained)
+                return False
+        self._record_candidate(assignment, candidate)
+        return True
+
+    def _record_candidate(
+        self, assignment: dict[str, Any], candidate: dict[str, Any]
+    ) -> None:
+        candidate_id = candidate.get("id")
+        if not isinstance(candidate_id, str):
+            raise StoreError("Tollgate candidate has no immutable identity")
         self.store.execute(
             "UPDATE assignments SET candidate_id = ?, source_oid = ?, tested_oid = ?, updated_at = ? WHERE id = ?",
             (
-                candidate.get("id"),
+                candidate_id,
                 _oid(candidate.get("source_oid")),
                 _oid(candidate.get("tested_oid")),
                 utc_now(),
-                assignment_id,
+                assignment["id"],
             ),
         )
-        return True
+        self.store.event(
+            "candidate_captured",
+            f"captured immutable candidate {candidate_id}",
+            entity_type="assignment",
+            entity_id=assignment["id"],
+            detail={
+                "candidate_id": candidate_id,
+                "source_oid": _oid(candidate.get("source_oid")),
+                "tested_oid": _oid(candidate.get("tested_oid")),
+            },
+        )
+        self._release_operator_hold("assignment", int(assignment["id"]))
+
+    def _release_operator_hold(self, entity_type: str, entity_id: int) -> None:
+        timestamp = utc_now()
+        self.store.execute(
+            "UPDATE holds SET released_at = ? WHERE scope = ? AND target = ? AND released_at IS NULL",
+            (timestamp, entity_type, str(entity_id)),
+        )
+        table = "actions" if entity_type == "action" else "assignments"
+        self.store.execute(
+            f"UPDATE {table} SET operator_hold_id = NULL, condition = NULL, updated_at = ? WHERE id = ?",
+            (timestamp, entity_id),
+        )
 
     async def _deliver(self, assignment: dict[str, Any]) -> None:
         if self.tollgate is None or not assignment["candidate_id"]:
-            return
+            raise StoreError("Tollgate delivery capability or candidate is unavailable")
         project = self.store.row(
             "SELECT * FROM projects WHERE project_id = ?", (assignment["project_id"],)
         )
         if project is None or not project["tollgate_repo_id"]:
-            return
+            raise StoreError("assignment has no Tollgate repository identity")
         previous = self.store.row(
             "SELECT * FROM external_operations WHERE kind = 'tollgate_approve' AND target = ? ORDER BY id DESC LIMIT 1",
             (assignment["candidate_id"],),
@@ -1182,19 +1742,15 @@ class Controller:
             return
         authority_error = self._delivery_authority_error(assignment)
         if authority_error:
-            self.store.execute(
-                "UPDATE assignments SET prior_stage = 'delivering', stage = 'recovering', condition = ?, updated_at = ? WHERE id = ?",
-                (authority_error, utc_now(), assignment["id"]),
-            )
+            self._hold_assignment(assignment, authority_error)
             return
         operation = self.store.create_operation(
             "tollgate_approve",
             assignment["candidate_id"],
             {"repository_id": project["tollgate_repo_id"]},
         )
-        self.store.execute(
-            "UPDATE external_operations SET state = 'sent' WHERE id = ?", (operation,)
-        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
         try:
             tollgate = self.tollgate
             assert tollgate is not None
@@ -1228,30 +1784,42 @@ class Controller:
                     "status": observed,
                     "diagnosis": diagnosis,
                 }
-                self.store.execute(
-                    "UPDATE external_operations SET state = 'failed', result_json = ?, condition = ?, updated_at = ? WHERE id = ?",
-                    (json.dumps(detail), failure, utc_now(), operation),
+                self.store.finish_operation_attempt(
+                    operation,
+                    attempt,
+                    state="failed",
+                    result=detail,
+                    error=failure,
+                    native_id=str(assignment["candidate_id"]),
+                    duration_ms=int((time.monotonic() - started) * 1000),
                 )
                 self.store.execute(
                     "UPDATE assignments SET prior_stage = 'delivering', stage = 'correcting', condition = ?, updated_at = ? WHERE id = ?",
                     (failure, utc_now(), assignment["id"]),
                 )
                 return
-            self.store.execute(
-                "UPDATE external_operations SET state = 'complete', result_json = ?, updated_at = ? WHERE id = ?",
-                (
-                    json.dumps({"approval": result, "status": observed}),
-                    utc_now(),
-                    operation,
-                ),
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result={"approval": result, "status": observed},
+                native_id=str(assignment["candidate_id"]),
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
             await self._close_delivered_assignment(assignment)
         except Exception as error:
-            self._operation_failed(operation, error)
-            self.store.execute(
-                "UPDATE assignments SET prior_stage = 'delivering', stage = 'recovering', condition = ?, updated_at = ? WHERE id = ?",
-                (str(error), utc_now(), assignment["id"]),
+            self._operation_failed(
+                operation,
+                error,
+                attempt=attempt,
+                started=started,
+                mutation=True,
             )
+            retained = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation,)
+            )
+            if retained is not None:
+                await self._reconcile_tollgate_approve(retained)
 
     async def _close_delivered_assignment(self, assignment: dict[str, Any]) -> None:
         previous = self.store.row(
@@ -1355,8 +1923,13 @@ class Controller:
         return None
 
     async def _archive_ready_tasks(self) -> None:
+        now = utc_now()
         for obligation in self.store.rows(
-            "SELECT * FROM obligations WHERE kind = 'archive' AND state IN ('pending','failed')"
+            """SELECT * FROM obligations WHERE kind = 'archive'
+               AND state IN ('pending','failed')
+               AND operator_hold_id IS NULL
+               AND (next_attempt_at IS NULL OR next_attempt_at <= ?)""",
+            (now,),
         ):
             task = self.store.row(
                 "SELECT * FROM tasks WHERE native_thread_id = ?",
@@ -1371,6 +1944,8 @@ class Controller:
             operation = self.store.create_operation(
                 "thread_archive", obligation["target"], {}
             )
+            attempt = self.store.begin_operation_attempt(operation)
+            started = time.monotonic()
             try:
                 await self.runtime.archive(obligation["target"])
                 self.store.execute(
@@ -1381,42 +1956,146 @@ class Controller:
                     "UPDATE tasks SET state = 'archived', archived = 1, updated_at = ? WHERE id = ?",
                     (utc_now(), task["id"]),
                 )
-                self.store.execute(
-                    "UPDATE external_operations SET state = 'complete', updated_at = ? WHERE id = ?",
-                    (utc_now(), operation),
+                self.store.finish_operation_attempt(
+                    operation,
+                    attempt,
+                    state="complete",
+                    result={"archived": True},
+                    native_id=str(obligation["target"]),
+                    duration_ms=int((time.monotonic() - started) * 1000),
                 )
             except Exception as error:
-                self._operation_failed(operation, error)
-                self.store.execute(
-                    "UPDATE obligations SET state = 'failed', detail = ?, updated_at = ? WHERE id = ?",
-                    (str(error), utc_now(), obligation["id"]),
+                self._operation_failed(
+                    operation,
+                    error,
+                    attempt=attempt,
+                    started=started,
+                    mutation=True,
                 )
+                retained = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation,)
+                )
+                if retained is not None:
+                    try:
+                        await self._reconcile_thread_archive(retained)
+                    except AppServerError:
+                        pass
+                current = self.store.row(
+                    "SELECT state FROM obligations WHERE id = ?", (obligation["id"],)
+                )
+                if current is not None and current["state"] != "complete":
+                    retries = int(obligation["retry_count"] or 0) + 1
+                    if retries >= 8:
+                        hold = self.store.execute(
+                            """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                               VALUES ('obligation', ?, ?, 1, 'operator repairs or quarantines native thread', ?)""",
+                            (str(obligation["id"]), str(error), utc_now()),
+                        )
+                        self.store.execute(
+                            """UPDATE obligations SET state = 'failed', retry_count = ?,
+                               operator_hold_id = ?, next_attempt_at = NULL, detail = ?, updated_at = ?
+                               WHERE id = ?""",
+                            (
+                                retries,
+                                hold.lastrowid,
+                                str(error),
+                                utc_now(),
+                                obligation["id"],
+                            ),
+                        )
+                    else:
+                        due = (
+                            (
+                                datetime.now(timezone.utc)
+                                + timedelta(seconds=5 * (2 ** min(retries - 1, 6)))
+                            )
+                            .isoformat()
+                            .replace("+00:00", "Z")
+                        )
+                        self.store.execute(
+                            """UPDATE obligations SET state = 'failed', retry_count = ?,
+                               next_attempt_at = ?, detail = ?, updated_at = ? WHERE id = ?""",
+                            (retries, due, str(error), utc_now(), obligation["id"]),
+                        )
 
-    def _operation_failed(self, operation: int, error: Exception) -> None:
+    def _operation_failed(
+        self,
+        operation: int,
+        error: Exception,
+        *,
+        attempt: int | None = None,
+        started: float | None = None,
+        mutation: bool = False,
+    ) -> None:
         state = (
             "uncertain"
-            if isinstance(error, (TollgateUncertainError, AppServerError))
+            if mutation or isinstance(error, (TollgateUncertainError, AppServerError))
             else "failed"
         )
-        self.store.execute(
-            "UPDATE external_operations SET state = ?, condition = ?, updated_at = ? WHERE id = ?",
-            (state, str(error), utc_now(), operation),
+        current = self.store.row(
+            "SELECT attempt_count FROM external_operations WHERE id = ?", (operation,)
+        )
+        actual_attempt = attempt or int(current["attempt_count"] if current else 0)
+        if actual_attempt <= 0:
+            actual_attempt = self.store.begin_operation_attempt(operation)
+        self.store.finish_operation_attempt(
+            operation,
+            actual_attempt,
+            state=state,
+            stdout=getattr(error, "stdout", None),
+            stderr=getattr(error, "stderr", None),
+            error=str(error),
+            duration_ms=(
+                getattr(error, "duration_ms", None)
+                if started is None
+                else int((time.monotonic() - started) * 1000)
+            ),
         )
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        correlation_id = f"request-{uuid.uuid4()}"
+        started = time.monotonic()
         try:
             line = await asyncio.wait_for(reader.readline(), 30)
             payload = json.loads(line)
             if not isinstance(payload, dict):
                 raise ValueError("request must be an object")
+            self.store.event(
+                "command_received",
+                f"received {payload.get('command', 'unknown')}",
+                entity_type="request",
+                entity_id=correlation_id,
+                detail={"correlation_id": correlation_id, "request": payload},
+            )
             async with self.mutation_lock:
                 result = await self.handle_request(payload)
-                await self.advance()
+            self.advance_requested.set()
             response = {"ok": True, "data": result}
+            self.store.event(
+                "command_succeeded",
+                f"completed {payload.get('command', 'unknown')}",
+                entity_type="request",
+                entity_id=correlation_id,
+                detail={
+                    "correlation_id": correlation_id,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                },
+            )
         except Exception as error:
             response = {"ok": False, "error": str(error)}
+            self.store.event(
+                "command_failed",
+                str(error),
+                entity_type="request",
+                entity_id=correlation_id,
+                detail={
+                    "correlation_id": correlation_id,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "traceback": traceback.format_exc(),
+                },
+            )
         writer.write(json.dumps(response, separators=(",", ":")).encode() + b"\n")
         await writer.drain()
         writer.close()
@@ -1813,12 +2492,20 @@ class Controller:
             save_installation(self.paths.config_file, self.config)
 
     def _update_readiness(self) -> None:
-        state_ready, _ = state_readiness(self.store)
-        ready = state_ready and self.runtime.ready
+        state_ready, state_reasons = state_readiness(self.store)
+        progress_ready, progress_reasons = progress_readiness(
+            self.store, critical_workers=self.critical_workers
+        )
+        ready = state_ready and progress_ready and self.runtime.ready
         self.store.execute(
             "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             ("1" if ready else "0",),
         )
+        self.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('readiness_reasons', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (json.dumps(state_reasons + progress_reasons),),
+        )
+        self.starts_enabled = ready
 
     async def _queue_proposals(self) -> None:
         archon = self.store.row(
@@ -2393,8 +3080,9 @@ class Controller:
                         "condition": "waiting for confirmed turn/helper termination",
                     }
         if mode == "reset":
-            await self._reset_state()
+            reset_exceptions = await self._reset_state(record)
         else:
+            reset_exceptions = []
             self.store.execute(
                 "DELETE FROM reservations WHERE action_id IN (SELECT id FROM actions WHERE state NOT IN ('processed','canceled'))"
             )
@@ -2422,28 +3110,105 @@ class Controller:
                 await self._ensure_pair(assignment)
         self.paths.reboot_record.unlink(missing_ok=True)
         self.starts_enabled = True
-        return {"complete": True, "mode": mode, **initialized}
+        return {
+            "complete": True,
+            "mode": mode,
+            "archive_exceptions": reset_exceptions,
+            "replacement": initialized,
+            **initialized,
+        }
 
-    async def _reset_state(self) -> None:
+    async def _reset_state(self, record: dict[str, Any]) -> list[dict[str, str]]:
         owned = self.store.rows(
-            "SELECT a.worktree_path, p.tollgate_repo_id FROM assignments a JOIN runs r ON r.id = a.run_id JOIN projects p ON p.project_id = r.project_id WHERE a.worktree_path IS NOT NULL AND a.stage NOT IN ('completed','canceled')"
+            """SELECT a.id, a.worktree_path, a.candidate_id, p.tollgate_repo_id
+               FROM assignments a JOIN runs r ON r.id = a.run_id
+               JOIN projects p ON p.project_id = r.project_id
+               WHERE a.worktree_path IS NOT NULL AND a.stage NOT IN ('completed','canceled')
+               ORDER BY a.id"""
         )
-        if owned and self.tollgate is None:
+        requires_tollgate = any(
+            item["candidate_id"] or Path(str(item["worktree_path"])).exists()
+            for item in owned
+        )
+        if requires_tollgate and self.tollgate is None:
             raise StoreError(
                 "reset incomplete; Tollgate is unavailable for owned worktree cleanup"
             )
         tollgate = self.tollgate
+        cleanup_errors: list[str] = []
+        completed_candidates = set(record.get("candidates_disposed", []))
+        completed_worktrees = set(record.get("worktrees_removed", []))
         for item in owned:
-            assert tollgate is not None
-            await asyncio.to_thread(
-                tollgate.remove_worktree,
-                item["tollgate_repo_id"],
-                item["worktree_path"],
-            )
+            identity = str(item["id"])
+            candidate_id = item["candidate_id"]
+            try:
+                if candidate_id and identity not in completed_candidates:
+                    assert tollgate is not None
+                    observed = await asyncio.to_thread(
+                        tollgate.status, item["tollgate_repo_id"], candidate_id
+                    )
+                    candidate = _candidate_by_id(observed, candidate_id)
+                    if candidate and candidate.get("state") in {
+                        "queued",
+                        "running",
+                        "validated",
+                        "promoting",
+                    }:
+                        await asyncio.to_thread(
+                            tollgate.cancel, item["tollgate_repo_id"], candidate_id
+                        )
+                    completed_candidates.add(identity)
+                    record["candidates_disposed"] = sorted(completed_candidates)
+                    self._write_reboot_record(record)
+                path = Path(str(item["worktree_path"]))
+                if identity not in completed_worktrees and path.exists():
+                    assert tollgate is not None
+                    await asyncio.to_thread(
+                        tollgate.remove_worktree,
+                        item["tollgate_repo_id"],
+                        item["worktree_path"],
+                    )
+                completed_worktrees.add(identity)
+                self.store.execute(
+                    "UPDATE assignments SET worktree_path = NULL, updated_at = ? WHERE id = ?",
+                    (utc_now(), item["id"]),
+                )
+                record["worktrees_removed"] = sorted(completed_worktrees)
+                self._write_reboot_record(record)
+            except Exception as error:
+                cleanup_errors.append(f"assignment {identity}: {error}")
+        archive_exceptions: list[dict[str, str]] = []
+        archived_threads = set(record.get("threads_archived", []))
         for task in self.store.rows(
             "SELECT * FROM tasks WHERE state NOT IN ('retired','archived')"
         ):
-            await self.runtime.archive(task["native_thread_id"])
+            thread_id = str(task["native_thread_id"])
+            if thread_id in archived_threads:
+                continue
+            try:
+                await self.runtime.archive(thread_id)
+                archived_threads.add(thread_id)
+                self.store.execute(
+                    "UPDATE tasks SET state = 'archived', archived = 1, updated_at = ? WHERE id = ?",
+                    (utc_now(), task["id"]),
+                )
+            except Exception as error:
+                archive_exceptions.append(
+                    {"thread_id": thread_id, "condition": str(error)}
+                )
+                self.store.execute(
+                    "UPDATE tasks SET state = 'uncertain', updated_at = ? WHERE id = ?",
+                    (utc_now(), task["id"]),
+                )
+            record["threads_archived"] = sorted(archived_threads)
+            record["archive_exceptions"] = archive_exceptions
+            self._write_reboot_record(record)
+        if cleanup_errors:
+            record["cleanup_errors"] = cleanup_errors
+            self._write_reboot_record(record)
+            raise StoreError(
+                "reset retained cleanup failures: " + "; ".join(cleanup_errors)
+            )
         await asyncio.to_thread(
             reset_brain,
             self.paths.brain_root,
@@ -2465,29 +3230,79 @@ class Controller:
                 import shutil
 
                 shutil.rmtree(child)
-        self.store = Store(self.paths.database)
+        self.store = Store(
+            self.paths.database, event_log=self.paths.logs_root / "workflow.jsonl"
+        )
         self._initialize_configuration()
+        if archive_exceptions:
+            self.store.event(
+                "reset_archive_exceptions",
+                "reset completed with quarantined native thread archives",
+                detail={"exceptions": archive_exceptions},
+            )
+        return archive_exceptions
+
+    def _write_reboot_record(self, record: dict[str, Any]) -> None:
+        temporary = self.paths.reboot_record.with_name(
+            f".{self.paths.reboot_record.name}.{os.getpid()}.tmp"
+        )
+        temporary.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, self.paths.reboot_record)
 
     async def _source_watch_loop(self) -> None:
         source = Path(self.config.source_root) / "src" / "fulcrum"
         async for changes in awatch(source, debounce=250):
+            self.store.heartbeat("source-watch")
             if not any(str(path).endswith(".py") for _, path in changes):
                 continue
             self.starts_enabled = False
             async with self.mutation_lock:
                 self.store.event(
                     "source_reload",
-                    "Python source changed; controller re-exec requested",
+                    "Python source changed; quiescent controller refresh requested",
                 )
-                if os.environ.get("FULCRUM_DISABLE_REEXEC") == "1":
-                    continue
-                await self.runtime.close()
-                server = self.server
-                if server is not None:
-                    server.close()
-                    await server.wait_closed()
-                self.store.close()
-                os.execv(sys.executable, [sys.executable, "-m", "fulcrum.cli", "serve"])
+                self.store.execute(
+                    "INSERT INTO meta(key, value) VALUES ('source_refresh_pending', '1') ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+            self.advance_requested.set()
+
+    async def _maybe_refresh_source(self) -> bool:
+        requested = self.store.row(
+            "SELECT value FROM meta WHERE key = 'source_refresh_pending'"
+        )
+        if requested is None or requested["value"] != "1":
+            return False
+        in_flight = self.store.row(
+            "SELECT id FROM external_operations WHERE state = 'sent' LIMIT 1"
+        )
+        if in_flight is not None:
+            self.store.event(
+                "source_refresh_deferred",
+                "waiting for an in-flight external mutation to be observed",
+                entity_type="operation",
+                entity_id=in_flight["id"],
+            )
+            return True
+        self.store.event(
+            "source_refresh_quiescent",
+            "all external mutations are observed; controller refresh may proceed",
+        )
+        if os.environ.get("FULCRUM_DISABLE_REEXEC") == "1":
+            self.store.execute(
+                "UPDATE meta SET value = '0' WHERE key = 'source_refresh_pending'"
+            )
+            self.starts_enabled = self.runtime.ready
+            return False
+        await self.runtime.close()
+        server = self.server
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        install_control_plane(self.config, self.paths)
+        arguments = controller_program_arguments(self.config, self.paths)
+        self.store.close()
+        os.execv(arguments[0], arguments)
+        return True
 
 
 def _thread_identity(request: dict[str, Any]) -> str:

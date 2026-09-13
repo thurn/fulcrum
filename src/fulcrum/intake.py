@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import replace
 from typing import Any
@@ -22,6 +23,27 @@ def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
             or existing["description"] != task.description
         ):
             raise StoreError("intake identity already exists with different content")
+        if existing["publication_state"] == "complete":
+            timestamp = utc_now()
+            store.execute(
+                """UPDATE obligations SET state = 'complete', detail = NULL, updated_at = ?
+                   WHERE kind = 'beads_publication' AND identity = ?
+                   AND state NOT IN ('complete','canceled')""",
+                (timestamp, task.intake_key),
+            )
+            store.execute(
+                """UPDATE external_operations SET state = 'canceled',
+                   condition = 'superseded by confirmed same-key publication', updated_at = ?
+                   WHERE kind = 'beads_create' AND target = ?
+                   AND state IN ('failed','uncertain')""",
+                (timestamp, task.intake_key),
+            )
+            store.event(
+                "intake_retry_reconciled",
+                f"reconciled confirmed publication for {existing['bead_id']}",
+                entity_type="bead",
+                entity_id=existing["bead_id"],
+            )
         return {
             "bead_id": existing["bead_id"],
             "publication_state": existing["publication_state"],
@@ -29,18 +51,21 @@ def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
             "reused": True,
         }
     operation = store.create_operation("beads_create", task.intake_key, task.__dict__)
-    store.execute(
-        "UPDATE external_operations SET state = 'sent', updated_at = ? WHERE id = ?",
-        (utc_now(), operation),
-    )
+    attempt = store.begin_operation_attempt(operation)
+    started = time.monotonic()
     try:
         bead_id = beads.create(task)
     except Exception as error:
         timestamp = utc_now()
         state = "uncertain" if isinstance(error, BeadsUncertainError) else "failed"
-        store.execute(
-            "UPDATE external_operations SET state = ?, condition = ?, updated_at = ? WHERE id = ?",
-            (state, str(error), timestamp, operation),
+        store.finish_operation_attempt(
+            operation,
+            attempt,
+            state=state,
+            stdout=getattr(error, "stdout", None),
+            stderr=getattr(error, "stderr", None),
+            error=str(error),
+            duration_ms=int((time.monotonic() - started) * 1000),
         )
         store.execute(
             """INSERT OR IGNORE INTO obligations(kind, identity, target, state, detail, created_at, updated_at)
@@ -48,7 +73,14 @@ def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
             (task.intake_key, task.project, state, str(error), timestamp, timestamp),
         )
         raise
-    _record_published_task(store, task, bead_id, operation)
+    _record_published_task(
+        store,
+        task,
+        bead_id,
+        operation,
+        attempt=attempt,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
     store.event(
         "intake_filed",
         f"filed {bead_id}: {task.title}",
@@ -64,7 +96,13 @@ def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
 
 
 def _record_published_task(
-    store: Store, task: IntakeTask, bead_id: str, operation: int
+    store: Store,
+    task: IntakeTask,
+    bead_id: str,
+    operation: int,
+    *,
+    attempt: int | None = None,
+    duration_ms: int | None = None,
 ) -> None:
     timestamp = utc_now()
     with store.transaction() as connection:
@@ -98,9 +136,28 @@ def _record_published_task(
                 (bead_id, dependency),
             )
         connection.execute(
-            "UPDATE external_operations SET state = 'complete', native_id = ?, result_json = ?, updated_at = ? WHERE id = ?",
-            (bead_id, json.dumps({"bead_id": bead_id}), timestamp, operation),
+            """UPDATE external_operations SET state = 'complete', native_id = ?,
+               result_json = ?, condition = NULL, completed_at = ?, updated_at = ? WHERE id = ?""",
+            (
+                bead_id,
+                json.dumps({"bead_id": bead_id}),
+                timestamp,
+                timestamp,
+                operation,
+            ),
         )
+        if attempt is not None:
+            connection.execute(
+                """UPDATE operation_attempts SET state = 'complete', result_json = ?,
+                   finished_at = ?, duration_ms = ? WHERE operation_id = ? AND attempt = ?""",
+                (
+                    json.dumps({"bead_id": bead_id}),
+                    timestamp,
+                    duration_ms,
+                    operation,
+                    attempt,
+                ),
+            )
 
 
 def reconcile_beads_creation(

@@ -6,8 +6,8 @@ import json
 import os
 import plistlib
 import shlex
+import shutil
 import subprocess
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,46 @@ def service_executable_path(*, user_home: Path | None = None) -> str:
 
 def package_root() -> Path:
     return Path(__file__).resolve().parent
+
+
+def control_plane_source(paths: RuntimePaths) -> Path:
+    return paths.control_root / "runtime" / "current" / "fulcrum"
+
+
+def install_control_plane(config: InstallationConfig, paths: RuntimePaths) -> Path:
+    """Atomically install an immutable controller snapshot outside managed source."""
+
+    source = Path(config.source_root).resolve(strict=True) / "src" / "fulcrum"
+    runtime_root = paths.control_root / "runtime"
+    runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    deployment = runtime_root / f"deployment-{os.getpid()}"
+    if deployment.exists():
+        shutil.rmtree(deployment)
+    shutil.copytree(
+        source.parent, deployment, ignore=shutil.ignore_patterns("__pycache__")
+    )
+    current = runtime_root / "current"
+    temporary = runtime_root / f".current.{os.getpid()}.tmp"
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(deployment.name, target_is_directory=True)
+    os.replace(temporary, current)
+    for child in runtime_root.glob("deployment-*"):
+        if child != deployment and child.is_dir():
+            shutil.rmtree(child)
+    return current / "fulcrum"
+
+
+def controller_program_arguments(
+    config: InstallationConfig, paths: RuntimePaths
+) -> list[str]:
+    python = Path(config.source_root) / ".venv" / "bin" / "python"
+    runtime_root = control_plane_source(paths).parent
+    launcher = (
+        "import sys; "
+        f"sys.path.insert(0, {str(runtime_root)!r}); "
+        "from fulcrum.cli import main; raise SystemExit(main())"
+    )
+    return [str(python), "-I", "-c", launcher, "serve"]
 
 
 def verify_editable_source(source_root: Path) -> None:
@@ -201,7 +241,6 @@ def service_definitions(
     user_home: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     source = Path(config.source_root)
-    python = source / ".venv" / "bin" / "python"
     logs = paths.logs_root
     executable_path = service_executable_path(user_home=user_home)
     return {
@@ -221,8 +260,8 @@ def service_definitions(
         },
         CONTROLLER_LABEL: {
             "Label": CONTROLLER_LABEL,
-            "ProgramArguments": [str(python), "-m", "fulcrum.cli", "serve"],
-            "WorkingDirectory": str(source),
+            "ProgramArguments": controller_program_arguments(config, paths),
+            "WorkingDirectory": str(paths.control_root),
             "RunAtLoad": True,
             "KeepAlive": True,
             "StandardOutPath": str(logs / "controller.log"),
@@ -330,13 +369,6 @@ def start_services(
                 )
             loaded = False
         if not loaded:
-            if (
-                not reloading
-                and label == APP_SERVER_LABEL
-                and app_server_endpoint
-                and _app_server_ready(app_server_endpoint)
-            ):
-                continue
             result = subprocess.run(
                 ["launchctl", "bootstrap", domain, definitions[label]],
                 capture_output=True,
@@ -344,9 +376,31 @@ def start_services(
                 check=False,
             )
             if result.returncode != 0:
-                raise InstallationError(
-                    f"could not start {label}: {result.stderr.strip() or result.stdout.strip()}"
+                observed = subprocess.run(
+                    ["launchctl", "print", f"{domain}/{label}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
+                if observed.returncode != 0:
+                    retried = subprocess.run(
+                        ["launchctl", "bootstrap", domain, definitions[label]],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                else:
+                    retried = observed
+                if retried.returncode != 0:
+                    raise InstallationError(
+                        "could not establish configured service "
+                        f"{label}; domain={domain}; plist={definitions[label]}; "
+                        f"first_stdout={result.stdout.strip()!r}; "
+                        f"first_stderr={result.stderr.strip()!r}; "
+                        f"observed_state={observed.stdout.strip() or observed.stderr.strip()!r}; "
+                        f"retry_stdout={retried.stdout.strip()!r}; "
+                        f"retry_stderr={retried.stderr.strip()!r}"
+                    )
         else:
             result = subprocess.run(
                 ["launchctl", "kickstart", f"{domain}/{label}"],
@@ -359,17 +413,24 @@ def start_services(
                     f"could not kickstart {label}: "
                     f"{result.stderr.strip() or result.stdout.strip()}"
                 )
-
-
-def _app_server_ready(endpoint: str) -> bool:
-    url = (
-        endpoint.replace("ws://", "http://", 1)
-        .replace("wss://", "https://", 1)
-        .rstrip("/")
-        + "/readyz"
-    )
-    try:
-        with urllib.request.urlopen(url, timeout=2) as response:
-            return response.status == 200
-    except Exception:
-        return False
+        verified = subprocess.run(
+            ["launchctl", "print", f"{domain}/{label}"],
+            capture_output=True,
+            check=False,
+        )
+        if verified.returncode != 0:
+            detail = (
+                verified.stderr.decode(errors="replace")
+                if isinstance(verified.stderr, bytes)
+                else str(verified.stderr or "")
+            ).strip()
+            raise InstallationError(
+                f"configured service {label} is not loaded after setup; "
+                f"domain={domain}; plist={definitions[label]}; state={detail!r}"
+            )
+        verified_path = _loaded_service_path(verified.stdout)
+        if expected_path is not None and verified_path != expected_path:
+            raise InstallationError(
+                f"configured service {label} loaded with an unexpected PATH; "
+                f"expected={expected_path!r}; observed={verified_path!r}"
+            )

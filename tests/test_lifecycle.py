@@ -105,6 +105,27 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(observe_action_terminal(self.store, action)["reminder"])
         result = observe_action_terminal(self.store, action)
         self.assertIn("condition", result)
+        self.assertIsNone(
+            self.store.row("SELECT * FROM reservations WHERE action_id = ?", (action,))
+        )
+        assignment = self.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(assignment["stage"], "recovering")
+        self.assertIsNotNone(assignment["next_attempt_at"])
+
+    def test_runtime_failure_releases_capacity_and_schedules_retry(self) -> None:
+        action = self._action()
+        result = observe_action_terminal(self.store, action, runtime_state="failed")
+        self.assertFalse(result["advanced"])
+        self.assertIsNone(
+            self.store.row("SELECT * FROM reservations WHERE action_id = ?", (action,))
+        )
+        assignment = self.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(assignment["stage"], "recovering")
+        self.assertIsNotNone(assignment["next_attempt_at"])
 
     def test_approval_and_covered_repair_retain_exact_mandate_linkage(self) -> None:
         self.store.execute(
