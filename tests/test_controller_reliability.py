@@ -802,7 +802,7 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retained, {"state": "archived", "archived": 1})
 
     async def test_late_unowned_start_event_does_not_reactivate_idle_task(self) -> None:
-        await self.controller._handle_runtime_event(
+        relevant = await self.controller._handle_runtime_event(
             "turn/started",
             {
                 "threadId": "executor",
@@ -815,6 +815,17 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             (self.executor["id"],),
         )
         self.assertEqual(retained["state"], "idle")
+        self.assertFalse(relevant)
+
+    async def test_high_volume_unrelated_runtime_event_does_not_request_advance(
+        self,
+    ) -> None:
+        relevant = await self.controller._handle_runtime_event(
+            "item/agentMessage/delta",
+            {"threadId": "executor", "delta": "token"},
+        )
+
+        self.assertFalse(relevant)
 
     async def test_refresh_repairs_idle_runtime_without_current_action(self) -> None:
         self.controller.store.execute(

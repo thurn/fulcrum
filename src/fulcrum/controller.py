@@ -265,8 +265,8 @@ class Controller:
             method, params = await self.events.get()
             try:
                 async with self.mutation_lock:
-                    await self._handle_runtime_event(method, params)
-                    self.advance_requested.set()
+                    if await self._handle_runtime_event(method, params):
+                        self.advance_requested.set()
             except Exception as error:
                 self.store.event(
                     "event_error",
@@ -290,7 +290,15 @@ class Controller:
                     continue
                 await self.advance()
 
-    async def _handle_runtime_event(self, method: str, params: dict[str, Any]) -> None:
+    async def _handle_runtime_event(
+        self, method: str, params: dict[str, Any]
+    ) -> bool:
+        """Apply a relevant runtime event and report whether workflow may advance.
+
+        Codex also emits high-volume item and token notifications. Those events do
+        not change Fulcrum state and must not wake reconciliation, or an active
+        agent turn creates a read/event/reconcile feedback loop.
+        """
         if method == "fulcrum/runtime/disconnected":
             self.starts_enabled = False
             self.store.execute(
@@ -303,17 +311,17 @@ class Controller:
                 entity_id="app_server",
             )
             self.advance_requested.set()
-            return
+            return True
         thread_id = params.get("threadId")
         if not isinstance(thread_id, str):
-            return
+            return False
         task = self.store.row(
             "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
         )
         if task is None:
-            return
+            return False
         if task["archived"] and method not in {"thread/archived", "thread/unarchived"}:
-            return
+            return False
         timestamp = utc_now()
         if method == "turn/started":
             turn = params.get("turn")
@@ -324,7 +332,7 @@ class Controller:
                 (task["id"],),
             )
             if action is None:
-                return
+                return False
             self.store.execute(
                 "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, updated_at = ? WHERE id = ?",
                 (timestamp, task["id"]),
@@ -364,7 +372,7 @@ class Controller:
             if action is not None:
                 if facts["last_turn_id"] != turn_id:
                     self.advance_requested.set()
-                    return
+                    return True
                 observed_status = (
                     str(facts["last_turn_status"])
                     if facts["last_turn_terminal"]
@@ -381,7 +389,7 @@ class Controller:
                         int(action["assignment_id"])
                     )
                     if not captured:
-                        return
+                        return True
                 result = observe_action_terminal(
                     self.store, int(action["id"]), runtime_state=observed_status
                 )
@@ -399,6 +407,9 @@ class Controller:
                 "UPDATE tasks SET archived = ?, state = ?, updated_at = ? WHERE id = ?",
                 (archived, state, timestamp, task["id"]),
             )
+        else:
+            return False
+        return True
 
     async def _refresh_task(self, task: dict[str, Any]) -> dict[str, Any]:
         thread = await self.runtime.read_thread(task["native_thread_id"])
