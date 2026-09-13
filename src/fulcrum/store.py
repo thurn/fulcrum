@@ -108,7 +108,9 @@ CREATE TABLE IF NOT EXISTS assignments (
   candidate_id TEXT, source_oid TEXT, tested_oid TEXT, review_failures INTEGER NOT NULL DEFAULT 0,
   repair_permissions TEXT NOT NULL DEFAULT '[]', mandate_candidate_id TEXT,
   mandate_scope TEXT, predecessor_candidate_id TEXT, repair_category TEXT,
-  repair_rationale TEXT, repair_evidence TEXT, condition TEXT,
+  repair_rationale TEXT, repair_evidence TEXT,
+  completion_kind TEXT CHECK (completion_kind IN ('non_code')),
+  completion_evidence TEXT, condition TEXT,
   retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
   next_attempt_at TEXT, operator_hold_id INTEGER REFERENCES holds(id),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -533,6 +535,8 @@ class Store:
                 "retry_count": "INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)",
                 "next_attempt_at": "TEXT",
                 "operator_hold_id": "INTEGER REFERENCES holds(id)",
+                "completion_kind": "TEXT CHECK (completion_kind IN ('non_code'))",
+                "completion_evidence": "TEXT",
             },
             "actions": {
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)",

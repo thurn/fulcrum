@@ -1699,12 +1699,14 @@ def apply_archon_decisions(
                 if (
                     not isinstance(assignment_id, int)
                     or isinstance(assignment_id, bool)
-                    or resolution not in {"retry", "rescope", "cancel"}
+                    or resolution
+                    not in {"retry", "rescope", "cancel", "complete_non_code"}
                     or not isinstance(reason, str)
                     or not reason.strip()
                 ):
                     raise StoreError(
-                        "resolve_escalation requires assignment_id, retry|rescope|cancel, and reason"
+                        "resolve_escalation requires assignment_id, "
+                        "retry|rescope|cancel|complete_non_code, and reason"
                     )
                 assignment = connection.execute(
                     "SELECT * FROM assignments WHERE id = ?", (assignment_id,)
@@ -1718,7 +1720,44 @@ def apply_archon_decisions(
                         "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
                         (timestamp, assignment["operator_hold_id"]),
                     )
-                if resolution == "cancel":
+                if resolution == "complete_non_code":
+                    evidence = decision.get("evidence")
+                    if not isinstance(evidence, str) or not evidence.strip():
+                        raise StoreError(
+                            "complete_non_code resolution requires nonempty evidence"
+                        )
+                    if any(
+                        assignment[field]
+                        for field in (
+                            "candidate_id",
+                            "source_oid",
+                            "tested_oid",
+                            "mandate_candidate_id",
+                        )
+                    ):
+                        raise StoreError(
+                            "complete_non_code resolution requires an assignment "
+                            "without a repository candidate"
+                        )
+                    unresolved_candidate = connection.execute(
+                        """SELECT id FROM external_operations
+                           WHERE kind = 'tollgate_candidate_create' AND target = ?
+                             AND state IN ('intent','sent','uncertain') LIMIT 1""",
+                        (str(assignment_id),),
+                    ).fetchone()
+                    if unresolved_candidate is not None:
+                        raise StoreError(
+                            "complete_non_code resolution cannot bypass an unresolved "
+                            "Tollgate operation"
+                        )
+                    connection.execute(
+                        """UPDATE assignments SET stage = 'delivering',
+                           completion_kind = 'non_code', completion_evidence = ?,
+                           operator_hold_id = NULL, next_attempt_at = NULL,
+                           condition = NULL, updated_at = ? WHERE id = ?""",
+                        (evidence.strip(), timestamp, assignment_id),
+                    )
+                elif resolution == "cancel":
                     connection.execute(
                         "UPDATE assignments SET stage = 'canceled', operator_hold_id = NULL, next_attempt_at = NULL, condition = ?, updated_at = ? WHERE id = ?",
                         (reason.strip(), timestamp, assignment_id),
@@ -1771,11 +1810,15 @@ def apply_archon_decisions(
                            mandate_candidate_id = CASE WHEN ? = 'rescope' THEN NULL ELSE mandate_candidate_id END,
                            mandate_scope = CASE WHEN ? = 'rescope' THEN NULL ELSE mandate_scope END,
                            repair_permissions = CASE WHEN ? = 'rescope' THEN '[]' ELSE repair_permissions END,
+                           completion_kind = CASE WHEN ? = 'rescope' THEN NULL ELSE completion_kind END,
+                           completion_evidence = CASE WHEN ? = 'rescope' THEN NULL ELSE completion_evidence END,
                            operator_hold_id = NULL, next_attempt_at = NULL, condition = ?, updated_at = ?
                            WHERE id = ?""",
                         (
                             target_stage,
                             approved_scope,
+                            resolution,
+                            resolution,
                             resolution,
                             resolution,
                             resolution,

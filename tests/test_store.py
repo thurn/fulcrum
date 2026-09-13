@@ -311,6 +311,8 @@ class StoreTest(unittest.TestCase):
             with Store(path) as migrated:
                 assignment = migrated.row("SELECT * FROM assignments WHERE id = 1")
                 self.assertIsNotNone(assignment["operator_hold_id"])
+                self.assertIsNone(assignment["completion_kind"])
+                self.assertIsNone(assignment["completion_evidence"])
                 hold = migrated.row(
                     "SELECT * FROM holds WHERE id = ?",
                     (assignment["operator_hold_id"],),

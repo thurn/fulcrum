@@ -2545,6 +2545,24 @@ class Controller:
         )
 
     async def _deliver(self, assignment: dict[str, Any]) -> None:
+        if assignment.get("completion_kind") == "non_code":
+            if not assignment.get("completion_evidence"):
+                self._hold_assignment(
+                    assignment, "non-code completion lacks retained evidence"
+                )
+                return
+            await self._refresh_delivery_pair(assignment)
+            authority_error = self._delivery_boundary_error(assignment)
+            if authority_error:
+                if (
+                    authority_error
+                    == "pair is not confirmed inactive at the delivery boundary"
+                ):
+                    return
+                self._hold_assignment(assignment, authority_error)
+                return
+            await self._close_delivered_assignment(assignment)
+            return
         if self.tollgate is None or not assignment["candidate_id"]:
             raise StoreError("Tollgate delivery capability or candidate is unavailable")
         project = self.store.row(
@@ -2721,10 +2739,19 @@ class Controller:
         if previous and previous["state"] in {"sent", "uncertain"}:
             return
         if not previous or previous["state"] != "complete":
+            non_code = assignment.get("completion_kind") == "non_code"
+            operation_input = (
+                {
+                    "completion_kind": "non_code",
+                    "evidence": assignment["completion_evidence"],
+                }
+                if non_code
+                else {"candidate_id": assignment["candidate_id"]}
+            )
             operation = self.store.create_operation(
                 "beads_close",
                 assignment["bead_id"],
-                {"candidate_id": assignment["candidate_id"]},
+                operation_input,
             )
             attempt = self.store.begin_operation_attempt(operation)
             started = time.monotonic()
@@ -2732,7 +2759,12 @@ class Controller:
                 await asyncio.to_thread(
                     self.beads.close,
                     assignment["bead_id"],
-                    f"Delivered candidate {assignment['candidate_id']}",
+                    (
+                        "Completed without a repository candidate: "
+                        f"{assignment['completion_evidence']}"
+                        if non_code
+                        else f"Delivered candidate {assignment['candidate_id']}"
+                    ),
                 )
                 self.store.finish_operation_attempt(
                     operation,
@@ -2777,6 +2809,8 @@ class Controller:
                     "run_id": assignment["run_id"],
                     "bead_id": assignment["bead_id"],
                     "candidate_id": assignment.get("candidate_id"),
+                    "completion_kind": assignment.get("completion_kind"),
+                    "completion_evidence": assignment.get("completion_evidence"),
                     "source_revision": assignment.get("source_oid"),
                     "tested_revision": assignment.get("tested_oid"),
                 },
@@ -2873,6 +2907,9 @@ class Controller:
                 return "replacement candidate lacks retained repair rationale or validation"
         if assignment["scope_snapshot"] != assignment["mandate_scope"]:
             return "assignment scope differs from the retained review mandate"
+        return self._delivery_boundary_error(assignment)
+
+    def _delivery_boundary_error(self, assignment: dict[str, Any]) -> str | None:
         active = self.store.row(
             """SELECT 1 FROM tasks WHERE id IN (?, ?)
                AND (last_turn_terminal = 0 OR helpers_terminal = 0

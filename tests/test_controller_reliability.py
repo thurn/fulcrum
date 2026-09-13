@@ -23,6 +23,7 @@ from fulcrum.controller import (
 )
 from fulcrum.kernel import LeaseRequest, acquire_lease, invariant_violations
 from fulcrum.ipc import request
+from fulcrum.intake import file_graph
 from fulcrum.lifecycle import (
     accept_finish,
     apply_archon_decisions,
@@ -148,9 +149,16 @@ class FakeTerminalTollgate:
 class FakeBeads:
     def __init__(self) -> None:
         self.closed: list[str] = []
+        self.close_reasons: list[str] = []
+        self.created: list[Any] = []
 
-    def close(self, bead_id: str, _reason: str) -> None:
+    def create(self, task: Any) -> str:
+        self.created.append(task)
+        return f"p-child-{len(self.created)}"
+
+    def close(self, bead_id: str, reason: str) -> None:
         self.closed.append(bead_id)
+        self.close_reasons.append(reason)
 
 
 class FakeArchiveRuntime:
@@ -3203,6 +3211,320 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(attempt["state"], "uncertain")
         self.assertEqual(attempt["stdout"], "promoted but not json")
+
+    async def test_completed_child_work_can_deliver_a_no_code_parent(self) -> None:
+        approved_scope = (
+            "File two independent copy-edit tasks; the child assignments own all "
+            "repository changes."
+        )
+        self.controller.store.execute(
+            "UPDATE beads SET description = ? WHERE bead_id = 'p-1'",
+            (approved_scope,),
+        )
+        self.controller.store.execute(
+            "UPDATE run_beads SET scope_snapshot = ? WHERE run_id = ?",
+            (approved_scope, self.assignment["run_id"]),
+        )
+        self.controller.store.execute(
+            "UPDATE assignments SET scope_snapshot = ? WHERE id = ?",
+            (approved_scope, self.assignment["id"]),
+        )
+        subprocess.run(["git", "init", "-q"], cwd=self.worktree, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=self.worktree,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fulcrum Test"],
+            cwd=self.worktree,
+            check=True,
+        )
+        (self.worktree / "README.md").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=self.worktree, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "test: establish baseline"],
+            cwd=self.worktree,
+            check=True,
+        )
+        parent_head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.worktree, text=True
+        ).strip()
+
+        beads = FakeBeads()
+        self.controller.beads = beads  # type: ignore[assignment]
+        children = file_graph(
+            self.controller.store,
+            beads,  # type: ignore[arg-type]
+            {
+                "project": "p",
+                "tasks": [
+                    {
+                        "intake_key": "parent:first-copy-edit",
+                        "title": "First copy edit",
+                        "description": "Apply and verify the first independent copy edit.",
+                    },
+                    {
+                        "intake_key": "parent:second-copy-edit",
+                        "title": "Second copy edit",
+                        "description": "Apply and verify the second independent copy edit.",
+                    },
+                ],
+            },
+            group_id="parent:children",
+        )["bead_ids"]
+        self.assertEqual(children, ["p-child-1", "p-child-2"])
+
+        action = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'active', ?, ?)""",
+            (self.executor["id"], self.assignment["id"], utc_now(), utc_now()),
+        )
+        self.controller.store.execute(
+            """INSERT INTO reservations(
+                   action_id, pair_id, project_ids, state, created_at
+               ) VALUES (?, ?, '["p"]', 'active', ?)""",
+            (action.lastrowid, self.assignment["run_id"], utc_now()),
+        )
+        accept_finish(
+            self.controller.store,
+            native_thread_id="executor",
+            outcome_kind="blocked",
+            options={
+                "reason": "The approved result is the two filed child tasks; no repository edit exists."
+            },
+        )
+        observed = observe_action_terminal(self.controller.store, int(action.lastrowid))
+        self.assertTrue(observed["advanced"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT stage FROM assignments WHERE id = ?",
+                (self.assignment["id"],),
+            )["stage"],
+            "recovering",
+        )
+
+        tollgate = FakeSuccessfulTollgate()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        for position, child_id in enumerate(children, start=1):
+            child_run = apply_archon_decisions(
+                self.controller.store,
+                {
+                    "decisions": [
+                        {
+                            "decision": "approve",
+                            "project": "p",
+                            "beads": [child_id],
+                        }
+                    ]
+                },
+            )["created_runs"][0]
+            child_assignment = self.controller.store.row(
+                "SELECT * FROM assignments WHERE run_id = ?", (child_run,)
+            )
+            candidate_id = f"child-candidate-{position}"
+            self.controller.store.execute(
+                """UPDATE assignments SET stage = 'delivering', candidate_id = ?,
+                   mandate_candidate_id = ?, mandate_scope = scope_snapshot
+                   WHERE id = ?""",
+                (candidate_id, candidate_id, child_assignment["id"]),
+            )
+            deliverable = self.controller.store.row(
+                """SELECT a.*, r.project_id FROM assignments a
+                   JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+                (child_assignment["id"],),
+            )
+            await self.controller._deliver(deliverable)
+
+        self.assertEqual(tollgate.approved, ["child-candidate-1", "child-candidate-2"])
+        self.assertEqual(
+            [
+                self.controller.store.row(
+                    "SELECT stage FROM assignments WHERE bead_id = ?", (child_id,)
+                )["stage"]
+                for child_id in children
+            ],
+            ["completed", "completed"],
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=self.worktree, text=True
+            ).strip(),
+            parent_head,
+        )
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=self.worktree, text=True
+            ),
+            "",
+        )
+
+        evidence = (
+            "Filed p-child-1 and p-child-2; both child assignments completed "
+            "after their candidates were promoted. The parent worktree remains clean."
+        )
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "resolve_escalation",
+                        "assignment_id": self.assignment["id"],
+                        "resolution": "complete_non_code",
+                        "reason": "The parent scope was fulfilled by filing the children.",
+                        "evidence": evidence,
+                    }
+                ]
+            },
+        )
+        parent = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(parent["stage"], "delivering")
+        self.assertEqual(parent["completion_kind"], "non_code")
+        self.assertEqual(parent["completion_evidence"], evidence)
+        self.assertIsNone(parent["candidate_id"])
+
+        await self.controller._deliver(parent)
+        await self.controller._deliver(
+            self.controller.store.row(
+                """SELECT a.*, r.project_id FROM assignments a
+                   JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+                (self.assignment["id"],),
+            )
+        )
+
+        completed_parent = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(completed_parent["stage"], "completed")
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM runs WHERE id = ?", (self.assignment["run_id"],)
+            )["state"],
+            "completed",
+        )
+        self.assertEqual(beads.closed.count("p-1"), 1)
+        self.assertEqual(tollgate.approved, ["child-candidate-1", "child-candidate-2"])
+        parent_closes = self.controller.store.rows("""SELECT * FROM external_operations
+               WHERE kind = 'beads_close' AND target = 'p-1'""")
+        self.assertEqual(len(parent_closes), 1)
+        self.assertEqual(
+            json.loads(parent_closes[0]["input_json"]),
+            {"completion_kind": "non_code", "evidence": evidence},
+        )
+        self.assertIn("without a repository candidate", beads.close_reasons[-1])
+        self.assertEqual(
+            self.controller.store.row(
+                """SELECT COUNT(*) AS count FROM external_operations
+                   WHERE kind = 'tollgate_candidate_create' AND target = ?""",
+                (str(self.assignment["id"]),),
+            )["count"],
+            0,
+        )
+        self.assertEqual(invariant_violations(self.controller.store), [])
+
+    async def test_canceling_recovery_does_not_claim_no_code_completion(self) -> None:
+        hold = self.controller.store.execute(
+            """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+               VALUES ('assignment', ?, 'work is not complete', 1,
+                       'Archon chooses a recovery', ?)""",
+            (str(self.assignment["id"]), utc_now()),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+               operator_hold_id = ?, condition = 'work is not complete' WHERE id = ?""",
+            (hold.lastrowid, self.assignment["id"]),
+        )
+        beads = FakeBeads()
+        self.controller.beads = beads  # type: ignore[assignment]
+
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "resolve_escalation",
+                        "assignment_id": self.assignment["id"],
+                        "resolution": "cancel",
+                        "reason": "The requested work should not be performed.",
+                    }
+                ]
+            },
+        )
+
+        canceled = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(canceled["stage"], "canceled")
+        self.assertIsNone(canceled["completion_kind"])
+        self.assertIsNone(canceled["completion_evidence"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM runs WHERE id = ?", (self.assignment["run_id"],)
+            )["state"],
+            "canceled",
+        )
+        self.assertEqual(beads.closed, [])
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT id FROM external_operations WHERE kind = 'beads_close' AND target = 'p-1'"
+            )
+        )
+
+    def test_no_code_completion_rejects_missing_evidence_or_a_candidate(self) -> None:
+        hold = self.controller.store.execute(
+            """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+               VALUES ('assignment', ?, 'needs a completion decision', 1,
+                       'Archon chooses a recovery', ?)""",
+            (str(self.assignment["id"]), utc_now()),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+               operator_hold_id = ? WHERE id = ?""",
+            (hold.lastrowid, self.assignment["id"]),
+        )
+        decision = {
+            "decisions": [
+                {
+                    "decision": "resolve_escalation",
+                    "assignment_id": self.assignment["id"],
+                    "resolution": "complete_non_code",
+                    "reason": "The approved result needs no source change.",
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(StoreError, "requires nonempty evidence"):
+            apply_archon_decisions(self.controller.store, decision)
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(retained["stage"], "recovering")
+        self.assertEqual(retained["operator_hold_id"], hold.lastrowid)
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT released_at FROM holds WHERE id = ?", (hold.lastrowid,)
+            )["released_at"]
+        )
+
+        decision["decisions"][0]["evidence"] = "The requested investigation is done."
+        self.controller.store.execute(
+            "UPDATE assignments SET candidate_id = 'candidate-1', source_oid = 'abc' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        with self.assertRaisesRegex(StoreError, "without a repository candidate"):
+            apply_archon_decisions(self.controller.store, decision)
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT stage FROM assignments WHERE id = ?",
+                (self.assignment["id"],),
+            )["stage"],
+            "recovering",
+        )
 
     def test_assignment_completion_is_one_transaction_at_every_mutation(self) -> None:
         archon = self.controller.store.register_task(

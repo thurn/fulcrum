@@ -287,9 +287,9 @@ def finish_examples(action_kind: str) -> dict[str, Any]:
                 {
                     "decision": "resolve_escalation",
                     "assignment_id": 1,
-                    "resolution": "rescope",
-                    "reason": "why",
-                    "scope": "required for rescope",
+                    "resolution": "complete_non_code",
+                    "reason": "why the approved scope needs no repository candidate",
+                    "evidence": "concrete proof that the approved result is complete",
                 },
                 {"decision": "set_priority", "run_id": 1, "priority": 10},
                 {
@@ -383,7 +383,9 @@ def finish_contract(action_kind: str, *, interviews_allowed: bool = True) -> str
             "include only intended decisions. Omit capacity or recurring-policy fields "
             "unless changing them. Approvals require exact stored scope. Holds accept "
             "global, project, run, or assignment scope; target is required except for "
-            "global. Escalation resolution is retry, rescope (with scope), or cancel. "
+            "global. Escalation resolution is retry, rescope (with scope), cancel, "
+            "or complete_non_code (with evidence) when the approved result is fully "
+            "satisfied without a repository candidate. "
             "An exhausted external operation must use resolve_operation with "
             "observed_success, observed_failure, or confirmed_unsent and concrete "
             "evidence; observed success also requires the kind-specific result identity. "

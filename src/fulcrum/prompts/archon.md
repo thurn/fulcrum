@@ -17,7 +17,9 @@ Resolve every update in the batch and include its update ID in handled_update_id
 Approve only stored scope. Use holds with explicit release conditions for pauses;
 release the exact hold when its condition is satisfied. Use priorities, capacity,
 model choices, and recurring policies only when a decision requires changing them.
-Adjudicate escalations with an evidence-backed retry, rescope, or cancellation.
+Adjudicate escalations with an evidence-backed retry, rescope, cancellation, or
+non-code completion. Use complete_non_code only when the approved result is fully
+satisfied without a repository candidate, and cite concrete completion evidence.
 If you cannot decide, defer with a concrete reactivation condition. Ask the human
 only for material choices that existing authority cannot resolve.
 
