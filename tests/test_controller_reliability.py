@@ -74,6 +74,29 @@ class FakeApprovalTollgate:
         }
 
 
+class FakeSuccessfulTollgate:
+    def __init__(self) -> None:
+        self.approved: list[str] = []
+
+    def approve(self, _repository: str, candidate: str) -> dict[str, Any]:
+        self.approved.append(candidate)
+        return {"id": candidate, "state": "promoted"}
+
+    def status(self, _repository: str, candidate: str | None = None) -> dict[str, Any]:
+        return {
+            "configuration": {"remote_enabled": True},
+            "candidate": {
+                "item": {
+                    "id": candidate,
+                    "state": "promoted",
+                    "remote_state": "synchronized",
+                    "cleanup_state": "completed",
+                    "certificate_id": "certificate-1",
+                }
+            },
+        }
+
+
 class FakeTerminalTollgate:
     def status(self, _repository: str, candidate: str | None = None) -> dict[str, Any]:
         return {"item": {"id": candidate, "state": "merge-conflict"}}
@@ -1721,6 +1744,155 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(retained, {"stage": "delivering", "operator_hold_id": None})
         self.controller.tollgate.approve.assert_not_called()
+
+    async def test_approved_action_with_stale_runtime_status_delivers_after_native_idle(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'reviewing', candidate_id = 'candidate-1',
+               source_oid = 'source-1', tested_oid = 'tested-1' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, outcome_kind,
+                   outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'processed', 'ready_for_review',
+                         ?, ?, ?)""",
+            (
+                self.executor["id"],
+                self.assignment["id"],
+                json.dumps({"evidence": "/tmp/implementation-evidence.md"}),
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+            (
+                self.assignment["id"],
+                implementation.lastrowid,
+                json.dumps({"evidence": "/tmp/implementation-evidence.md"}),
+                now,
+            ),
+        )
+        review = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, native_turn_id,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'review', '{}', 'active', 'review-turn', 'approved',
+                         ?, ?, ?)""",
+            (
+                self.overseer["id"],
+                self.assignment["id"],
+                json.dumps(
+                    {
+                        "assessment": "candidate matches the approved scope",
+                        "allow_repair": ["bounded_in_scope_ci_fix"],
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """UPDATE tasks SET state = 'active', runtime_status = 'active',
+               last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?""",
+            (self.overseer["id"],),
+        )
+        self.controller.store.execute(
+            """UPDATE tasks SET state = 'idle', runtime_status = 'idle',
+               last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?""",
+            (self.executor["id"],),
+        )
+
+        result = observe_action_terminal(self.controller.store, int(review.lastrowid))
+        self.assertTrue(result["advanced"])
+        approved = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(approved["stage"], "delivering")
+        self.assertEqual(approved["mandate_candidate_id"], "candidate-1")
+        self.assertEqual(approved["mandate_scope"], approved["scope_snapshot"])
+        stale_task = self.controller.store.row(
+            "SELECT state, runtime_status FROM tasks WHERE id = ?",
+            (self.overseer["id"],),
+        )
+        self.assertEqual(stale_task, {"state": "idle", "runtime_status": "active"})
+
+        native_status = {"executor": "idle", "overseer": "active"}
+
+        async def read_thread(thread_id: str) -> dict[str, Any]:
+            task = self.controller.store.row(
+                "SELECT title FROM tasks WHERE native_thread_id = ?", (thread_id,)
+            )
+            assert task is not None
+            return {
+                "id": thread_id,
+                "name": task["title"],
+                "status": {"type": native_status[thread_id]},
+                "turns": [
+                    {
+                        "id": "review-turn" if thread_id == "overseer" else "impl-turn",
+                        "status": "completed",
+                        "items": [],
+                    }
+                ],
+            }
+
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.read_thread.side_effect = read_thread
+        self.controller.runtime = runtime
+        tollgate = FakeSuccessfulTollgate()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        beads = FakeBeads()
+        self.controller.beads = beads  # type: ignore[assignment]
+
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        await self.controller._deliver(assignment)
+
+        deferred = self.controller.store.row(
+            "SELECT stage, operator_hold_id, mandate_candidate_id, mandate_scope FROM assignments WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(deferred["stage"], "delivering")
+        self.assertIsNone(deferred["operator_hold_id"])
+        self.assertEqual(deferred["mandate_candidate_id"], "candidate-1")
+        self.assertEqual(deferred["mandate_scope"], approved["scope_snapshot"])
+        self.assertEqual(tollgate.approved, [])
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT id FROM holds WHERE scope = 'assignment' AND target = ?",
+                (str(self.assignment["id"]),),
+            )
+        )
+
+        native_status["overseer"] = "idle"
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        await self.controller._deliver(assignment)
+
+        completed = self.controller.store.row(
+            "SELECT stage, operator_hold_id, mandate_candidate_id, mandate_scope FROM assignments WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(completed["stage"], "completed")
+        self.assertIsNone(completed["operator_hold_id"])
+        self.assertEqual(completed["mandate_candidate_id"], "candidate-1")
+        self.assertEqual(completed["mandate_scope"], approved["scope_snapshot"])
+        self.assertEqual(tollgate.approved, ["candidate-1"])
+        self.assertEqual(beads.closed, ["p-1"])
 
     async def test_reconcile_releases_stale_delivery_boundary_hold(self) -> None:
         hold = self.controller.store.execute(
