@@ -296,7 +296,7 @@ def _apply_outcome(
         if assignment_id is None:
             raise StoreError("implementation action has no assignment")
         candidate = store.row(
-            "SELECT candidate_id, source_oid FROM assignments WHERE id = ?",
+            "SELECT candidate_id, source_oid, tested_oid FROM assignments WHERE id = ?",
             (assignment_id,),
         )
         if (
@@ -307,6 +307,9 @@ def _apply_outcome(
             raise StoreError(
                 "implementation cannot enter review without an immutable candidate"
             )
+        validation_error = _exact_source_validation_error(candidate, payload)
+        if validation_error is not None:
+            raise StoreError(validation_error)
         store.execute(
             "UPDATE assignments SET stage = 'review_pending', condition = NULL, updated_at = ? WHERE id = ?",
             (timestamp, assignment_id),
@@ -714,6 +717,53 @@ def _retain_evidence_content(
     except (OSError, UnicodeError) as error:
         retained["evidence_read_error"] = str(error)
     return retained
+
+
+def _exact_source_validation_error(
+    candidate: dict[str, Any], payload: dict[str, Any]
+) -> str | None:
+    """Require controller-produced exact-source evidence for mismatched revisions."""
+
+    source_oid = candidate.get("source_oid")
+    tested_oid = candidate.get("tested_oid")
+    if not source_oid or not tested_oid or source_oid == tested_oid:
+        return None
+    artifact = payload.get("exact_source_validation")
+    if not isinstance(artifact, dict):
+        return (
+            "source and tested revisions differ; controller-produced tree comparison "
+            "or exact-source validation evidence is required before review"
+        )
+    if artifact.get("trees_equal") is True:
+        if (
+            artifact.get("source_revision") == source_oid
+            and artifact.get("tested_revision") == tested_oid
+        ):
+            return None
+        return "tree-equivalence evidence does not match the retained revisions"
+    valid = (
+        artifact.get("required") is True
+        and artifact.get("source_revision") == source_oid
+        and artifact.get("tested_revision") == tested_oid
+        and isinstance(artifact.get("command"), list)
+        and bool(artifact["command"])
+        and artifact.get("exit_status") == 0
+        and artifact.get("source_before") == source_oid
+        and artifact.get("source_after") == source_oid
+        and artifact.get("source_unchanged") is True
+        and artifact.get("worktree_clean_before") is True
+        and artifact.get("worktree_clean_after") is True
+        and artifact.get("passed") is True
+        and isinstance(artifact.get("artifact_path"), str)
+    )
+    if valid:
+        return None
+    detail = artifact.get("error") or f"exit status {artifact.get('exit_status')!r}"
+    return (
+        "source and tested trees differ; exact-source validation must record a "
+        "nonempty command, exit status 0, and an unchanged clean source before/after "
+        f"the check ({detail})"
+    )
 
 
 def _archive_obligation(store: Store, task_id: int, timestamp: str) -> None:

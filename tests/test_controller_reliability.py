@@ -19,14 +19,26 @@ from fulcrum.controller import (
     _find_candidate,
 )
 from fulcrum.kernel import LeaseRequest, acquire_lease
-from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
+from fulcrum.lifecycle import (
+    accept_finish,
+    apply_archon_decisions,
+    observe_action_terminal,
+)
 from fulcrum.store import StoreError
 from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 
 class FakeCandidateTollgate:
-    def __init__(self, worktree: str) -> None:
+    def __init__(
+        self,
+        worktree: str,
+        *,
+        source_oid: str = "source-1",
+        tested_oid: str = "tested-1",
+    ) -> None:
         self.worktree = worktree
+        self.source_oid = source_oid
+        self.tested_oid = tested_oid
         self.submissions: list[Path | None] = []
 
     def status(self, _repository: str, _candidate: str | None = None) -> dict[str, Any]:
@@ -38,9 +50,9 @@ class FakeCandidateTollgate:
                     "item": {
                         "id": "candidate-1",
                         "metadata": {"worktree_path": self.worktree},
-                        "source_oid": "source-1",
+                        "source_oid": self.source_oid,
                     },
-                    "generation": {"tested_oid": "tested-1"},
+                    "generation": {"tested_oid": self.tested_oid},
                 }
             ]
         }
@@ -1562,6 +1574,135 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM external_operations WHERE kind = 'tollgate_candidate_create'"
         )
         self.assertEqual(operation["state"], "complete")
+
+    async def test_mismatched_tested_tree_reaches_review_with_exact_source_evidence(
+        self,
+    ) -> None:
+        def git(*arguments: str) -> str:
+            result = subprocess.run(
+                ["git", *arguments],
+                cwd=self.worktree,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return result.stdout.strip()
+
+        git("init", "--quiet")
+        git("config", "user.name", "Fulcrum Test")
+        git("config", "user.email", "fulcrum@example.invalid")
+        source_file = self.worktree / "controller.py"
+        source_file.write_text("value = 'tested'\n", encoding="utf-8")
+        git("add", "controller.py")
+        git("commit", "--quiet", "-m", "tested revision")
+        tested_oid = git("rev-parse", "HEAD")
+        source_file.write_text("value = 'source'\n", encoding="utf-8")
+        git("add", "controller.py")
+        git("commit", "--quiet", "-m", "source revision")
+        source_oid = git("rev-parse", "HEAD")
+        self.assertNotEqual(
+            git("rev-parse", f"{source_oid}^{{tree}}"),
+            git("rev-parse", f"{tested_oid}^{{tree}}"),
+        )
+
+        action = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, native_turn_id,
+                   created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'active', 'implement-turn',
+                         'now', 'now')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        evidence_path = self.paths.state_root.parent / "implementation.md"
+        evidence_path.write_text(
+            "Implementation is committed; controller validation is required.\n",
+            encoding="utf-8",
+        )
+        accept_finish(
+            self.controller.store,
+            native_thread_id="executor",
+            outcome_kind="ready_for_review",
+            options={"evidence": str(evidence_path)},
+        )
+        self.controller.tollgate = FakeCandidateTollgate(
+            str(self.worktree),
+            source_oid=source_oid,
+            tested_oid=tested_oid,
+        )  # type: ignore[assignment]
+
+        captured = await self.controller._capture_submitted_candidate(
+            int(self.assignment["id"])
+        )
+
+        self.assertTrue(captured)
+        retained_action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action.lastrowid,)
+        )
+        exact_validation = json.loads(retained_action["outcome_payload"])[
+            "exact_source_validation"
+        ]
+        self.assertEqual(exact_validation["command"], ["true"])
+        self.assertEqual(exact_validation["exit_status"], 0)
+        self.assertEqual(exact_validation["source_before"], source_oid)
+        self.assertEqual(exact_validation["source_after"], source_oid)
+        self.assertTrue(exact_validation["source_unchanged"])
+        self.assertTrue(exact_validation["passed"])
+        artifact_path = Path(exact_validation["artifact_path"])
+        self.assertTrue(artifact_path.is_file())
+        self.assertEqual(
+            json.loads(artifact_path.read_text(encoding="utf-8"))["source_revision"],
+            source_oid,
+        )
+
+        self.controller.store.execute(
+            """UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1
+               WHERE id = ?""",
+            (self.executor["id"],),
+        )
+        processed = observe_action_terminal(
+            self.controller.store, int(action.lastrowid)
+        )
+        self.assertTrue(processed["advanced"])
+        self.assertEqual(processed["stage"], "review_pending")
+        handoff = self.controller.store.row(
+            "SELECT * FROM handoffs WHERE source_action_id = ?", (action.lastrowid,)
+        )
+        retained_evidence = json.loads(handoff["content_json"])
+        self.assertEqual(retained_evidence["exact_source_validation"], exact_validation)
+
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'unmaterialized' WHERE id = ?",
+            (self.overseer["id"],),
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.return_value = "review-turn"
+        self.controller.runtime = runtime
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+
+        await self.controller._start_assignment_action(assignment)
+
+        review = self.controller.store.row(
+            "SELECT * FROM actions WHERE assignment_id = ? AND kind = 'review'",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(review["state"], "active")
+        self.assertEqual(review["native_turn_id"], "review-turn")
+        review_prompt = runtime.start_turn.await_args.args[1]
+        self.assertIn(str(artifact_path), review_prompt)
+        self.assertIn(source_oid, review_prompt)
+        self.assertIn(tested_oid, review_prompt)
+        self.assertEqual(
+            self.controller.store.rows(
+                "SELECT id FROM actions WHERE assignment_id = ? AND kind = 'correct'",
+                (self.assignment["id"],),
+            ),
+            [],
+        )
 
     def test_candidate_lookup_ignores_stale_reused_worktree_history(self) -> None:
         status = {

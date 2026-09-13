@@ -56,6 +56,7 @@ from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 INHERITED_LOCK_FD_ENV = "FULCRUM_INHERITED_LOCK_FD"
 FALLBACK_RECONCILIATION_SECONDS = 30
+MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
 
 
 class Controller:
@@ -1954,13 +1955,16 @@ class Controller:
         tollgate = self.tollgate
         assert tollgate is not None
         action = self.store.row(
-            """SELECT payload FROM actions WHERE assignment_id = ?
+            """SELECT * FROM actions WHERE assignment_id = ?
                AND state IN ('starting','active','terminal','uncertain') ORDER BY id DESC LIMIT 1""",
             (assignment_id,),
         )
+        if action is None:
+            return False
         payload = json.loads(action["payload"] or "{}") if action else {}
         predecessor = payload.get("predecessor_candidate_id")
         if assignment["candidate_id"] and assignment["candidate_id"] != predecessor:
+            await self._retain_exact_source_validation(assignment_id, action)
             return True
         source_oid = await asyncio.to_thread(
             _worktree_head, assignment["worktree_path"]
@@ -2058,7 +2062,162 @@ class Controller:
                 )
                 return True
         self._record_candidate(assignment, candidate)
+        await self._retain_exact_source_validation(assignment_id, action)
         return True
+
+    async def _retain_exact_source_validation(
+        self, assignment_id: int, action: dict[str, Any]
+    ) -> None:
+        """Attach controller-produced evidence when Tollgate tested another tree."""
+
+        assignment = self.store.row(
+            """SELECT a.source_oid, a.tested_oid, a.worktree_path,
+                      p.validation_command
+               FROM assignments a JOIN runs r ON r.id = a.run_id
+               JOIN projects p ON p.project_id = r.project_id
+               WHERE a.id = ?""",
+            (assignment_id,),
+        )
+        if assignment is None:
+            raise StoreError("candidate assignment disappeared before validation")
+        source_oid = assignment["source_oid"]
+        tested_oid = assignment["tested_oid"]
+        if not source_oid or not tested_oid or source_oid == tested_oid:
+            return
+        worktree = str(assignment["worktree_path"] or "")
+        source_tree, tested_tree = await asyncio.gather(
+            asyncio.to_thread(_git_tree_oid, worktree, str(source_oid)),
+            asyncio.to_thread(_git_tree_oid, worktree, str(tested_oid)),
+        )
+        if source_tree is not None and source_tree == tested_tree:
+            artifact: dict[str, Any] = {
+                "required": False,
+                "trees_equal": True,
+                "source_revision": source_oid,
+                "tested_revision": tested_oid,
+                "reason": "source and tested revisions resolve to the same tree",
+            }
+        else:
+            try:
+                configured = json.loads(assignment["validation_command"] or "[]")
+            except (TypeError, json.JSONDecodeError):
+                configured = []
+            command = (
+                configured
+                if isinstance(configured, list)
+                and configured
+                and all(isinstance(item, str) and item for item in configured)
+                else []
+            )
+            artifact = await asyncio.to_thread(
+                self._run_exact_source_validation,
+                action_id=int(action["id"]),
+                worktree=worktree,
+                source_oid=str(source_oid),
+                tested_oid=str(tested_oid),
+                command=command,
+                trees_equal=False if source_tree and tested_tree else None,
+            )
+        encoded = json.dumps(artifact, sort_keys=True)
+        if len(encoded.encode("utf-8")) > MAX_EXACT_SOURCE_ARTIFACT_BYTES:
+            artifact = {
+                key: value
+                for key, value in artifact.items()
+                if key not in {"stdout", "stderr"}
+            }
+            artifact.update(
+                {
+                    "passed": False,
+                    "error": "exact-source validation output exceeds the 1 MB retained handoff limit",
+                }
+            )
+        outcome = json.loads(action["outcome_payload"] or "{}")
+        outcome["exact_source_validation"] = artifact
+        self.store.execute(
+            "UPDATE actions SET outcome_payload = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(outcome, sort_keys=True), utc_now(), action["id"]),
+        )
+
+    def _run_exact_source_validation(
+        self,
+        *,
+        action_id: int,
+        worktree: str,
+        source_oid: str,
+        tested_oid: str,
+        command: list[str],
+        trees_equal: bool | None,
+    ) -> dict[str, Any]:
+        before = _worktree_head(worktree)
+        clean_before = _worktree_clean(worktree)
+        exit_status: int | None = None
+        stdout = ""
+        stderr = ""
+        error: str | None = None
+        if not command:
+            error = "project has no executable validation command"
+        elif before != source_oid:
+            error = "worktree HEAD does not match the retained candidate source"
+        elif not clean_before:
+            error = "worktree is not clean at the retained candidate source"
+        else:
+            try:
+                result = subprocess.run(
+                    command,
+                    cwd=worktree,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1, self.config.turn_check_after_seconds),
+                    check=False,
+                )
+                exit_status = result.returncode
+                stdout = result.stdout
+                stderr = result.stderr
+            except subprocess.TimeoutExpired as failure:
+                stdout = str(failure.stdout or "")
+                stderr = str(failure.stderr or "")
+                error = "exact-source validation timed out"
+            except OSError as failure:
+                error = str(failure)
+        after = _worktree_head(worktree)
+        clean_after = _worktree_clean(worktree)
+        unchanged = before == source_oid == after and clean_before and clean_after
+        passed = exit_status == 0 and unchanged and error is None
+        artifact: dict[str, Any] = {
+            "required": True,
+            "trees_equal": trees_equal,
+            "reason": "source and tested revisions have different or unresolvable trees",
+            "source_revision": source_oid,
+            "tested_revision": tested_oid,
+            "command": command,
+            "exit_status": exit_status,
+            "source_before": before,
+            "source_after": after,
+            "source_unchanged": unchanged,
+            "worktree_clean_before": clean_before,
+            "worktree_clean_after": clean_after,
+            "stdout": stdout,
+            "stderr": stderr,
+            "passed": passed,
+            "error": error,
+            "captured_at": utc_now(),
+        }
+        evidence_root = self.paths.state_root / "evidence"
+        evidence_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        destination = evidence_root / f"exact-source-action-{action_id}.json"
+        artifact["artifact_path"] = str(destination)
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(artifact, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return artifact
 
     def _record_candidate(
         self, assignment: dict[str, Any], candidate: dict[str, Any]
@@ -4586,6 +4745,46 @@ def _worktree_head(worktree_path: str | None) -> str | None:
     try:
         result = subprocess.run(
             ["git", "-C", worktree_path, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
+
+
+def _worktree_clean(worktree_path: str | None) -> bool:
+    if not worktree_path:
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                worktree_path,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and not result.stdout.strip()
+
+
+def _git_tree_oid(worktree_path: str | None, revision: str) -> str | None:
+    if not worktree_path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", worktree_path, "rev-parse", f"{revision}^{{tree}}"],
             capture_output=True,
             text=True,
             timeout=10,

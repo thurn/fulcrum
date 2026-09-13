@@ -552,6 +552,39 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(repaired["predecessor_candidate_id"], "candidate-1")
         self.assertEqual(repaired["repair_category"], "bounded_in_scope_ci_fix")
 
+    def test_mismatched_revisions_require_controller_exact_source_evidence(
+        self,
+    ) -> None:
+        action = self._action()
+        self.store.execute(
+            """UPDATE assignments SET candidate_id = 'candidate-source',
+               source_oid = 'source-revision', tested_oid = 'tested-revision'
+               WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        accept_finish(
+            self.store,
+            native_thread_id="executor",
+            outcome_kind="ready_for_review",
+            options={"evidence": "/tmp/evidence"},
+        )
+
+        result = observe_action_terminal(self.store, action)
+
+        self.assertFalse(result["advanced"])
+        self.assertIn(
+            "exact-source validation evidence is required", result["condition"]
+        )
+        retained = self.store.row(
+            "SELECT stage FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(retained["stage"], "recovering")
+        self.assertIsNone(
+            self.store.row(
+                "SELECT id FROM handoffs WHERE source_action_id = ?", (action,)
+            )
+        )
+
     def test_sage_evidence_request_creates_one_interview_round(self) -> None:
         subject = self.store.register_task(
             native_thread_id="subject",
