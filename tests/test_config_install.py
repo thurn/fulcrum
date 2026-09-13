@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import subprocess
 import tempfile
@@ -33,6 +34,89 @@ from fulcrum.setup import _wait_for_archon_readiness
 
 
 class ConfigInstallTest(unittest.TestCase):
+    def _launcher_environment(self, **overrides: str) -> dict[str, str]:
+        environment = dict(os.environ)
+        environment.pop("FULCRUM_CONFIG", None)
+        environment.pop("FULCRUM_CONTROL_ROOT", None)
+        environment.update(overrides)
+        return environment
+
+    def test_public_desktop_launcher_forwards_arguments_to_control_override(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            control = root / "custom control"
+            control.mkdir()
+            installed = control / "open-codex-with-fulcrum"
+            installed.write_text('#!/bin/sh\nprintf "<%s>\\n" "$@"\n')
+            installed.chmod(0o700)
+            script = Path(__file__).resolve().parents[1] / "scripts/launch_codex.sh"
+
+            result = subprocess.run(
+                [str(script), "one", "two words", "", "*"],
+                env=self._launcher_environment(
+                    FULCRUM_CONTROL_ROOT=str(control),
+                    FULCRUM_CONFIG=str(root / "ignored" / "config.json"),
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "<one>\n<two words>\n<>\n<*>\n")
+            self.assertEqual(result.stderr, "")
+
+    def test_public_desktop_launcher_uses_config_adjacent_control_directory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "custom environment" / "config.json"
+            control = config.parent / "control"
+            control.mkdir(parents=True)
+            installed = control / "open-codex-with-fulcrum"
+            installed.write_text("#!/bin/sh\nprintf 'delegated\\n'\n")
+            installed.chmod(0o700)
+            script = Path(__file__).resolve().parents[1] / "scripts/launch_codex.sh"
+
+            result = subprocess.run(
+                [str(script)],
+                env=self._launcher_environment(
+                    HOME=str(root),
+                    FULCRUM_CONFIG="~/custom environment/config.json",
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "delegated\n")
+            self.assertEqual(result.stderr, "")
+
+    def test_public_desktop_launcher_reports_missing_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = Path(__file__).resolve().parents[1] / "scripts/launch_codex.sh"
+
+            result = subprocess.run(
+                [str(script)],
+                env=self._launcher_environment(HOME=str(root)),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(
+                result.stderr,
+                "fulcrum launch: installed launcher not found; "
+                "run ./scripts/setup\n",
+            )
+
     def test_setup_polls_initialization_until_archon_is_ready(self) -> None:
         paths = RuntimePaths(
             brain_root=Path("/brain"),

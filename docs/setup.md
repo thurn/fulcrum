@@ -28,10 +28,19 @@ user-installed dependencies such as `bd` and `tg` after a clean login. When a
 rerun changes an installed definition, setup unloads and bootstraps that service
 so the running job receives the repaired environment; unchanged jobs are reused.
 
-The desktop launcher in the control directory sets
-`CODEX_APP_SERVER_WS_URL` before starting the configured desktop executable.
-Existing private-runtime work must be drained and the desktop relaunched through
-this wrapper; setup never terminates or silently migrates it.
+After setup completes, launch Codex desktop from the retained checkout with:
+
+```sh
+./scripts/launch_codex.sh
+```
+
+This is the user-facing desktop command. It honors `FULCRUM_CONFIG` and
+`FULCRUM_CONTROL_ROOT`, then delegates to the configuration-aware launcher that
+setup installed in the selected control directory. The installed launcher sets
+`CODEX_APP_SERVER_WS_URL` before starting the configured desktop executable; its
+path and contents are internal implementation details. Existing private-runtime
+work must be drained and the desktop relaunched with `./scripts/launch_codex.sh`;
+setup never terminates or silently migrates it.
 
 Setup checks `/readyz`, the protocol handshake, configured models, native Codex
 project and Tollgate identities, Git/Beads connectivity, linked assets, SQLite,

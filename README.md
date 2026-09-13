@@ -126,16 +126,20 @@ Setup installs two separate per-user `launchd` services:
 
 Codex desktop is another client of the **same** app-server. Do not start the
 app-server or controller manually. To join the shared runtime, launch the desktop
-through the wrapper path printed by setup (by default):
+from the retained checkout after setup completes:
 
 ```sh
-"$HOME/Library/Application Support/Fulcrum/control/open-codex-with-fulcrum"
+./scripts/launch_codex.sh
 ```
 
 A normal Dock launch or an environment variable added to `.zshrc` does not
 reliably connect the desktop to the shared listener. If desktop is already using
 its private runtime, finish or drain those conversations and relaunch it through
-the wrapper; setup will not silently terminate or migrate them.
+this command; setup will not silently terminate or migrate them. The script honors
+the supported `FULCRUM_CONFIG` and `FULCRUM_CONTROL_ROOT` overrides and delegates
+to the configuration-aware launcher installed in the control directory. That
+installed launcher is an internal implementation detail and should not be invoked
+directly.
 
 For unattended setup, supply the same configuration as JSON:
 
