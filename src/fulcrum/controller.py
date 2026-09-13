@@ -29,6 +29,7 @@ from fulcrum.intake import (
     task_from_payload,
 )
 from fulcrum.install import controller_program_arguments, install_control_plane
+from fulcrum.ipc import MAX_MESSAGE_BYTES
 from fulcrum.lifecycle import accept_finish, observe_action_terminal
 from fulcrum.kernel import (
     LeaseRequest,
@@ -162,7 +163,7 @@ class Controller:
         self._initialize_configuration()
         self.paths.socket.unlink(missing_ok=True)
         self.server = await asyncio.start_unix_server(
-            self._handle_client, path=self.paths.socket
+            self._handle_client, path=self.paths.socket, limit=MAX_MESSAGE_BYTES
         )
         os.chmod(self.paths.socket, 0o600)
         try:

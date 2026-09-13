@@ -32,4 +32,5 @@ credentials/
 
 # Tollgate-owned worktrees and local editor state
 .worktrees/
+.codex/
 .DS_Store

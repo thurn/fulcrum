@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+
 
 class ControllerUnavailable(RuntimeError):
     pass
@@ -17,7 +19,7 @@ async def request(
 ) -> dict[str, Any]:
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_unix_connection(socket_path), timeout
+            asyncio.open_unix_connection(socket_path, limit=MAX_MESSAGE_BYTES), timeout
         )
     except (OSError, TimeoutError) as error:
         raise ControllerUnavailable(
