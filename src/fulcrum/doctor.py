@@ -19,6 +19,7 @@ from fulcrum.install import (
     HUMAN_SKILLS,
     REMOVED_SKILLS,
     control_plane_source,
+    inspect_service,
     package_root,
     service_definitions,
 )
@@ -150,14 +151,18 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
     expected_services = service_definitions(config, paths)
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
         service_file = agents / f"{label}.plist"
-        check(
-            f"service:{label}",
-            service_file.is_file(),
-            str(service_file),
-        )
         try:
             with service_file.open("rb") as handle:
                 installed_service = plistlib.load(handle)
+            check(
+                f"service:{label}",
+                installed_service == expected_services[label],
+                (
+                    str(service_file)
+                    if installed_service == expected_services[label]
+                    else f"definition differs; rerun ./scripts/setup: {service_file}"
+                ),
+            )
             installed_path = installed_service.get("EnvironmentVariables", {}).get(
                 "PATH"
             )
@@ -168,6 +173,7 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
                 str(installed_path or "missing; rerun ./scripts/setup"),
             )
         except (OSError, plistlib.InvalidFileException, AttributeError) as error:
+            check(f"service:{label}", False, str(error))
             check(f"service_path:{label}", False, str(error))
     endpoint = (
         config.app_server_endpoint.replace("ws://", "http://", 1)
@@ -182,28 +188,23 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
             check("app_server_ready", app_server_ready, endpoint)
     except Exception as error:
         check("app_server_ready", False, str(error))
-    domain = f"gui/{os.getuid()}"
-    controller_service = subprocess.run(
-        ["launchctl", "print", f"{domain}/{CONTROLLER_LABEL}"],
-        capture_output=True,
-        check=False,
-    )
+    controller_service = inspect_service(CONTROLLER_LABEL)
     check(
         "controller_service_loaded",
-        controller_service.returncode == 0,
-        CONTROLLER_LABEL,
+        controller_service.running,
+        (
+            f"{CONTROLLER_LABEL} pid={controller_service.pid}"
+            if controller_service.running
+            else f"loaded={controller_service.loaded}; state={controller_service.state}; pid={controller_service.pid}"
+        ),
     )
-    runtime_service = subprocess.run(
-        ["launchctl", "print", f"{domain}/{APP_SERVER_LABEL}"],
-        capture_output=True,
-        check=False,
-    )
+    runtime_service = inspect_service(APP_SERVER_LABEL)
     check(
         "shared_runtime_active",
-        runtime_service.returncode == 0,
+        runtime_service.running,
         (
-            APP_SERVER_LABEL
-            if runtime_service.returncode == 0
+            f"{APP_SERVER_LABEL} pid={runtime_service.pid}"
+            if runtime_service.running
             else f"unmanaged listener may be serving {endpoint}"
         ),
     )

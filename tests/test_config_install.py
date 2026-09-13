@@ -22,6 +22,7 @@ from fulcrum.install import (
     install_control_plane,
     install_hook_config,
     install_services,
+    _service_observation_from_result,
     service_definitions,
     service_executable_path,
     start_services,
@@ -184,7 +185,12 @@ class ConfigInstallTest(unittest.TestCase):
         def completed(
             command: list[str], **_kwargs: object
         ) -> subprocess.CompletedProcess:
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="\tstate = running\n\tpid = 123\n",
+                stderr="",
+            )
 
         with (
             patch("fulcrum.install.os.getuid", return_value=501),
@@ -227,7 +233,10 @@ class ConfigInstallTest(unittest.TestCase):
                 if command[1] == "bootstrap":
                     repaired = True
                 path = "/expected/bin:/usr/bin" if repaired else "/stale/bin:/usr/bin"
-                output = f"environment = {{\n\tPATH => {path}\n}}\n"
+                output = (
+                    "\tstate = running\n\tpid = 123\n"
+                    f"\tenvironment = {{\n\t\tPATH => {path}\n\t}}\n"
+                )
                 return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
 
             with (
@@ -285,7 +294,12 @@ class ConfigInstallTest(unittest.TestCase):
             if command[1] == "print":
                 label = command[-1].rsplit("/", 1)[-1]
                 if calls[label] >= 2:
-                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="\tstate = running\n\tpid = 123\n",
+                        stderr="",
+                    )
                 return subprocess.CompletedProcess(
                     command, 1, stdout="", stderr="absent"
                 )
@@ -306,6 +320,62 @@ class ConfigInstallTest(unittest.TestCase):
         ):
             start_services(definitions, updated=frozenset())
         self.assertEqual(calls, {APP_SERVER_LABEL: 2, CONTROLLER_LABEL: 2})
+
+    def test_launchctl_observation_ignores_inherited_environment(self) -> None:
+        output = """gui/501/dev.fulcrum.controller = {
+\tstate = running
+\targuments = {
+\t\t/control/python
+\t\t-I
+\t\t-c
+\t\tlauncher
+\t\tserve
+\t}
+\tworking directory = /control
+\tinherited environment = {
+\t\tPATH => /wrong
+\t}
+\tenvironment = {
+\t\tPATH => /expected
+\t}
+\tpid = 321
+}
+"""
+        result = subprocess.CompletedProcess(
+            ["launchctl", "print"], 0, stdout=output, stderr=""
+        )
+        observed = _service_observation_from_result(CONTROLLER_LABEL, result)
+        self.assertTrue(observed.running)
+        self.assertEqual(observed.executable_path, "/expected")
+        self.assertEqual(
+            observed.program_arguments,
+            ("/control/python", "-I", "-c", "launcher", "serve"),
+        )
+        self.assertEqual(observed.working_directory, "/control")
+
+    def test_start_services_rejects_an_unmanaged_ready_listener(self) -> None:
+        definitions = {
+            APP_SERVER_LABEL: "/tmp/app-server.plist",
+            CONTROLLER_LABEL: "/tmp/controller.plist",
+        }
+        absent = subprocess.CompletedProcess(
+            ["launchctl", "print"], 1, stdout="", stderr="absent"
+        )
+        with (
+            patch("fulcrum.install.subprocess.run", return_value=absent) as run,
+            patch("fulcrum.install._endpoint_is_ready", return_value=True),
+        ):
+            with self.assertRaisesRegex(
+                Exception, "refusing to accept an unmanaged listener"
+            ):
+                start_services(
+                    definitions,
+                    updated=frozenset(),
+                    app_server_endpoint="ws://127.0.0.1:4500",
+                )
+        self.assertFalse(
+            any(call.args[0][1] == "bootstrap" for call in run.call_args_list)
+        )
 
 
 if __name__ == "__main__":

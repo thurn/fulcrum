@@ -8,6 +8,9 @@ import plistlib
 import shlex
 import shutil
 import subprocess
+import time
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,24 @@ SYSTEM_EXECUTABLE_PATHS = (
     "/sbin",
 )
 USER_EXECUTABLE_PATHS = (".local/bin", "bin")
+
+
+@dataclass(frozen=True)
+class ServiceObservation:
+    """Typed evidence about one launchd job, not merely its plist on disk."""
+
+    label: str
+    loaded: bool
+    state: str | None
+    pid: int | None
+    executable_path: str | None
+    program_arguments: tuple[str, ...]
+    working_directory: str | None
+    detail: str
+
+    @property
+    def running(self) -> bool:
+        return self.loaded and self.state == "running" and self.pid is not None
 
 
 def service_executable_path(*, user_home: Path | None = None) -> str:
@@ -319,20 +340,106 @@ def _installed_service_path(definition: str) -> str | None:
         return None
 
 
-def _loaded_service_path(output: bytes | str | None) -> str | None:
-    text = (
+def _launchctl_text(output: bytes | str | None) -> str:
+    return (
         output.decode(errors="replace") if isinstance(output, bytes) else output or ""
     )
+
+
+def _loaded_service_path(output: bytes | str | None) -> str | None:
+    text = _launchctl_text(output)
     in_environment = False
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == "environment = {":
+        if line == "\tenvironment = {":
             in_environment = True
-        elif in_environment and stripped == "}":
+        elif in_environment and line == "\t}":
             return None
-        elif in_environment and stripped.startswith("PATH => "):
-            return stripped.removeprefix("PATH => ")
+        elif in_environment and line.startswith("\t\tPATH => "):
+            return line.removeprefix("\t\tPATH => ")
     return None
+
+
+def _service_observation_from_result(
+    label: str, result: subprocess.CompletedProcess[Any]
+) -> ServiceObservation:
+    text = _launchctl_text(result.stdout if result.returncode == 0 else result.stderr)
+    state: str | None = None
+    pid: int | None = None
+    working_directory: str | None = None
+    arguments: list[str] = []
+    in_arguments = False
+    for line in text.splitlines():
+        if line == "\targuments = {":
+            in_arguments = True
+            continue
+        if in_arguments:
+            if line == "\t}":
+                in_arguments = False
+            elif line.startswith("\t\t"):
+                arguments.append(line[2:])
+            continue
+        if line.startswith("\t\t") or not line.startswith("\t"):
+            continue
+        field = line[1:]
+        if field.startswith("state = ") and state is None:
+            state = field.removeprefix("state = ")
+        elif field.startswith("pid = ") and pid is None:
+            try:
+                pid = int(field.removeprefix("pid = "))
+            except ValueError:
+                pid = None
+        elif field.startswith("working directory = "):
+            working_directory = field.removeprefix("working directory = ")
+    return ServiceObservation(
+        label=label,
+        loaded=result.returncode == 0,
+        state=state,
+        pid=pid,
+        executable_path=_loaded_service_path(result.stdout),
+        program_arguments=tuple(arguments),
+        working_directory=working_directory,
+        detail=text.strip(),
+    )
+
+
+def inspect_service(label: str) -> ServiceObservation:
+    domain = f"gui/{os.getuid()}"
+    result = subprocess.run(
+        ["launchctl", "print", f"{domain}/{label}"],
+        capture_output=True,
+        check=False,
+    )
+    return _service_observation_from_result(label, result)
+
+
+def _endpoint_is_ready(endpoint: str) -> bool:
+    ready_url = (
+        endpoint.replace("ws://", "http://", 1)
+        .replace("wss://", "https://", 1)
+        .rstrip("/")
+        + "/readyz"
+    )
+    try:
+        with urllib.request.urlopen(ready_url, timeout=1) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def _wait_for_running_service(label: str, *, timeout: float = 10) -> ServiceObservation:
+    deadline = time.monotonic() + timeout
+    consecutive = 0
+    latest = inspect_service(label)
+    while time.monotonic() < deadline:
+        latest = inspect_service(label)
+        if latest.running:
+            consecutive += 1
+            if consecutive >= 2:
+                return latest
+        else:
+            consecutive = 0
+        time.sleep(0.2)
+    return latest
 
 
 def start_services(
@@ -342,15 +449,23 @@ def start_services(
     app_server_endpoint: str | None = None,
 ) -> None:
     domain = f"gui/{os.getuid()}"
-    for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
-        check = subprocess.run(
-            ["launchctl", "print", f"{domain}/{label}"],
-            capture_output=True,
-            check=False,
+    initial_app_server = inspect_service(APP_SERVER_LABEL)
+    if (
+        app_server_endpoint is not None
+        and _endpoint_is_ready(app_server_endpoint)
+        and not initial_app_server.running
+    ):
+        raise InstallationError(
+            f"refusing to accept an unmanaged listener at {app_server_endpoint}; "
+            f"{APP_SERVER_LABEL} is not the running owner"
         )
-        loaded = check.returncode == 0
+    for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
+        observation = (
+            initial_app_server if label == APP_SERVER_LABEL else inspect_service(label)
+        )
+        loaded = observation.loaded
         expected_path = _installed_service_path(definitions[label])
-        loaded_path = _loaded_service_path(check.stdout) if loaded else None
+        loaded_path = observation.executable_path
         reloading = loaded and (
             label in updated
             or (expected_path is not None and loaded_path != expected_path)
@@ -368,6 +483,15 @@ def start_services(
                     f"{result.stderr.strip() or result.stdout.strip()}"
                 )
             loaded = False
+            if (
+                label == APP_SERVER_LABEL
+                and app_server_endpoint is not None
+                and _endpoint_is_ready(app_server_endpoint)
+            ):
+                raise InstallationError(
+                    f"{APP_SERVER_LABEL} stopped but {app_server_endpoint} remains "
+                    "occupied; refusing to start competing runtimes"
+                )
         if not loaded:
             result = subprocess.run(
                 ["launchctl", "bootstrap", domain, definitions[label]],
@@ -413,22 +537,15 @@ def start_services(
                     f"could not kickstart {label}: "
                     f"{result.stderr.strip() or result.stdout.strip()}"
                 )
-        verified = subprocess.run(
-            ["launchctl", "print", f"{domain}/{label}"],
-            capture_output=True,
-            check=False,
-        )
-        if verified.returncode != 0:
-            detail = (
-                verified.stderr.decode(errors="replace")
-                if isinstance(verified.stderr, bytes)
-                else str(verified.stderr or "")
-            ).strip()
+        verified = _wait_for_running_service(label)
+        if not verified.running:
             raise InstallationError(
-                f"configured service {label} is not loaded after setup; "
-                f"domain={domain}; plist={definitions[label]}; state={detail!r}"
+                f"configured service {label} is not stably running after setup; "
+                f"domain={domain}; plist={definitions[label]}; "
+                f"loaded={verified.loaded}; state={verified.state!r}; "
+                f"pid={verified.pid!r}; detail={verified.detail!r}"
             )
-        verified_path = _loaded_service_path(verified.stdout)
+        verified_path = verified.executable_path
         if expected_path is not None and verified_path != expected_path:
             raise InstallationError(
                 f"configured service {label} loaded with an unexpected PATH; "
