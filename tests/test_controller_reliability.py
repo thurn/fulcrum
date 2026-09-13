@@ -758,6 +758,22 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(retained["state"], "idle")
 
+    async def test_reconciliation_repairs_terminal_task_without_current_action(
+        self,
+    ) -> None:
+        self.controller.store.execute(
+            """UPDATE tasks SET state = 'active', runtime_status = 'notLoaded',
+               last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?""",
+            (self.executor["id"],),
+        )
+
+        self.controller._normalize_unowned_tasks()
+
+        retained = self.controller.store.row(
+            "SELECT state FROM tasks WHERE id = ?", (self.executor["id"],)
+        )
+        self.assertEqual(retained["state"], "idle")
+
     async def test_repair_context_exposes_permission_and_retained_diagnosis(
         self,
     ) -> None:

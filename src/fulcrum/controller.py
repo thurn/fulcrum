@@ -508,6 +508,7 @@ class Controller:
                     entity_id=task["id"],
                     detail={"traceback": traceback.format_exc()},
                 )
+        self._normalize_unowned_tasks()
         await self._inspect_due_actions()
         self.store.execute(
             "INSERT INTO meta(key, value) VALUES ('last_reconciliation', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -540,6 +541,21 @@ class Controller:
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "violations": violations,
             },
+        )
+
+    def _normalize_unowned_tasks(self) -> None:
+        """Return terminal tasks without a current action to their idle state."""
+
+        self.store.execute(
+            """UPDATE tasks SET state = 'idle', updated_at = ?
+               WHERE archived = 0 AND state != 'idle'
+               AND last_turn_terminal = 1 AND helpers_terminal = 1
+               AND NOT EXISTS (
+                   SELECT 1 FROM actions
+                   WHERE actions.task_id = tasks.id
+                   AND actions.state IN ('pending','starting','active','terminal','uncertain')
+               )""",
+            (utc_now(),),
         )
 
     async def _retry_pending_actions(self) -> None:
