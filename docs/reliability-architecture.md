@@ -138,6 +138,30 @@ authoritative if the secondary file sink is unavailable. Database triggers retai
 every workflow state change with before/after values. External attempts preserve
 structured result or error evidence and bounded stdout/stderr.
 
+Token notifications use a separate observational path. Each update is an
+idempotent SQLite upsert of the native turn's cumulative snapshot; it neither
+takes the workflow mutation lock nor requests reconciliation, and individual
+samples are not copied to `events` or `logs/workflow.jsonl`. A terminal action
+emits one bounded summary event. Status adds only a compact total-and-coverage
+summary to active actions, while `fulcrum usage` provides filtered historical
+turns and rollups.
+
+Turn binding reconciles usage that arrived before `turn/started` or before an
+uncertain start was resolved. Terminal observation finalizes the latest retained
+snapshot. Restart and runtime disconnect mark open rows partial rather than
+fabricating completeness; a turn with no observed usage is unavailable. Retry,
+reminder, terminal processing, and archival remain independent of telemetry.
+Helper attribution follows only supported collaboration parent/child identities,
+propagates through descendants, and tolerates usage and relationship notifications
+in either order. Ownership records are distinct by collaboration item, helper
+thread, and parent native turn, then bind to the helper's native `turn/started`
+identity. Multiple calls to one helper from a single parent turn are separate;
+duplicate delivery of one item preserves insertion order and cannot rewrite an
+earlier helper turn. If a lifecycle observation gap makes that binding ambiguous,
+Fulcrum retains the turn as unassociated and partial rather than guessing the newest
+thread-level relationship. Known unassociated helper turns also keep every possible
+owning rollup partial, so missing descendants cannot produce false completeness.
+
 ## Control-plane isolation and refresh
 
 Setup copies the Python package into an owned deployment directory under the
@@ -192,6 +216,8 @@ The automated gate covers both domain behavior and interruption boundaries:
 - idempotent reset of an already-missing worktree;
 - ordered candidate cancellation and worktree removal;
 - independent archive quarantine;
+- cumulative token usage deduplication, observational gaps, helper attribution,
+  and historical rollups without workflow-event amplification;
 - transient launchctl bootstrap failure; and
 - atomic control-plane snapshot replacement.
 

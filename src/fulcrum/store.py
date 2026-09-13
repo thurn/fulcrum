@@ -24,6 +24,8 @@ ROLE_CODES = {
     "inquisitor": ("INQ", "🛡️"),
 }
 
+_HELPER_OWNERSHIP_GAP = "helper turn has no unambiguous collaboration ownership"
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -138,6 +140,35 @@ CREATE TABLE IF NOT EXISTS actions (
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_thread ON actions(task_id) WHERE state NOT IN ('processed','canceled');
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_assignment ON actions(assignment_id)
   WHERE assignment_id IS NOT NULL AND state IN ('pending','starting','active','terminal','uncertain');
+CREATE TABLE IF NOT EXISTS action_turn_usage (
+  native_thread_id TEXT NOT NULL, native_turn_id TEXT NOT NULL,
+  action_id INTEGER REFERENCES actions(id),
+  attributed_action_id INTEGER REFERENCES actions(id),
+  is_helper INTEGER NOT NULL DEFAULT 0 CHECK (is_helper IN (0, 1)),
+  model TEXT, reasoning_effort TEXT,
+  last_input_tokens INTEGER, last_cached_input_tokens INTEGER,
+  last_cache_write_input_tokens INTEGER, last_output_tokens INTEGER,
+  last_reasoning_output_tokens INTEGER, last_total_tokens INTEGER,
+  total_input_tokens INTEGER, total_cached_input_tokens INTEGER,
+  total_cache_write_input_tokens INTEGER, total_output_tokens INTEGER,
+  total_reasoning_output_tokens INTEGER, total_tokens INTEGER,
+  model_context_window INTEGER,
+  coverage TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (coverage IN ('unknown','observed','complete','partial','unavailable')),
+  gap_reason TEXT, first_observed_at TEXT, last_observed_at TEXT,
+  terminal_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  PRIMARY KEY (native_thread_id, native_turn_id)
+);
+CREATE INDEX IF NOT EXISTS usage_by_action ON action_turn_usage(action_id);
+CREATE INDEX IF NOT EXISTS usage_by_attributed_action ON action_turn_usage(attributed_action_id);
+CREATE TABLE IF NOT EXISTS telemetry_helper_threads (
+  id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL,
+  parent_thread_id TEXT NOT NULL, parent_turn_id TEXT NOT NULL DEFAULT '',
+  collaboration_item_id TEXT NOT NULL DEFAULT '', native_turn_id TEXT,
+  attributed_action_id INTEGER REFERENCES actions(id),
+  first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL,
+  UNIQUE(native_thread_id, parent_thread_id, parent_turn_id, collaboration_item_id)
+);
 CREATE TABLE IF NOT EXISTS reservations (
   id INTEGER PRIMARY KEY, action_id INTEGER NOT NULL UNIQUE REFERENCES actions(id),
   pair_id INTEGER, global_slots INTEGER NOT NULL DEFAULT 1 CHECK (global_slots >= 0),
@@ -511,6 +542,56 @@ class Store:
     def _migrate_existing_database(self) -> None:
         """Add correctness metadata to an existing database without a version gate."""
 
+        helper_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(telemetry_helper_threads)"
+            )
+        }
+        required_helper_columns = {"id", "native_turn_id", "collaboration_item_id"}
+        if helper_columns and not required_helper_columns.issubset(helper_columns):
+            native_turn = (
+                "native_turn_id" if "native_turn_id" in helper_columns else "NULL"
+            )
+            collaboration_item = (
+                "collaboration_item_id"
+                if "collaboration_item_id" in helper_columns
+                else "''"
+            )
+            self.connection.executescript(f"""ALTER TABLE telemetry_helper_threads
+                     RENAME TO obsolete_telemetry_helper_threads;
+                CREATE TABLE telemetry_helper_threads (
+                  id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL,
+                  parent_thread_id TEXT NOT NULL,
+                  parent_turn_id TEXT NOT NULL DEFAULT '',
+                  collaboration_item_id TEXT NOT NULL DEFAULT '',
+                  native_turn_id TEXT,
+                  attributed_action_id INTEGER REFERENCES actions(id),
+                  first_observed_at TEXT NOT NULL,
+                  last_observed_at TEXT NOT NULL,
+                  UNIQUE(native_thread_id, parent_thread_id, parent_turn_id,
+                         collaboration_item_id)
+                );
+                INSERT INTO telemetry_helper_threads(
+                  native_thread_id, parent_thread_id, parent_turn_id,
+                  collaboration_item_id, native_turn_id,
+                  attributed_action_id, first_observed_at, last_observed_at
+                ) SELECT native_thread_id, parent_thread_id,
+                         COALESCE(parent_turn_id, ''), {collaboration_item},
+                         {native_turn}, attributed_action_id,
+                         first_observed_at, last_observed_at
+                    FROM obsolete_telemetry_helper_threads;
+                DROP TABLE obsolete_telemetry_helper_threads;""")
+        self.connection.execute("""CREATE INDEX IF NOT EXISTS helper_ownership_by_thread
+               ON telemetry_helper_threads(native_thread_id, id)""")
+        self.connection.execute("""CREATE INDEX IF NOT EXISTS helper_ownership_by_action
+               ON telemetry_helper_threads(attributed_action_id)""")
+        self.connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS helper_ownership_by_native_turn
+               ON telemetry_helper_threads(native_thread_id, native_turn_id)
+               WHERE native_turn_id IS NOT NULL"""
+        )
+
         batch_table = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'batch_updates'"
         ).fetchone()
@@ -852,6 +933,813 @@ class Store:
             raise StoreError("thread has no current Fulcrum action")
         return row
 
+    def bind_action_turn(
+        self, action_id: int, native_thread_id: str, native_turn_id: str
+    ) -> None:
+        """Attach retained usage to a managed action after turn reconciliation."""
+
+        timestamp = utc_now()
+        action = self.row(
+            """SELECT a.id, t.model, t.reasoning_effort FROM actions a
+               JOIN tasks t ON t.id = a.task_id WHERE a.id = ?""",
+            (action_id,),
+        )
+        if action is None:
+            raise StoreError(f"action {action_id} does not exist")
+        retained = self.row(
+            """SELECT action_id FROM action_turn_usage
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (native_thread_id, native_turn_id),
+        )
+        if (
+            retained is not None
+            and retained["action_id"] is not None
+            and int(retained["action_id"]) != action_id
+        ):
+            raise StoreError(
+                f"native turn {native_thread_id}/{native_turn_id} is already bound"
+            )
+        with self.transaction() as connection:
+            connection.execute(
+                """INSERT INTO action_turn_usage(
+                       native_thread_id, native_turn_id, action_id,
+                       attributed_action_id, model, reasoning_effort,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(native_thread_id, native_turn_id) DO UPDATE SET
+                     action_id = excluded.action_id,
+                     attributed_action_id = excluded.attributed_action_id,
+                     is_helper = 0,
+                     model = excluded.model,
+                     reasoning_effort = excluded.reasoning_effort,
+                     updated_at = excluded.updated_at""",
+                (
+                    native_thread_id,
+                    native_turn_id,
+                    action_id,
+                    action_id,
+                    action["model"],
+                    action["reasoning_effort"],
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """UPDATE telemetry_helper_threads SET attributed_action_id = ?,
+                       last_observed_at = ?
+                   WHERE parent_thread_id = ? AND parent_turn_id = ?
+                     AND attributed_action_id IS NULL""",
+                (action_id, timestamp, native_thread_id, native_turn_id),
+            )
+            self._propagate_helper_ownership(connection, timestamp)
+
+    def _propagate_helper_ownership(
+        self, connection: sqlite3.Connection, timestamp: str
+    ) -> None:
+        """Resolve parent actions and propagate exact helper-turn ownership."""
+
+        while True:
+            relations = connection.execute(
+                """UPDATE telemetry_helper_threads AS child
+                   SET attributed_action_id = (
+                         SELECT COALESCE(parent.attributed_action_id,
+                                         parent.action_id)
+                         FROM action_turn_usage parent
+                         WHERE parent.native_thread_id = child.parent_thread_id
+                           AND parent.native_turn_id = child.parent_turn_id
+                       ),
+                       last_observed_at = ?
+                   WHERE child.attributed_action_id IS NULL
+                     AND child.parent_turn_id != ''
+                     AND EXISTS (
+                       SELECT 1 FROM action_turn_usage parent
+                       WHERE parent.native_thread_id = child.parent_thread_id
+                         AND parent.native_turn_id = child.parent_turn_id
+                         AND COALESCE(parent.attributed_action_id,
+                                      parent.action_id) IS NOT NULL
+                     )""",
+                (timestamp,),
+            ).rowcount
+            turns = connection.execute(
+                """UPDATE action_turn_usage AS usage
+                   SET attributed_action_id = (
+                         SELECT helper.attributed_action_id
+                         FROM telemetry_helper_threads helper
+                         WHERE helper.native_thread_id = usage.native_thread_id
+                           AND helper.native_turn_id = usage.native_turn_id
+                           AND helper.attributed_action_id IS NOT NULL
+                       ),
+                       is_helper = 1,
+                       model = COALESCE(model, (
+                         SELECT task.model FROM telemetry_helper_threads helper
+                         JOIN actions action
+                           ON action.id = helper.attributed_action_id
+                         JOIN tasks task ON task.id = action.task_id
+                         WHERE helper.native_thread_id = usage.native_thread_id
+                           AND helper.native_turn_id = usage.native_turn_id
+                           AND helper.attributed_action_id IS NOT NULL
+                       )),
+                       reasoning_effort = COALESCE(reasoning_effort, (
+                         SELECT task.reasoning_effort
+                         FROM telemetry_helper_threads helper
+                         JOIN actions action
+                           ON action.id = helper.attributed_action_id
+                         JOIN tasks task ON task.id = action.task_id
+                         WHERE helper.native_thread_id = usage.native_thread_id
+                           AND helper.native_turn_id = usage.native_turn_id
+                           AND helper.attributed_action_id IS NOT NULL
+                       )),
+                       coverage = CASE
+                         WHEN usage.gap_reason = ? AND usage.terminal_at IS NOT NULL
+                              AND usage.total_tokens IS NULL THEN 'unavailable'
+                         WHEN usage.gap_reason = ? AND usage.terminal_at IS NOT NULL
+                              THEN 'complete'
+                         WHEN usage.gap_reason = ? AND usage.total_tokens IS NOT NULL
+                              THEN 'observed'
+                         WHEN usage.gap_reason = ? THEN 'unknown'
+                         ELSE usage.coverage END,
+                       gap_reason = CASE
+                         WHEN usage.gap_reason = ? AND usage.terminal_at IS NOT NULL
+                              AND usage.total_tokens IS NULL
+                           THEN 'no token-usage notification was observed'
+                         WHEN usage.gap_reason = ? THEN NULL
+                         ELSE usage.gap_reason END,
+                       updated_at = ?
+                   WHERE usage.action_id IS NULL
+                     AND usage.attributed_action_id IS NULL
+                     AND EXISTS (
+                       SELECT 1 FROM telemetry_helper_threads helper
+                       WHERE helper.native_thread_id = usage.native_thread_id
+                         AND helper.native_turn_id = usage.native_turn_id
+                         AND helper.attributed_action_id IS NOT NULL
+                     )""",
+                (
+                    _HELPER_OWNERSHIP_GAP,
+                    _HELPER_OWNERSHIP_GAP,
+                    _HELPER_OWNERSHIP_GAP,
+                    _HELPER_OWNERSHIP_GAP,
+                    _HELPER_OWNERSHIP_GAP,
+                    _HELPER_OWNERSHIP_GAP,
+                    timestamp,
+                ),
+            ).rowcount
+            if relations == 0 and turns == 0:
+                return
+
+    def observe_helper_turn_started(
+        self, native_thread_id: str, native_turn_id: str
+    ) -> bool:
+        """Bind a helper lifecycle turn to one unambiguous collaboration item."""
+
+        if self.row(
+            "SELECT 1 FROM tasks WHERE native_thread_id = ?", (native_thread_id,)
+        ):
+            return False
+        relationships = self.rows(
+            """SELECT id, native_turn_id FROM telemetry_helper_threads
+               WHERE native_thread_id = ? ORDER BY id""",
+            (native_thread_id,),
+        )
+        if not relationships:
+            return False
+        timestamp = utc_now()
+        exact = next(
+            (
+                relationship
+                for relationship in relationships
+                if relationship["native_turn_id"] == native_turn_id
+            ),
+            None,
+        )
+        unresolved = [
+            relationship
+            for relationship in relationships
+            if relationship["native_turn_id"] is None
+        ]
+        with self.transaction() as connection:
+            if exact is None and len(unresolved) == 1:
+                connection.execute(
+                    """UPDATE telemetry_helper_threads
+                       SET native_turn_id = ?, last_observed_at = ? WHERE id = ?""",
+                    (native_turn_id, timestamp, unresolved[0]["id"]),
+                )
+                exact = unresolved[0]
+            helper = connection.execute(
+                """SELECT attributed_action_id FROM telemetry_helper_threads
+                   WHERE native_thread_id = ? AND native_turn_id = ?""",
+                (native_thread_id, native_turn_id),
+            ).fetchone()
+            action_id = helper[0] if helper is not None else None
+            attribution = None
+            if action_id is not None:
+                attribution = connection.execute(
+                    """SELECT t.model, t.reasoning_effort FROM actions a
+                       JOIN tasks t ON t.id = a.task_id WHERE a.id = ?""",
+                    (action_id,),
+                ).fetchone()
+            gap_reason = None if helper is not None else _HELPER_OWNERSHIP_GAP
+            connection.execute(
+                """INSERT INTO action_turn_usage(
+                       native_thread_id, native_turn_id, attributed_action_id,
+                       is_helper, model, reasoning_effort, coverage, gap_reason,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(native_thread_id, native_turn_id) DO UPDATE SET
+                     attributed_action_id = action_turn_usage.attributed_action_id,
+                     is_helper = 1,
+                     model = COALESCE(action_turn_usage.model, excluded.model),
+                     reasoning_effort = COALESCE(
+                       action_turn_usage.reasoning_effort,
+                       excluded.reasoning_effort),
+                     coverage = CASE
+                       WHEN excluded.attributed_action_id IS NULL
+                        AND action_turn_usage.attributed_action_id IS NULL
+                       THEN 'partial' ELSE action_turn_usage.coverage END,
+                     gap_reason = CASE
+                       WHEN excluded.attributed_action_id IS NULL
+                        AND action_turn_usage.attributed_action_id IS NULL
+                       THEN COALESCE(action_turn_usage.gap_reason,
+                                     excluded.gap_reason)
+                       ELSE action_turn_usage.gap_reason END,
+                     updated_at = excluded.updated_at""",
+                (
+                    native_thread_id,
+                    native_turn_id,
+                    action_id,
+                    attribution[0] if attribution is not None else None,
+                    attribution[1] if attribution is not None else None,
+                    "unknown" if helper is not None else "partial",
+                    gap_reason,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            self._propagate_helper_ownership(connection, timestamp)
+        return True
+
+    def observe_helper_thread(
+        self,
+        *,
+        parent_thread_id: str,
+        parent_turn_id: str | None,
+        native_thread_id: str,
+        collaboration_item_id: str | None = None,
+    ) -> None:
+        """Retain a supported collaboration parent/child identity."""
+
+        if native_thread_id == parent_thread_id:
+            return
+        # A separately managed Fulcrum thread is never reclassified as a helper.
+        if self.row(
+            "SELECT 1 FROM tasks WHERE native_thread_id = ?", (native_thread_id,)
+        ):
+            return
+        owner = None
+        if parent_turn_id is not None:
+            owner = self.row(
+                """SELECT COALESCE(attributed_action_id, action_id) AS action_id
+                   FROM action_turn_usage
+                   WHERE native_thread_id = ? AND native_turn_id = ?""",
+                (parent_thread_id, parent_turn_id),
+            )
+            if owner is None:
+                owner = self.row(
+                    """SELECT a.id AS action_id FROM actions a JOIN tasks t
+                       ON t.id = a.task_id
+                       WHERE t.native_thread_id = ? AND a.native_turn_id = ?
+                       ORDER BY a.id DESC LIMIT 1""",
+                    (parent_thread_id, parent_turn_id),
+                )
+        action_id = owner["action_id"] if owner else None
+        timestamp = utc_now()
+        normalized_parent_turn_id = parent_turn_id or ""
+        normalized_item_id = collaboration_item_id or ""
+        with self.transaction() as connection:
+            connection.execute(
+                """INSERT INTO telemetry_helper_threads(
+                       native_thread_id, parent_thread_id, parent_turn_id,
+                       collaboration_item_id, attributed_action_id,
+                       first_observed_at, last_observed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(native_thread_id, parent_thread_id, parent_turn_id,
+                               collaboration_item_id)
+                   DO UPDATE SET attributed_action_id = COALESCE(
+                       telemetry_helper_threads.attributed_action_id,
+                       excluded.attributed_action_id),
+                     last_observed_at = CASE
+                       WHEN telemetry_helper_threads.attributed_action_id IS NULL
+                        AND excluded.attributed_action_id IS NOT NULL
+                       THEN excluded.last_observed_at
+                       ELSE telemetry_helper_threads.last_observed_at END""",
+                (
+                    native_thread_id,
+                    parent_thread_id,
+                    normalized_parent_turn_id,
+                    normalized_item_id,
+                    action_id,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            relationship = connection.execute(
+                """SELECT id, native_turn_id FROM telemetry_helper_threads
+                   WHERE native_thread_id = ? AND parent_thread_id = ?
+                     AND parent_turn_id = ? AND collaboration_item_id = ?""",
+                (
+                    native_thread_id,
+                    parent_thread_id,
+                    normalized_parent_turn_id,
+                    normalized_item_id,
+                ),
+            ).fetchone()
+            relationship_id = int(relationship[0]) if relationship is not None else None
+            unresolved_relationships = connection.execute(
+                """SELECT id FROM telemetry_helper_threads
+                   WHERE native_thread_id = ? AND native_turn_id IS NULL""",
+                (native_thread_id,),
+            ).fetchall()
+            pending_turns = connection.execute(
+                """SELECT native_turn_id FROM action_turn_usage
+                   WHERE native_thread_id = ? AND action_id IS NULL
+                     AND attributed_action_id IS NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM telemetry_helper_threads helper
+                       WHERE helper.native_thread_id = action_turn_usage.native_thread_id
+                         AND helper.native_turn_id = action_turn_usage.native_turn_id
+                     )""",
+                (native_thread_id,),
+            ).fetchall()
+            if (
+                relationship is not None
+                and relationship[1] is None
+                and len(unresolved_relationships) == 1
+                and len(pending_turns) == 1
+                and int(unresolved_relationships[0][0]) == relationship_id
+            ):
+                connection.execute(
+                    """UPDATE telemetry_helper_threads
+                       SET native_turn_id = ?, last_observed_at = ? WHERE id = ?""",
+                    (pending_turns[0][0], timestamp, relationship_id),
+                )
+            self._propagate_helper_ownership(connection, timestamp)
+
+    def observe_turn_usage(self, params: dict[str, Any]) -> bool:
+        """Upsert one cumulative app-server snapshot without sampling inflation."""
+
+        thread_id = params.get("threadId")
+        turn_id = params.get("turnId")
+        token_usage = params.get("tokenUsage")
+        if not isinstance(thread_id, str) or not isinstance(turn_id, str):
+            return False
+        if not isinstance(token_usage, dict):
+            return False
+        cumulative = token_usage.get("total")
+        latest = token_usage.get("last")
+        if not isinstance(cumulative, dict):
+            return False
+        total = _usage_breakdown(cumulative)
+        last = _usage_breakdown(latest) if isinstance(latest, dict) else {}
+        if not total:
+            return False
+        timestamp = utc_now()
+        action = self.row(
+            """SELECT a.id, t.model, t.reasoning_effort FROM actions a
+               JOIN tasks t ON t.id = a.task_id
+               WHERE t.native_thread_id = ? AND a.native_turn_id = ?
+               ORDER BY a.id DESC LIMIT 1""",
+            (thread_id, turn_id),
+        )
+        if action is None:
+            self.observe_helper_turn_started(thread_id, turn_id)
+        helper = self.row(
+            """SELECT attributed_action_id FROM telemetry_helper_threads
+               WHERE native_thread_id = ? AND native_turn_id = ?
+                 AND attributed_action_id IS NOT NULL""",
+            (thread_id, turn_id),
+        )
+        helper_history = self.row(
+            "SELECT 1 FROM telemetry_helper_threads WHERE native_thread_id = ?",
+            (thread_id,),
+        )
+        action_id = action["id"] if action else None
+        attributed_action_id = (
+            action_id
+            if action_id is not None
+            else helper["attributed_action_id"] if helper else None
+        )
+        attribution = action
+        if attribution is None and attributed_action_id is not None:
+            attribution = self.row(
+                """SELECT t.model, t.reasoning_effort FROM actions a
+                   JOIN tasks t ON t.id = a.task_id WHERE a.id = ?""",
+                (attributed_action_id,),
+            )
+        model = attribution["model"] if attribution else None
+        effort = attribution["reasoning_effort"] if attribution else None
+        existing = self.row(
+            """SELECT * FROM action_turn_usage
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (thread_id, turn_id),
+        )
+        columns = _usage_columns("total")
+        last_columns = _usage_columns("last")
+        if existing is None:
+            values = [total.get(key) for key in _USAGE_KEYS]
+            last_values = [last.get(key) for key in _USAGE_KEYS]
+            self.execute(
+                f"""INSERT INTO action_turn_usage(
+                       native_thread_id, native_turn_id, action_id,
+                       attributed_action_id, is_helper, model, reasoning_effort,
+                       {', '.join(last_columns)}, {', '.join(columns)},
+                       model_context_window, coverage, first_observed_at,
+                       last_observed_at, created_at, updated_at
+                   ) VALUES ({', '.join('?' for _ in range(7 + 6 + 6 + 6))})""",
+                [
+                    thread_id,
+                    turn_id,
+                    action_id,
+                    attributed_action_id,
+                    int(action_id is None and helper_history is not None),
+                    model,
+                    effort,
+                    *last_values,
+                    *values,
+                    _nonnegative_int(params.get("modelContextWindow")),
+                    (
+                        "partial"
+                        if action_id is None and helper is None and helper_history
+                        else "observed"
+                    ),
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ],
+            )
+            if action_id is None and helper is None and helper_history:
+                self.execute(
+                    """UPDATE action_turn_usage SET gap_reason = ?
+                       WHERE native_thread_id = ? AND native_turn_id = ?""",
+                    (_HELPER_OWNERSHIP_GAP, thread_id, turn_id),
+                )
+            with self.transaction() as connection:
+                self._propagate_helper_ownership(connection, timestamp)
+            return True
+        old_total = existing.get("total_tokens")
+        new_total = total.get("total_tokens")
+        newest = new_total is not None and (
+            old_total is None
+            or new_total > int(old_total)
+            or (
+                new_total == int(old_total)
+                and existing.get("last_total_tokens") is None
+            )
+        )
+        updates: dict[str, Any] = {}
+        for key, column in zip(_USAGE_KEYS, columns, strict=True):
+            value = total.get(key)
+            retained = existing.get(column)
+            if value is not None and (retained is None or value > int(retained)):
+                updates[column] = value
+        if newest:
+            for key, column in zip(_USAGE_KEYS, last_columns, strict=True):
+                if key in last:
+                    updates[column] = last[key]
+        context = _nonnegative_int(params.get("modelContextWindow"))
+        if context is not None:
+            updates["model_context_window"] = max(
+                context, int(existing.get("model_context_window") or 0)
+            )
+        updates.update(
+            {
+                "action_id": existing.get("action_id") or action_id,
+                "attributed_action_id": existing.get("attributed_action_id")
+                or attributed_action_id,
+                "is_helper": int(
+                    existing.get("is_helper")
+                    or (action_id is None and helper_history is not None)
+                ),
+                "model": existing.get("model") or model,
+                "reasoning_effort": existing.get("reasoning_effort") or effort,
+                "first_observed_at": existing.get("first_observed_at") or timestamp,
+                "last_observed_at": timestamp,
+                "updated_at": timestamp,
+            }
+        )
+        if existing.get("terminal_at") and existing.get("gap_reason") == (
+            "no token-usage notification was observed"
+        ):
+            updates["gap_reason"] = None
+            updates["coverage"] = "complete"
+        elif existing.get("terminal_at") and not existing.get("gap_reason"):
+            updates["coverage"] = "complete"
+        elif existing.get("coverage") in {"unknown", "unavailable"}:
+            updates["coverage"] = "observed"
+        assignments = ", ".join(f"{name} = ?" for name in updates)
+        self.execute(
+            f"""UPDATE action_turn_usage SET {assignments}
+                WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (*updates.values(), thread_id, turn_id),
+        )
+        with self.transaction() as connection:
+            self._propagate_helper_ownership(connection, timestamp)
+        return True
+
+    def mark_open_usage_gap(self, reason: str) -> None:
+        timestamp = utc_now()
+        self.execute(
+            """UPDATE action_turn_usage SET coverage = 'partial',
+                   gap_reason = COALESCE(gap_reason, ?), updated_at = ?
+               WHERE terminal_at IS NULL AND coverage != 'unavailable'""",
+            (reason, timestamp),
+        )
+
+    def finalize_native_turn_usage(
+        self, native_thread_id: str, native_turn_id: str
+    ) -> bool:
+        """Finalize a known helper turn even though it owns no Fulcrum action."""
+
+        row = self.row(
+            """SELECT * FROM action_turn_usage
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (native_thread_id, native_turn_id),
+        )
+        helper = self.row(
+            """SELECT attributed_action_id FROM telemetry_helper_threads
+               WHERE native_thread_id = ? AND native_turn_id = ?
+                 AND attributed_action_id IS NOT NULL""",
+            (native_thread_id, native_turn_id),
+        )
+        if row is None and (helper is None or helper["attributed_action_id"] is None):
+            return False
+        timestamp = utc_now()
+        if row is None:
+            assert helper is not None
+            self.execute(
+                """INSERT INTO action_turn_usage(
+                       native_thread_id, native_turn_id, attributed_action_id,
+                       is_helper, coverage, gap_reason, terminal_at,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, 1, 'unavailable', ?, ?, ?, ?)""",
+                (
+                    native_thread_id,
+                    native_turn_id,
+                    helper["attributed_action_id"],
+                    "no token-usage notification was observed",
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            return True
+        if row["terminal_at"] is not None:
+            return False
+        coverage = (
+            "partial"
+            if row["gap_reason"]
+            else "unavailable" if row["total_tokens"] is None else "complete"
+        )
+        gap = row["gap_reason"]
+        if coverage == "unavailable" and gap is None:
+            gap = "no token-usage notification was observed"
+        self.execute(
+            """UPDATE action_turn_usage SET terminal_at = ?, coverage = ?,
+                   gap_reason = ?, updated_at = ?
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (timestamp, coverage, gap, timestamp, native_thread_id, native_turn_id),
+        )
+        return True
+
+    def finalize_action_usage(self, action_id: int) -> dict[str, Any]:
+        """Freeze the latest direct snapshot and return a bounded summary."""
+
+        timestamp = utc_now()
+        action = self.row(
+            """SELECT a.*, t.native_thread_id FROM actions a JOIN tasks t
+               ON t.id = a.task_id WHERE a.id = ?""",
+            (action_id,),
+        )
+        if action is None or not isinstance(action.get("native_turn_id"), str):
+            return self.action_usage_summary(action_id)
+        self.bind_action_turn(
+            action_id, str(action["native_thread_id"]), str(action["native_turn_id"])
+        )
+        row = self.row(
+            """SELECT total_tokens, gap_reason, terminal_at FROM action_turn_usage
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (action["native_thread_id"], action["native_turn_id"]),
+        )
+        assert row is not None
+        if row["terminal_at"] is not None:
+            summary = self.action_usage_summary(action_id)
+            summary["_newly_finalized"] = False
+            return summary
+        coverage = (
+            "unavailable"
+            if row["total_tokens"] is None
+            else "partial" if row["gap_reason"] else "complete"
+        )
+        gap = row["gap_reason"]
+        if coverage == "unavailable":
+            gap = "no token-usage notification was observed"
+        self.execute(
+            """UPDATE action_turn_usage SET terminal_at = ?, coverage = ?,
+                   gap_reason = ?, updated_at = ?
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (
+                timestamp,
+                coverage,
+                gap,
+                timestamp,
+                action["native_thread_id"],
+                action["native_turn_id"],
+            ),
+        )
+        summary = self.action_usage_summary(action_id)
+        summary["_newly_finalized"] = True
+        return summary
+
+    def action_usage_summary(self, action_id: int) -> dict[str, Any]:
+        report = self.usage_report(action_id=action_id, group_by="action")
+        groups = report["groups"]
+        if not groups:
+            return {
+                "direct_total_tokens": None,
+                "attributed_total_tokens": None,
+                "coverage": "unknown",
+            }
+        item = groups[0]
+        return {
+            "direct_total_tokens": item["direct"]["total_tokens"],
+            "attributed_total_tokens": item["attributed"]["total_tokens"],
+            "coverage": item["coverage"],
+            "turn_count": item["contributing_turn_count"],
+        }
+
+    def usage_report(
+        self,
+        *,
+        action_id: int | None = None,
+        task_id: int | None = None,
+        assignment_id: int | None = None,
+        run_id: int | None = None,
+        role: str | None = None,
+        project_id: str | None = None,
+        group_by: str = "action",
+    ) -> dict[str, Any]:
+        """Return historical and active usage without replaying stream samples."""
+
+        dimensions = {
+            "action": "a.id",
+            "task": "t.id",
+            "assignment": "a.assignment_id",
+            "run": "assn.run_id",
+            "role": "t.role",
+            "project": "t.project_id",
+        }
+        result_keys = {
+            "action": "id",
+            "task": "task_id",
+            "assignment": "assignment_id",
+            "run": "run_id",
+            "role": "role",
+            "project": "project_id",
+        }
+        if group_by not in dimensions:
+            raise StoreError(f"unsupported usage grouping: {group_by}")
+        filters: list[str] = []
+        values: list[Any] = []
+        for column, value in (
+            ("a.id", action_id),
+            ("t.id", task_id),
+            ("a.assignment_id", assignment_id),
+            ("assn.run_id", run_id),
+            ("t.role", role),
+            ("t.project_id", project_id),
+        ):
+            if value is not None:
+                filters.append(f"{column} = ?")
+                values.append(value)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        actions = self.rows(
+            f"""SELECT a.id, a.task_id, a.assignment_id, a.kind, a.state,
+                       a.native_turn_id, t.native_thread_id, t.role, t.title,
+                       t.project_id, t.model, t.reasoning_effort, assn.run_id
+                FROM actions a JOIN tasks t ON t.id = a.task_id
+                LEFT JOIN assignments assn ON assn.id = a.assignment_id
+                {where} ORDER BY a.id""",
+            values,
+        )
+        groups: dict[Any, list[dict[str, Any]]] = {}
+        key_name = result_keys[group_by]
+        for action in actions:
+            key = action.get(key_name)
+            if key is not None:
+                groups.setdefault(key, []).append(action)
+        rendered: list[dict[str, Any]] = []
+        all_turns: list[dict[str, Any]] = []
+        for key, members in groups.items():
+            ids = [int(member["id"]) for member in members]
+            marks = ",".join("?" for _ in ids)
+            turns = self.rows(
+                f"""SELECT * FROM action_turn_usage
+                    WHERE action_id IN ({marks}) OR attributed_action_id IN ({marks})
+                    ORDER BY first_observed_at, native_thread_id, native_turn_id""",
+                ids + ids,
+            )
+            all_turns.extend(turns)
+            direct = [turn for turn in turns if turn["action_id"] in ids]
+            attributed = [turn for turn in turns if turn["attributed_action_id"] in ids]
+            coverage = _coverage_state(attributed or direct, expected=bool(members))
+            missing_helpers = self.row(
+                f"""SELECT COUNT(*) AS count FROM telemetry_helper_threads helper
+                    WHERE helper.attributed_action_id IN ({marks})
+                      AND NOT EXISTS (
+                        SELECT 1 FROM action_turn_usage usage
+                        WHERE usage.native_thread_id = helper.native_thread_id
+                          AND usage.native_turn_id = helper.native_turn_id
+                          AND usage.attributed_action_id =
+                              helper.attributed_action_id
+                      )""",
+                ids,
+            )
+            missing_helper_count = int(
+                missing_helpers["count"] if missing_helpers else 0
+            )
+            unassociated_helpers = self.row(
+                f"""SELECT COUNT(*) AS count FROM action_turn_usage usage
+                    WHERE usage.action_id IS NULL
+                      AND usage.attributed_action_id IS NULL
+                      AND usage.is_helper = 1
+                      AND EXISTS (
+                        SELECT 1 FROM telemetry_helper_threads helper
+                        WHERE helper.native_thread_id = usage.native_thread_id
+                          AND helper.attributed_action_id IN ({marks})
+                      )""",
+                ids,
+            )
+            missing_helper_count = max(
+                missing_helper_count,
+                int(unassociated_helpers["count"] if unassociated_helpers else 0),
+            )
+            if missing_helper_count and coverage in {"complete", "observed"}:
+                coverage = "partial"
+            rendered.append(
+                {
+                    "group_by": group_by,
+                    "group": key,
+                    "action_ids": ids,
+                    "direct": _sum_usage(direct),
+                    "attributed": _sum_usage(attributed),
+                    "coverage": coverage,
+                    "contributing_action_count": len(
+                        {
+                            turn["attributed_action_id"]
+                            for turn in attributed
+                            if turn["attributed_action_id"] is not None
+                        }
+                    ),
+                    "contributing_turn_count": len(attributed),
+                    "direct_action_count": len(
+                        {
+                            turn["action_id"]
+                            for turn in direct
+                            if turn["action_id"] is not None
+                        }
+                    ),
+                    "direct_turn_count": len(direct),
+                    "attributed_action_count": len(
+                        {
+                            turn["attributed_action_id"]
+                            for turn in attributed
+                            if turn["attributed_action_id"] is not None
+                        }
+                    ),
+                    "attributed_turn_count": len(attributed),
+                    "helper_turn_count": sum(
+                        int(turn["is_helper"]) for turn in attributed
+                    ),
+                    "unobserved_helper_count": missing_helper_count,
+                }
+            )
+        unique_turns = {
+            (turn["native_thread_id"], turn["native_turn_id"]): turn
+            for turn in all_turns
+        }
+        return {
+            "filters": {
+                "action_id": action_id,
+                "task_id": task_id,
+                "assignment_id": assignment_id,
+                "run_id": run_id,
+                "role": role,
+                "project_id": project_id,
+            },
+            "group_by": group_by,
+            "groups": rendered,
+            "turns": list(unique_turns.values()),
+        }
+
     def create_operation(
         self,
         kind: str,
@@ -1154,6 +2042,7 @@ class Store:
                 ),
                 "next_attempt_at": action["next_attempt_at"],
             }
+            action["usage"] = self.action_usage_summary(int(action["id"]))
         return {
             "controller_state": self.row(
                 "SELECT value FROM meta WHERE key = 'controller_state'"
@@ -1218,6 +2107,75 @@ def _project_slot_usage(reservations: list[dict[str, Any]]) -> dict[str, int]:
         for project in json.loads(reservation["project_ids"]):
             usage[project] = usage.get(project, 0) + 1
     return usage
+
+
+_USAGE_KEYS: Final = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else None
+    )
+
+
+def _usage_breakdown(value: dict[str, Any]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for key in _USAGE_KEYS:
+        wire_key = "".join(
+            part if index == 0 else part.title()
+            for index, part in enumerate(key.split("_"))
+        )
+        parsed = _nonnegative_int(value.get(wire_key))
+        if parsed is not None:
+            result[key] = parsed
+    return result
+
+
+def _usage_columns(prefix: str) -> tuple[str, ...]:
+    return tuple(
+        (
+            f"{prefix}_{key}"
+            if not (prefix == "total" and key == "total_tokens")
+            else "total_tokens"
+        )
+        for key in _USAGE_KEYS
+    )
+
+
+def _sum_usage(turns: list[dict[str, Any]]) -> dict[str, int | None]:
+    totals: dict[str, int | None] = {}
+    for key in _USAGE_KEYS:
+        column = "total_tokens" if key == "total_tokens" else f"total_{key}"
+        values = [turn.get(column) for turn in turns]
+        known = [int(value) for value in values if value is not None]
+        totals[key] = sum(known) if known else None
+    return totals
+
+
+def _coverage_state(turns: list[dict[str, Any]], *, expected: bool) -> str:
+    if not turns:
+        return "unknown" if expected else "unavailable"
+    states = {str(turn["coverage"]) for turn in turns}
+    if states == {"complete"}:
+        return "complete"
+    if states == {"unknown"}:
+        return "unknown"
+    if states == {"observed"}:
+        return "observed"
+    if states == {"unavailable"}:
+        return "unavailable"
+    if "partial" in states or "unknown" in states or "unavailable" in states:
+        return "partial"
+    return "observed" if "observed" in states else "partial"
 
 
 _SENSITIVE_KEYS: Final = frozenset(

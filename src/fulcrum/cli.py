@@ -58,6 +58,21 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--queue", action="store_true")
     status.add_argument("--capabilities", action="store_true")
     status.add_argument("--run", type=int)
+    usage = commands.add_parser("usage", help="query durable action token usage")
+    usage.add_argument("--action", type=int)
+    usage.add_argument("--task", type=int)
+    usage.add_argument("--assignment", type=int)
+    usage.add_argument("--run", type=int)
+    usage.add_argument(
+        "--role",
+        choices=("archon", "weaver", "executor", "overseer", "sage", "inquisitor"),
+    )
+    usage.add_argument("--project")
+    usage.add_argument(
+        "--group-by",
+        choices=("action", "task", "assignment", "run", "role", "project"),
+        default="action",
+    )
     commands.add_parser(
         "context", help="show the current managed action's authoritative context"
     )
@@ -241,6 +256,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "run": args.run,
                 },
             )
+        elif args.command == "usage":
+            query = {
+                "command": "usage",
+                "action_id": args.action,
+                "task_id": args.task,
+                "assignment_id": args.assignment,
+                "run_id": args.run,
+                "role": args.role,
+                "project_id": args.project,
+                "group_by": args.group_by,
+            }
+            if paths.socket.exists():
+                result = _request(paths, query)
+            else:
+                with Store(paths.database, readonly=True) as store:
+                    result = store.usage_report(
+                        action_id=args.action,
+                        task_id=args.task,
+                        assignment_id=args.assignment,
+                        run_id=args.run,
+                        role=args.role,
+                        project_id=args.project,
+                        group_by=args.group_by,
+                    )
         elif args.command == "context":
             result = _request(paths, {"command": "context"})
         elif args.command == "archon":

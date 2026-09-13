@@ -37,7 +37,7 @@ from fulcrum.lifecycle import (
     observe_action_terminal,
 )
 from fulcrum.scheduling import ready_assignments
-from fulcrum.runtime import AppServerError
+from fulcrum.runtime import AppServerError, thread_facts
 from fulcrum.store import Store, StoreError, utc_now
 from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
@@ -459,6 +459,68 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM external_operations WHERE id = ?", (operation,)
         )
         self.assertEqual(retained["state"], "failed")
+
+    def test_controller_restart_marks_open_usage_partial_without_fabrication(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, native_turn_id, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'active', 'restart-turn', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.bind_action_turn(action_id, "executor", "restart-turn")
+        self.controller.store.observe_turn_usage(
+            {
+                "threadId": "executor",
+                "turnId": "restart-turn",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 5,
+                        "cachedInputTokens": 2,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 1,
+                        "reasoningOutputTokens": 0,
+                        "totalTokens": 6,
+                    }
+                },
+            }
+        )
+
+        self._restart_controller()
+
+        usage = self.controller.store.row(
+            "SELECT * FROM action_turn_usage WHERE native_turn_id = 'restart-turn'"
+        )
+        self.assertEqual(usage["total_tokens"], 6)
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIn("controller restarted", usage["gap_reason"])
+
+    def test_current_collaboration_shape_blocks_terminal_until_helper_finishes(
+        self,
+    ) -> None:
+        thread = {
+            "status": {"type": "idle"},
+            "turns": [
+                {
+                    "id": "turn",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "type": "collabToolCall",
+                            "agentStatus": "running",
+                            "newThreadId": "helper",
+                        }
+                    ],
+                }
+            ],
+        }
+        self.assertFalse(thread_facts(thread)["helpers_terminal"])
+        thread["turns"][0]["items"][0]["agentStatus"] = "completed"
+        self.assertTrue(thread_facts(thread)["helpers_terminal"])
 
     def test_managed_worktree_environment_isolated_from_controller_install(
         self,
@@ -1684,6 +1746,273 @@ print(json.dumps({
             )["state"],
             "canceled",
         )
+
+    async def test_resolved_uncertain_turn_binds_preobserved_usage_immediately(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'uncertain', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.execute(
+            """INSERT INTO reservations(action_id, pair_id, global_slots,
+                   project_ids, state, created_at)
+               VALUES (?, ?, 1, '["p"]', 'uncertain', ?)""",
+            (action_id, self.executor["pair_id"], now),
+        )
+        operation_id = self.controller.store.create_operation(
+            "turn_start",
+            str(action_id),
+            {
+                "thread_id": "executor",
+                "baseline_turn_id": "prior-turn",
+                "prompt": "retained prompt",
+            },
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="turn start response was lost",
+        )
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        self.controller._retain_uncertain_condition(
+            operation, "turn start remained ambiguous after targeted observation"
+        )
+
+        self.controller.store.observe_turn_usage(
+            {
+                "threadId": "executor",
+                "turnId": "resolved-turn",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 8,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 10,
+                    }
+                },
+            }
+        )
+        before = self.controller.store.row(
+            """SELECT action_id, attributed_action_id, coverage
+               FROM action_turn_usage WHERE native_thread_id = 'executor'
+                 AND native_turn_id = 'resolved-turn'"""
+        )
+        self.assertEqual(
+            before,
+            {
+                "action_id": None,
+                "attributed_action_id": None,
+                "coverage": "observed",
+            },
+        )
+        request = {
+            "command": "resolve_operation",
+            "decision": {
+                "operation_id": operation_id,
+                "resolution": "observed_success",
+                "native_id": "resolved-turn",
+                "evidence": "operator inspected the exact native turn identity",
+            },
+        }
+
+        resolved = await self.controller.handle_request(request)
+        replayed = await self.controller.handle_request(request)
+
+        self.assertFalse(resolved["applied_decisions"][0]["reused"])
+        self.assertTrue(replayed["applied_decisions"][0]["reused"])
+        action = self.controller.store.row(
+            "SELECT state, native_turn_id FROM actions WHERE id = ?", (action_id,)
+        )
+        self.assertEqual(action, {"state": "active", "native_turn_id": "resolved-turn"})
+        usage = self.controller.store.row(
+            """SELECT action_id, attributed_action_id, total_tokens, coverage
+               FROM action_turn_usage WHERE native_thread_id = 'executor'
+                 AND native_turn_id = 'resolved-turn'"""
+        )
+        self.assertEqual(
+            usage,
+            {
+                "action_id": action_id,
+                "attributed_action_id": action_id,
+                "total_tokens": 10,
+                "coverage": "observed",
+            },
+        )
+        self.assertEqual(
+            self.controller.store.row("""SELECT COUNT(*) AS count FROM action_turn_usage
+                   WHERE native_thread_id = 'executor'
+                     AND native_turn_id = 'resolved-turn'""")["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.action_usage_summary(action_id),
+            {
+                "direct_total_tokens": 10,
+                "attributed_total_tokens": 10,
+                "coverage": "observed",
+                "turn_count": 1,
+            },
+        )
+        for report in (
+            self.controller.store.usage_report(
+                assignment_id=int(self.assignment["id"]), group_by="assignment"
+            ),
+            self.controller.store.usage_report(
+                run_id=int(self.assignment["run_id"]), group_by="run"
+            ),
+            self.controller.store.usage_report(role="executor", group_by="role"),
+            self.controller.store.usage_report(project_id="p", group_by="project"),
+        ):
+            self.assertEqual(report["groups"][0]["direct"]["total_tokens"], 10)
+            self.assertEqual(report["groups"][0]["attributed"]["total_tokens"], 10)
+
+    async def test_reconcile_repairs_interrupted_resolved_turn_usage_binding(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'uncertain', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.execute(
+            """INSERT INTO reservations(action_id, pair_id, global_slots,
+                   project_ids, state, created_at)
+               VALUES (?, ?, 1, '["p"]', 'uncertain', ?)""",
+            (action_id, self.executor["pair_id"], now),
+        )
+        operation_id = self.controller.store.create_operation(
+            "turn_start",
+            str(action_id),
+            {
+                "thread_id": "executor",
+                "baseline_turn_id": "prior-turn",
+                "prompt": "retained prompt",
+            },
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="turn start response was lost",
+        )
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        self.controller._retain_uncertain_condition(
+            operation, "turn start remained ambiguous after targeted observation"
+        )
+        self.controller.store.observe_turn_usage(
+            {
+                "threadId": "executor",
+                "turnId": "resolved-turn",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 8,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 10,
+                    }
+                },
+            }
+        )
+
+        # Commit the lifecycle mutation directly to model process loss before the
+        # controller command can perform its follow-up usage binding.
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "resolve_operation",
+                        "operation_id": operation_id,
+                        "resolution": "observed_success",
+                        "native_id": "resolved-turn",
+                        "evidence": "operator inspected the exact native turn identity",
+                    }
+                ]
+            },
+        )
+        orphaned = self.controller.store.row(
+            """SELECT action_id, attributed_action_id FROM action_turn_usage
+               WHERE native_thread_id = 'executor'
+                 AND native_turn_id = 'resolved-turn'"""
+        )
+        self.assertEqual(orphaned, {"action_id": None, "attributed_action_id": None})
+
+        self._restart_controller()
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "name": self.executor["title"],
+            "projectId": "codex-p",
+            "status": {"type": "active"},
+            "turns": [{"id": "resolved-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+
+        await self.controller.reconcile()
+        await self.controller.reconcile()
+
+        usage = self.controller.store.row(
+            """SELECT action_id, attributed_action_id, total_tokens,
+                      coverage, gap_reason
+               FROM action_turn_usage WHERE native_thread_id = 'executor'
+                 AND native_turn_id = 'resolved-turn'"""
+        )
+        self.assertEqual(usage["action_id"], action_id)
+        self.assertEqual(usage["attributed_action_id"], action_id)
+        self.assertEqual(usage["total_tokens"], 10)
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIn("controller restarted", usage["gap_reason"])
+        self.assertEqual(
+            self.controller.store.row("""SELECT COUNT(*) AS count FROM action_turn_usage
+                   WHERE native_thread_id = 'executor'
+                     AND native_turn_id = 'resolved-turn'""")["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.action_usage_summary(action_id),
+            {
+                "direct_total_tokens": 10,
+                "attributed_total_tokens": 10,
+                "coverage": "partial",
+                "turn_count": 1,
+            },
+        )
+        for report in (
+            self.controller.store.usage_report(
+                assignment_id=int(self.assignment["id"]), group_by="assignment"
+            ),
+            self.controller.store.usage_report(
+                run_id=int(self.assignment["run_id"]), group_by="run"
+            ),
+            self.controller.store.usage_report(role="executor", group_by="role"),
+            self.controller.store.usage_report(project_id="p", group_by="project"),
+        ):
+            group = report["groups"][0]
+            self.assertEqual(group["direct"]["total_tokens"], 10)
+            self.assertEqual(group["attributed"]["total_tokens"], 10)
+            self.assertEqual(group["coverage"], "partial")
 
     async def test_weaver_registration_binds_the_current_native_turn(self) -> None:
         runtime = AsyncMock()
@@ -3405,6 +3734,33 @@ print(json.dumps({
                             "delta": f"token-{sequence}",
                         },
                     )
+                for sequence in range(1_000):
+                    await self.controller._queue_runtime_event(
+                        "thread/tokenUsage/updated",
+                        {
+                            "threadId": "executor",
+                            "turnId": "turn-stream",
+                            "modelContextWindow": 128_000,
+                            "tokenUsage": {
+                                "last": {
+                                    "inputTokens": 1,
+                                    "cachedInputTokens": 0,
+                                    "cacheWriteInputTokens": 0,
+                                    "outputTokens": 1,
+                                    "reasoningOutputTokens": 0,
+                                    "totalTokens": 2,
+                                },
+                                "total": {
+                                    "inputTokens": sequence,
+                                    "cachedInputTokens": sequence // 2,
+                                    "cacheWriteInputTokens": 0,
+                                    "outputTokens": sequence,
+                                    "reasoningOutputTokens": sequence // 3,
+                                    "totalTokens": sequence * 2,
+                                },
+                            },
+                        },
+                    )
                 for _ in range(1_000):
                     await self.controller._queue_runtime_event(
                         "thread/status/changed",
@@ -3420,6 +3776,26 @@ print(json.dumps({
                 reconcile.assert_not_awaited()
                 advance.assert_not_awaited()
                 runtime.start_turn.assert_awaited_once()
+                retained_usage = self.controller.store.rows(
+                    "SELECT * FROM action_turn_usage WHERE native_turn_id = 'turn-stream'"
+                )
+                self.assertEqual(len(retained_usage), 1)
+                self.assertEqual(retained_usage[0]["total_tokens"], 1998)
+                status_action = next(
+                    item
+                    for item in self.controller.store.status()["actions"]
+                    if item["id"] == decision.action["id"]
+                )
+                self.assertEqual(
+                    set(status_action["usage"]),
+                    {
+                        "direct_total_tokens",
+                        "attributed_total_tokens",
+                        "coverage",
+                        "turn_count",
+                    },
+                )
+                self.assertNotIn("turns", status_action["usage"])
 
                 await self.controller._queue_runtime_event(
                     "turn/completed",
@@ -3662,6 +4038,262 @@ print(json.dumps({
             self.paths.socket.unlink(missing_ok=True)
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_telemetry_path_attributes_collaboration_and_never_advances(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, native_turn_id, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'active', 'parent-turn', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.bind_action_turn(action_id, "executor", "parent-turn")
+        events_before = self.controller.store.row(
+            "SELECT COUNT(*) AS count FROM events"
+        )["count"]
+
+        await self.controller._queue_runtime_event(
+            "item/completed",
+            {
+                "threadId": "executor",
+                "turnId": "parent-turn",
+                "item": {
+                    "id": "collaboration-item",
+                    "type": "collabToolCall",
+                    "tool": "spawn_agent",
+                    "senderThreadId": "executor",
+                    "newThreadId": "helper-thread",
+                },
+            },
+        )
+        self.assertFalse(
+            await self.controller._handle_runtime_event(
+                "turn/started",
+                {"threadId": "helper-thread", "turn": {"id": "helper-turn"}},
+            )
+        )
+        await self.controller._queue_runtime_event(
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "helper-thread",
+                "turnId": "helper-turn",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 8,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 10,
+                    }
+                },
+            },
+        )
+
+        summary = self.controller.store.action_usage_summary(action_id)
+        self.assertEqual(summary["direct_total_tokens"], None)
+        self.assertEqual(summary["attributed_total_tokens"], 10)
+        assignment_rollup = self.controller.store.usage_report(
+            assignment_id=int(self.assignment["id"]), group_by="assignment"
+        )["groups"][0]
+        run_rollup = self.controller.store.usage_report(
+            run_id=int(self.assignment["run_id"]), group_by="run"
+        )["groups"][0]
+        self.assertEqual(assignment_rollup["attributed"]["total_tokens"], 10)
+        self.assertEqual(run_rollup["attributed"]["total_tokens"], 10)
+        self.assertEqual(
+            self.controller.store.row("SELECT COUNT(*) AS count FROM events")["count"],
+            events_before,
+        )
+        self.assertFalse(self.controller.advance_requested.is_set())
+        self.assertFalse(self.controller.mutation_lock.locked())
+        ownership = self.controller.store.row("""SELECT parent_turn_id,
+                      collaboration_item_id, native_turn_id
+               FROM telemetry_helper_threads
+               WHERE native_thread_id = 'helper-thread'""")
+        self.assertEqual(ownership["parent_turn_id"], "parent-turn")
+        self.assertEqual(ownership["collaboration_item_id"], "collaboration-item")
+        self.assertEqual(ownership["native_turn_id"], "helper-turn")
+
+    async def test_terminal_usage_summary_retains_disconnect_gap_and_numeric_counts(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, native_turn_id, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'active', 'terminal-turn', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.bind_action_turn(action_id, "executor", "terminal-turn")
+        await self.controller._queue_runtime_event(
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "executor",
+                "turnId": "terminal-turn",
+                "tokenUsage": {
+                    "total": {
+                        "inputTokens": 12,
+                        "cachedInputTokens": 6,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 3,
+                        "reasoningOutputTokens": 2,
+                        "totalTokens": 15,
+                    }
+                },
+            },
+        )
+        await self.controller._handle_runtime_event(
+            "fulcrum/runtime/disconnected", {"error": "socket lost"}
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "name": self.executor["title"],
+            "projectId": "codex-p",
+            "status": {"type": "idle"},
+            "turns": [{"id": "terminal-turn", "status": "completed", "items": []}],
+        }
+        self.controller.runtime = runtime
+        with patch.object(self.controller, "_dispatch_action", new=AsyncMock()):
+            changed = await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "executor",
+                    "turn": {"id": "terminal-turn", "status": "completed"},
+                },
+            )
+        self.assertTrue(changed)
+        usage = self.controller.store.row(
+            "SELECT * FROM action_turn_usage WHERE native_turn_id = 'terminal-turn'"
+        )
+        self.assertEqual(usage["coverage"], "partial")
+        self.assertIn("socket lost", usage["gap_reason"])
+        event = self.controller.store.row(
+            """SELECT * FROM events WHERE kind = 'action_usage_finalized'
+               AND entity_id = ?""",
+            (str(action_id),),
+        )
+        detail = json.loads(event["detail_json"])
+        self.assertEqual(detail["direct_total_tokens"], 15)
+        self.assertIsInstance(detail["direct_total_tokens"], int)
+
+    async def _assert_reboot_finalizes_terminal_usage(
+        self, mode: str, *, with_usage: bool
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, native_turn_id, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'active', 'reboot-turn', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.bind_action_turn(action_id, "executor", "reboot-turn")
+        if with_usage:
+            self.controller.store.observe_turn_usage(
+                {
+                    "threadId": "executor",
+                    "turnId": "reboot-turn",
+                    "tokenUsage": {
+                        "total": {
+                            "inputTokens": 8,
+                            "cachedInputTokens": 4,
+                            "cacheWriteInputTokens": 0,
+                            "outputTokens": 2,
+                            "reasoningOutputTokens": 1,
+                            "totalTokens": 10,
+                        }
+                    },
+                }
+            )
+
+        executor_reads = 0
+
+        async def read_thread(thread_id: str) -> dict[str, Any]:
+            nonlocal executor_reads
+            task = self.controller.store.row(
+                "SELECT title FROM tasks WHERE native_thread_id = ?", (thread_id,)
+            )
+            assert task is not None
+            if thread_id == "executor":
+                executor_reads += 1
+                running = mode == "hard" and executor_reads == 1
+                return {
+                    "id": thread_id,
+                    "name": task["title"],
+                    "projectId": "codex-p",
+                    "status": {"type": "active" if running else "idle"},
+                    "turns": [
+                        {
+                            "id": "reboot-turn",
+                            "status": "inProgress" if running else "completed",
+                            "items": [],
+                        }
+                    ],
+                }
+            return {
+                "id": thread_id,
+                "name": task["title"],
+                "projectId": "codex-p",
+                "status": {"type": "idle"},
+                "turns": [],
+            }
+
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.read_thread.side_effect = read_thread
+        self.controller.runtime = runtime
+        with (
+            patch.object(
+                self.controller,
+                "_setup_initialize",
+                new=AsyncMock(return_value={"created_tasks": []}),
+            ),
+            patch.object(self.controller, "_ensure_pair", new=AsyncMock()),
+        ):
+            result = await self.controller._begin_reboot(mode)
+            repeated = await self.controller._begin_reboot(mode)
+
+        self.assertTrue(result["complete"])
+        self.assertTrue(repeated["complete"])
+        action = self.controller.store.row(
+            "SELECT state FROM actions WHERE id = ?", (action_id,)
+        )
+        self.assertEqual(action["state"], "canceled")
+        usage = self.controller.store.row(
+            "SELECT total_tokens, coverage, terminal_at FROM action_turn_usage WHERE action_id = ?",
+            (action_id,),
+        )
+        self.assertEqual(usage["total_tokens"], 10 if with_usage else None)
+        self.assertEqual(usage["coverage"], "complete" if with_usage else "unavailable")
+        self.assertIsNotNone(usage["terminal_at"])
+        events = self.controller.store.rows(
+            """SELECT detail_json FROM events WHERE kind = 'action_usage_finalized'
+               AND entity_id = ?""",
+            (str(action_id),),
+        )
+        self.assertEqual(len(events), 1)
+        detail = json.loads(events[0]["detail_json"])
+        self.assertEqual(detail["direct_total_tokens"], 10 if with_usage else None)
+        self.assertLess(len(events[0]["detail_json"]), 512)
+        if mode == "hard":
+            runtime.interrupt.assert_awaited_once_with("executor", "reboot-turn")
+        else:
+            runtime.interrupt.assert_not_awaited()
+
+    async def test_soft_reboot_finalizes_observed_usage_once(self) -> None:
+        await self._assert_reboot_finalizes_terminal_usage("soft", with_usage=True)
+
+    async def test_hard_reboot_finalizes_unavailable_usage_once(self) -> None:
+        await self._assert_reboot_finalizes_terminal_usage("hard", with_usage=False)
 
     async def test_refresh_repairs_idle_runtime_without_current_action(self) -> None:
         self.controller.store.execute(

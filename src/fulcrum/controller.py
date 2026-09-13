@@ -78,6 +78,9 @@ RUNTIME_WORKFLOW_EVENTS: frozenset[str] = frozenset(
         "turn/started",
     }
 )
+RUNTIME_TELEMETRY_EVENTS: frozenset[str] = frozenset(
+    {"thread/tokenUsage/updated", "item/started", "item/completed"}
+)
 MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
 
 
@@ -90,6 +93,9 @@ class Controller:
         self.lock_handle: Any = None
         self.acquire_process_lock()
         self.store = Store(paths.database, event_log=paths.logs_root / "workflow.jsonl")
+        self.store.mark_open_usage_gap(
+            "controller restarted before terminal usage confirmation"
+        )
         self.runtime = CodexRuntime(
             config.app_server_endpoint, event_handler=self._queue_runtime_event
         )
@@ -97,6 +103,7 @@ class Controller:
         self.beads = Beads(paths.brain_root)
         self.events: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
         self.mutation_lock = asyncio.Lock()
+        self.telemetry_lock = asyncio.Lock()
         self.server: asyncio.AbstractServer | None = None
         self.stop_event = asyncio.Event()
         self.advance_requested = asyncio.Event()
@@ -284,11 +291,54 @@ class Controller:
             )
 
     async def _queue_runtime_event(self, method: str, params: dict[str, Any]) -> None:
-        # Item, token, and other observational notifications do not mutate the
-        # workflow. Drop them before they can contend for mutation_lock.
+        # Telemetry is durable but never enters the workflow queue, takes the
+        # workflow mutation lock, logs stream samples, or requests advancement.
+        if method in RUNTIME_TELEMETRY_EVENTS:
+            async with self.telemetry_lock:
+                self._handle_telemetry_event(method, params)
+            return
+        # Other observational notifications do not mutate workflow state.
         if method not in RUNTIME_WORKFLOW_EVENTS:
             return
         await self.events.put((method, params))
+
+    def _handle_telemetry_event(self, method: str, params: dict[str, Any]) -> None:
+        if method == "thread/tokenUsage/updated":
+            self.store.observe_turn_usage(params)
+            return
+        item = params.get("item")
+        if not isinstance(item, dict) or item.get("type") not in {
+            "collabToolCall",
+            "collabAgentToolCall",
+        }:
+            return
+        parent_thread = item.get("senderThreadId") or params.get("threadId")
+        parent_turn = params.get("turnId")
+        collaboration_item = item.get("id")
+        if not isinstance(parent_thread, str):
+            return
+        children: set[str] = set()
+        new_thread = item.get("newThreadId")
+        if isinstance(new_thread, str):
+            children.add(new_thread)
+        receiver = item.get("receiverThreadId")
+        if isinstance(receiver, str) and self.store.row(
+            "SELECT 1 FROM telemetry_helper_threads WHERE native_thread_id = ?",
+            (receiver,),
+        ):
+            children.add(receiver)
+        legacy_states = item.get("agentsStates") or item.get("agents_states")
+        if isinstance(legacy_states, dict):
+            children.update(str(key) for key in legacy_states if isinstance(key, str))
+        for child in children:
+            self.store.observe_helper_thread(
+                parent_thread_id=parent_thread,
+                parent_turn_id=parent_turn if isinstance(parent_turn, str) else None,
+                native_thread_id=child,
+                collaboration_item_id=(
+                    collaboration_item if isinstance(collaboration_item, str) else None
+                ),
+            )
 
     async def _event_loop(self) -> None:
         while True:
@@ -335,6 +385,9 @@ class Controller:
         """
         if method == "fulcrum/runtime/disconnected":
             self.starts_enabled = False
+            self.store.mark_open_usage_gap(
+                str(params.get("error") or "app-server disconnected during turn")
+            )
             self.store.execute(
                 "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0') ON CONFLICT(key) DO UPDATE SET value = '0'"
             )
@@ -352,6 +405,13 @@ class Controller:
             "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
         )
         if task is None:
+            if method in {"turn/started", "turn/completed"}:
+                turn = params.get("turn")
+                turn_id = turn.get("id") if isinstance(turn, dict) else None
+                if isinstance(turn_id, str):
+                    self.store.observe_helper_turn_started(thread_id, turn_id)
+                    if method == "turn/completed":
+                        self.store.finalize_native_turn_usage(thread_id, turn_id)
             return False
         if task["archived"] and method not in {"thread/archived", "thread/unarchived"}:
             return False
@@ -379,6 +439,7 @@ class Controller:
                     "UPDATE actions SET state = 'active', native_turn_id = ?, updated_at = ? WHERE id = ?",
                     (turn_id, timestamp, action["id"]),
                 )
+                self.store.bind_action_turn(int(action["id"]), thread_id, turn_id)
         elif method == "thread/status/changed":
             raw_status = params.get("status")
             status = (
@@ -452,6 +513,7 @@ class Controller:
                 )
                 if not captured:
                     return True
+            self._finalize_action_usage(int(action["id"]))
             result = observe_action_terminal(
                 self.store, int(action["id"]), runtime_state=observed_status
             )
@@ -479,6 +541,20 @@ class Controller:
         else:
             return False
         return True
+
+    def _finalize_action_usage(self, action_id: int) -> dict[str, Any]:
+        """Finalize one action snapshot and emit its bounded summary once."""
+
+        usage_summary = self.store.finalize_action_usage(action_id)
+        if usage_summary.pop("_newly_finalized", False):
+            self.store.event(
+                "action_usage_finalized",
+                "retained terminal token-usage summary",
+                entity_type="action",
+                entity_id=action_id,
+                detail=usage_summary,
+            )
+        return usage_summary
 
     def _adopt_unbound_weaver_turn(
         self,
@@ -539,6 +615,13 @@ class Controller:
         )
         if cursor.rowcount != 1:
             return None
+        task = self.store.row(
+            "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
+        )
+        assert task is not None
+        self.store.bind_action_turn(
+            int(action["id"]), task["native_thread_id"], turn_id
+        )
         self.store.event(
             "weaver_turn_adopted",
             f"adopted native turn {turn_id}",
@@ -692,6 +775,7 @@ class Controller:
         started = time.monotonic()
         self.store.event("reconciliation_started", "reconciliation pass started")
         self._reconcile_assignment_completions()
+        self._repair_action_usage_bindings()
         if not self.runtime.ready:
             self.store.event(
                 "reconciliation_skipped",
@@ -745,6 +829,7 @@ class Controller:
                             int(action["assignment_id"])
                         )
                     if candidate_ready:
+                        self._finalize_action_usage(int(action["id"]))
                         result = observe_action_terminal(
                             self.store,
                             int(action["id"]),
@@ -803,6 +888,28 @@ class Controller:
                 "violations": violations,
             },
         )
+
+    def _repair_action_usage_bindings(self) -> None:
+        """Restore exact active action/turn usage links after interruption."""
+
+        actions = self.store.rows("""SELECT a.id, a.native_turn_id, t.native_thread_id
+               FROM actions a JOIN tasks t ON t.id = a.task_id
+               WHERE a.native_turn_id IS NOT NULL
+                 AND (a.state IN ('starting','active','terminal','uncertain') OR
+                      (a.state = 'failed' AND a.outcome_kind IS NOT NULL
+                       AND a.condition LIKE 'runtime turn %'))
+                 AND NOT EXISTS (
+                   SELECT 1 FROM action_turn_usage usage
+                   WHERE usage.native_thread_id = t.native_thread_id
+                     AND usage.native_turn_id = a.native_turn_id
+                     AND usage.action_id = a.id
+                 )""")
+        for action in actions:
+            self.store.bind_action_turn(
+                int(action["id"]),
+                str(action["native_thread_id"]),
+                str(action["native_turn_id"]),
+            )
 
     def _normalize_unowned_tasks(self) -> None:
         """Return terminal tasks without a current action to their idle state."""
@@ -1108,6 +1215,9 @@ class Controller:
             self.store.execute(
                 "UPDATE actions SET state = 'active', native_turn_id = ?, condition = NULL, updated_at = ? WHERE id = ?",
                 (turn_id, utc_now(), action["id"]),
+            )
+            self.store.bind_action_turn(
+                int(action["id"]), str(inputs["thread_id"]), str(turn_id)
             )
             self.store.execute(
                 "UPDATE reservations SET state = 'active' WHERE action_id = ?",
@@ -2445,6 +2555,9 @@ class Controller:
                 "UPDATE actions SET state = 'active', native_turn_id = ?, next_attempt_at = NULL, condition = NULL, updated_at = ? WHERE id = ?",
                 (turn_id, utc_now(), action["id"]),
             )
+            self.store.bind_action_turn(
+                int(action["id"]), str(task["native_thread_id"]), turn_id
+            )
             self.store.execute(
                 "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
                 (utc_now(), task["id"]),
@@ -3465,6 +3578,24 @@ class Controller:
                     "policies": status["policies"],
                 }
             return status
+        if command == "usage":
+            return self.store.usage_report(
+                action_id=_optional_int(request.get("action_id")),
+                task_id=_optional_int(request.get("task_id")),
+                assignment_id=_optional_int(request.get("assignment_id")),
+                run_id=_optional_int(request.get("run_id")),
+                role=(
+                    request.get("role")
+                    if isinstance(request.get("role"), str)
+                    else None
+                ),
+                project_id=(
+                    request.get("project_id")
+                    if isinstance(request.get("project_id"), str)
+                    else None
+                ),
+                group_by=str(request.get("group_by") or "action"),
+            )
         if command == "context":
             thread_id = _thread_identity(request)
             action = self.store.current_action(thread_id)
@@ -3511,6 +3642,24 @@ class Controller:
                 self.store,
                 {"decisions": [decision]},
             )
+            if decision.get("resolution") == "observed_success":
+                operation = self.store.row(
+                    "SELECT kind, target FROM external_operations WHERE id = ?",
+                    (decision.get("operation_id"),),
+                )
+                if operation is not None and operation["kind"] == "turn_start":
+                    action = self.store.row(
+                        """SELECT a.id, a.native_turn_id, t.native_thread_id
+                           FROM actions a JOIN tasks t ON t.id = a.task_id
+                           WHERE a.id = ?""",
+                        (int(operation["target"]),),
+                    )
+                    if action is not None and isinstance(action["native_turn_id"], str):
+                        self.store.bind_action_turn(
+                            int(action["id"]),
+                            str(action["native_thread_id"]),
+                            str(action["native_turn_id"]),
+                        )
             self._update_readiness()
             return result
         if command == "intake":
@@ -3640,6 +3789,10 @@ class Controller:
                 existing = self.store.row(
                     "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
                 )
+                if isinstance(facts["last_turn_id"], str):
+                    self.store.bind_action_turn(
+                        int(cursor.lastrowid), thread_id, facts["last_turn_id"]
+                    )
             elif existing["native_turn_id"] is None:
                 self._adopt_unbound_weaver_turn(int(task["id"]), facts)
         self.store.execute(
@@ -4867,7 +5020,7 @@ class Controller:
                     "truncated": len(reports) > 20,
                     "selection": "same role and retained scope",
                 },
-                "missing": "Native Codex histories, complete Tollgate logs, token/latency telemetry and existing Beads are not automatically included; inspect relevant durable sources or report gaps.",
+                "missing": "Native Codex histories, complete Tollgate logs, latency telemetry and existing Beads are not automatically included; token usage is included when observed, with explicit coverage gaps.",
             },
             "assignments": assignments[:100],
             "event_counts": event_counts,
@@ -5226,9 +5379,16 @@ class Controller:
         candidates = self.store.rows(
             "SELECT * FROM tasks WHERE state NOT IN ('retired','archived')"
         )
+        confirmed_terminal_turns: dict[int, str] = {}
         for task in candidates:
             try:
-                await self._refresh_task(task)
+                facts = await self._refresh_task(task)
+                if (
+                    facts["last_turn_terminal"]
+                    and facts["helpers_terminal"]
+                    and isinstance(facts["last_turn_id"], str)
+                ):
+                    confirmed_terminal_turns[int(task["id"])] = facts["last_turn_id"]
             except AppServerError:
                 pass
         active = self.store.rows(
@@ -5269,10 +5429,21 @@ class Controller:
                         "mode": mode,
                         "condition": "waiting for confirmed turn/helper termination",
                     }
+                if isinstance(facts["last_turn_id"], str):
+                    confirmed_terminal_turns[int(task["id"])] = facts["last_turn_id"]
         if mode == "reset":
             reset_exceptions = await self._reset_state(record)
         else:
             reset_exceptions = []
+            for action in self.store.rows(
+                """SELECT id, task_id, native_turn_id FROM actions
+                   WHERE state NOT IN ('processed','canceled')
+                     AND native_turn_id IS NOT NULL"""
+            ):
+                if confirmed_terminal_turns.get(int(action["task_id"])) == action.get(
+                    "native_turn_id"
+                ):
+                    self._finalize_action_usage(int(action["id"]))
             self.store.execute(
                 "DELETE FROM reservations WHERE action_id IN (SELECT id FROM actions WHERE state NOT IN ('processed','canceled'))"
             )
@@ -5784,6 +5955,10 @@ def _contains_id(value: Any, identifier: str) -> bool:
     if isinstance(value, list):
         return any(_contains_id(child, identifier) for child in value)
     return False
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 async def run_controller(paths: RuntimePaths, config: InstallationConfig) -> None:

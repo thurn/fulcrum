@@ -411,16 +411,36 @@ def thread_facts(thread: dict[str, Any]) -> dict[str, Any]:
         for item in (
             last.get("items", []) if isinstance(last.get("items"), list) else []
         ):
-            if not isinstance(item, dict) or item.get("type") != "collabAgentToolCall":
+            if not isinstance(item, dict) or item.get("type") not in {
+                "collabToolCall",
+                "collabAgentToolCall",
+            }:
                 continue
             states = item.get("agentsStates") or item.get("agents_states") or {}
             if isinstance(states, dict):
-                helpers_terminal = all(
-                    isinstance(value, dict)
-                    and value.get("status")
-                    in {"completed", "errored", "interrupted", "shutdown", "notFound"}
-                    for value in states.values()
-                )
+                if states:
+                    helpers_terminal = helpers_terminal and all(
+                        isinstance(value, dict)
+                        and value.get("status")
+                        in {
+                            "completed",
+                            "errored",
+                            "interrupted",
+                            "shutdown",
+                            "notFound",
+                        }
+                        for value in states.values()
+                    )
+                else:
+                    agent_status = item.get("agentStatus")
+                    if isinstance(agent_status, str):
+                        helpers_terminal = helpers_terminal and agent_status in {
+                            "completed",
+                            "errored",
+                            "interrupted",
+                            "shutdown",
+                            "notFound",
+                        }
     terminal = last is None or last.get("status") in {
         "completed",
         "failed",
