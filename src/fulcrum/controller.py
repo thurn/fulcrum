@@ -3468,11 +3468,15 @@ class Controller:
 
     async def _register_weaver(self, request: dict[str, Any]) -> dict[str, Any]:
         thread_id = _thread_identity(request)
+        raw_description = request.get("description")
+        if not isinstance(raw_description, str) or not raw_description.strip():
+            raise StoreError("weaver registration requires a nonempty description")
+        description = raw_description.strip()
         project_id = request.get("project") or self._infer_project(thread_id)
         task = self.store.register_task(
             native_thread_id=thread_id,
             role="weaver",
-            description=str(request.get("description") or "Task intake"),
+            description=description,
             model=str(request.get("model") or "gpt-5.6-sol"),
             reasoning_effort=str(request.get("effort") or "high"),
             project_id=project_id,

@@ -160,12 +160,14 @@ Open a new Codex task rooted in an enrolled repository and invoke the installed
 also ask the task to run it explicitly:
 
 ```sh
-fulcrum weaver register --project fulcrum
+fulcrum weaver register --project fulcrum --description 'Fix empty search results'
 ```
 
 Registration binds and names the current conversation and returns its authoring
-instructions. Describe the desired outcome in that conversation. Weaver will ask
-only material questions, inspect the repository as needed, and file the result.
+instructions. The description is required and becomes the task-specific suffix in
+the conversation name. Describe the desired outcome in that conversation. Weaver
+will ask only material questions, inspect the repository as needed, and file the
+result.
 For a small request, the underlying intake is equivalent to:
 
 ```sh

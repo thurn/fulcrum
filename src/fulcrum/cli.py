@@ -19,6 +19,13 @@ from fulcrum.setup import run_setup
 from fulcrum.store import Store
 
 
+def _nonempty_description(value: str) -> str:
+    description = value.strip()
+    if not description:
+        raise argparse.ArgumentTypeError("description must not be empty")
+    return description
+
+
 def _thread_id() -> str | None:
     for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TASK_ID"):
         value = os.environ.get(name)
@@ -74,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     weaver_sub = weaver.add_subparsers(dest="weaver_command", required=True)
     register = weaver_sub.add_parser("register")
     register.add_argument("--project")
-    register.add_argument("--description", default="Task intake")
+    register.add_argument("--description", required=True, type=_nonempty_description)
     register.add_argument("--model", default="gpt-5.6-sol")
     register.add_argument("--effort", default="high")
     register.add_argument("--plan-mode", action="store_true")

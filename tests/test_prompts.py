@@ -366,6 +366,28 @@ class PromptsTest(unittest.TestCase):
     def test_cli_has_no_instruction_fetch_interface(self) -> None:
         self.assertNotIn("instructions", build_parser().format_help())
 
+    def test_weaver_registration_requires_a_nonempty_description(self) -> None:
+        parser = build_parser()
+        for arguments in (
+            ["weaver", "register"],
+            ["weaver", "register", "--description", "   "],
+        ):
+            with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
+                parser.parse_args(arguments)
+
+        description = "Explain $(touch /tmp/not-run); quotes ' and `ticks`"
+        args = parser.parse_args(
+            [
+                "weaver",
+                "register",
+                "--description",
+                description,
+                "--plan-mode",
+            ]
+        )
+        self.assertEqual(args.description, description)
+        self.assertTrue(args.plan_mode)
+
     def test_role_creation_exposes_optional_context_recovery(self) -> None:
         for action_kind, role in (
             ("archon", "archon"),

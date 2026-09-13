@@ -1656,11 +1656,119 @@ print(json.dumps({
                    (SELECT id FROM tasks WHERE native_thread_id = ?)""",
             ("weaver-thread",),
         )
+        task = self.controller.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", ("weaver-thread",)
+        )
         self.assertEqual(action["native_turn_id"], "weaver-turn")
         self.assertEqual(result["thread_id"], "weaver-thread")
+        self.assertEqual(task["description"], "File a task")
+        self.assertEqual(task["title"], "🧵 [WVR0001] File a task")
+        self.assertEqual(result["title"], task["title"])
+        self.assertIn(
+            ("weaver-thread", task["title"]),
+            [call.args for call in runtime.set_name.await_args_list],
+        )
         runtime.assign_thread_project.assert_awaited_once_with(
             "weaver-thread", "codex-p"
         )
+
+    async def test_weaver_registration_rejects_missing_and_empty_descriptions(
+        self,
+    ) -> None:
+        self.controller.runtime = AsyncMock()
+
+        for description in (None, "", " \t\n "):
+            request = {
+                "thread_id": "invalid-weaver",
+                "project": "p",
+                "writable": True,
+            }
+            if description is not None:
+                request["description"] = description
+            with (
+                self.subTest(description=description),
+                self.assertRaisesRegex(StoreError, "nonempty description"),
+            ):
+                await self.controller._register_weaver(request)
+
+        self.assertIsNone(
+            self.controller.store.row("SELECT * FROM tasks WHERE role = 'weaver'")
+        )
+        self.controller.runtime.set_name.assert_not_awaited()
+
+    async def test_plan_mode_weaver_registration_retains_name_without_action(
+        self,
+    ) -> None:
+        title = "🧵 [WVR0001] Plan safer authentication"
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "planning-weaver",
+            "name": title,
+            "projectId": "codex-p",
+            "status": {"type": "active"},
+            "turns": [{"id": "planning-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+
+        result = await self.controller._register_weaver(
+            {
+                "thread_id": "planning-weaver",
+                "project": "p",
+                "description": "Plan safer authentication",
+                "writable": False,
+            }
+        )
+
+        task = self.controller.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", ("planning-weaver",)
+        )
+        self.assertEqual(task["description"], "Plan safer authentication")
+        self.assertEqual(task["title"], title)
+        self.assertEqual(result["title"], title)
+        self.assertIn("do not publish or call finish", result["instructions"])
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT * FROM actions WHERE task_id = ?", (task["id"],)
+            )
+        )
+        runtime.set_name.assert_awaited_once_with("planning-weaver", title)
+
+    async def test_weaver_registration_retry_keeps_original_task_and_action(
+        self,
+    ) -> None:
+        title = "🧵 [WVR0001] Diagnose flaky checkout"
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "retry-weaver",
+            "name": title,
+            "projectId": "codex-p",
+            "status": {"type": "active"},
+            "turns": [{"id": "retry-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+        initial_request = {
+            "thread_id": "retry-weaver",
+            "project": "p",
+            "description": "Diagnose flaky checkout",
+            "writable": True,
+        }
+
+        first = await self.controller._register_weaver(initial_request)
+        second = await self.controller._register_weaver(
+            {**initial_request, "description": "A changed retry description"}
+        )
+
+        tasks = self.controller.store.rows(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", ("retry-weaver",)
+        )
+        actions = self.controller.store.rows(
+            "SELECT * FROM actions WHERE task_id = ?", (tasks[0]["id"],)
+        )
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(tasks[0]["description"], "Diagnose flaky checkout")
+        self.assertEqual(first["title"], title)
+        self.assertEqual(second["title"], title)
 
     async def test_project_verification_replaces_a_mismatched_saved_identity(
         self,
