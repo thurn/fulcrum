@@ -16,8 +16,7 @@ retried with bounded backoff; exhausted retries become explicit holds.
 Relevant events advance work immediately. Due timers cover recurring specialists,
 interviews, liveness checks, and retryable Python operations. A non-overlapping
 fallback reconciliation runs every 30 seconds alongside a supervised advancement
-worker. Agent turns are inspected after
-the configured 1,800 seconds by default; the threshold creates one evidence-backed
+worker. By default, agent turns are inspected after 1,800 seconds; the threshold creates one evidence-backed
 possible-stall condition and never interrupts automatically.
 
 Command responses are isolated from later advancement. A successful intake returns
