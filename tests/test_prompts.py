@@ -309,6 +309,28 @@ class PromptsTest(unittest.TestCase):
         self.assertIn("fulcrum intake --input -", text)
         self.assertIn("single-quoted shell heredoc", text)
         self.assertNotIn('fulcrum intake --title "..."', text)
+        self.assertNotIn("Subsequent messages contain the actual request", text)
+        self.assertIn(
+            'Interpret requests such as "fix this," "change this," or "please revise this file"',
+            text,
+        )
+        self.assertIn(
+            "Imperative wording does\nnot authorize you to edit source files", text
+        )
+        self.assertIn("run exactly one command", text)
+        self.assertLess(
+            text.index("fulcrum finish intake_complete"),
+            text.index("fulcrum finish future_plan"),
+        )
+        self.assertLess(
+            text.index("fulcrum finish future_plan"),
+            text.index("fulcrum finish blocked"),
+        )
+        self.assertIn(
+            "For future_plan only, --evidence is the absolute path to the saved plan",
+            text,
+        )
+        self.assertIn("intake_complete and blocked do not use an evidence file", text)
 
         args = build_parser().parse_args(["intake", "--input", "-"])
         with patch("sys.stdin", io.StringIO('{"title":"Use `code` safely"}')):

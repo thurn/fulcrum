@@ -405,9 +405,15 @@ def finish_contract(action_kind: str, *, interviews_allowed: bool = True) -> str
             "activation: future only with a nonempty deferral_reason explaining explicit "
             "deferral authority. identity is a descriptive problem key, not a hash."
         )
-    if action_kind in {"implement", "correct", "weaver"}:
+    if action_kind in {"implement", "correct"}:
         lines.append(
             "--evidence names an absolute path to a readable text file containing the authored evidence; no JSON wrapper is needed."
+        )
+    if action_kind == "weaver":
+        lines.append(
+            "For future_plan only, --evidence is the absolute path to the saved "
+            "plan document; do not wrap the plan in JSON. intake_complete and "
+            "blocked do not use an evidence file."
         )
     return "\n\n".join(lines)
 
@@ -478,6 +484,20 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
     }
     if action_kind not in ALLOWED:
         raise OutcomeError(f"unknown action kind: {action_kind}")
+    if action_kind == "weaver":
+        return "\n\n".join(
+            [
+                "When writable authoring ends, run exactly one command:",
+                "Task intake succeeded: every requested task or active plan task "
+                "is retained.\n`fulcrum finish intake_complete`",
+                "Future plan succeeded: the approved plan was saved and explicitly "
+                "deferred.\n`fulcrum finish future_plan --evidence "
+                '"/absolute/path/to/plan.md"`',
+                "Authoring is blocked: required scope or evidence is unavailable.\n"
+                '`fulcrum finish blocked --reason "Observed blocker and decision '
+                'needed"`',
+            ]
+        )
     rows = []
     for outcome, (arguments, purpose) in commands.items():
         if outcome not in ALLOWED[action_kind] or (

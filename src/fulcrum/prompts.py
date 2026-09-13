@@ -424,7 +424,16 @@ def weaver_instructions(*, plan_mode: bool, project: str) -> str:
             f"Project: {project}. Planning turn: inspect and propose; do not publish or call finish.\n\n"
             + load_template("weaver", role="weaver")
         )
-    return (
-        f"Project: {project}. Complete the requested writable authoring work.\n\n"
-        + role_instructions("weaver", role="weaver")
+    return "\n\n".join(
+        [
+            f"Project: {project}. Complete the requested writable authoring work.",
+            load_template("weaver", role="weaver"),
+            "The human's request is input to the authoring path above, even when "
+            "phrased as a command to change the project. Use supplied facts "
+            "directly. Wait for any required native helper reviews before "
+            "submitting. If a finish command fails, correct the reported error "
+            "and retry that same outcome.",
+            finish_contract("weaver"),
+            finish_syntax("weaver"),
+        ]
     )
