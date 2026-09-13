@@ -1812,6 +1812,13 @@ print(json.dumps({
 
         runtime.resume_thread.assert_awaited_once_with("executor")
         runtime.start_turn.assert_awaited_once()
+        self.assertEqual(
+            runtime.start_turn.await_args.kwargs["cwd"], str(self.worktree)
+        )
+        self.assertEqual(
+            runtime.start_turn.await_args.kwargs["workspace_root"],
+            self.config.source_root,
+        )
 
     async def test_source_refresh_is_consumed_before_lock_handoff(self) -> None:
         self.controller.store.execute(
@@ -2293,7 +2300,7 @@ print(json.dumps({
             self.assertEqual(retained["executor_task_id"], executor["id"])
             self.assertIsNone(retained["overseer_task_id"])
             provision.assert_awaited_once()
-            self.assertEqual(provision.await_args.kwargs["cwd"], str(self.worktree))
+            self.assertNotIn("cwd", provision.await_args.kwargs)
 
             assignment.update(retained)
             await self.controller._ensure_pair(assignment, include_overseer=True)
@@ -2303,7 +2310,44 @@ print(json.dumps({
         self.assertEqual(retained["overseer_task_id"], overseer["id"])
         self.assertEqual(provision.await_count, 2)
         self.assertEqual(provision.await_args.kwargs["role"], "overseer")
-        self.assertEqual(provision.await_args.kwargs["cwd"], str(self.worktree))
+        self.assertNotIn("cwd", provision.await_args.kwargs)
+
+    async def test_worker_thread_is_created_at_the_canonical_project_root(
+        self,
+    ) -> None:
+        runtime = AsyncMock()
+        runtime.create_thread.return_value = {
+            "thread": {
+                "id": "canonical-executor",
+                "projectId": "codex-p",
+            }
+        }
+        self.controller.runtime = runtime
+        project = self.controller.store.row(
+            "SELECT * FROM projects WHERE project_id = 'p'"
+        )
+
+        await self.controller._provision_task(
+            role="executor",
+            description="Canonical creation context",
+            project=project,
+            model="sol",
+            effort="high",
+        )
+
+        runtime.create_thread.assert_awaited_once_with(
+            cwd=self.config.source_root,
+            workspace_root=self.config.source_root,
+            model="sol",
+            project_id="codex-p",
+        )
+        operation = self.controller.store.row(
+            """SELECT input_json FROM external_operations
+               WHERE kind = 'thread_start' AND native_id = 'canonical-executor'"""
+        )
+        self.assertEqual(
+            json.loads(operation["input_json"])["cwd"], self.config.source_root
+        )
 
     async def test_dispatch_sends_scope_candidate_and_evidence_inline(
         self,
@@ -2376,6 +2420,7 @@ print(json.dumps({
         self.assertIn("You are Overseer", prompt)
         self.assertIn("# Current action", prompt)
         self.assertNotIn("--section", prompt)
+        self.assertEqual(start.await_args.kwargs["cwd"], self.config.source_root)
 
     async def test_archon_batch_dispatch_contains_actual_proposal(self) -> None:
         self.controller.store.register_task(

@@ -1631,7 +1631,6 @@ class Controller:
             model=bead["executor_model"],
             effort=bead["executor_reasoning_effort"],
             pair_id=int(assignment["run_id"]),
-            cwd=str(assignment["worktree_path"]),
         )
         if include_overseer and overseer is None:
             overseer = await self._provision_task(
@@ -1641,7 +1640,6 @@ class Controller:
                 model=bead["overseer_model"],
                 effort=bead["overseer_reasoning_effort"],
                 pair_id=int(assignment["run_id"]),
-                cwd=str(assignment["worktree_path"]),
             )
         self.store.execute(
             "UPDATE runs SET executor_task_id = ?, overseer_task_id = ?, state = 'active', updated_at = ? WHERE id = ?",
@@ -1739,7 +1737,6 @@ class Controller:
         model: str,
         effort: str,
         pair_id: int | None = None,
-        cwd: str | None = None,
         succession_task_id: int | None = None,
     ) -> dict[str, Any]:
         if role == "archon":
@@ -1754,7 +1751,7 @@ class Controller:
             "description": description,
             "project_id": project["codex_project_id"],
             "local_project_id": project["project_id"],
-            "cwd": cwd or project["repo_path"],
+            "cwd": project["repo_path"],
             "model": model,
             "effort": effort,
             "pair_id": pair_id,
