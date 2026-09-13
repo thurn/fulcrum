@@ -6,6 +6,8 @@ installer. First use asks only for missing brain, project, validation, and Archo
 model choices. `--config <absolute-json> --non-interactive` supplies the same
 fields unattended.
 
+Setup owns both background services; users do not start the app-server or controller manually.
+
 Static configuration is stored at `~/Library/Application Support/Fulcrum/config.json`
 unless `FULCRUM_CONFIG` selects another environment. It contains source, brain,
 state, Codex, desktop, endpoint, model, and enrolled-project connection facts.
