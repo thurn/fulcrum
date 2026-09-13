@@ -79,7 +79,12 @@ RUNTIME_WORKFLOW_EVENTS: frozenset[str] = frozenset(
     }
 )
 RUNTIME_TELEMETRY_EVENTS: frozenset[str] = frozenset(
-    {"thread/tokenUsage/updated", "item/started", "item/completed"}
+    {
+        "thread/tokenUsage/updated",
+        "model/rerouted",
+        "item/started",
+        "item/completed",
+    }
 )
 MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
 
@@ -306,16 +311,67 @@ class Controller:
         if method == "thread/tokenUsage/updated":
             self.store.observe_turn_usage(params)
             return
+        if method == "model/rerouted":
+            self.store.observe_model_reroute(params)
+            return
         item = params.get("item")
-        if not isinstance(item, dict) or item.get("type") not in {
-            "collabToolCall",
-            "collabAgentToolCall",
-        }:
+        if not isinstance(item, dict):
             return
         parent_thread = item.get("senderThreadId") or params.get("threadId")
         parent_turn = params.get("turnId")
         collaboration_item = item.get("id")
         if not isinstance(parent_thread, str):
+            return
+        pricing = item.get("publicPricing")
+        if (
+            method == "item/completed"
+            and isinstance(item.get("id"), str)
+            and isinstance(parent_turn, str)
+        ):
+            owner = self.store.row(
+                """SELECT action_id, attributed_action_id
+                   FROM action_turn_usage
+                   WHERE native_thread_id = ? AND native_turn_id = ?""",
+                (parent_thread, parent_turn),
+            )
+            owner_id = int(owner["action_id"]) if owner and owner["action_id"] else None
+            attributed_owner_id = (
+                int(owner["attributed_action_id"])
+                if owner and owner["attributed_action_id"]
+                else owner_id
+            )
+            source_key = f"tool-call:{parent_thread}:{parent_turn}:{item['id']}"
+            if item.get("type") == "webSearch":
+                self.store.record_observed_tool(
+                    source_key=source_key,
+                    tool_name="web_search",
+                    native_thread_id=parent_thread,
+                    native_turn_id=parent_turn,
+                    action_id=owner_id,
+                    attributed_action_id=attributed_owner_id,
+                )
+            elif isinstance(pricing, dict):
+                self.store.record_tool_cost(
+                    source_key=source_key,
+                    tool_name=str(item.get("tool") or item.get("name") or item["type"]),
+                    quantity=pricing.get("quantity", 1),
+                    unit=str(pricing.get("unit") or "call"),
+                    unit_rate=(
+                        str(pricing["unitRate"])
+                        if pricing.get("unitRate") is not None
+                        else None
+                    ),
+                    source_url=(
+                        str(pricing["sourceUrl"])
+                        if pricing.get("sourceUrl") is not None
+                        else None
+                    ),
+                    native_thread_id=parent_thread,
+                    native_turn_id=parent_turn,
+                    action_id=owner_id,
+                    attributed_action_id=attributed_owner_id,
+                )
+        if item.get("type") not in {"collabToolCall", "collabAgentToolCall"}:
             return
         children: set[str] = set()
         new_thread = item.get("newThreadId")
@@ -517,6 +573,7 @@ class Controller:
             result = observe_action_terminal(
                 self.store, int(action["id"]), runtime_state=observed_status
             )
+            self._finalize_completed_workflows_for_archon(int(action["id"]))
             if result.get("reminder"):
                 action["reminder_sent"] = 1
                 self.store.execute(
@@ -554,7 +611,85 @@ class Controller:
                 entity_id=action_id,
                 detail=usage_summary,
             )
+            cost_summary = self.store.action_cost_summary(action_id)
+            self.store.event(
+                (
+                    "action_cost_computed"
+                    if cost_summary["coverage"] == "complete"
+                    else "action_cost_partial"
+                ),
+                "froze terminal API-equivalent cost estimate",
+                entity_type="action",
+                entity_id=action_id,
+                detail=cost_summary,
+            )
         return usage_summary
+
+    def _finalize_completed_workflows_for_archon(self, action_id: int) -> None:
+        action = self.store.row(
+            "SELECT kind, payload, state FROM actions WHERE id = ?", (action_id,)
+        )
+        if (
+            action is None
+            or action["kind"] != "archon"
+            or action["state"] != "processed"
+        ):
+            return
+        payload = json.loads(action["payload"] or "{}")
+        completion_workflows: set[str] = set()
+        for item in payload.get("batch_items", []):
+            content = item.get("content", {}) if isinstance(item, dict) else {}
+            if not isinstance(content, dict) or content.get("kind") not in {
+                "assignment_completed",
+                "specialist_completed",
+            }:
+                continue
+            completion_workflows.update(self._workflow_ids_for_update(content))
+        if not completion_workflows:
+            return
+        workflows = self.store.rows(
+            """SELECT workflow_id, include_cost, exclusion_reason
+               FROM workflow_cost_actions WHERE action_id = ?""",
+            (action_id,),
+        )
+        linked = {str(item["workflow_id"]): item for item in workflows}
+        for workflow_id in sorted(completion_workflows):
+            item = linked.get(workflow_id)
+            if item is None:
+                continue
+            unfinished = self.store.row(
+                """SELECT 1 FROM workflow_cost_beads bead
+                   WHERE bead.workflow_id = ? AND NOT EXISTS (
+                     SELECT 1 FROM assignments assignment
+                     WHERE assignment.bead_id = bead.bead_id
+                       AND assignment.stage = 'completed') LIMIT 1""",
+                (workflow_id,),
+            )
+            if unfinished is not None:
+                continue
+            report = self.store.finalize_workflow_cost(workflow_id)
+            if not report.pop("_newly_finalized", False):
+                continue
+            group = report["groups"][0] if report["groups"] else {}
+            includes_acknowledgement = bool(item["include_cost"])
+            self.store.event(
+                "workflow_cost_finalized",
+                "froze all-in API-equivalent workflow cost after acknowledgement",
+                entity_type="workflow",
+                entity_id=workflow_id,
+                detail={
+                    "amount": report.get("frozen_amount"),
+                    "display": (group.get("attributed") or {}).get("display"),
+                    "coverage": group.get("coverage", "partial"),
+                    "acknowledgement_action_id": action_id,
+                    "includes_acknowledgement_action": includes_acknowledgement,
+                    "acknowledgement_exclusion": (
+                        None
+                        if includes_acknowledgement
+                        else item.get("exclusion_reason")
+                    ),
+                },
+            )
 
     def _adopt_unbound_weaver_turn(
         self,
@@ -835,6 +970,7 @@ class Controller:
                             int(action["id"]),
                             runtime_state=str(facts["last_turn_status"] or "completed"),
                         )
+                        self._finalize_completed_workflows_for_archon(int(action["id"]))
                         if result.get("reminder") and self.starts_enabled:
                             self.store.execute(
                                 "UPDATE actions SET state = 'pending', updated_at = ? WHERE id = ?",
@@ -1641,6 +1777,8 @@ class Controller:
                     "target": operation["target"],
                     "condition": condition,
                     "hold_id": hold_id,
+                    "target_type": target_type,
+                    "target_id": target_id,
                     "required_decision": "resolve_operation",
                     "resolutions": [
                         "observed_success",
@@ -2453,6 +2591,57 @@ class Controller:
                 "SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id WHERE a.id = ?",
                 (action["assignment_id"],),
             )
+        if assignment is not None:
+            linked = self.store.rows(
+                "SELECT workflow_id FROM workflow_cost_beads WHERE bead_id = ?",
+                (assignment["bead_id"],),
+            )
+            if not linked:
+                linked = [{"workflow_id": f"assignment:{assignment['id']}"}]
+            for row in linked:
+                self.store.link_action_to_workflow(
+                    str(row["workflow_id"]),
+                    int(action["id"]),
+                    causal_role=str(task["role"]),
+                )
+        elif action.get("occurrence_id") is not None:
+            self.store.link_action_to_workflow(
+                f"specialist:{action['occurrence_id']}",
+                int(action["id"]),
+                causal_role=str(task["role"]),
+            )
+        elif action["kind"] == "archon":
+            payload = json.loads(action.get("payload") or "{}")
+            workflow_ids: set[str] = set()
+            for item in payload.get("batch_items", []):
+                if isinstance(item, dict) and isinstance(
+                    (content := item.get("content")), dict
+                ):
+                    workflow_id = content.get("workflow_id")
+                    if isinstance(workflow_id, str) and workflow_id:
+                        workflow_ids.add(workflow_id)
+                    retained_ids = content.get("workflow_ids")
+                    if isinstance(retained_ids, list):
+                        workflow_ids.update(
+                            value
+                            for value in retained_ids
+                            if isinstance(value, str) and value
+                        )
+            mixed = len(workflow_ids) > 1
+            allocation_exclusion = (
+                "mixed-workflow Archon response excluded because response-level "
+                "ownership is unavailable; unrelated concurrent work is not allocated"
+                if mixed
+                else None
+            )
+            for workflow_id in workflow_ids:
+                self.store.link_action_to_workflow(
+                    workflow_id,
+                    int(action["id"]),
+                    causal_role="archon",
+                    include_cost=not mixed,
+                    exclusion_reason=allocation_exclusion,
+                )
         if task["archived"]:
             await self.runtime.unarchive(task["native_thread_id"])
             await self.runtime.resume_thread(task["native_thread_id"])
@@ -3163,6 +3352,31 @@ class Controller:
 
     def _record_assignment_completed(self, assignment: dict[str, Any]) -> None:
         timestamp = utc_now()
+        completion_action = self.store.row(
+            """SELECT id FROM actions WHERE assignment_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (assignment["id"],),
+        )
+        workflow = self.store.row(
+            """SELECT workflow_id FROM workflow_cost_beads WHERE bead_id = ?
+               ORDER BY created_at LIMIT 1""",
+            (assignment["bead_id"],),
+        )
+        workflow_id = (
+            str(workflow["workflow_id"])
+            if workflow
+            else f"assignment:{assignment['id']}"
+        )
+        if completion_action:
+            self.store.link_action_to_workflow(
+                workflow_id,
+                int(completion_action["id"]),
+                causal_role="assignment_completion",
+            )
+        workflow_cost = self.store.cost_report(
+            workflow_id=workflow_id, group_by="workflow"
+        )
+        workflow_group = workflow_cost["groups"][0] if workflow_cost["groups"] else {}
         approval = self.store.row(
             """SELECT outcome_payload FROM actions
                WHERE assignment_id = ? AND kind = 'review'
@@ -3191,6 +3405,25 @@ class Controller:
                     "source_revision": assignment.get("source_oid"),
                     "tested_revision": assignment.get("tested_oid"),
                     "minor_fixes": approval_payload.get("minor_fixes", []),
+                    "action_id": (
+                        int(completion_action["id"]) if completion_action else None
+                    ),
+                    "workflow_id": workflow_id,
+                    "cost": {
+                        "estimate_kind": "equivalent public OpenAI API charges",
+                        "action": (
+                            self.store.action_cost_summary(int(completion_action["id"]))
+                            if completion_action
+                            else None
+                        ),
+                        "workflow_through_completion": (
+                            workflow_group.get("attributed") or {}
+                        ),
+                        "coverage": workflow_group.get("coverage", "partial"),
+                        "assumptions": workflow_group.get("assumptions", []),
+                        "exclusions": workflow_group.get("exclusions", []),
+                        "excludes_running_acknowledgement": True,
+                    },
                 },
             )
             remaining = self.store.row(
@@ -3596,6 +3829,29 @@ class Controller:
                 ),
                 group_by=str(request.get("group_by") or "action"),
             )
+        if command == "cost":
+            return self.store.cost_report(
+                action_id=_optional_int(request.get("action_id")),
+                task_id=_optional_int(request.get("task_id")),
+                assignment_id=_optional_int(request.get("assignment_id")),
+                run_id=_optional_int(request.get("run_id")),
+                role=(
+                    request.get("role")
+                    if isinstance(request.get("role"), str)
+                    else None
+                ),
+                project_id=(
+                    request.get("project_id")
+                    if isinstance(request.get("project_id"), str)
+                    else None
+                ),
+                workflow_id=(
+                    request.get("workflow_id")
+                    if isinstance(request.get("workflow_id"), str)
+                    else None
+                ),
+                group_by=str(request.get("group_by") or "action"),
+            )
         if command == "context":
             thread_id = _thread_identity(request)
             action = self.store.current_action(thread_id)
@@ -3669,12 +3925,16 @@ class Controller:
                 raise StoreError("intake requires a task object")
             if not payload.get("project"):
                 payload["project"] = self._infer_project(request.get("thread_id"))
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 file_task,
                 self.store,
                 self.beads,
                 task_from_payload(payload, intake_key=request.get("intake_key")),
             )
+            self._link_weaver_intake_workflow(
+                request.get("thread_id"), [result["bead_id"]]
+            )
+            return result
         if command == "intake_graph":
             self._require_registered_weaver(request.get("thread_id"))
             graph = request.get("graph")
@@ -3682,13 +3942,17 @@ class Controller:
                 raise StoreError("graph intake requires an object")
             if not graph.get("project"):
                 graph["project"] = self._infer_project(request.get("thread_id"))
-            return await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 file_graph,
                 self.store,
                 self.beads,
                 graph,
                 group_id=request.get("intake_key"),
             )
+            self._link_weaver_intake_workflow(
+                request.get("thread_id"), list(result.get("bead_ids", []))
+            )
+            return result
         if command == "weaver_register":
             return await self._register_weaver(request)
         if command == "archon":
@@ -3725,6 +3989,29 @@ class Controller:
             raise StoreError(
                 "Codex task intake requires `fulcrum weaver register` first"
             )
+
+    def _link_weaver_intake_workflow(
+        self, thread_id: object, bead_ids: list[str]
+    ) -> None:
+        if not isinstance(thread_id, str) or not bead_ids:
+            return
+        action = self.store.row(
+            """SELECT a.id FROM actions a JOIN tasks t ON t.id = a.task_id
+               WHERE t.native_thread_id = ? AND a.kind = 'weaver'
+               ORDER BY a.id DESC LIMIT 1""",
+            (thread_id,),
+        )
+        if action is None:
+            return
+        workflow_id = f"weaver-action:{action['id']}"
+        self.store.link_action_to_workflow(
+            workflow_id,
+            int(action["id"]),
+            causal_role="weaver_intake",
+            origin_action_id=int(action["id"]),
+        )
+        for bead_id in bead_ids:
+            self.store.link_bead_to_workflow(workflow_id, bead_id)
 
     def _infer_project(self, thread_id: object) -> str:
         if isinstance(thread_id, str):
@@ -4203,6 +4490,7 @@ class Controller:
         )
         if archon is None:
             return
+        content = self._with_workflow_context(content)
         timestamp = utc_now()
         self.store.execute(
             """INSERT INTO updates(recipient_task_id, identity, content, actionable, state, created_at, updated_at)
@@ -4219,6 +4507,105 @@ class Controller:
                 timestamp,
             ),
         )
+
+    def _workflow_ids_for_update(self, content: dict[str, Any]) -> set[str]:
+        """Resolve durable causal identities for one controller-to-Archon fact."""
+
+        workflow_ids: set[str] = set()
+        workflow_id = content.get("workflow_id")
+        if isinstance(workflow_id, str) and workflow_id:
+            workflow_ids.add(workflow_id)
+        retained_ids = content.get("workflow_ids")
+        if isinstance(retained_ids, list):
+            workflow_ids.update(
+                item for item in retained_ids if isinstance(item, str) and item
+            )
+
+        bead_id = content.get("bead_id")
+        if isinstance(bead_id, str):
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in self.store.rows(
+                    "SELECT workflow_id FROM workflow_cost_beads WHERE bead_id = ?",
+                    (bead_id,),
+                )
+            )
+
+        assignment_id = content.get("assignment_id")
+        if isinstance(assignment_id, int) and not isinstance(assignment_id, bool):
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in self.store.rows(
+                    """SELECT workflow.workflow_id FROM assignments assignment
+                       JOIN workflow_cost_beads workflow
+                         ON workflow.bead_id = assignment.bead_id
+                       WHERE assignment.id = ?""",
+                    (assignment_id,),
+                )
+            )
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in self.store.rows(
+                    """SELECT DISTINCT workflow.workflow_id
+                       FROM actions action JOIN workflow_cost_actions workflow
+                         ON workflow.action_id = action.id
+                       WHERE action.assignment_id = ?""",
+                    (assignment_id,),
+                )
+            )
+
+        action_id = content.get("action_id")
+        if isinstance(action_id, int) and not isinstance(action_id, bool):
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in self.store.rows(
+                    "SELECT workflow_id FROM workflow_cost_actions WHERE action_id = ?",
+                    (action_id,),
+                )
+            )
+
+        target_type = content.get("target_type")
+        target_id = content.get("target_id")
+        if (
+            target_type == "action"
+            and isinstance(target_id, int)
+            and not isinstance(target_id, bool)
+        ):
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in self.store.rows(
+                    "SELECT workflow_id FROM workflow_cost_actions WHERE action_id = ?",
+                    (target_id,),
+                )
+            )
+        elif (
+            target_type == "assignment"
+            and isinstance(target_id, int)
+            and not isinstance(target_id, bool)
+        ):
+            workflow_ids.update(
+                self._workflow_ids_for_update({"assignment_id": target_id})
+            )
+
+        if content.get("kind") == "archon_succession_completed":
+            workflow_ids.update(
+                str(row["workflow_id"])
+                for row in self.store.rows(
+                    """SELECT workflow_id FROM workflow_cost_boundaries
+                       WHERE state = 'open' ORDER BY workflow_id"""
+                )
+            )
+        return workflow_ids
+
+    def _with_workflow_context(self, content: dict[str, Any]) -> dict[str, Any]:
+        retained = dict(content)
+        workflow_ids = sorted(self._workflow_ids_for_update(retained))
+        if len(workflow_ids) == 1:
+            retained["workflow_id"] = workflow_ids[0]
+            retained.pop("workflow_ids", None)
+        elif workflow_ids:
+            retained["workflow_ids"] = workflow_ids
+        return retained
 
     async def _process_archon_succession(self) -> None:
         retained = self.store.row(
@@ -4317,6 +4704,11 @@ class Controller:
                     (bead["bead_id"],),
                 )
             ]
+            workflow = self.store.row(
+                """SELECT workflow_id FROM workflow_cost_beads
+                   WHERE bead_id = ? ORDER BY created_at LIMIT 1""",
+                (bead["bead_id"],),
+            )
             content = json.dumps(
                 {
                     "kind": "proposal",
@@ -4341,6 +4733,7 @@ class Controller:
                         "id": bead["plan_id"],
                         "commit": bead["plan_commit"],
                     },
+                    "workflow_id": workflow["workflow_id"] if workflow else None,
                 },
                 sort_keys=True,
             )
@@ -4403,15 +4796,19 @@ class Controller:
         if not updates:
             return
         timestamp = utc_now()
+        prepared_updates = [
+            (row, self._with_workflow_context(json.loads(row["content"])))
+            for row in updates
+        ]
         payload = {
             "fleet_snapshot": self._fleet_snapshot(),
             "batch_items": [
                 {
                     "update_id": row["id"],
                     "identity": row["identity"],
-                    "content": json.loads(row["content"]),
+                    "content": content,
                 }
-                for row in updates
+                for row, content in prepared_updates
             ],
         }
         with self.store.transaction() as connection:
@@ -4427,14 +4824,15 @@ class Controller:
                 "UPDATE batches SET action_id = ? WHERE id = ?",
                 (action_cursor.lastrowid, batch_cursor.lastrowid),
             )
-            for update in updates:
+            for update, content in prepared_updates:
                 connection.execute(
                     "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
                     (batch_cursor.lastrowid, update["id"]),
                 )
                 connection.execute(
-                    "UPDATE updates SET state = 'batched', updated_at = ? WHERE id = ?",
-                    (timestamp, update["id"]),
+                    """UPDATE updates SET content = ?, state = 'batched',
+                       updated_at = ? WHERE id = ?""",
+                    (json.dumps(content, sort_keys=True), timestamp, update["id"]),
                 )
         action = self.store.row(
             "SELECT * FROM actions WHERE id = ?", (action_cursor.lastrowid,)
@@ -5073,7 +5471,7 @@ class Controller:
                         or finding["problem"].splitlines()[0][:100],
                         "description": f"{finding['problem']}\n\nEvidence: {finding['evidence']}\n\nExpected benefit: {finding['expected_benefit']}\n\nAcceptance criteria: {finding['acceptance_criteria']}",
                     }
-                    await asyncio.to_thread(
+                    filed = await asyncio.to_thread(
                         file_task,
                         self.store,
                         self.beads,
@@ -5084,6 +5482,10 @@ class Controller:
                             ),
                         ),
                     )
+                    if isinstance(filed.get("bead_id"), str):
+                        self.store.link_bead_to_workflow(
+                            f"specialist:{occurrence['id']}", filed["bead_id"]
+                        )
                 self.store.execute(
                     """UPDATE occurrences SET state = 'complete', publication_revision = ?,
                        updated_at = ? WHERE id = ?""",
@@ -5095,6 +5497,18 @@ class Controller:
                            next_attempt_at = NULL, updated_at = ? WHERE id = ?""",
                         (utc_now(), obligation["id"]),
                     )
+                workflow_id = f"specialist:{occurrence['id']}"
+                workflow_cost = self.store.cost_report(
+                    workflow_id=workflow_id, group_by="workflow"
+                )
+                workflow_group = (
+                    workflow_cost["groups"][0] if workflow_cost["groups"] else {}
+                )
+                specialist_action = self.store.row(
+                    """SELECT id FROM actions WHERE occurrence_id = ?
+                       AND kind = 'specialist' ORDER BY id DESC LIMIT 1""",
+                    (occurrence["id"],),
+                )
                 self._queue_archon_update(
                     f"specialist:{occurrence['id']}",
                     {
@@ -5105,6 +5519,27 @@ class Controller:
                         "summary": report.get("summary"),
                         "finding_count": len(report.get("findings", [])),
                         "publication_revision": publication["local_revision"],
+                        "action_id": (
+                            int(specialist_action["id"]) if specialist_action else None
+                        ),
+                        "workflow_id": workflow_id,
+                        "cost": {
+                            "estimate_kind": "equivalent public OpenAI API charges",
+                            "action": (
+                                self.store.action_cost_summary(
+                                    int(specialist_action["id"])
+                                )
+                                if specialist_action
+                                else None
+                            ),
+                            "workflow_through_completion": (
+                                workflow_group.get("attributed") or {}
+                            ),
+                            "coverage": workflow_group.get("coverage", "partial"),
+                            "assumptions": workflow_group.get("assumptions", []),
+                            "exclusions": workflow_group.get("exclusions", []),
+                            "excludes_running_acknowledgement": True,
+                        },
                     },
                 )
                 if occurrence["policy_id"] is not None:

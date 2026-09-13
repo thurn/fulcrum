@@ -169,6 +169,63 @@ class PromptsTest(unittest.TestCase):
         self.assertNotIn("nonblocking follow-up", text)
         self.assertNotIn("Weaver bead", text)
 
+    def test_archon_repeats_frozen_cost_and_marks_acknowledgement_boundary(
+        self,
+    ) -> None:
+        text = action_message(
+            action={
+                "id": 31,
+                "kind": "archon",
+                "payload": {
+                    "batch_items": [
+                        {
+                            "update_id": 4,
+                            "content": {
+                                "kind": "assignment_completed",
+                                "bead_id": "brain-oea",
+                                "assignment_id": 7,
+                                "run_id": 7,
+                                "action_id": 30,
+                                "cost": {
+                                    "action": {"attributed_display": "$3.13"},
+                                    "workflow_through_completion": {"display": "$3.20"},
+                                    "coverage": "partial",
+                                    "assumptions": ["effective tier assumed standard"],
+                                    "exclusions": [],
+                                },
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        self.assertIn("Action 30 completed at estimated API cost of $3.13.", text)
+        self.assertIn("$3.20", text)
+        self.assertIn("excludes the currently running Archon acknowledgement", text)
+        self.assertIn("Partial estimate: effective tier assumed standard.", text)
+
+        absent = action_message(
+            action={
+                "id": 32,
+                "kind": "archon",
+                "payload": {
+                    "batch_items": [
+                        {
+                            "update_id": 5,
+                            "content": {
+                                "kind": "assignment_completed",
+                                "bead_id": "x",
+                                "assignment_id": 8,
+                                "run_id": 8,
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        self.assertIn("do not invent one", absent)
+        self.assertNotIn("estimated API cost of $", absent)
+
     def test_archon_initial_policy_message_is_project_specific(self) -> None:
         text = action_message(
             action={

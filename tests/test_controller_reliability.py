@@ -3216,6 +3216,302 @@ print(json.dumps({
         self.assertNotIn("Exact JSON", text)
         self.assertLess(len(text.split()), 380)
 
+    async def test_mixed_archon_batch_finalizes_only_acknowledged_workflow_once(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-cost-mixed",
+            role="archon",
+            description="Fleet",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        now = "2026-01-01T00:00:00Z"
+        completed_action = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, created_at, updated_at)
+                   VALUES (?, ?, 'correct', '{}', 'processed', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        concurrent_action = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, kind, payload, state,
+                       created_at, updated_at)
+                   VALUES (?, 'review', '{}', 'processed', ?, ?)""",
+                (self.overseer["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.link_bead_to_workflow("workflow-complete", "p-1")
+        self.controller.store.link_action_to_workflow(
+            "workflow-complete", completed_action, causal_role="executor"
+        )
+        self.controller.store.link_action_to_workflow(
+            "workflow-concurrent", concurrent_action, causal_role="overseer"
+        )
+        self.controller.store.record_tool_cost(
+            source_key="completed-cost",
+            tool_name="test",
+            quantity=1,
+            unit="call",
+            unit_rate="0.01",
+            source_url="https://developers.openai.com/api/docs/pricing",
+            action_id=completed_action,
+        )
+        self.controller.store.record_tool_cost(
+            source_key="concurrent-cost",
+            tool_name="test",
+            quantity=1,
+            unit="call",
+            unit_rate="0.02",
+            source_url="https://developers.openai.com/api/docs/pricing",
+            action_id=concurrent_action,
+        )
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        self.controller._queue_archon_update(
+            "completion:mixed",
+            {
+                "kind": "assignment_completed",
+                "assignment_id": self.assignment["id"],
+                "action_id": completed_action,
+                "bead_id": "p-1",
+                "run_id": self.assignment["run_id"],
+                "workflow_id": "workflow-complete",
+            },
+        )
+        self.controller._queue_archon_update(
+            "proposal:mixed",
+            {
+                "kind": "proposal",
+                "bead_id": "unrelated",
+                "project": "p",
+                "title": "Unrelated work",
+                "scope": "Keep this concurrent workflow separate.",
+                "workflow_id": "workflow-concurrent",
+            },
+        )
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="mixed-ack-turn"),
+            ),
+        ):
+            await self.controller._deliver_update_batch()
+        acknowledgement = self.controller.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'
+               ORDER BY id DESC LIMIT 1""",
+            (archon["id"],),
+        )
+        self.controller.store.record_tool_cost(
+            source_key="mixed-ack-cost",
+            tool_name="test",
+            quantity=1,
+            unit="call",
+            unit_rate="0.05",
+            source_url="https://developers.openai.com/api/docs/pricing",
+            action_id=int(acknowledgement["id"]),
+        )
+        self.controller.store.execute(
+            "UPDATE actions SET state = 'processed' WHERE id = ?",
+            (acknowledgement["id"],),
+        )
+
+        self.controller._finalize_completed_workflows_for_archon(
+            int(acknowledgement["id"])
+        )
+        self.controller._finalize_completed_workflows_for_archon(
+            int(acknowledgement["id"])
+        )
+        complete = self.controller.store.row("""SELECT * FROM workflow_cost_boundaries
+               WHERE workflow_id = 'workflow-complete'""")
+        concurrent = self.controller.store.row("""SELECT * FROM workflow_cost_boundaries
+               WHERE workflow_id = 'workflow-concurrent'""")
+        self.assertEqual(complete["state"], "closed")
+        self.assertEqual(complete["frozen_amount"], "0.01")
+        self.assertEqual(concurrent["state"], "open")
+        links = self.controller.store.rows(
+            """SELECT workflow_id, include_cost FROM workflow_cost_actions
+               WHERE action_id = ? ORDER BY workflow_id""",
+            (acknowledgement["id"],),
+        )
+        self.assertEqual([row["include_cost"] for row in links], [0, 0])
+        report = self.controller.store.cost_report(
+            workflow_id="workflow-complete", group_by="workflow"
+        )["groups"][0]
+        self.assertEqual(report["attributed"]["amount"], "0.01")
+        self.assertEqual(report["coverage"], "partial")
+        self.assertIn("mixed-workflow Archon response", " ".join(report["exclusions"]))
+        self.assertEqual(
+            self.controller.store.row("""SELECT COUNT(*) AS count FROM events
+                   WHERE kind = 'workflow_cost_finalized'
+                     AND entity_id = 'workflow-complete'""")["count"],
+            1,
+        )
+        self._restart_controller()
+        self.controller._finalize_completed_workflows_for_archon(
+            int(acknowledgement["id"])
+        )
+        self.assertEqual(
+            self.controller.store.row("""SELECT COUNT(*) AS count FROM events
+                   WHERE kind = 'workflow_cost_finalized'
+                     AND entity_id = 'workflow-complete'""")["count"],
+            1,
+        )
+
+    def test_completion_with_same_workflow_recovery_includes_acknowledgement(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-cost-one-workflow",
+            role="archon",
+            description="Fleet",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        now = "2026-01-01T00:00:00Z"
+        source_action = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, created_at, updated_at)
+                   VALUES (?, ?, 'correct', '{}', 'processed', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        payload = {
+            "batch_items": [
+                {
+                    "content": {
+                        "kind": "assignment_completed",
+                        "assignment_id": self.assignment["id"],
+                        "workflow_id": "workflow-one",
+                    }
+                },
+                {
+                    "content": {
+                        "kind": "assignment_recovery",
+                        "assignment_id": self.assignment["id"],
+                        "workflow_id": "workflow-one",
+                    }
+                },
+            ]
+        }
+        acknowledgement = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, kind, payload, state,
+                       created_at, updated_at)
+                   VALUES (?, 'archon', ?, 'processed', ?, ?)""",
+                (archon["id"], json.dumps(payload), now, now),
+            ).lastrowid
+        )
+        self.controller.store.link_bead_to_workflow("workflow-one", "p-1")
+        self.controller.store.link_action_to_workflow(
+            "workflow-one", source_action, causal_role="executor"
+        )
+        self.controller.store.link_action_to_workflow(
+            "workflow-one", acknowledgement, causal_role="archon"
+        )
+        for key, action_id, amount in (
+            ("one-source", source_action, "0.01"),
+            ("one-ack", acknowledgement, "0.05"),
+        ):
+            self.controller.store.record_tool_cost(
+                source_key=key,
+                tool_name="test",
+                quantity=1,
+                unit="call",
+                unit_rate=amount,
+                source_url="https://developers.openai.com/api/docs/pricing",
+                action_id=action_id,
+            )
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+
+        self.controller._finalize_completed_workflows_for_archon(acknowledgement)
+        self.controller._finalize_completed_workflows_for_archon(acknowledgement)
+        boundary = self.controller.store.row("""SELECT * FROM workflow_cost_boundaries
+               WHERE workflow_id = 'workflow-one'""")
+        self.assertEqual(boundary["state"], "closed")
+        self.assertEqual(boundary["frozen_amount"], "0.06")
+        event = self.controller.store.row(
+            """SELECT detail_json FROM events WHERE kind = 'workflow_cost_finalized'
+               AND entity_id = 'workflow-one'"""
+        )
+        self.assertTrue(
+            json.loads(event["detail_json"])["includes_acknowledgement_action"]
+        )
+
+    def test_recovery_resolution_and_succession_retain_causal_workflows(self) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-causal",
+            role="archon",
+            description="Fleet",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        self.controller.store.link_bead_to_workflow("workflow-causal", "p-1")
+        self.controller._schedule_assignment_recovery(
+            dict(self.assignment), "runtime disconnected"
+        )
+        self.controller._queue_operation_resolution(
+            {"id": 91, "kind": "turn_start", "target": "assignment"},
+            hold_id=8,
+            condition="uncertain operation",
+            target_type="assignment",
+            target_id=int(self.assignment["id"]),
+        )
+        self.controller._queue_archon_update(
+            "succession:causal",
+            {
+                "kind": "archon_succession_completed",
+                "predecessor_task_id": 1,
+                "successor_task_id": 2,
+                "reason": "context limit",
+            },
+        )
+        updates = self.controller.store.rows(
+            "SELECT identity, content FROM updates WHERE recipient_task_id = ?",
+            (archon["id"],),
+        )
+        by_identity = {row["identity"]: json.loads(row["content"]) for row in updates}
+        recovery = next(
+            content
+            for identity, content in by_identity.items()
+            if identity.startswith("recovery:")
+        )
+        self.assertEqual(recovery["workflow_id"], "workflow-causal")
+        self.assertEqual(
+            by_identity["operation-resolution:91"]["workflow_id"],
+            "workflow-causal",
+        )
+        self.assertEqual(
+            by_identity["succession:causal"]["workflow_id"],
+            "workflow-causal",
+        )
+
     async def test_third_review_failure_reaches_archon_and_cancel_resolves_hold(
         self,
     ) -> None:
@@ -3228,6 +3524,7 @@ print(json.dumps({
             project_id="p",
             state="idle",
         )
+        self.controller.store.link_bead_to_workflow("workflow-review-escalation", "p-1")
         findings_path = Path(self.temporary.name) / "review-findings.json"
         self.controller.store.execute(
             """UPDATE assignments SET candidate_id = 'candidate-review-escalation',
@@ -3333,6 +3630,13 @@ print(json.dumps({
             await self.controller._deliver_update_batch()
 
         runtime.start_turn.assert_awaited_once()
+        retained_escalation = self.controller.store.row(
+            "SELECT content FROM updates WHERE id = ?", (escalation["id"],)
+        )
+        self.assertEqual(
+            json.loads(retained_escalation["content"])["workflow_id"],
+            "workflow-review-escalation",
+        )
         prompt = runtime.start_turn.await_args.args[1]
         self.assertIn(
             f"Assignment {self.assignment['id']} reached 3 substantive review failures",
@@ -4093,6 +4397,18 @@ print(json.dumps({
                 },
             },
         )
+        await self.controller._queue_runtime_event(
+            "item/completed",
+            {
+                "threadId": "helper-thread",
+                "turnId": "helper-turn",
+                "item": {
+                    "id": "helper-search",
+                    "type": "webSearch",
+                    "query": "helper query",
+                },
+            },
+        )
 
         summary = self.controller.store.action_usage_summary(action_id)
         self.assertEqual(summary["direct_total_tokens"], None)
@@ -4105,6 +4421,9 @@ print(json.dumps({
         )["groups"][0]
         self.assertEqual(assignment_rollup["attributed"]["total_tokens"], 10)
         self.assertEqual(run_rollup["attributed"]["total_tokens"], 10)
+        cost = self.controller.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(cost["direct"]["tool_count"], 0)
+        self.assertEqual(cost["attributed"]["tool_count"], 1)
         self.assertEqual(
             self.controller.store.row("SELECT COUNT(*) AS count FROM events")["count"],
             events_before,
@@ -4118,6 +4437,304 @@ print(json.dumps({
         self.assertEqual(ownership["parent_turn_id"], "parent-turn")
         self.assertEqual(ownership["collaboration_item_id"], "collaboration-item")
         self.assertEqual(ownership["native_turn_id"], "helper-turn")
+
+    async def test_protocol_reroutes_and_observable_tools_are_durable(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            "UPDATE tasks SET model = 'gpt-5.6-sol' WHERE id = ?",
+            (self.executor["id"],),
+        )
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, native_turn_id, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'active', 'priced-turn', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.bind_action_turn(action_id, "executor", "priced-turn")
+        reroute = {
+            "threadId": "executor",
+            "turnId": "priced-turn",
+            "fromModel": "gpt-5.6-sol",
+            "toModel": "gpt-5.6-luna",
+            "reason": "capacity",
+        }
+        await self.controller._queue_runtime_event("model/rerouted", reroute)
+        await self.controller._queue_runtime_event("model/rerouted", reroute)
+        await self.controller._queue_runtime_event(
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "executor",
+                "turnId": "priced-turn",
+                "serviceTier": "standard",
+                "responseId": "response-1",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 10,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 12,
+                    },
+                    "total": {
+                        "inputTokens": 10,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 12,
+                    },
+                },
+            },
+        )
+        await self.controller._queue_runtime_event(
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "executor",
+                "turnId": "priced-turn",
+                "effectiveModel": "gpt-5.6-terra",
+                "serviceTier": "standard",
+                "responseId": "response-2",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 10,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 12,
+                    },
+                    "total": {
+                        "inputTokens": 20,
+                        "cachedInputTokens": 8,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 4,
+                        "reasoningOutputTokens": 2,
+                        "totalTokens": 24,
+                    },
+                },
+            },
+        )
+        await self.controller._queue_runtime_event(
+            "model/rerouted",
+            {
+                "threadId": "executor",
+                "turnId": "priced-turn",
+                "fromModel": "gpt-5.6-luna",
+                "toModel": "gpt-6-astra",
+                "reason": "capability",
+            },
+        )
+        await self.controller._queue_runtime_event(
+            "thread/tokenUsage/updated",
+            {
+                "threadId": "executor",
+                "turnId": "priced-turn",
+                "serviceTier": "standard",
+                "responseId": "response-3",
+                "tokenUsage": {
+                    "last": {
+                        "inputTokens": 10,
+                        "cachedInputTokens": 4,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 2,
+                        "reasoningOutputTokens": 1,
+                        "totalTokens": 12,
+                    },
+                    "total": {
+                        "inputTokens": 30,
+                        "cachedInputTokens": 12,
+                        "cacheWriteInputTokens": 0,
+                        "outputTokens": 6,
+                        "reasoningOutputTokens": 3,
+                        "totalTokens": 36,
+                    },
+                },
+            },
+        )
+        unassociated = {
+            "threadId": "executor",
+            "turnId": "priced-turn",
+            "fromModel": "gpt-6-astra",
+            "toModel": "gpt-5.6-terra",
+            "reason": "late without response",
+        }
+        await self.controller._queue_runtime_event("model/rerouted", unassociated)
+        await self.controller._queue_runtime_event("model/rerouted", unassociated)
+        item = {
+            "threadId": "executor",
+            "turnId": "priced-turn",
+            "item": {"id": "search-1", "type": "webSearch", "query": "x"},
+        }
+        await self.controller._queue_runtime_event("item/started", item)
+        await self.controller._queue_runtime_event("item/completed", item)
+        await self.controller._queue_runtime_event("item/completed", item)
+        self.controller.store.execute("DELETE FROM api_tool_rate_cards")
+        await self.controller._queue_runtime_event(
+            "item/completed",
+            {
+                "threadId": "executor",
+                "turnId": "priced-turn",
+                "item": {"id": "search-2", "type": "webSearch", "query": "y"},
+            },
+        )
+        self.controller.store.finalize_action_usage(action_id)
+        await self.controller._queue_runtime_event(
+            "item/completed",
+            {
+                "threadId": "executor",
+                "turnId": "priced-turn",
+                "item": {"id": "search-3", "type": "webSearch", "query": "z"},
+            },
+        )
+
+        contributions = self.controller.store.rows(
+            "SELECT * FROM cost_contributions WHERE action_id = ? ORDER BY id",
+            (action_id,),
+        )
+        self.assertEqual(len(contributions), 6)
+        self.assertEqual(contributions[0]["effective_model"], "gpt-5.6-luna")
+        self.assertEqual(contributions[1]["effective_model"], "gpt-5.6-terra")
+        self.assertEqual(contributions[2]["effective_model"], "gpt-6-astra")
+        self.assertEqual(contributions[1]["coverage"], "complete")
+        tools = [
+            row for row in contributions if row["contribution_kind"] == "tool_call"
+        ]
+        self.assertEqual(len(tools), 3)
+        self.assertEqual(tools[0]["amount"], "0.01")
+        self.assertIn("one completed", " ".join(json.loads(tools[0]["applied_rules"])))
+        self.assertEqual(tools[1]["coverage"], "partial")
+        self.assertEqual(
+            self.controller.store.row("SELECT COUNT(*) AS count FROM model_reroutes")[
+                "count"
+            ],
+            3,
+        )
+        self.assertEqual(
+            self.controller.store.row("""SELECT COUNT(*) AS count FROM model_reroutes
+                   WHERE contribution_id IS NULL""")["count"],
+            1,
+        )
+        reroutes = self.controller.store.rows(
+            "SELECT contribution_id FROM model_reroutes ORDER BY id"
+        )
+        self.assertEqual(
+            [row["contribution_id"] for row in reroutes],
+            [contributions[0]["id"], contributions[2]["id"], None],
+        )
+        self.assertEqual(
+            self.controller.store.row("""SELECT COUNT(*) AS count FROM events
+                   WHERE kind = 'cost_late_contribution_incorporated'""")["count"],
+            1,
+        )
+        report = self.controller.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(report["coverage"], "partial")
+        self.assertEqual(report["attributed"]["response_count"], 3)
+        self.assertEqual(
+            {
+                source["model"]
+                for source in report["rate_card_provenance"]
+                if source["model"] is not None
+            },
+            {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra"},
+        )
+        web_rate = next(
+            source
+            for source in report["rate_card_provenance"]
+            if source["tool"] == "web_search"
+        )
+        self.assertEqual(web_rate["unit_rate"], "0.01")
+        self.assertEqual(web_rate["unit"], "call")
+        self.assertFalse(self.controller.advance_requested.is_set())
+
+    async def test_identical_consumed_reroute_is_retained_for_next_response(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            "UPDATE tasks SET model = 'gpt-5.6-sol' WHERE id = ?",
+            (self.executor["id"],),
+        )
+        action_id = int(
+            self.controller.store.execute(
+                """INSERT INTO actions(task_id, assignment_id, kind, payload,
+                       state, native_turn_id, created_at, updated_at)
+                   VALUES (?, ?, 'implement', '{}', 'active',
+                           'repeat-reroute-turn', ?, ?)""",
+                (self.executor["id"], self.assignment["id"], now, now),
+            ).lastrowid
+        )
+        self.controller.store.bind_action_turn(
+            action_id, "executor", "repeat-reroute-turn"
+        )
+        reroute = {
+            "threadId": "executor",
+            "turnId": "repeat-reroute-turn",
+            "fromModel": "gpt-5.6-sol",
+            "toModel": "gpt-5.6-luna",
+            "reason": "capacity",
+        }
+
+        def usage(response_id: str, multiple: int) -> dict[str, Any]:
+            response = {
+                "inputTokens": 10,
+                "cachedInputTokens": 4,
+                "cacheWriteInputTokens": 0,
+                "outputTokens": 2,
+                "reasoningOutputTokens": 1,
+                "totalTokens": 12,
+            }
+            return {
+                "threadId": "executor",
+                "turnId": "repeat-reroute-turn",
+                "serviceTier": "standard",
+                "responseId": response_id,
+                "tokenUsage": {
+                    "last": response,
+                    "total": {key: value * multiple for key, value in response.items()},
+                },
+            }
+
+        first = usage("r1", 1)
+        await self.controller._queue_runtime_event("model/rerouted", reroute)
+        await self.controller._queue_runtime_event("model/rerouted", reroute)
+        await self.controller._queue_runtime_event("thread/tokenUsage/updated", first)
+        await self.controller._queue_runtime_event("model/rerouted", reroute)
+        await self.controller._queue_runtime_event("thread/tokenUsage/updated", first)
+        await self.controller._queue_runtime_event("model/rerouted", reroute)
+        await self.controller._queue_runtime_event(
+            "thread/tokenUsage/updated", usage("r2", 2)
+        )
+
+        contributions = self.controller.store.rows(
+            """SELECT id, effective_model, coverage FROM cost_contributions
+               WHERE action_id = ? AND contribution_kind = 'model_response'
+               ORDER BY response_sequence""",
+            (action_id,),
+        )
+        reroutes = self.controller.store.rows(
+            "SELECT contribution_id FROM model_reroutes ORDER BY id"
+        )
+        self.assertEqual(len(contributions), 2)
+        self.assertEqual(
+            [row["effective_model"] for row in contributions],
+            ["gpt-5.6-luna", "gpt-5.6-luna"],
+        )
+        self.assertEqual([row["coverage"] for row in contributions], ["complete"] * 2)
+        self.assertEqual(
+            [row["contribution_id"] for row in reroutes],
+            [contributions[0]["id"], contributions[1]["id"]],
+        )
+        report = self.controller.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(report["coverage"], "complete")
+        self.assertEqual(report["attributed"]["response_count"], 2)
+        self.assertEqual(
+            {source["model"] for source in report["rate_card_provenance"]},
+            {"gpt-5.6-luna"},
+        )
+        self.assertFalse(self.controller.advance_requested.is_set())
 
     async def test_terminal_usage_summary_retains_disconnect_gap_and_numeric_counts(
         self,

@@ -6,12 +6,13 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from fulcrum.cli import main
-from fulcrum.store import Store, StoreError
+from fulcrum.store import Store, StoreError, format_usd
 
 
 class StoreTest(unittest.TestCase):
@@ -29,6 +30,408 @@ class StoreTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.store.close()
         self.temporary.cleanup()
+
+    def test_response_cost_formula_precision_subsets_and_reasoning(self) -> None:
+        estimate = self.store.estimate_response_cost(
+            requested_model="gpt-5.6-sol",
+            effective_model="gpt-5.6-sol",
+            processing_tier="standard",
+            input_tokens=1_000,
+            cached_input_tokens=600,
+            cache_write_input_tokens=100,
+            output_tokens=50,
+            reasoning_output_tokens=40,
+        )
+        self.assertEqual(estimate["ordinary_input_tokens"], 300)
+        self.assertEqual(estimate["amount"], "0.00294")
+        self.assertEqual(format_usd(estimate["amount"]), "<$0.01")
+        self.assertEqual(estimate["output_amount"], "0.001")
+
+    def test_seeded_models_invalid_relationships_and_tier_rules(self) -> None:
+        expected = {
+            "gpt-5.6-sol": "0.0000476",
+            "gpt-5.6-terra": "0.0000258",
+            "gpt-5.6-luna": "0.00000258",
+            "gpt-6-astra": "0.000119",
+        }
+        for model, amount in expected.items():
+            estimate = self.store.estimate_response_cost(
+                requested_model=model,
+                effective_model=model,
+                processing_tier="standard",
+                input_tokens=10,
+                cached_input_tokens=4,
+                cache_write_input_tokens=2,
+                output_tokens=1,
+                reasoning_output_tokens=1,
+            )
+            self.assertEqual(estimate["amount"], amount, model)
+        invalid = self.store.estimate_response_cost(
+            requested_model="gpt-5.6-sol",
+            effective_model="gpt-5.6-sol",
+            processing_tier="standard",
+            input_tokens=3,
+            cached_input_tokens=2,
+            cache_write_input_tokens=2,
+            output_tokens=1,
+            reasoning_output_tokens=2,
+        )
+        self.assertEqual(invalid["coverage"], "invalid")
+        self.assertNotIn("amount", invalid)
+        self.assertEqual(
+            self.store.estimate_response_cost(
+                requested_model="gpt-6-astra",
+                effective_model="gpt-6-astra",
+                processing_tier="flex",
+                input_tokens=1,
+                cached_input_tokens=0,
+                cache_write_input_tokens=0,
+                output_tokens=0,
+            )["amount"],
+            "0.000005",
+        )
+
+    def test_long_context_is_response_specific_and_sol_example_rounds_313(self) -> None:
+        quantities = []
+        remaining_ordinary = 116_994
+        remaining_cached = 5_367_936
+        for index in range(28):
+            cached = min(191_712, remaining_cached)
+            ordinary = remaining_ordinary if index == 27 else 4_179
+            remaining_cached -= cached
+            remaining_ordinary -= ordinary
+            quantities.append((ordinary + cached, cached, ordinary))
+        self.assertEqual(remaining_cached, 0)
+        estimates = [
+            self.store.estimate_response_cost(
+                requested_model="gpt-5.6-sol",
+                effective_model="gpt-5.6-sol",
+                processing_tier="standard",
+                input_tokens=total,
+                cached_input_tokens=cached,
+                cache_write_input_tokens=0,
+                output_tokens=25_749 if index == 27 else 0,
+            )
+            for index, (total, cached, _ordinary) in enumerate(quantities)
+        ]
+        self.assertTrue(all(not item["applied_rules"] for item in estimates))
+        total = sum((Decimal(item["amount"]) for item in estimates), Decimal("0"))
+        self.assertEqual(format_usd(total), "$3.13")
+        aggregate = self.store.estimate_response_cost(
+            requested_model="gpt-5.6-sol",
+            effective_model="gpt-5.6-sol",
+            processing_tier="standard",
+            input_tokens=5_484_930,
+            cached_input_tokens=5_367_936,
+            cache_write_input_tokens=0,
+            output_tokens=25_749,
+        )
+        self.assertIn("long_context_input_over_272000", aggregate["applied_rules"])
+        self.assertEqual(format_usd(aggregate["amount"]), "$6.00")
+
+    def test_frozen_contribution_tool_coverage_and_workflow_idempotency(self) -> None:
+        _, action_id = self._usage_action("priced", turn_id="priced-turn")
+        event = self._usage("priced", "priced-turn", 10)
+        event["effectiveModel"] = "gpt-5.6-luna"
+        event["serviceTier"] = "standard"
+        self.store.observe_turn_usage(event)
+        before = self.store.action_cost_summary(action_id)
+        self.store.execute(
+            "UPDATE api_rate_cards SET output_per_million = '999' WHERE model = 'gpt-5.6-luna'"
+        )
+        self.store.observe_turn_usage(event)
+        self.assertEqual(self.store.action_cost_summary(action_id), before)
+        self.store.record_tool_cost(
+            source_key="tool:known",
+            tool_name="search",
+            quantity=2,
+            unit="call",
+            unit_rate="0.01",
+            source_url="https://example.test/public-rate",
+            action_id=action_id,
+        )
+        self.store.record_tool_cost(
+            source_key="tool:unknown",
+            tool_name="future-tool",
+            quantity=1,
+            unit="call",
+            unit_rate=None,
+            source_url=None,
+            action_id=action_id,
+        )
+        self.store.link_action_to_workflow(
+            "workflow:test",
+            action_id,
+            causal_role="executor",
+            origin_action_id=action_id,
+        )
+        report = self.store.finalize_workflow_cost("workflow:test")
+        self.store.record_tool_cost(
+            source_key="tool:too-late",
+            tool_name="late-tool",
+            quantity=1,
+            unit="call",
+            unit_rate="100",
+            source_url="https://example.test/public-rate",
+            action_id=action_id,
+        )
+        repeated = self.store.finalize_workflow_cost("workflow:test")
+        self.assertEqual(report["frozen_amount"], repeated["frozen_amount"])
+        self.assertEqual(report["groups"][0]["coverage"], "partial")
+        self.assertEqual(report["groups"][0]["attributed"]["tool_count"], 2)
+
+    def test_reroutes_unknown_tiers_and_missing_boundaries_are_explicit(self) -> None:
+        task, action_id = self._usage_action("rerouted", turn_id="rerouted-turn")
+        self.store.execute(
+            "UPDATE tasks SET model = 'gpt-5.6-sol' WHERE id = ?", (task["id"],)
+        )
+        self.assertTrue(
+            self.store.observe_model_reroute(
+                {
+                    "threadId": "rerouted",
+                    "turnId": "rerouted-turn",
+                    "fromModel": "gpt-5.6-sol",
+                    "toModel": "gpt-5.6-luna",
+                    "reason": "capacity",
+                }
+            )
+        )
+        self.assertFalse(
+            self.store.observe_model_reroute(
+                {
+                    "threadId": "rerouted",
+                    "turnId": "rerouted-turn",
+                    "fromModel": "gpt-5.6-sol",
+                    "toModel": "gpt-5.6-luna",
+                    "reason": "capacity",
+                }
+            )
+        )
+        first = {
+            "inputTokens": 10,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 1,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 11,
+        }
+        self.store.observe_turn_usage(
+            {
+                "threadId": "rerouted",
+                "turnId": "rerouted-turn",
+                "serviceTier": "standard",
+                "responseId": "luna-response",
+                "tokenUsage": {"last": first, "total": first},
+            }
+        )
+        self.store.observe_model_reroute(
+            {
+                "threadId": "rerouted",
+                "turnId": "rerouted-turn",
+                "fromModel": "gpt-5.6-luna",
+                "toModel": "gpt-6-astra",
+                "reason": "capability",
+            }
+        )
+        second = dict(first)
+        total = {key: first[key] + second[key] for key in first}
+        self.store.observe_turn_usage(
+            {
+                "threadId": "rerouted",
+                "turnId": "rerouted-turn",
+                "serviceTier": "standard",
+                "responseId": "astra-response",
+                "tokenUsage": {"last": second, "total": total},
+            }
+        )
+        report = self.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(report["attributed"]["response_count"], 2)
+        self.assertEqual(
+            {item["model"] for item in report["rate_card_provenance"]},
+            {"gpt-5.6-luna", "gpt-6-astra"},
+        )
+        self.assertEqual(
+            self.store.row(
+                "SELECT COUNT(*) AS count FROM model_reroutes WHERE contribution_id IS NOT NULL"
+            )["count"],
+            2,
+        )
+        self.store.observe_model_reroute(
+            {
+                "threadId": "rerouted",
+                "turnId": "rerouted-turn",
+                "fromModel": "gpt-6-astra",
+                "toModel": "gpt-5.6-terra",
+                "reason": "late notification",
+            }
+        )
+        partial = self.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(partial["coverage"], "partial")
+        self.assertIn(
+            "without a following response boundary", " ".join(partial["exclusions"])
+        )
+        unknown = self.store.estimate_response_cost(
+            requested_model="gpt-5.6-sol",
+            effective_model="gpt-5.6-sol",
+            processing_tier="unknown-tier",
+            input_tokens=1,
+            cached_input_tokens=0,
+            cache_write_input_tokens=0,
+            output_tokens=0,
+        )
+        self.assertEqual(unknown["coverage"], "partial")
+        self.assertNotIn("amount", unknown)
+
+        _, missing_action = self._usage_action("boundary-gap", turn_id="gap-turn")
+        event = self._usage("boundary-gap", "gap-turn", 10)
+        del event["tokenUsage"]["last"]
+        self.store.observe_turn_usage(event)
+        missing = self.store.cost_report(action_id=missing_action)["groups"][0]
+        self.assertEqual(missing["coverage"], "partial")
+        self.assertIn("priced response boundaries", " ".join(missing["exclusions"]))
+
+    def test_consumed_reroute_does_not_leak_to_later_response(self) -> None:
+        task, action_id = self._usage_action(
+            "one-shot-reroute", turn_id="one-shot-turn"
+        )
+        self.store.execute(
+            "UPDATE tasks SET model = 'gpt-5.6-sol' WHERE id = ?", (task["id"],)
+        )
+        reroute = {
+            "threadId": "one-shot-reroute",
+            "turnId": "one-shot-turn",
+            "fromModel": "gpt-5.6-sol",
+            "toModel": "gpt-5.6-luna",
+            "reason": "capacity",
+        }
+        self.assertTrue(self.store.observe_model_reroute(reroute))
+        self.assertFalse(self.store.observe_model_reroute(reroute))
+        first = {
+            "inputTokens": 10,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 1,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 11,
+        }
+        first_event = {
+            "threadId": "one-shot-reroute",
+            "turnId": "one-shot-turn",
+            "serviceTier": "standard",
+            "responseId": "r1",
+            "tokenUsage": {"last": first, "total": first},
+        }
+        self.store.observe_turn_usage(first_event)
+        self.store.observe_turn_usage(first_event)
+        total = {key: value * 2 for key, value in first.items()}
+        self.store.observe_turn_usage(
+            {
+                "threadId": "one-shot-reroute",
+                "turnId": "one-shot-turn",
+                "serviceTier": "standard",
+                "responseId": "r2",
+                "tokenUsage": {"last": first, "total": total},
+            }
+        )
+
+        contributions = self.store.rows(
+            """SELECT id, response_sequence, effective_model, coverage, assumptions
+               FROM cost_contributions WHERE action_id = ?
+                 AND contribution_kind = 'model_response' ORDER BY response_sequence""",
+            (action_id,),
+        )
+        self.assertEqual(len(contributions), 2)
+        self.assertEqual(
+            [row["effective_model"] for row in contributions],
+            ["gpt-5.6-luna", "gpt-5.6-sol"],
+        )
+        self.assertEqual(contributions[0]["coverage"], "complete")
+        self.assertEqual(contributions[1]["coverage"], "partial")
+        self.assertIn(
+            "used configured model",
+            " ".join(json.loads(contributions[1]["assumptions"])),
+        )
+        retained_reroute = self.store.row("SELECT * FROM model_reroutes")
+        self.assertEqual(retained_reroute["contribution_id"], contributions[0]["id"])
+        report = self.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(report["coverage"], "partial")
+        self.assertEqual(
+            {source["model"] for source in report["rate_card_provenance"]},
+            {"gpt-5.6-luna", "gpt-5.6-sol"},
+        )
+
+    def test_identical_reroute_after_consumption_is_a_new_occurrence(self) -> None:
+        task, action_id = self._usage_action(
+            "repeated-reroute", turn_id="repeated-turn"
+        )
+        self.store.execute(
+            "UPDATE tasks SET model = 'gpt-5.6-sol' WHERE id = ?", (task["id"],)
+        )
+        reroute = {
+            "threadId": "repeated-reroute",
+            "turnId": "repeated-turn",
+            "fromModel": "gpt-5.6-sol",
+            "toModel": "gpt-5.6-luna",
+            "reason": "capacity",
+        }
+        response = {
+            "inputTokens": 10,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 1,
+            "reasoningOutputTokens": 1,
+            "totalTokens": 11,
+        }
+
+        first = {
+            "threadId": "repeated-reroute",
+            "turnId": "repeated-turn",
+            "serviceTier": "standard",
+            "responseId": "r1",
+            "tokenUsage": {"last": response, "total": response},
+        }
+        self.assertTrue(self.store.observe_model_reroute(reroute))
+        self.store.observe_turn_usage(first)
+        self.assertTrue(self.store.observe_model_reroute(reroute))
+        self.store.observe_turn_usage(first)
+        self.assertFalse(self.store.observe_model_reroute(reroute))
+        total = {key: value * 2 for key, value in response.items()}
+        self.store.observe_turn_usage(
+            {
+                "threadId": "repeated-reroute",
+                "turnId": "repeated-turn",
+                "serviceTier": "standard",
+                "responseId": "r2",
+                "tokenUsage": {"last": response, "total": total},
+            }
+        )
+
+        contributions = self.store.rows(
+            """SELECT id, effective_model, coverage FROM cost_contributions
+               WHERE action_id = ? AND contribution_kind = 'model_response'
+               ORDER BY response_sequence""",
+            (action_id,),
+        )
+        reroutes = self.store.rows(
+            "SELECT contribution_id FROM model_reroutes ORDER BY id"
+        )
+        self.assertEqual(len(contributions), 2)
+        self.assertEqual(
+            [row["effective_model"] for row in contributions],
+            ["gpt-5.6-luna", "gpt-5.6-luna"],
+        )
+        self.assertEqual([row["coverage"] for row in contributions], ["complete"] * 2)
+        self.assertEqual(
+            [row["contribution_id"] for row in reroutes],
+            [contributions[0]["id"], contributions[1]["id"]],
+        )
+        report = self.store.cost_report(action_id=action_id)["groups"][0]
+        self.assertEqual(report["coverage"], "complete")
+        self.assertEqual(report["attributed"]["response_count"], 2)
+        self.assertEqual(
+            {source["model"] for source in report["rate_card_provenance"]},
+            {"gpt-5.6-luna"},
+        )
 
     def test_pragmas_and_names_are_role_specific(self) -> None:
         self.assertEqual(self.store.row("PRAGMA journal_mode")["journal_mode"], "wal")
@@ -243,6 +646,107 @@ class StoreTest(unittest.TestCase):
             ("handoff_must_match_terminal_source",),
         )
         self.assertNotIn("outcome_payload = NEW.content_json", trigger["sql"])
+
+    def test_cost_schema_migration_preserves_usage_contributions_and_workflow(
+        self,
+    ) -> None:
+        _, action_id = self._usage_action("cost-migration", turn_id="cost-turn")
+        usage = self._usage("cost-migration", "cost-turn", 10)
+        usage["effectiveModel"] = "gpt-5.6-luna"
+        usage["serviceTier"] = "standard"
+        self.store.observe_turn_usage(usage)
+        self.store.link_action_to_workflow(
+            "workflow:migration", action_id, causal_role="executor"
+        )
+        path = Path(self.temporary.name) / "state.sqlite3"
+        self.store.close()
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "ALTER TABLE workflow_cost_actions DROP COLUMN exclusion_reason"
+        )
+        connection.execute("ALTER TABLE workflow_cost_actions DROP COLUMN include_cost")
+        connection.execute("DROP TABLE api_tool_rate_cards")
+        connection.execute("DROP TABLE model_reroutes")
+        connection.commit()
+        connection.close()
+
+        self.store = Store(path)
+        retained_usage = self.store.row("""SELECT total_tokens FROM action_turn_usage
+               WHERE native_thread_id = 'cost-migration'""")
+        retained_cost = self.store.row(
+            "SELECT amount FROM cost_contributions WHERE action_id = ?", (action_id,)
+        )
+        retained_link = self.store.row(
+            """SELECT include_cost, exclusion_reason FROM workflow_cost_actions
+               WHERE workflow_id = 'workflow:migration' AND action_id = ?""",
+            (action_id,),
+        )
+        self.assertEqual(retained_usage["total_tokens"], 14)
+        self.assertIsNotNone(retained_cost["amount"])
+        self.assertEqual(retained_link["include_cost"], 1)
+        self.assertIsNone(retained_link["exclusion_reason"])
+        self.assertEqual(
+            self.store.row("""SELECT unit_rate FROM api_tool_rate_cards
+                   WHERE tool_name = 'web_search'""")["unit_rate"],
+            "0.01",
+        )
+
+    def test_lifetime_reroute_identity_migrates_without_data_loss(self) -> None:
+        task, action_id = self._usage_action(
+            "reroute-migration", turn_id="reroute-migration-turn"
+        )
+        self.store.execute(
+            "UPDATE tasks SET model = 'gpt-5.6-sol' WHERE id = ?", (task["id"],)
+        )
+        reroute = {
+            "threadId": "reroute-migration",
+            "turnId": "reroute-migration-turn",
+            "fromModel": "gpt-5.6-sol",
+            "toModel": "gpt-5.6-luna",
+            "reason": "capacity",
+        }
+        self.store.observe_model_reroute(reroute)
+        usage = self._usage("reroute-migration", "reroute-migration-turn", 10)
+        usage["serviceTier"] = "standard"
+        self.store.observe_turn_usage(usage)
+        contribution = self.store.row(
+            "SELECT id FROM cost_contributions WHERE action_id = ?", (action_id,)
+        )
+        path = Path(self.temporary.name) / "state.sqlite3"
+        self.store.close()
+        connection = sqlite3.connect(path)
+        connection.executescript("""PRAGMA foreign_keys = OFF;
+            DROP INDEX one_pending_model_reroute;
+            DROP INDEX reroutes_by_turn;
+            ALTER TABLE model_reroutes RENAME TO replacement_model_reroutes;
+            CREATE TABLE model_reroutes (
+              id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL,
+              native_turn_id TEXT NOT NULL, from_model TEXT NOT NULL,
+              to_model TEXT NOT NULL, reason TEXT NOT NULL,
+              contribution_id INTEGER REFERENCES cost_contributions(id),
+              observed_at TEXT NOT NULL,
+              UNIQUE(native_thread_id, native_turn_id, from_model, to_model, reason)
+            );
+            INSERT INTO model_reroutes SELECT * FROM replacement_model_reroutes;
+            DROP TABLE replacement_model_reroutes;
+            PRAGMA foreign_keys = ON;""")
+        connection.commit()
+        connection.close()
+
+        self.store = Store(path)
+        retained = self.store.row("SELECT * FROM model_reroutes")
+        self.assertEqual(retained["contribution_id"], contribution["id"])
+        table_sql = self.store.row("""SELECT sql FROM sqlite_master
+               WHERE type = 'table' AND name = 'model_reroutes'""")["sql"]
+        index_sql = self.store.row("""SELECT sql FROM sqlite_master
+               WHERE type = 'index' AND name = 'one_pending_model_reroute'""")["sql"]
+        self.assertNotIn("UNIQUE", table_sql.upper())
+        self.assertIn("WHERE contribution_id IS NULL", index_sql)
+        self.assertTrue(self.store.observe_model_reroute(reroute))
+        self.assertEqual(
+            self.store.row("SELECT COUNT(*) AS count FROM model_reroutes")["count"],
+            2,
+        )
 
     def test_open_collapses_duplicate_unresolved_candidate_operations(self) -> None:
         now = "2026-01-01T00:00:00Z"

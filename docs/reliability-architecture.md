@@ -146,6 +146,39 @@ emits one bounded summary event. Status adds only a compact total-and-coverage
 summary to active actions, while `fulcrum usage` provides filtered historical
 turns and rollups.
 
+Cost calculation is observational and cannot drive, block, or retry workflow
+state. One immutable contribution is retained per observed model response or
+priced tool call, with raw quantities, Decimal component amounts, effective
+model/tier, frozen rates and rules, official provenance, coverage, assumptions,
+and exclusions. Unknown prices are not zero. Duplicate or out-of-order samples
+cannot create a second contribution; late helper ownership propagates to the
+existing contribution. Terminal processing emits one bounded computed/partial
+cost summary instead of logging token samples.
+
+Protocol-native `model/rerouted` events are retained by native thread and turn,
+then consumed exactly once by the following response boundary. Later responses
+fall back to their own model fact or the configured-model assumption; an
+identical reroute is deduplicated only while pending and becomes a new occurrence
+after the prior row is consumed. An unassociated event makes the affected estimate
+partial. `item/completed` is authoritative for observable tool charges. A
+`webSearch` completion resolves against the frozen dated public $0.01-per-call
+card, while a missing card creates an unknown-price contribution
+instead of disappearing. Item starts, replays, and late delivery remain exact-once
+by source identity.
+
+Workflow cost uses explicit causal joins from Weaver intake, never project/run or
+thread proximity. Retries, recovery, correction cycles, specialists, helpers,
+Archon succession, and completion delivery are included once while unrelated
+work is excluded. An acknowledgement may quote only the frozen total through the
+work it acknowledges. After that Archon turn terminates and its finish is accepted,
+each eligible acknowledged boundary is finalized independently, even if unrelated
+actionable facts shared the batch. A single-workflow acknowledgement contribution
+is included and the all-in total is frozen. If the Archon response spans multiple
+workflow identities, Fulcrum cannot divide its response telemetry safely: it
+excludes that response from every affected workflow, marks each total partial, and
+never copies unrelated cost across boundaries. Replays and restarts return the
+same value and emit one finalization event.
+
 Turn binding reconciles usage that arrived before `turn/started` or before an
 uncertain start was resolved. Terminal observation finalizes the latest retained
 snapshot. Restart and runtime disconnect mark open rows partial rather than
@@ -218,6 +251,9 @@ The automated gate covers both domain behavior and interruption boundaries:
 - independent archive quarantine;
 - cumulative token usage deduplication, observational gaps, helper attribution,
   and historical rollups without workflow-event amplification;
+- response-level Decimal estimates, long-context/service-tier rules, reroutes,
+  frozen rate provenance, tool exclusions, causal boundaries, acknowledgement
+  finalization, and cost replay idempotency;
 - transient launchctl bootstrap failure; and
 - atomic control-plane snapshot replacement.
 

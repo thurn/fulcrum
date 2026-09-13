@@ -170,6 +170,12 @@ def _archon_finish_guidance(
                     ensure_ascii=False,
                 )
             )
+            lines.append(
+                "Repeat each controller-supplied completion cost sentence exactly. "
+                "Do not calculate, refresh, extrapolate, or invent a price. A workflow "
+                "estimate through completion excludes this still-running acknowledgement; "
+                "only a later controller finalization is all-in."
+            )
             if any(content.get("minor_fixes") for content in contents):
                 lines.append(
                     "Do not schedule the nonblocking follow-up; it requires a new Weaver bead."
@@ -263,6 +269,7 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
                 prefix
                 + f"{content['bead_id']} completed (assignment {content['assignment_id']}, run {content['run_id']})."
             )
+            lines.extend(_archon_cost_confirmation(content))
             if content.get("minor_fixes"):
                 lines.append(
                     "Overseer nonblocking follow-up (not approved work): "
@@ -299,6 +306,7 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
                 + f"{content['specialist']} report {content['occurrence_id']}: {content['summary']} ({content['finding_count']} findings). "
                 + _facts({"scope": content.get("scope")})
             )
+            lines.extend(_archon_cost_confirmation(content))
         else:
             # Unknown exceptions retain their actual decision data instead of
             # silently becoming an uninformative notification count.
@@ -392,6 +400,48 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
             lines.append("Policy: " + _facts(policy))
     guidance = _archon_finish_guidance(payload, action_id=action_id)
     return "\n".join([guidance[0], *lines, *guidance[1:]])
+
+
+def _archon_cost_confirmation(content: dict[str, Any]) -> list[str]:
+    """Render only controller-frozen values; Archon must never do cost arithmetic."""
+
+    cost = content.get("cost")
+    completed_action_id = content.get("action_id")
+    if not isinstance(cost, dict) or not isinstance(completed_action_id, int):
+        return ["No controller-supplied cost estimate is available; do not invent one."]
+    action = cost.get("action")
+    display = action.get("attributed_display") if isinstance(action, dict) else None
+    if not isinstance(display, str):
+        return ["No controller-supplied cost estimate is available; do not invent one."]
+    lines = [
+        f"Action {completed_action_id} completed at estimated API cost of {display}."
+    ]
+    workflow = cost.get("workflow_through_completion")
+    workflow_display = workflow.get("display") if isinstance(workflow, dict) else None
+    if isinstance(workflow_display, str):
+        lines.append(
+            "Frozen end-to-end workflow estimate through this completion: "
+            f"{workflow_display}; it excludes the currently running Archon "
+            "acknowledgement turn."
+        )
+    if cost.get("coverage") != "complete":
+        reasons = [
+            *(
+                cost.get("assumptions", [])
+                if isinstance(cost.get("assumptions"), list)
+                else []
+            ),
+            *(
+                cost.get("exclusions", [])
+                if isinstance(cost.get("exclusions"), list)
+                else []
+            ),
+        ]
+        qualification = (
+            str(reasons[0]) if reasons else "some pricing facts are unavailable"
+        )
+        lines.append(f"Partial estimate: {qualification}.")
+    return lines
 
 
 def _handoff_text(content: Any) -> str:

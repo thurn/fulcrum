@@ -73,6 +73,24 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("action", "task", "assignment", "run", "role", "project"),
         default="action",
     )
+    cost = commands.add_parser(
+        "cost", help="query frozen API-equivalent workflow cost estimates"
+    )
+    cost.add_argument("--action", type=int)
+    cost.add_argument("--task", type=int)
+    cost.add_argument("--assignment", type=int)
+    cost.add_argument("--run", type=int)
+    cost.add_argument(
+        "--role",
+        choices=("archon", "weaver", "executor", "overseer", "sage", "inquisitor"),
+    )
+    cost.add_argument("--project")
+    cost.add_argument("--workflow")
+    cost.add_argument(
+        "--group-by",
+        choices=("action", "task", "assignment", "run", "role", "project", "workflow"),
+        default="action",
+    )
     commands.add_parser(
         "context", help="show the current managed action's authoritative context"
     )
@@ -278,6 +296,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                         run_id=args.run,
                         role=args.role,
                         project_id=args.project,
+                        group_by=args.group_by,
+                    )
+        elif args.command == "cost":
+            query = {
+                "command": "cost",
+                "action_id": args.action,
+                "task_id": args.task,
+                "assignment_id": args.assignment,
+                "run_id": args.run,
+                "role": args.role,
+                "project_id": args.project,
+                "workflow_id": args.workflow,
+                "group_by": args.group_by,
+            }
+            if paths.socket.exists():
+                result = _request(paths, query)
+            else:
+                with Store(paths.database, readonly=True) as store:
+                    result = store.cost_report(
+                        action_id=args.action,
+                        task_id=args.task,
+                        assignment_id=args.assignment,
+                        run_id=args.run,
+                        role=args.role,
+                        project_id=args.project,
+                        workflow_id=args.workflow,
                         group_by=args.group_by,
                     )
         elif args.command == "context":

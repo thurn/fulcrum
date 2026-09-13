@@ -30,7 +30,7 @@ audited transitions, and concise events. There is no
 parallel JSON state store, role plugin framework, event-replay architecture, or
 agent-owned operational record.
 
-## Token-usage accounting
+## Usage and API-equivalent cost accounting
 
 The app-server's `thread/tokenUsage/updated` notification is retained as one
 coalesced cumulative row per native thread and turn, then associated with the
@@ -44,8 +44,36 @@ values remain unknown; they are never converted to zero.
 subset of input and `reasoningOutputTokens` is already a subset of output, so
 callers must not add every field together. Total processed tokens are also not a
 measure of unique prompt text: repeated context and cache reads remain processed
-input. Fulcrum reports usage, not estimated dollar cost or ChatGPT subscription
-billing.
+input. Fulcrum also freezes an estimate of equivalent public OpenAI API charges.
+This is not actual ChatGPT subscription consumption, credits, an invoice, internal
+cost, or marginal cost.
+
+Pricing is response-specific. For each `last` response boundary, ordinary input is
+`input - cached input - cache-write input`; its contribution charges those three
+input categories at their separate rates and all output at the output rate.
+Reasoning output is informational within output and is never charged again.
+Negative quantities, invalid subset relationships, and reasoning output above
+output make the contribution invalid instead of being coerced. Decimal text retains
+exact arithmetic; display normally rounds to cents, with positive sub-cent values
+shown as `<$0.01`.
+
+The dated rate card retains provider, effective and configured models, effective
+processing tier, currency, unit rates and multipliers, rules, official model URL,
+and captured/effective timestamps. The initial card was captured 2026-09-13 from
+the official Sol, Terra, Luna, and Astra model pages. Prompts above 272,000 input
+tokens apply 2x input/cache and 1.5x output rates to that response only. Batch/Flex
+use 0.5x and Fast/priority 2x when observed. A reroute uses its effective model.
+The controller retains the protocol-native `model/rerouted` tuple (`threadId`,
+`turnId`, `fromModel`, `toModel`, `reason`) and associates it with the following
+response boundary. Once associated, that reroute is not eligible for another
+response; later responses use their own effective-model fact or the configured
+model assumption. Value-identical delivery is idempotent while that occurrence is
+pending; after consumption, the same tuple represents a new observable occurrence
+and can be associated with a later response. A reroute with no following boundary
+is reported as partial instead of being guessed onto an earlier response. Missing
+model, tier, rate, or response boundaries produce explicit partial coverage.
+Frozen contributions retain their rates, so later card changes never recompute
+history.
 
 Direct usage answers what the managed agent thread used. Attributed usage includes
 that direct usage plus native helper turns linked by app-server collaboration
@@ -62,3 +90,29 @@ role, and project by summing each turn's final cumulative snapshot—not repeate
 streaming samples. A disconnect, restart, or missing notification leaves observed
 counts partial or unavailable with a gap reason; workflow completion never waits
 on telemetry.
+
+`fulcrum cost` returns frozen token/tool components, response/action counts,
+provenance, assumptions, and coverage by action, task, role, assignment, run,
+project, or causal workflow. Direct cost covers the managed action; attributed
+cost also includes observed nested native helpers. Priced tools are separate generic
+contributions with quantity, unit, rate, source, and amount. An observed tool with
+no authoritative public rate is excluded and makes coverage partial; unobservable
+calls are never inferred as zero. A completed App Server `webSearch` item is one
+observable call and resolves against the dated official tool card captured
+2026-09-13 at $10 per 1,000 calls. Started/replayed items do not create additional
+contributions, and late completed items retain native turn identity for direct or
+helper attribution.
+
+A causal identity begins at Weaver intake and follows its beads through Archon
+proposal/approval, all Executor/Overseer correction and recovery actions, helpers,
+delivery, and the completion Archon action. Specialist workflows use occurrence
+identity. Explicit joins exclude unrelated concurrent work and survive retries and
+Archon succession. Completion updates contain action cost and workflow cost through
+completion, excluding the acknowledgement being generated. After that Archon action
+terminates, the controller prices it and freezes/logs the all-in total. Each
+acknowledged workflow in a batch closes independently of proposal, recovery,
+escalation, operation-resolution, or succession items beside it. When one Archon
+response spans multiple workflow identities and response-level ownership is not
+available, the response is excluded from every affected workflow rather than
+duplicated; each total records that partial-allocation exclusion. Unique source
+identities and joins make replay idempotent.

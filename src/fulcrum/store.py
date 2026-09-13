@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Final
 
@@ -25,6 +26,37 @@ ROLE_CODES = {
 }
 
 _HELPER_OWNERSHIP_GAP = "helper turn has no unambiguous collaboration ownership"
+
+_RATE_CAPTURED_AT = "2026-09-13T00:00:00Z"
+_RATE_CARDS: Final = (
+    ("gpt-5.6-sol", "4.00", "0.40", "5.00", "20.00"),
+    ("gpt-5.6-terra", "2.00", "0.20", "2.50", "12.00"),
+    ("gpt-5.6-luna", "0.20", "0.02", "0.25", "1.20"),
+    ("gpt-6-astra", "10.00", "1.00", "12.50", "50.00"),
+)
+_TOOL_RATE_CARDS: Final = (
+    (
+        "web_search",
+        "call",
+        "0.01",
+        "https://developers.openai.com/api/docs/pricing",
+    ),
+)
+_MODEL_ALIASES: Final = {
+    "gpt-5.6": "gpt-5.6-sol",
+    "sol": "gpt-5.6-sol",
+    "terra": "gpt-5.6-terra",
+    "luna": "gpt-5.6-luna",
+    "astra": "gpt-6-astra",
+}
+_TIER_MULTIPLIERS: Final = {
+    "standard": Decimal("1"),
+    "default": Decimal("1"),
+    "batch": Decimal("0.5"),
+    "flex": Decimal("0.5"),
+    "fast": Decimal("2"),
+    "priority": Decimal("2"),
+}
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -161,6 +193,82 @@ CREATE TABLE IF NOT EXISTS action_turn_usage (
 );
 CREATE INDEX IF NOT EXISTS usage_by_action ON action_turn_usage(action_id);
 CREATE INDEX IF NOT EXISTS usage_by_attributed_action ON action_turn_usage(attributed_action_id);
+CREATE TABLE IF NOT EXISTS api_rate_cards (
+  id INTEGER PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL,
+  processing_tier TEXT NOT NULL, currency TEXT NOT NULL,
+  input_per_million TEXT NOT NULL, cached_input_per_million TEXT NOT NULL,
+  cache_write_input_per_million TEXT NOT NULL, output_per_million TEXT NOT NULL,
+  long_context_threshold INTEGER, long_context_input_multiplier TEXT,
+  long_context_output_multiplier TEXT, tier_multiplier TEXT NOT NULL,
+  rules_json TEXT NOT NULL, source_url TEXT NOT NULL,
+  effective_at TEXT NOT NULL, captured_at TEXT NOT NULL,
+  UNIQUE(provider, model, processing_tier, effective_at)
+);
+CREATE TABLE IF NOT EXISTS api_tool_rate_cards (
+  id INTEGER PRIMARY KEY, provider TEXT NOT NULL, tool_name TEXT NOT NULL,
+  unit TEXT NOT NULL, currency TEXT NOT NULL, unit_rate TEXT NOT NULL,
+  rules_json TEXT NOT NULL DEFAULT '[]', source_url TEXT NOT NULL,
+  effective_at TEXT NOT NULL, captured_at TEXT NOT NULL,
+  UNIQUE(provider, tool_name, unit, effective_at)
+);
+CREATE TABLE IF NOT EXISTS cost_contributions (
+  id INTEGER PRIMARY KEY, contribution_kind TEXT NOT NULL
+    CHECK (contribution_kind IN ('model_response','tool_call')),
+  source_key TEXT NOT NULL UNIQUE,
+  native_thread_id TEXT, native_turn_id TEXT, response_sequence INTEGER,
+  action_id INTEGER REFERENCES actions(id),
+  attributed_action_id INTEGER REFERENCES actions(id),
+  provider TEXT NOT NULL, requested_model TEXT, effective_model TEXT,
+  processing_tier TEXT, currency TEXT NOT NULL,
+  rate_card_id INTEGER REFERENCES api_rate_cards(id),
+  input_rate TEXT, cached_input_rate TEXT, cache_write_input_rate TEXT,
+  output_rate TEXT, tier_multiplier TEXT, applied_rules TEXT NOT NULL DEFAULT '[]',
+  input_tokens INTEGER, cached_input_tokens INTEGER,
+  cache_write_input_tokens INTEGER, output_tokens INTEGER,
+  reasoning_output_tokens INTEGER, ordinary_input_tokens INTEGER,
+  tool_name TEXT, quantity TEXT, unit TEXT, unit_rate TEXT,
+  input_amount TEXT, cached_input_amount TEXT, cache_write_input_amount TEXT,
+  output_amount TEXT, amount TEXT,
+  coverage TEXT NOT NULL CHECK (coverage IN ('complete','partial','invalid')),
+  assumptions TEXT NOT NULL DEFAULT '[]', exclusions TEXT NOT NULL DEFAULT '[]',
+  source_url TEXT, rate_captured_at TEXT, rate_effective_at TEXT,
+  finalized_at TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS costs_by_action ON cost_contributions(action_id);
+CREATE INDEX IF NOT EXISTS costs_by_attributed_action ON cost_contributions(attributed_action_id);
+CREATE TABLE IF NOT EXISTS model_reroutes (
+  id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL,
+  native_turn_id TEXT NOT NULL, from_model TEXT NOT NULL,
+  to_model TEXT NOT NULL, reason TEXT NOT NULL,
+  contribution_id INTEGER REFERENCES cost_contributions(id),
+  observed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reroutes_by_turn
+  ON model_reroutes(native_thread_id, native_turn_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS one_pending_model_reroute
+  ON model_reroutes(native_thread_id, native_turn_id, from_model, to_model, reason)
+  WHERE contribution_id IS NULL;
+CREATE TABLE IF NOT EXISTS workflow_cost_boundaries (
+  workflow_id TEXT PRIMARY KEY, origin_action_id INTEGER REFERENCES actions(id),
+  state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','closed')),
+  frozen_amount TEXT, currency TEXT NOT NULL DEFAULT 'USD',
+  frozen_summary TEXT,
+  coverage TEXT, assumptions TEXT NOT NULL DEFAULT '[]',
+  exclusions TEXT NOT NULL DEFAULT '[]', closed_at TEXT, created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_cost_actions (
+  workflow_id TEXT NOT NULL REFERENCES workflow_cost_boundaries(workflow_id),
+  action_id INTEGER NOT NULL REFERENCES actions(id), causal_role TEXT NOT NULL,
+  include_cost INTEGER NOT NULL DEFAULT 1 CHECK (include_cost IN (0, 1)),
+  exclusion_reason TEXT,
+  created_at TEXT NOT NULL, PRIMARY KEY (workflow_id, action_id)
+);
+CREATE TABLE IF NOT EXISTS workflow_cost_beads (
+  workflow_id TEXT NOT NULL REFERENCES workflow_cost_boundaries(workflow_id),
+  bead_id TEXT NOT NULL REFERENCES beads(bead_id), created_at TEXT NOT NULL,
+  PRIMARY KEY (workflow_id, bead_id)
+);
 CREATE TABLE IF NOT EXISTS telemetry_helper_threads (
   id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL,
   parent_thread_id TEXT NOT NULL, parent_turn_id TEXT NOT NULL DEFAULT '',
@@ -521,6 +629,7 @@ class Store:
             self.connection.execute("PRAGMA synchronous = FULL")
             self.connection.executescript(SCHEMA)
             self._migrate_existing_database()
+            self._seed_rate_cards()
             self._replace_invariant_triggers()
             self.connection.executescript(INVARIANT_TRIGGERS)
             for role in ROLE_CODES:
@@ -528,6 +637,73 @@ class Store:
                     "INSERT OR IGNORE INTO role_counters(role, next_number) VALUES (?, 1)",
                     (role,),
                 )
+
+    def _seed_rate_cards(self) -> None:
+        """Retain the dated public prices used by estimates, without refreshing history."""
+
+        for model, input_rate, cached_rate, write_rate, output_rate in _RATE_CARDS:
+            self.connection.execute(
+                """INSERT OR IGNORE INTO api_rate_cards(
+                       provider, model, processing_tier, currency,
+                       input_per_million, cached_input_per_million,
+                       cache_write_input_per_million, output_per_million,
+                       long_context_threshold, long_context_input_multiplier,
+                       long_context_output_multiplier, tier_multiplier, rules_json,
+                       source_url, effective_at, captured_at
+                   ) VALUES ('openai', ?, 'standard', 'USD', ?, ?, ?, ?,
+                             272000, '2', '1.5', '1', ?, ?, ?, ?)""",
+                (
+                    model,
+                    input_rate,
+                    cached_rate,
+                    write_rate,
+                    output_rate,
+                    json.dumps(
+                        {
+                            "long_context": (
+                                "input > 272000: 2x ordinary/cached/cache-write input "
+                                "and 1.5x output for that response"
+                            ),
+                            "service_tiers": {
+                                "batch": "0.5",
+                                "flex": "0.5",
+                                "fast": "2",
+                                "priority": "2",
+                            },
+                            "reasoning_output": "included in output; never added again",
+                        },
+                        sort_keys=True,
+                    ),
+                    f"https://developers.openai.com/api/docs/models/{model}",
+                    _RATE_CAPTURED_AT,
+                    _RATE_CAPTURED_AT,
+                ),
+            )
+        for tool_name, unit, unit_rate, source_url in _TOOL_RATE_CARDS:
+            self.connection.execute(
+                """INSERT OR IGNORE INTO api_tool_rate_cards(
+                       provider, tool_name, unit, currency, unit_rate,
+                       rules_json, source_url, effective_at, captured_at
+                   ) VALUES ('openai', ?, ?, 'USD', ?, ?, ?, ?, ?)""",
+                (
+                    tool_name,
+                    unit,
+                    unit_rate,
+                    json.dumps(
+                        {
+                            "quantity": "one completed App Server webSearch item is one call",
+                            "search_content_tokens": (
+                                "already represented in model input usage when exposed; "
+                                "never added as a second inferred quantity"
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                    source_url,
+                    _RATE_CAPTURED_AT,
+                    _RATE_CAPTURED_AT,
+                ),
+            )
 
     def _replace_invariant_triggers(self) -> None:
         """Replace retained trigger definitions when controller invariants change."""
@@ -608,6 +784,33 @@ class Store:
                 DROP TABLE obsolete_batch_updates;"""
             )
 
+        reroute_table = self.connection.execute("""SELECT sql FROM sqlite_master
+               WHERE type = 'table' AND name = 'model_reroutes'""").fetchone()
+        if reroute_table is not None and "UNIQUE" in str(reroute_table[0]).upper():
+            self.connection.executescript("""DROP INDEX IF EXISTS reroutes_by_turn;
+                DROP INDEX IF EXISTS one_pending_model_reroute;
+                ALTER TABLE model_reroutes RENAME TO obsolete_model_reroutes;
+                CREATE TABLE model_reroutes (
+                  id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL,
+                  native_turn_id TEXT NOT NULL, from_model TEXT NOT NULL,
+                  to_model TEXT NOT NULL, reason TEXT NOT NULL,
+                  contribution_id INTEGER REFERENCES cost_contributions(id),
+                  observed_at TEXT NOT NULL
+                );
+                INSERT INTO model_reroutes(
+                  id, native_thread_id, native_turn_id, from_model, to_model,
+                  reason, contribution_id, observed_at
+                ) SELECT id, native_thread_id, native_turn_id, from_model,
+                         to_model, reason, contribution_id, observed_at
+                    FROM obsolete_model_reroutes;
+                DROP TABLE obsolete_model_reroutes;
+                CREATE INDEX reroutes_by_turn
+                  ON model_reroutes(native_thread_id, native_turn_id, id);
+                CREATE UNIQUE INDEX one_pending_model_reroute
+                  ON model_reroutes(native_thread_id, native_turn_id,
+                                    from_model, to_model, reason)
+                  WHERE contribution_id IS NULL;""")
+
         additions = {
             "tasks": {
                 "archive_eligible_at": "TEXT",
@@ -649,6 +852,11 @@ class Store:
             "occurrences": {
                 "evidence_json": "TEXT NOT NULL DEFAULT '{}'",
                 "publication_revision": "TEXT",
+            },
+            "workflow_cost_boundaries": {"frozen_summary": "TEXT"},
+            "workflow_cost_actions": {
+                "include_cost": "INTEGER NOT NULL DEFAULT 1 CHECK (include_cost IN (0, 1))",
+                "exclusion_reason": "TEXT",
             },
         }
         for table, columns in additions.items():
@@ -991,7 +1199,15 @@ class Store:
                      AND attributed_action_id IS NULL""",
                 (action_id, timestamp, native_thread_id, native_turn_id),
             )
+            connection.execute(
+                """UPDATE cost_contributions SET action_id = ?,
+                       attributed_action_id = ?
+                   WHERE native_thread_id = ? AND native_turn_id = ?
+                     AND action_id IS NULL""",
+                (action_id, action_id, native_thread_id, native_turn_id),
+            )
             self._propagate_helper_ownership(connection, timestamp)
+        self._price_pending_response_contributions(native_thread_id, native_turn_id)
 
     def _propagate_helper_ownership(
         self, connection: sqlite3.Connection, timestamp: str
@@ -1083,6 +1299,19 @@ class Store:
                     timestamp,
                 ),
             ).rowcount
+            connection.execute("""UPDATE cost_contributions AS cost
+                   SET attributed_action_id = (
+                         SELECT usage.attributed_action_id
+                         FROM action_turn_usage usage
+                         WHERE usage.native_thread_id = cost.native_thread_id
+                           AND usage.native_turn_id = cost.native_turn_id)
+                   WHERE cost.action_id IS NULL
+                     AND cost.attributed_action_id IS NULL
+                     AND EXISTS (
+                       SELECT 1 FROM action_turn_usage usage
+                       WHERE usage.native_thread_id = cost.native_thread_id
+                         AND usage.native_turn_id = cost.native_turn_id
+                         AND usage.attributed_action_id IS NOT NULL)""")
             if relations == 0 and turns == 0:
                 return
 
@@ -1175,6 +1404,7 @@ class Store:
                 ),
             )
             self._propagate_helper_ownership(connection, timestamp)
+        self._price_pending_response_contributions(native_thread_id, native_turn_id)
         return True
 
     def observe_helper_thread(
@@ -1282,6 +1512,12 @@ class Store:
                     (pending_turns[0][0], timestamp, relationship_id),
                 )
             self._propagate_helper_ownership(connection, timestamp)
+        for pending in self.rows("""SELECT DISTINCT native_thread_id, native_turn_id
+               FROM cost_contributions WHERE amount IS NULL
+                 AND contribution_kind = 'model_response'"""):
+            self._price_pending_response_contributions(
+                str(pending["native_thread_id"]), str(pending["native_turn_id"])
+            )
 
     def observe_turn_usage(self, params: dict[str, Any]) -> bool:
         """Upsert one cumulative app-server snapshot without sampling inflation."""
@@ -1384,6 +1620,16 @@ class Store:
                 )
             with self.transaction() as connection:
                 self._propagate_helper_ownership(connection, timestamp)
+            if last:
+                self._retain_response_cost(
+                    params=params,
+                    total=total,
+                    response=last,
+                    action_id=action_id,
+                    attributed_action_id=attributed_action_id,
+                    requested_model=model,
+                    timestamp=timestamp,
+                )
             return True
         old_total = existing.get("total_tokens")
         new_total = total.get("total_tokens")
@@ -1443,7 +1689,267 @@ class Store:
         )
         with self.transaction() as connection:
             self._propagate_helper_ownership(connection, timestamp)
+        response_identity = _first_string(
+            params.get("responseId"),
+            _nested_value(params.get("tokenUsage"), "last", "responseId"),
+        )
+        if last and (newest or response_identity is not None):
+            self._retain_response_cost(
+                params=params,
+                total=total,
+                response=last,
+                action_id=action_id,
+                attributed_action_id=attributed_action_id,
+                requested_model=model,
+                timestamp=timestamp,
+            )
         return True
+
+    def observe_model_reroute(self, params: dict[str, Any]) -> bool:
+        """Retain the App Server model/rerouted event for the next response boundary."""
+
+        values = tuple(
+            params.get(name)
+            for name in ("threadId", "turnId", "fromModel", "toModel", "reason")
+        )
+        if not all(isinstance(value, str) and value for value in values):
+            return False
+        before = int(self.connection.total_changes)
+        self.execute(
+            """INSERT OR IGNORE INTO model_reroutes(
+                   native_thread_id, native_turn_id, from_model, to_model,
+                   reason, observed_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (*values, utc_now()),
+        )
+        return int(self.connection.total_changes) > before
+
+    def _retain_response_cost(
+        self,
+        *,
+        params: dict[str, Any],
+        total: dict[str, int],
+        response: dict[str, int],
+        action_id: int | None,
+        attributed_action_id: int | None,
+        requested_model: str | None,
+        timestamp: str,
+    ) -> None:
+        """Freeze one response contribution identified by its cumulative boundary."""
+
+        thread_id = str(params["threadId"])
+        turn_id = str(params["turnId"])
+        cumulative_identity = ":".join(
+            str(total.get(key, "unknown")) for key in _USAGE_KEYS
+        )
+        response_id = _first_string(
+            params.get("responseId"),
+            _nested_value(params.get("tokenUsage"), "last", "responseId"),
+        )
+        source_key = (
+            f"model-response:{thread_id}:{turn_id}:id:{response_id}"
+            if response_id
+            else f"model-response:{thread_id}:{turn_id}:totals:{cumulative_identity}"
+        )
+        if self.row(
+            "SELECT 1 FROM cost_contributions WHERE source_key = ?", (source_key,)
+        ):
+            return
+        sequence = self.row(
+            """SELECT COALESCE(MAX(response_sequence), 0) + 1 AS sequence
+               FROM cost_contributions
+               WHERE native_thread_id = ? AND native_turn_id = ?
+                 AND contribution_kind = 'model_response'""",
+            (thread_id, turn_id),
+        )
+        reroute = self.row(
+            """SELECT id, to_model FROM model_reroutes
+               WHERE native_thread_id = ? AND native_turn_id = ?
+                 AND contribution_id IS NULL
+               ORDER BY id LIMIT 1""",
+            (thread_id, turn_id),
+        )
+        effective_model = _first_string(
+            reroute["to_model"] if reroute is not None else None,
+            params.get("effectiveModel"),
+            params.get("model"),
+            _nested_value(params.get("tokenUsage"), "last", "effectiveModel"),
+            _nested_value(params.get("tokenUsage"), "last", "model"),
+        )
+        tier = _first_string(
+            params.get("effectiveServiceTier"),
+            params.get("processingTier"),
+            params.get("serviceTier"),
+            _nested_value(params.get("tokenUsage"), "last", "serviceTier"),
+        )
+        estimate = self.estimate_response_cost(
+            requested_model=requested_model,
+            effective_model=effective_model,
+            processing_tier=tier,
+            input_tokens=response.get("input_tokens"),
+            cached_input_tokens=response.get("cached_input_tokens"),
+            cache_write_input_tokens=response.get("cache_write_input_tokens"),
+            output_tokens=response.get("output_tokens"),
+            reasoning_output_tokens=response.get("reasoning_output_tokens"),
+        )
+        # If observation began after the first response, retained contributions
+        # cover only the response boundary that App Server actually supplied.
+        response_gap = (
+            any(
+                total.get(key) != response.get(key)
+                for key in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "output_tokens",
+                )
+            )
+            and int(sequence["sequence"] if sequence else 1) == 1
+        )
+        exclusions = list(estimate["exclusions"])
+        coverage = str(estimate["coverage"])
+        if response_gap:
+            coverage = "partial" if coverage != "invalid" else coverage
+            exclusions.append(
+                "earlier response boundaries preceded the first observed last-response snapshot"
+            )
+        self.execute(
+            """INSERT OR IGNORE INTO cost_contributions(
+                   contribution_kind, source_key, native_thread_id, native_turn_id,
+                   response_sequence, action_id, attributed_action_id, provider,
+                   requested_model, effective_model, processing_tier, currency,
+                   rate_card_id, input_rate, cached_input_rate,
+                   cache_write_input_rate, output_rate, tier_multiplier,
+                   applied_rules, input_tokens, cached_input_tokens,
+                   cache_write_input_tokens, output_tokens,
+                   reasoning_output_tokens, ordinary_input_tokens,
+                   input_amount, cached_input_amount, cache_write_input_amount,
+                   output_amount, amount, coverage, assumptions, exclusions,
+                   source_url, rate_captured_at, rate_effective_at,
+                   finalized_at, created_at
+               ) VALUES ('model_response', ?, ?, ?, ?, ?, ?, 'openai', ?, ?, ?,
+                         'USD', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_key,
+                thread_id,
+                turn_id,
+                int(sequence["sequence"] if sequence else 1),
+                action_id,
+                attributed_action_id,
+                requested_model,
+                estimate["effective_model"],
+                estimate["processing_tier"],
+                estimate.get("rate_card_id"),
+                estimate.get("input_rate"),
+                estimate.get("cached_input_rate"),
+                estimate.get("cache_write_input_rate"),
+                estimate.get("output_rate"),
+                estimate.get("tier_multiplier"),
+                json.dumps(estimate["applied_rules"]),
+                response.get("input_tokens"),
+                response.get("cached_input_tokens"),
+                response.get("cache_write_input_tokens"),
+                response.get("output_tokens"),
+                response.get("reasoning_output_tokens"),
+                estimate.get("ordinary_input_tokens"),
+                estimate.get("input_amount"),
+                estimate.get("cached_input_amount"),
+                estimate.get("cache_write_input_amount"),
+                estimate.get("output_amount"),
+                estimate.get("amount"),
+                coverage,
+                json.dumps(estimate["assumptions"]),
+                json.dumps(exclusions),
+                estimate.get("source_url"),
+                estimate.get("rate_captured_at"),
+                estimate.get("rate_effective_at"),
+                timestamp,
+                timestamp,
+            ),
+        )
+        retained = self.row(
+            "SELECT id FROM cost_contributions WHERE source_key = ?",
+            (source_key,),
+        )
+        if retained is not None:
+            if reroute is not None:
+                self.execute(
+                    """UPDATE model_reroutes SET contribution_id = ?
+                       WHERE id = ? AND contribution_id IS NULL""",
+                    (retained["id"], reroute["id"]),
+                )
+        terminal = self.row(
+            """SELECT terminal_at FROM action_turn_usage
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (thread_id, turn_id),
+        )
+        if terminal and terminal["terminal_at"] is not None:
+            self.event(
+                "cost_late_contribution_incorporated",
+                "incorporated response telemetry observed after turn finalization",
+                entity_type="cost_contribution",
+                entity_id=retained["id"] if retained else source_key,
+                detail={
+                    "action_id": action_id,
+                    "attributed_action_id": attributed_action_id,
+                    "amount": estimate.get("amount"),
+                    "coverage": coverage,
+                },
+            )
+        self._reconcile_turn_cost_coverage(thread_id, turn_id)
+
+    def _reconcile_turn_cost_coverage(
+        self, native_thread_id: str, native_turn_id: str
+    ) -> None:
+        """Clear an initial boundary gap once explicit response IDs fill it."""
+
+        usage = self.row(
+            """SELECT total_input_tokens, total_cached_input_tokens,
+                      total_cache_write_input_tokens, total_output_tokens
+               FROM action_turn_usage WHERE native_thread_id = ?
+                 AND native_turn_id = ?""",
+            (native_thread_id, native_turn_id),
+        )
+        rows = self.rows(
+            """SELECT * FROM cost_contributions WHERE native_thread_id = ?
+                 AND native_turn_id = ? AND contribution_kind = 'model_response'""",
+            (native_thread_id, native_turn_id),
+        )
+        if usage is None or not rows:
+            return
+        pairs = (
+            ("input_tokens", "total_input_tokens"),
+            ("cached_input_tokens", "total_cached_input_tokens"),
+            ("cache_write_input_tokens", "total_cache_write_input_tokens"),
+            ("output_tokens", "total_output_tokens"),
+        )
+        if any(
+            usage[total_name] is None
+            or any(row[value_name] is None for row in rows)
+            or sum(int(row[value_name]) for row in rows) != int(usage[total_name])
+            for value_name, total_name in pairs
+        ):
+            return
+        boundary_gap = (
+            "earlier response boundaries preceded the first observed "
+            "last-response snapshot"
+        )
+        for row in rows:
+            exclusions = [
+                item
+                for item in _json_string_union([row], "exclusions")
+                if item != boundary_gap
+            ]
+            assumptions = _json_string_union([row], "assumptions")
+            coverage = str(row["coverage"])
+            if coverage != "invalid":
+                coverage = "partial" if assumptions or exclusions else "complete"
+            self.execute(
+                """UPDATE cost_contributions SET exclusions = ?, coverage = ?
+                   WHERE id = ?""",
+                (json.dumps(exclusions), coverage, row["id"]),
+            )
 
     def mark_open_usage_gap(self, reason: str) -> None:
         timestamp = utc_now()
@@ -1453,6 +1959,526 @@ class Store:
                WHERE terminal_at IS NULL AND coverage != 'unavailable'""",
             (reason, timestamp),
         )
+
+    def _price_pending_response_contributions(
+        self, native_thread_id: str, native_turn_id: str
+    ) -> None:
+        """Complete a formerly unpriced response after late ownership/model binding."""
+
+        usage = self.row(
+            """SELECT model FROM action_turn_usage
+               WHERE native_thread_id = ? AND native_turn_id = ?""",
+            (native_thread_id, native_turn_id),
+        )
+        if usage is None or not usage.get("model"):
+            return
+        for contribution in self.rows(
+            """SELECT * FROM cost_contributions
+               WHERE native_thread_id = ? AND native_turn_id = ?
+                 AND contribution_kind = 'model_response' AND amount IS NULL
+                 AND effective_model IS NULL""",
+            (native_thread_id, native_turn_id),
+        ):
+            estimate = self.estimate_response_cost(
+                requested_model=str(usage["model"]),
+                effective_model=None,
+                processing_tier=contribution.get("processing_tier"),
+                input_tokens=contribution.get("input_tokens"),
+                cached_input_tokens=contribution.get("cached_input_tokens"),
+                cache_write_input_tokens=contribution.get("cache_write_input_tokens"),
+                output_tokens=contribution.get("output_tokens"),
+                reasoning_output_tokens=contribution.get("reasoning_output_tokens"),
+            )
+            if estimate.get("amount") is None:
+                continue
+            prior_exclusions = _json_string_union([contribution], "exclusions")
+            retained_exclusions = [
+                reason
+                for reason in prior_exclusions
+                if "model" not in reason and "rate" not in reason
+            ]
+            coverage = (
+                "partial"
+                if retained_exclusions or estimate["coverage"] != "complete"
+                else "complete"
+            )
+            self.execute(
+                """UPDATE cost_contributions SET requested_model = ?,
+                       effective_model = ?, processing_tier = ?, rate_card_id = ?,
+                       input_rate = ?, cached_input_rate = ?,
+                       cache_write_input_rate = ?, output_rate = ?,
+                       tier_multiplier = ?, applied_rules = ?,
+                       ordinary_input_tokens = ?, input_amount = ?,
+                       cached_input_amount = ?, cache_write_input_amount = ?,
+                       output_amount = ?, amount = ?, coverage = ?, assumptions = ?,
+                       exclusions = ?, source_url = ?, rate_captured_at = ?,
+                       rate_effective_at = ? WHERE id = ? AND amount IS NULL""",
+                (
+                    usage["model"],
+                    estimate["effective_model"],
+                    estimate["processing_tier"],
+                    estimate["rate_card_id"],
+                    estimate["input_rate"],
+                    estimate["cached_input_rate"],
+                    estimate["cache_write_input_rate"],
+                    estimate["output_rate"],
+                    estimate["tier_multiplier"],
+                    json.dumps(estimate["applied_rules"]),
+                    estimate["ordinary_input_tokens"],
+                    estimate["input_amount"],
+                    estimate["cached_input_amount"],
+                    estimate["cache_write_input_amount"],
+                    estimate["output_amount"],
+                    estimate["amount"],
+                    coverage,
+                    json.dumps(estimate["assumptions"]),
+                    json.dumps(retained_exclusions),
+                    estimate["source_url"],
+                    estimate["rate_captured_at"],
+                    estimate["rate_effective_at"],
+                    contribution["id"],
+                ),
+            )
+            self.event(
+                "cost_late_contribution_incorporated",
+                "priced response after late causal ownership became available",
+                entity_type="cost_contribution",
+                entity_id=contribution["id"],
+                detail={
+                    "action_id": contribution.get("action_id"),
+                    "attributed_action_id": contribution.get("attributed_action_id"),
+                    "amount": estimate["amount"],
+                    "coverage": coverage,
+                },
+            )
+
+    def estimate_response_cost(
+        self,
+        *,
+        requested_model: str | None,
+        effective_model: str | None,
+        processing_tier: str | None,
+        input_tokens: int | None,
+        cached_input_tokens: int | None,
+        cache_write_input_tokens: int | None,
+        output_tokens: int | None,
+        reasoning_output_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        """Calculate an API-equivalent response estimate using one retained card."""
+
+        assumptions: list[str] = []
+        exclusions: list[str] = []
+        rules: list[str] = []
+        configured = _canonical_model(requested_model)
+        effective = effective_model
+        if effective is None and configured is not None:
+            effective = requested_model or configured
+            assumptions.append("effective model unavailable; used configured model")
+        if effective is None:
+            exclusions.append("effective model and usable configured model unavailable")
+
+        normalized_tier = processing_tier.lower() if processing_tier else None
+        if normalized_tier in {None, "auto"}:
+            normalized_tier = "standard"
+            assumptions.append(
+                "effective processing tier unavailable; assumed standard"
+            )
+        assert normalized_tier is not None
+        tier_multiplier = _TIER_MULTIPLIERS.get(normalized_tier)
+        if tier_multiplier is None:
+            exclusions.append(
+                f"no authoritative multiplier for processing tier {normalized_tier}"
+            )
+
+        quantities = {
+            "input": input_tokens,
+            "cached input": cached_input_tokens,
+            "cache-write input": cache_write_input_tokens,
+            "output": output_tokens,
+        }
+        missing = [name for name, value in quantities.items() if value is None]
+        if missing:
+            exclusions.append("missing response quantities: " + ", ".join(missing))
+        invalid: list[str] = []
+        for name, value in quantities.items():
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                invalid.append(f"{name} tokens must be a nonnegative integer")
+        if (
+            input_tokens is not None
+            and cached_input_tokens is not None
+            and cache_write_input_tokens is not None
+            and cached_input_tokens + cache_write_input_tokens > input_tokens
+        ):
+            invalid.append("cached plus cache-write input exceeds input tokens")
+        if (
+            output_tokens is not None
+            and reasoning_output_tokens is not None
+            and reasoning_output_tokens > output_tokens
+        ):
+            invalid.append("reasoning output exceeds output tokens")
+        if reasoning_output_tokens is not None and (
+            not isinstance(reasoning_output_tokens, int)
+            or isinstance(reasoning_output_tokens, bool)
+            or reasoning_output_tokens < 0
+        ):
+            invalid.append("reasoning output tokens must be a nonnegative integer")
+
+        card = (
+            self.row(
+                """SELECT * FROM api_rate_cards
+                   WHERE provider = 'openai' AND model = ?
+                     AND processing_tier = 'standard'
+                   ORDER BY effective_at DESC, id DESC LIMIT 1""",
+                (_canonical_model(effective),),
+            )
+            if effective
+            else None
+        )
+        if card is None and effective is not None:
+            exclusions.append(f"no retained public rate for model {effective}")
+        result: dict[str, Any] = {
+            "provider": "openai",
+            "requested_model": requested_model,
+            "effective_model": effective,
+            "processing_tier": normalized_tier,
+            "currency": "USD",
+            "coverage": "invalid" if invalid else "partial",
+            "assumptions": assumptions,
+            "exclusions": [*invalid, *exclusions],
+            "applied_rules": rules,
+            "reasoning_output_tokens": reasoning_output_tokens,
+        }
+        if card is None or missing or invalid or tier_multiplier is None:
+            return result
+
+        assert input_tokens is not None
+        assert cached_input_tokens is not None
+        assert cache_write_input_tokens is not None
+        assert output_tokens is not None
+        ordinary = input_tokens - cached_input_tokens - cache_write_input_tokens
+        input_multiplier = Decimal("1")
+        output_multiplier = Decimal("1")
+        threshold = card.get("long_context_threshold")
+        if threshold is not None and input_tokens > int(threshold):
+            input_multiplier = Decimal(str(card["long_context_input_multiplier"]))
+            output_multiplier = Decimal(str(card["long_context_output_multiplier"]))
+            rules.append(f"long_context_input_over_{threshold}")
+        if tier_multiplier != Decimal("1"):
+            rules.append(f"service_tier_{normalized_tier}")
+        divisor = Decimal("1000000")
+        input_rate = Decimal(str(card["input_per_million"]))
+        cached_rate = Decimal(str(card["cached_input_per_million"]))
+        write_rate = Decimal(str(card["cache_write_input_per_million"]))
+        output_rate = Decimal(str(card["output_per_million"]))
+        input_amount = (
+            Decimal(ordinary)
+            * input_rate
+            * input_multiplier
+            * tier_multiplier
+            / divisor
+        )
+        cached_amount = (
+            Decimal(cached_input_tokens)
+            * cached_rate
+            * input_multiplier
+            * tier_multiplier
+            / divisor
+        )
+        write_amount = (
+            Decimal(cache_write_input_tokens)
+            * write_rate
+            * input_multiplier
+            * tier_multiplier
+            / divisor
+        )
+        output_amount = (
+            Decimal(output_tokens)
+            * output_rate
+            * output_multiplier
+            * tier_multiplier
+            / divisor
+        )
+        amount = input_amount + cached_amount + write_amount + output_amount
+        result.update(
+            {
+                "coverage": "complete" if not assumptions else "partial",
+                "rate_card_id": card["id"],
+                "input_rate": _decimal_text(input_rate),
+                "cached_input_rate": _decimal_text(cached_rate),
+                "cache_write_input_rate": _decimal_text(write_rate),
+                "output_rate": _decimal_text(output_rate),
+                "tier_multiplier": _decimal_text(tier_multiplier),
+                "ordinary_input_tokens": ordinary,
+                "input_amount": _decimal_text(input_amount),
+                "cached_input_amount": _decimal_text(cached_amount),
+                "cache_write_input_amount": _decimal_text(write_amount),
+                "output_amount": _decimal_text(output_amount),
+                "amount": _decimal_text(amount),
+                "source_url": card["source_url"],
+                "rate_captured_at": card["captured_at"],
+                "rate_effective_at": card["effective_at"],
+            }
+        )
+        return result
+
+    def record_tool_cost(
+        self,
+        *,
+        source_key: str,
+        tool_name: str,
+        quantity: str | int,
+        unit: str,
+        unit_rate: str | None,
+        source_url: str | None,
+        native_thread_id: str | None = None,
+        native_turn_id: str | None = None,
+        action_id: int | None = None,
+        attributed_action_id: int | None = None,
+        provider: str = "openai",
+        currency: str = "USD",
+        assumption: str | None = None,
+        applied_rules: Sequence[str] = (),
+        rate_captured_at: str | None = None,
+        rate_effective_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Freeze an observed tool charge, or an explicit unknown-price exclusion."""
+
+        existing = self.row(
+            "SELECT * FROM cost_contributions WHERE source_key = ?", (source_key,)
+        )
+        if existing is not None:
+            return existing
+        timestamp = utc_now()
+        assumptions = [assumption] if assumption else []
+        exclusions: list[str] = []
+        amount: str | None = None
+        coverage = "complete"
+        try:
+            parsed_quantity = Decimal(str(quantity))
+            if parsed_quantity < 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            parsed_quantity = Decimal("0")
+            coverage = "invalid"
+            exclusions.append("tool quantity must be a nonnegative decimal")
+        if unit_rate is None or source_url is None:
+            coverage = "partial" if coverage != "invalid" else coverage
+            exclusions.append("authoritative public tool rate or source unavailable")
+        else:
+            try:
+                parsed_rate = Decimal(unit_rate)
+                if parsed_rate < 0:
+                    raise InvalidOperation
+                if coverage != "invalid":
+                    amount = _decimal_text(parsed_quantity * parsed_rate)
+            except (InvalidOperation, ValueError):
+                coverage = "invalid"
+                exclusions.append("tool unit rate must be a nonnegative decimal")
+        self.execute(
+            """INSERT INTO cost_contributions(
+                   contribution_kind, source_key, native_thread_id, native_turn_id,
+                   action_id, attributed_action_id,
+                   provider, currency, tool_name, quantity, unit, unit_rate,
+                   amount, coverage, assumptions, exclusions, source_url,
+                   rate_captured_at, rate_effective_at, finalized_at, created_at,
+                   applied_rules
+               ) VALUES ('tool_call', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                source_key,
+                native_thread_id,
+                native_turn_id,
+                action_id,
+                attributed_action_id if attributed_action_id is not None else action_id,
+                provider,
+                currency,
+                tool_name,
+                _decimal_text(parsed_quantity),
+                unit,
+                unit_rate,
+                amount,
+                coverage,
+                json.dumps(assumptions),
+                json.dumps(exclusions),
+                source_url,
+                rate_captured_at or (timestamp if source_url and unit_rate else None),
+                rate_effective_at or (timestamp if source_url and unit_rate else None),
+                timestamp,
+                timestamp,
+                json.dumps(list(applied_rules)),
+            ),
+        )
+        retained = (
+            self.row(
+                "SELECT * FROM cost_contributions WHERE source_key = ?", (source_key,)
+            )
+            or {}
+        )
+        terminal = (
+            self.row(
+                """SELECT terminal_at FROM action_turn_usage
+                   WHERE native_thread_id = ? AND native_turn_id = ?""",
+                (native_thread_id, native_turn_id),
+            )
+            if native_thread_id is not None and native_turn_id is not None
+            else None
+        )
+        if terminal is not None and terminal["terminal_at"] is not None:
+            self.event(
+                "cost_late_contribution_incorporated",
+                "incorporated tool telemetry observed after turn finalization",
+                entity_type="cost_contribution",
+                entity_id=retained.get("id", source_key),
+                detail={
+                    "action_id": action_id,
+                    "attributed_action_id": (
+                        attributed_action_id
+                        if attributed_action_id is not None
+                        else action_id
+                    ),
+                    "amount": amount,
+                    "coverage": coverage,
+                },
+            )
+        return retained
+
+    def record_observed_tool(
+        self,
+        *,
+        source_key: str,
+        tool_name: str,
+        native_thread_id: str,
+        native_turn_id: str,
+        action_id: int | None = None,
+        attributed_action_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one observable separately priced tool against dated public rates."""
+
+        card = self.row(
+            """SELECT * FROM api_tool_rate_cards
+               WHERE provider = 'openai' AND tool_name = ? AND unit = 'call'
+               ORDER BY effective_at DESC, id DESC LIMIT 1""",
+            (tool_name,),
+        )
+        return self.record_tool_cost(
+            source_key=source_key,
+            tool_name=tool_name,
+            quantity=1,
+            unit="call",
+            unit_rate=str(card["unit_rate"]) if card is not None else None,
+            source_url=str(card["source_url"]) if card is not None else None,
+            native_thread_id=native_thread_id,
+            native_turn_id=native_turn_id,
+            action_id=action_id,
+            attributed_action_id=attributed_action_id,
+            rate_captured_at=(str(card["captured_at"]) if card is not None else None),
+            rate_effective_at=(str(card["effective_at"]) if card is not None else None),
+            applied_rules=(
+                (
+                    "one completed App Server webSearch item is one call",
+                    "search content tokens are represented only by observed model input usage",
+                )
+                if card is not None
+                else ()
+            ),
+        )
+
+    def link_action_to_workflow(
+        self,
+        workflow_id: str,
+        action_id: int,
+        *,
+        causal_role: str,
+        origin_action_id: int | None = None,
+        include_cost: bool = True,
+        exclusion_reason: str | None = None,
+    ) -> None:
+        """Attach one action to an explicit causal boundary, idempotently."""
+
+        timestamp = utc_now()
+        self.execute(
+            """INSERT OR IGNORE INTO workflow_cost_boundaries(
+                   workflow_id, origin_action_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?)""",
+            (workflow_id, origin_action_id, timestamp, timestamp),
+        )
+        self.execute(
+            """INSERT INTO workflow_cost_actions(
+                   workflow_id, action_id, causal_role, include_cost,
+                   exclusion_reason, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(workflow_id, action_id) DO UPDATE SET
+                 causal_role = excluded.causal_role,
+                 include_cost = MIN(workflow_cost_actions.include_cost,
+                                    excluded.include_cost),
+                 exclusion_reason = COALESCE(workflow_cost_actions.exclusion_reason,
+                                             excluded.exclusion_reason)""",
+            (
+                workflow_id,
+                action_id,
+                causal_role,
+                int(include_cost),
+                exclusion_reason,
+                timestamp,
+            ),
+        )
+
+    def link_bead_to_workflow(self, workflow_id: str, bead_id: str) -> None:
+        timestamp = utc_now()
+        self.execute(
+            """INSERT OR IGNORE INTO workflow_cost_boundaries(
+                   workflow_id, created_at, updated_at) VALUES (?, ?, ?)""",
+            (workflow_id, timestamp, timestamp),
+        )
+        self.execute(
+            """INSERT OR IGNORE INTO workflow_cost_beads(
+                   workflow_id, bead_id, created_at) VALUES (?, ?, ?)""",
+            (workflow_id, bead_id, timestamp),
+        )
+
+    def finalize_workflow_cost(self, workflow_id: str) -> dict[str, Any]:
+        """Freeze the all-in total only after the final acknowledgement terminated."""
+
+        boundary = self.row(
+            "SELECT * FROM workflow_cost_boundaries WHERE workflow_id = ?",
+            (workflow_id,),
+        )
+        if boundary is None:
+            raise StoreError(f"unknown workflow cost boundary {workflow_id}")
+        if boundary["state"] == "closed":
+            report = self.cost_report(workflow_id=workflow_id, group_by="workflow")
+            report["frozen_amount"] = boundary["frozen_amount"]
+            report["finalized"] = True
+            report["_newly_finalized"] = False
+            return report
+        report = self.cost_report(workflow_id=workflow_id, group_by="workflow")
+        group = report["groups"][0] if report["groups"] else None
+        amount = group["attributed"]["amount"] if group else None
+        coverage = group["coverage"] if group else "partial"
+        assumptions = group["assumptions"] if group else []
+        exclusions = group["exclusions"] if group else ["no observed contributions"]
+        timestamp = utc_now()
+        self.execute(
+            """UPDATE workflow_cost_boundaries SET state = 'closed',
+                   frozen_amount = ?, frozen_summary = ?, coverage = ?,
+                   assumptions = ?, exclusions = ?, closed_at = ?, updated_at = ?
+                   WHERE workflow_id = ?""",
+            (
+                amount,
+                json.dumps(group, sort_keys=True),
+                coverage,
+                json.dumps(assumptions),
+                json.dumps(exclusions),
+                timestamp,
+                timestamp,
+                workflow_id,
+            ),
+        )
+        report["frozen_amount"] = amount
+        report["finalized"] = True
+        report["_newly_finalized"] = True
+        return report
 
     def finalize_native_turn_usage(
         self, native_thread_id: str, native_turn_id: str
@@ -1574,6 +2600,38 @@ class Store:
             "attributed_total_tokens": item["attributed"]["total_tokens"],
             "coverage": item["coverage"],
             "turn_count": item["contributing_turn_count"],
+        }
+
+    def action_cost_summary(self, action_id: int) -> dict[str, Any]:
+        report = self.cost_report(action_id=action_id, group_by="action")
+        if not report["groups"]:
+            return {
+                "direct_amount": None,
+                "attributed_amount": None,
+                "direct_display": None,
+                "attributed_display": None,
+                "coverage": "partial",
+                "estimate_kind": "equivalent public OpenAI API charges",
+                "not_actual_billing": True,
+            }
+        group = report["groups"][0]
+        direct = group["direct"]["amount"]
+        attributed = group["attributed"]["amount"]
+        return {
+            "direct_amount": direct,
+            "attributed_amount": attributed,
+            "direct_display": format_usd(direct),
+            "attributed_display": format_usd(attributed),
+            "direct": group["direct"],
+            "attributed": group["attributed"],
+            "coverage": group["coverage"],
+            "response_count": group["attributed"]["response_count"],
+            "tool_count": group["attributed"]["tool_count"],
+            "assumptions": group["assumptions"],
+            "exclusions": group["exclusions"],
+            "rate_card_provenance": group["rate_card_provenance"],
+            "estimate_kind": "equivalent public OpenAI API charges",
+            "not_actual_billing": True,
         }
 
     def usage_report(
@@ -1738,6 +2796,242 @@ class Store:
             "group_by": group_by,
             "groups": rendered,
             "turns": list(unique_turns.values()),
+        }
+
+    def cost_report(
+        self,
+        *,
+        action_id: int | None = None,
+        task_id: int | None = None,
+        assignment_id: int | None = None,
+        run_id: int | None = None,
+        role: str | None = None,
+        project_id: str | None = None,
+        workflow_id: str | None = None,
+        group_by: str = "action",
+    ) -> dict[str, Any]:
+        """Return frozen API-equivalent estimates; never refresh retained prices."""
+
+        dimensions = {
+            "action": "a.id",
+            "task": "t.id",
+            "assignment": "a.assignment_id",
+            "run": "assn.run_id",
+            "role": "t.role",
+            "project": "t.project_id",
+            "workflow": "wca.workflow_id",
+        }
+        result_keys = {
+            "action": "id",
+            "task": "task_id",
+            "assignment": "assignment_id",
+            "run": "run_id",
+            "role": "role",
+            "project": "project_id",
+            "workflow": "workflow_id",
+        }
+        if group_by not in dimensions:
+            raise StoreError(f"unsupported cost grouping: {group_by}")
+        filters: list[str] = []
+        values: list[Any] = []
+        for column, value in (
+            ("a.id", action_id),
+            ("t.id", task_id),
+            ("a.assignment_id", assignment_id),
+            ("assn.run_id", run_id),
+            ("t.role", role),
+            ("t.project_id", project_id),
+            ("wca.workflow_id", workflow_id),
+        ):
+            if value is not None:
+                filters.append(f"{column} = ?")
+                values.append(value)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        actions = self.rows(
+            f"""SELECT DISTINCT a.id, a.task_id, a.assignment_id, a.kind, a.state,
+                       t.role, t.project_id, assn.run_id, wca.workflow_id,
+                       wca.include_cost, wca.exclusion_reason
+                FROM actions a JOIN tasks t ON t.id = a.task_id
+                LEFT JOIN assignments assn ON assn.id = a.assignment_id
+                LEFT JOIN workflow_cost_actions wca ON wca.action_id = a.id
+                {where} ORDER BY a.id""",
+            values,
+        )
+        groups: dict[Any, list[dict[str, Any]]] = {}
+        for action in actions:
+            key = action.get(result_keys[group_by])
+            if key is not None:
+                groups.setdefault(key, []).append(action)
+        rendered: list[dict[str, Any]] = []
+        selected_contributions: dict[int, dict[str, Any]] = {}
+        for key, members in groups.items():
+            ids = sorted({int(member["id"]) for member in members})
+            included_ids = (
+                sorted(
+                    {
+                        int(member["id"])
+                        for member in members
+                        if member.get("include_cost") != 0
+                    }
+                )
+                if group_by == "workflow"
+                else ids
+            )
+            marks = ",".join("?" for _ in included_ids)
+            boundary = (
+                self.row(
+                    """SELECT state, frozen_summary, closed_at
+                       FROM workflow_cost_boundaries WHERE workflow_id = ?""",
+                    (key,),
+                )
+                if group_by == "workflow"
+                else None
+            )
+            closed_filter = (
+                " AND created_at <= ?"
+                if boundary and boundary["state"] == "closed"
+                else ""
+            )
+            contribution_values: list[Any] = included_ids + included_ids
+            if closed_filter:
+                assert boundary is not None
+                contribution_values.append(boundary["closed_at"])
+            contributions = (
+                self.rows(
+                    f"""SELECT * FROM cost_contributions
+                        WHERE (action_id IN ({marks}) OR attributed_action_id IN ({marks}))
+                        {closed_filter}
+                        ORDER BY id""",
+                    contribution_values,
+                )
+                if included_ids
+                else []
+            )
+            for contribution in contributions:
+                selected_contributions[int(contribution["id"])] = contribution
+            direct = [row for row in contributions if row["action_id"] in included_ids]
+            attributed = [
+                row
+                for row in contributions
+                if row["attributed_action_id"] in included_ids
+            ]
+            relevant = attributed or direct
+            assumptions = _json_string_union(relevant, "assumptions")
+            exclusions = _json_string_union(relevant, "exclusions")
+            allocation_exclusions = (
+                sorted(
+                    {
+                        str(member["exclusion_reason"])
+                        for member in members
+                        if member.get("include_cost") == 0
+                        and member.get("exclusion_reason")
+                    }
+                )
+                if group_by == "workflow"
+                else []
+            )
+            exclusions.extend(allocation_exclusions)
+            if not relevant:
+                exclusions.append("no priced response or tool contribution observed")
+            coverage = _cost_coverage(relevant, expected=bool(members))
+            directly_priced = {
+                int(row["action_id"])
+                for row in direct
+                if row["action_id"] is not None
+                and row["contribution_kind"] == "model_response"
+            }
+            missing_action_boundaries = sorted(set(included_ids) - directly_priced)
+            usage_gaps = (
+                self.row(
+                    f"""SELECT COUNT(*) AS count FROM action_turn_usage
+                        WHERE (action_id IN ({marks}) OR attributed_action_id IN ({marks}))
+                          AND coverage NOT IN ('complete','observed')""",
+                    included_ids + included_ids,
+                )
+                if included_ids
+                else None
+            )
+            unmatched_reroutes = (
+                self.row(
+                    f"""SELECT COUNT(*) AS count FROM model_reroutes reroute
+                        JOIN action_turn_usage usage
+                          ON usage.native_thread_id = reroute.native_thread_id
+                         AND usage.native_turn_id = reroute.native_turn_id
+                        WHERE reroute.contribution_id IS NULL
+                          AND (usage.action_id IN ({marks})
+                               OR usage.attributed_action_id IN ({marks}))
+                          {('AND reroute.observed_at <= ?' if closed_filter else '')}""",
+                    contribution_values,
+                )
+                if included_ids
+                else None
+            )
+            if allocation_exclusions:
+                coverage = "partial" if coverage != "invalid" else coverage
+            if missing_action_boundaries:
+                coverage = "partial" if coverage != "invalid" else coverage
+                exclusions.append(
+                    "actions without priced response boundaries: "
+                    + json.dumps(missing_action_boundaries)
+                )
+            if usage_gaps and int(usage_gaps["count"]):
+                coverage = "partial" if coverage != "invalid" else coverage
+                exclusions.append("raw token telemetry coverage is not complete")
+            if unmatched_reroutes and int(unmatched_reroutes["count"]):
+                coverage = "partial" if coverage != "invalid" else coverage
+                exclusions.append(
+                    "model reroute observed without a following response boundary"
+                )
+            rendered.append(
+                {
+                    "group_by": group_by,
+                    "group": key,
+                    "action_ids": ids,
+                    "contributing_action_ids": included_ids,
+                    "currency": "USD",
+                    "estimate_kind": "equivalent public OpenAI API charges",
+                    "not_actual_billing": True,
+                    "direct": _sum_costs(direct),
+                    "attributed": _sum_costs(attributed),
+                    "coverage": coverage,
+                    "assumptions": assumptions,
+                    "exclusions": exclusions,
+                    "rate_card_provenance": _rate_provenance(relevant),
+                }
+            )
+        contributions = list(selected_contributions.values())
+        if group_by == "workflow":
+            for index, group in enumerate(rendered):
+                boundary = self.row(
+                    """SELECT state, frozen_summary FROM workflow_cost_boundaries
+                       WHERE workflow_id = ?""",
+                    (group["group"],),
+                )
+                if (
+                    boundary
+                    and boundary["state"] == "closed"
+                    and boundary["frozen_summary"]
+                ):
+                    frozen = json.loads(boundary["frozen_summary"])
+                    frozen["finalized"] = True
+                    rendered[index] = frozen
+        limit = 200
+        return {
+            "filters": {
+                "action_id": action_id,
+                "task_id": task_id,
+                "assignment_id": assignment_id,
+                "run_id": run_id,
+                "role": role,
+                "project_id": project_id,
+                "workflow_id": workflow_id,
+            },
+            "group_by": group_by,
+            "estimate_kind": "equivalent public OpenAI API charges",
+            "not_actual_billing_or_subscription_usage": True,
+            "groups": rendered,
+            "contributions": contributions[:limit],
+            "contributions_truncated": len(contributions) > limit,
         }
 
     def create_operation(
@@ -2125,6 +3419,155 @@ def _nonnegative_int(value: Any) -> int | None:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0
         else None
     )
+
+
+def _first_string(*values: Any) -> str | None:
+    return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _nested_value(value: Any, *keys: str) -> Any:
+    current = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _canonical_model(model: str | None) -> str | None:
+    if not model:
+        return None
+    normalized = model.lower()
+    if normalized in _MODEL_ALIASES:
+        return _MODEL_ALIASES[normalized]
+    for seeded, *_ in _RATE_CARDS:
+        if normalized == seeded or normalized.startswith(seeded + "-"):
+            return seeded
+    return normalized
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def format_usd(amount: str | Decimal | None) -> str | None:
+    """Deterministically display USD, including a visible positive sub-cent value."""
+
+    if amount is None:
+        return None
+    value = amount if isinstance(amount, Decimal) else Decimal(str(amount))
+    if Decimal("0") < value < Decimal("0.01"):
+        return "<$0.01"
+    rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"${rounded:.2f}"
+
+
+def _sum_costs(contributions: list[dict[str, Any]]) -> dict[str, Any]:
+    known = [
+        Decimal(str(row["amount"]))
+        for row in contributions
+        if row["amount"] is not None
+    ]
+    amount = _decimal_text(sum(known, Decimal("0"))) if known else None
+    token_rows = [
+        row for row in contributions if row["contribution_kind"] == "model_response"
+    ]
+    tool_rows = [
+        row for row in contributions if row["contribution_kind"] == "tool_call"
+    ]
+    component_names = (
+        "input_amount",
+        "cached_input_amount",
+        "cache_write_input_amount",
+        "output_amount",
+    )
+    components: dict[str, str | None] = {}
+    for name in component_names:
+        values = [
+            Decimal(str(row[name])) for row in token_rows if row[name] is not None
+        ]
+        components[name] = _decimal_text(sum(values, Decimal("0"))) if values else None
+    tool_values = [
+        Decimal(str(row["amount"])) for row in tool_rows if row["amount"] is not None
+    ]
+    components["tool_amount"] = (
+        _decimal_text(sum(tool_values, Decimal("0"))) if tool_values else None
+    )
+    return {
+        "amount": amount,
+        "display": format_usd(amount),
+        "components": components,
+        "contribution_count": len(contributions),
+        "response_count": len(token_rows),
+        "tool_count": len(tool_rows),
+        "action_count": len(
+            {
+                row["attributed_action_id"] or row["action_id"]
+                for row in contributions
+                if row["attributed_action_id"] is not None
+                or row["action_id"] is not None
+            }
+        ),
+    }
+
+
+def _json_string_union(rows: list[dict[str, Any]], column: str) -> list[str]:
+    values: list[str] = []
+    for row in rows:
+        try:
+            items = json.loads(row.get(column) or "[]")
+        except (TypeError, json.JSONDecodeError):
+            items = [str(row.get(column))]
+        for item in items if isinstance(items, list) else [items]:
+            rendered = str(item)
+            if rendered not in values:
+                values.append(rendered)
+    return values
+
+
+def _cost_coverage(rows: list[dict[str, Any]], *, expected: bool) -> str:
+    if not rows:
+        return "partial" if expected else "partial"
+    states = {str(row["coverage"]) for row in rows}
+    if "invalid" in states:
+        return "invalid"
+    return "complete" if states == {"complete"} else "partial"
+
+
+def _rate_provenance(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    provenance: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for row in rows:
+        key = (
+            row.get("provider"),
+            row.get("effective_model"),
+            row.get("processing_tier"),
+            row.get("tool_name"),
+            row.get("unit"),
+            row.get("unit_rate"),
+            row.get("source_url"),
+            row.get("rate_captured_at"),
+        )
+        if key in seen or row.get("source_url") is None:
+            continue
+        seen.add(key)
+        provenance.append(
+            {
+                "provider": row.get("provider"),
+                "model": row.get("effective_model"),
+                "processing_tier": row.get("processing_tier"),
+                "tool": row.get("tool_name"),
+                "unit": row.get("unit"),
+                "unit_rate": row.get("unit_rate"),
+                "source_url": row.get("source_url"),
+                "captured_at": row.get("rate_captured_at"),
+                "effective_at": row.get("rate_effective_at"),
+            }
+        )
+    return provenance
 
 
 def _usage_breakdown(value: dict[str, Any]) -> dict[str, int]:

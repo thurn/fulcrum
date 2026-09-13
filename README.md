@@ -221,6 +221,8 @@ fulcrum status --queue
 fulcrum status --capabilities
 fulcrum status --run 3 --events 20
 fulcrum doctor --json
+fulcrum usage --assignment 7 --group-by assignment
+fulcrum cost --workflow weaver-action:12 --group-by workflow
 ```
 
 `status` reports managed tasks, runs, assignments, stages, runtime activity,
@@ -229,6 +231,35 @@ Use `--queue` for waiting work, `--capabilities` for dispatch readiness and
 project capacity, and `--run <integer>` to focus on one run. `doctor` checks the
 assembled installation and reports concrete service, runtime, project, brain,
 and dependency failures.
+
+`usage` reports durable raw token telemetry. `cost` reports a frozen estimate of
+equivalent public OpenAI API charges with direct versus helper-attributed totals,
+token/tool components, rate provenance, counts, assumptions, exclusions, and
+coverage. It is not actual ChatGPT subscription usage, credits, billing, internal
+cost, or marginal cost. Ordinary input is total input minus cached and cache-write
+input; reasoning output remains within output. Long-context pricing is applied per
+response, never to an action aggregate. App Server `model/rerouted` events are
+retained against the following response boundary so the actual routed model is
+priced. A consumed reroute cannot affect later responses; they use their own model
+facts or the documented configured-model assumption. Identical delivery coalesces
+only while an occurrence is pending, so the same reroute observed after consumption
+is retained for another response. A reroute without a following boundary remains
+partial. Completed `webSearch`
+items use the dated official $0.01-per-call rate, while an observed tool without a
+matching authoritative card remains an explicit partial exclusion. Historical
+contributions keep their dated rates when the public card changes.
+
+Workflow totals follow explicit causality from Weaver intake through Archon,
+Executor/helpers, Overseer correction/recovery cycles, specialists, delivery, and
+completion acknowledgement, excluding unrelated concurrent work. A confirmation
+such as `Action 30 completed at estimated API cost of $3.13.` reports the completed
+action. A workflow value beside it is frozen through that completion and excludes
+the running acknowledgement; the controller freezes the all-in value after that
+turn terminates. If one Archon response contains work for multiple causal
+workflows, its indivisible response cost is excluded from each workflow rather
+than copied into all of them, and those workflow totals are explicitly partial.
+An eligible completion in a mixed batch still closes independently after the
+acknowledgement terminates.
 
 ### Replace the managed fleet
 
