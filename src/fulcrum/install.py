@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ SYSTEM_EXECUTABLE_PATHS = (
     "/sbin",
 )
 USER_EXECUTABLE_PATHS = (".local/bin", "bin")
+WORKTREE_RUNTIME_IMPORTS = ("jsonschema", "yaml", "watchfiles", "websockets")
+WORKTREE_DEVELOPMENT_COMMANDS = ("black", "pyre", "fulcrum")
 
 
 @dataclass(frozen=True)
@@ -146,6 +149,193 @@ def controller_program_arguments(
         "from fulcrum.cli import main; raise SystemExit(main())"
     )
     return [str(python), "-I", "-c", launcher, "serve"]
+
+
+def _remove_environment_path(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _worktree_environment_is_ready(
+    environment: Path, worktree: Path, source_environment: Path
+) -> bool:
+    """Validate the boundary and installed tools without importing Fulcrum."""
+
+    if environment.is_symlink() or not environment.is_dir():
+        return False
+    python = environment / "bin" / "python"
+    if not os.access(python, os.X_OK):
+        return False
+    inspection = """
+import importlib.metadata
+import json
+import pathlib
+import site
+import sys
+
+for name in sys.argv[1].split(','):
+    __import__(name)
+distribution = importlib.metadata.distribution('fulcrum')
+print(json.dumps({
+    'prefix': sys.prefix,
+    'base_prefix': sys.base_prefix,
+    'site_packages': site.getsitepackages(),
+    'distribution_root': str(distribution.locate_file('')),
+    'direct_url': distribution.read_text('direct_url.json'),
+    'version': list(sys.version_info[:2]),
+}))
+"""
+    try:
+        completed = subprocess.run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                inspection,
+                ",".join(WORKTREE_RUNTIME_IMPORTS),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            return False
+        observed = json.loads(completed.stdout)
+        direct_url = json.loads(observed["direct_url"])
+        editable = direct_url.get("dir_info", {}).get("editable") is True
+        editable_url = urllib.parse.urlparse(direct_url["url"])
+        if editable_url.scheme != "file":
+            return False
+        installed_source = Path(
+            urllib.request.url2pathname(urllib.parse.unquote(editable_url.path))
+        )
+        environment_root = environment.resolve(strict=True)
+        source_root = source_environment.resolve(strict=True)
+        site_packages = [
+            Path(item).resolve(strict=True) for item in observed["site_packages"]
+        ]
+        if not (
+            observed["version"] == [3, 12]
+            and Path(observed["prefix"]).resolve(strict=True) == environment_root
+            and Path(observed["base_prefix"]).resolve(strict=True) != environment_root
+            and environment_root != source_root
+            and all(path.is_relative_to(environment_root) for path in site_packages)
+            and all(not path.is_relative_to(source_root) for path in site_packages)
+            and Path(observed["distribution_root"])
+            .resolve(strict=True)
+            .is_relative_to(environment_root)
+            and editable
+            and installed_source.resolve(strict=True) == worktree.resolve(strict=True)
+        ):
+            return False
+        for name in WORKTREE_DEVELOPMENT_COMMANDS:
+            command = environment / "bin" / name
+            if not os.access(command, os.X_OK) or not command.resolve(
+                strict=True
+            ).is_relative_to(environment_root):
+                return False
+        return True
+    except (
+        KeyError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        subprocess.TimeoutExpired,
+    ):
+        return False
+
+
+def _run_environment_install(command: list[str], *, worktree: Path) -> None:
+    completed = subprocess.run(
+        command,
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode == 0:
+        return
+    detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
+    raise InstallationError(
+        f"managed worktree environment command failed ({' '.join(command)}): {detail}"
+    )
+
+
+def provision_worktree_environment(source_root: Path, worktree: Path) -> bool:
+    """Create or verify a worktree-owned Python development environment.
+
+    Pip's ordinary cache remains enabled, but no files from the controller's
+    environment are linked into the managed worktree.
+    """
+
+    source = source_root.resolve(strict=True)
+    managed = worktree.resolve(strict=True)
+    if managed == source:
+        raise InstallationError("managed worktree must differ from the source checkout")
+    source_environment = source / ".venv"
+    source_python = source_environment / "bin" / "python"
+    requirements = managed / "requirements-dev.lock"
+    project = managed / "pyproject.toml"
+    if not os.access(source_python, os.X_OK):
+        raise InstallationError(
+            f"controller Python environment is unavailable: {source_environment}"
+        )
+    if not requirements.is_file() or not project.is_file():
+        raise InstallationError(
+            f"managed worktree lacks pyproject.toml or requirements-dev.lock: {managed}"
+        )
+
+    target = managed / ".venv"
+    if _worktree_environment_is_ready(target, managed, source_environment):
+        return False
+
+    displaced = managed / f".venv.invalid-{os.getpid()}-{uuid.uuid4().hex}"
+    if target.exists() or target.is_symlink():
+        os.replace(target, displaced)
+    try:
+        _run_environment_install(
+            [str(source_python), "-m", "venv", str(target)], worktree=managed
+        )
+        python = target / "bin" / "python"
+        _run_environment_install(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--requirement",
+                str(requirements),
+            ],
+            worktree=managed,
+        )
+        _run_environment_install(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-deps",
+                "--editable",
+                str(managed),
+            ],
+            worktree=managed,
+        )
+        if not _worktree_environment_is_ready(target, managed, source_environment):
+            raise InstallationError(
+                f"managed worktree environment failed validation: {target}"
+            )
+    except Exception:
+        _remove_environment_path(target)
+        if displaced.exists() or displaced.is_symlink():
+            os.replace(displaced, target)
+        raise
+    _remove_environment_path(displaced)
+    return True
 
 
 def verify_editable_source(source_root: Path) -> None:

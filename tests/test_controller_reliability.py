@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,7 +16,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
+from fulcrum.config import (
+    InstallationConfig,
+    ProjectConfig,
+    RuntimePaths,
+    save_installation,
+)
 from fulcrum.controller import (
     Controller,
     INHERITED_LOCK_FD_ENV,
@@ -353,6 +360,262 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM external_operations WHERE id = ?", (operation,)
         )
         self.assertEqual(retained["state"], "failed")
+
+    def test_managed_worktree_environment_isolated_from_controller_install(
+        self,
+    ) -> None:
+        fixture = Path(self.temporary.name) / "environment-isolation"
+        source = fixture / "source"
+        worktree = fixture / "worktree"
+        repository = Path(__file__).resolve().parents[1]
+        for checkout in (source, worktree):
+            checkout.mkdir(parents=True)
+            shutil.copytree(repository / "src", checkout / "src")
+            shutil.copytree(repository / "scripts", checkout / "scripts")
+            for name in (
+                "LICENSE",
+                "README.md",
+                "pyproject.toml",
+                "requirements-dev.lock",
+            ):
+                shutil.copy2(repository / name, checkout / name)
+
+        root_environment = source / ".venv"
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "venv",
+                "--system-site-packages",
+                str(root_environment),
+            ],
+            check=True,
+        )
+        root_python = root_environment / "bin" / "python"
+        subprocess.run(
+            [
+                str(root_python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--requirement",
+                str(source / "requirements-dev.lock"),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                str(root_python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-deps",
+                "--editable",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        root_cli = root_environment / "bin" / "fulcrum"
+        root_cli_before = root_cli.read_bytes()
+
+        self.controller.config = InstallationConfig(
+            source_root=str(source),
+            brain_root=self.config.brain_root,
+            state_root=self.config.state_root,
+            codex_bin=self.config.codex_bin,
+            desktop_executable=self.config.desktop_executable,
+            projects=self.config.projects,
+        )
+        (worktree / ".venv").symlink_to(root_environment, target_is_directory=True)
+        asyncio.run(self.controller._ensure_worktree_environment(worktree))
+        managed_environment = worktree / ".venv"
+        managed_python = managed_environment / "bin" / "python"
+        self.assertTrue(managed_environment.is_dir())
+        self.assertFalse(managed_environment.is_symlink())
+
+        inspect = """
+import importlib.metadata
+import json
+import pathlib
+import site
+import sys
+distribution = importlib.metadata.distribution('fulcrum')
+print(json.dumps({
+    'prefix': sys.prefix,
+    'site_packages': site.getsitepackages(),
+    'distribution_root': str(distribution.locate_file('')),
+    'controller': str(pathlib.Path(__import__('fulcrum.controller').controller.__file__).resolve()),
+}))
+"""
+
+        def inspect_environment(python: Path) -> dict[str, object]:
+            result = subprocess.run(
+                [str(python), "-I", "-c", inspect],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        root_install = inspect_environment(root_python)
+        managed_install = inspect_environment(managed_python)
+        self.assertEqual(
+            Path(str(root_install["prefix"])).resolve(), root_environment.resolve()
+        )
+        self.assertEqual(
+            Path(str(managed_install["prefix"])).resolve(),
+            managed_environment.resolve(),
+        )
+        self.assertNotEqual(
+            root_install["site_packages"], managed_install["site_packages"]
+        )
+        self.assertNotEqual(
+            root_install["distribution_root"], managed_install["distribution_root"]
+        )
+        self.assertTrue(
+            Path(str(root_install["controller"])).is_relative_to(source.resolve())
+        )
+        self.assertTrue(
+            Path(str(managed_install["controller"])).is_relative_to(worktree.resolve())
+        )
+        self.assertIn(
+            str(root_python), root_cli.read_text(encoding="utf-8").splitlines()[0]
+        )
+        self.assertIn(
+            str(managed_python),
+            (managed_environment / "bin" / "fulcrum")
+            .read_text(encoding="utf-8")
+            .splitlines()[0],
+        )
+        for command in ("black", "pyre"):
+            subprocess.run(
+                [str(managed_environment / "bin" / command), "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        sentinel = managed_environment / "executor-owned-sentinel"
+        sentinel.write_text("preserve me\n", encoding="utf-8")
+        environment_inode = managed_environment.stat().st_ino
+        managed_cli_before = (managed_environment / "bin" / "fulcrum").read_bytes()
+        asyncio.run(self.controller._ensure_worktree_environment(worktree))
+        self.assertEqual(managed_environment.stat().st_ino, environment_inode)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve me\n")
+        self.assertEqual(
+            (managed_environment / "bin" / "fulcrum").read_bytes(),
+            managed_cli_before,
+        )
+
+        subprocess.run(
+            [str(managed_python), "-m", "pip", "install", "-e", "."],
+            cwd=worktree,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        (worktree / "src" / "fulcrum" / "controller.py").write_text(
+            "    transient indentation failure\n", encoding="utf-8"
+        )
+        broken_import = subprocess.run(
+            [str(managed_python), "-c", "import fulcrum.controller"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(broken_import.returncode, 0)
+        self.assertIn("IndentationError", broken_import.stderr)
+
+        self.assertEqual(root_cli.read_bytes(), root_cli_before)
+        root_after = inspect_environment(root_python)
+        self.assertTrue(
+            Path(str(root_after["controller"])).is_relative_to(source.resolve())
+        )
+        state = fixture / "state"
+        config_path = fixture / "config.json"
+        paths = RuntimePaths(
+            brain_root=fixture / "brain",
+            state_root=state,
+            config_file=config_path,
+            control_root=fixture / "control",
+        )
+        with Store(paths.database):
+            pass
+        save_installation(
+            config_path,
+            InstallationConfig(
+                source_root=str(source),
+                brain_root=str(paths.brain_root),
+                state_root=str(paths.state_root),
+                codex_bin="/bin/false",
+                desktop_executable="/bin/false",
+            ),
+        )
+        root_status = subprocess.run(
+            [str(root_cli), "status", "--json"],
+            env={**os.environ, "FULCRUM_CONFIG": str(config_path)},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(root_status.returncode, 0, root_status.stderr)
+        self.assertIsInstance(json.loads(root_status.stdout), dict)
+
+    async def test_environment_failure_prevents_executor_preparation(
+        self,
+    ) -> None:
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'preparing' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(assignment["stage"], "preparing")
+        self.controller.runtime.ready = True
+        self.controller.starts_enabled = True
+        with (
+            patch("fulcrum.controller.ready_assignments", return_value=[assignment]),
+            patch.object(
+                self.controller,
+                "_ensure_worktree_environment",
+                side_effect=RuntimeError("environment provisioning failed"),
+            ) as ensure_environment,
+            patch.object(
+                self.controller, "_ensure_pair", new=AsyncMock()
+            ) as ensure_pair,
+            patch.object(self.controller, "_manage_interviews", new=AsyncMock()),
+            patch.object(self.controller, "_start_specialists", new=AsyncMock()),
+            patch.object(self.controller, "_queue_proposals", new=AsyncMock()),
+            patch.object(self.controller, "_deliver_update_batch", new=AsyncMock()),
+            patch.object(self.controller, "_update_readiness"),
+        ):
+            await self.controller.advance()
+
+        recovered = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(recovered["stage"], "recovering")
+        self.assertEqual(recovered["prior_stage"], "preparing")
+        self.assertIn("environment provisioning failed", recovered["condition"])
+        ensure_environment.assert_awaited_once_with(self.worktree)
+        ensure_pair.assert_not_awaited()
+        self.assertEqual(
+            self.controller.store.rows(
+                "SELECT id FROM actions WHERE assignment_id = ? AND state = 'active'",
+                (self.assignment["id"],),
+            ),
+            [],
+        )
 
     async def test_exhausted_worktree_observer_requires_explicit_resolution(
         self,

@@ -28,7 +28,11 @@ from fulcrum.intake import (
     reconcile_beads_creation,
     task_from_payload,
 )
-from fulcrum.install import controller_program_arguments, install_control_plane
+from fulcrum.install import (
+    controller_program_arguments,
+    install_control_plane,
+    provision_worktree_environment,
+)
 from fulcrum.ipc import MAX_MESSAGE_BYTES
 from fulcrum.lifecycle import (
     accept_finish,
@@ -1424,6 +1428,7 @@ class Controller:
             "UPDATE assignments SET stage = 'preparing', updated_at = ? WHERE id = ?",
             (timestamp, assignment["id"]),
         )
+        assignment["stage"] = "preparing"
         operation = self.store.create_operation(
             "tollgate_worktree_create",
             str(assignment["id"]),
@@ -1449,7 +1454,6 @@ class Controller:
                 "UPDATE assignments SET worktree_path = ?, updated_at = ? WHERE id = ?",
                 (path, utc_now(), assignment["id"]),
             )
-            self._ensure_worktree_environment(Path(path))
             self.store.finish_operation_attempt(
                 operation,
                 attempt,
@@ -1457,14 +1461,6 @@ class Controller:
                 result=result,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
-            assignment["worktree_path"] = path
-            await self._ensure_pair(assignment)
-            assignment["stage"] = "implementing"
-            self.store.execute(
-                "UPDATE assignments SET stage = 'implementing', updated_at = ? WHERE id = ?",
-                (utc_now(), assignment["id"]),
-            )
-            await self._start_assignment_action(assignment)
         except Exception as error:
             self._operation_failed(
                 operation,
@@ -1478,6 +1474,16 @@ class Controller:
             )
             if retained is not None:
                 self._reconcile_worktree_create(retained)
+            return
+        assignment["worktree_path"] = path
+        await self._ensure_worktree_environment(Path(path))
+        await self._ensure_pair(assignment)
+        assignment["stage"] = "implementing"
+        self.store.execute(
+            "UPDATE assignments SET stage = 'implementing', updated_at = ? WHERE id = ?",
+            (utc_now(), assignment["id"]),
+        )
+        await self._start_assignment_action(assignment)
 
     async def _resume_preparing_assignment(self, assignment: dict[str, Any]) -> None:
         if not assignment["worktree_path"]:
@@ -1486,6 +1492,7 @@ class Controller:
                 (utc_now(), assignment["id"]),
             )
             return
+        await self._ensure_worktree_environment(Path(assignment["worktree_path"]))
         await self._ensure_pair(assignment)
         self.store.execute(
             "UPDATE assignments SET stage = 'implementing', condition = NULL, updated_at = ? WHERE id = ?",
@@ -2033,20 +2040,24 @@ class Controller:
             action=action, assignment=assignment, constraints=constraints
         )
 
-    def _ensure_worktree_environment(self, worktree: Path) -> None:
-        """Expose the retained check environment in every managed worktree."""
+    async def _ensure_worktree_environment(self, worktree: Path) -> None:
+        """Provision a complete environment owned by the managed worktree."""
 
-        source_environment = Path(self.config.source_root) / ".venv"
-        target = worktree / ".venv"
-        if not source_environment.is_dir() or target.exists() or target.is_symlink():
-            return
-        target.symlink_to(source_environment, target_is_directory=True)
+        created = await asyncio.to_thread(
+            provision_worktree_environment,
+            Path(self.config.source_root),
+            worktree,
+        )
         self.store.event(
             "worktree_environment_ready",
-            "linked the managed validation environment",
+            (
+                "provisioned an isolated managed worktree environment"
+                if created
+                else "verified the isolated managed worktree environment"
+            ),
             entity_type="worktree",
             entity_id=str(worktree),
-            detail={"environment": str(source_environment)},
+            detail={"environment": str(worktree / ".venv"), "created": created},
         )
 
     def _schedule_assignment_recovery(
