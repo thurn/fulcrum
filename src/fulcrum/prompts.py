@@ -331,6 +331,11 @@ def action_message(
                 + _handoff_text(latest["content"])
             )
     if kind == "correct":
+        lines.append(
+            "Replacement candidate rule: leave exactly one task commit based on the "
+            "current promoted `release`; amend or squash the predecessor candidate "
+            "and rebase it onto `release` before finishing."
+        )
         if assignment.get("mandate_candidate_id"):
             lines.append(
                 "Repair permission: "

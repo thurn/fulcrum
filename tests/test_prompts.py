@@ -298,6 +298,22 @@ class PromptsTest(unittest.TestCase):
         with patch("sys.stdin", io.StringIO('{"title":"Use `code` safely"}')):
             self.assertEqual(_intake_payload(args)["title"], "Use `code` safely")
 
+    def test_correction_prompt_requires_one_release_based_commit(self) -> None:
+        text = action_message(
+            action={
+                "kind": "correct",
+                "payload": {"predecessor_candidate_id": "candidate-1"},
+            },
+            assignment={
+                "bead_id": "p-1",
+                "scope_snapshot": "Fix it",
+                "worktree_path": "/tmp/worktree",
+                "repair_permissions": "[]",
+            },
+        )
+        self.assertIn("exactly one task commit", text)
+        self.assertIn("rebase it onto `release`", text)
+
     def test_hook_is_quiet_for_unmanaged_and_actionless_threads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

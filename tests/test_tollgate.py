@@ -47,6 +47,29 @@ class TollgateTests(unittest.TestCase):
         self.assertEqual(raised.exception.stdout, "promoted")
         self.assertEqual(raised.exception.stderr, "warning")
 
+    def test_structured_mutation_rejection_is_definitive(self) -> None:
+        tollgate = Tollgate("/usr/bin/tg")
+        stderr = json.dumps(
+            {
+                "error": {
+                    "code": "unpromoted-source-ancestor",
+                    "message": "rebase onto release",
+                    "retryable": True,
+                },
+                "ok": False,
+            }
+        )
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr=stderr
+        )
+
+        with patch("fulcrum.tollgate.subprocess.run", return_value=completed):
+            with self.assertRaises(TollgateError) as raised:
+                tollgate.submit_candidate("repo-1", "HEAD")
+
+        self.assertNotIsInstance(raised.exception, TollgateUncertainError)
+        self.assertEqual(raised.exception.stderr, stderr)
+
     def test_approve_accepts_retained_json_lines_streams(self) -> None:
         tollgate = Tollgate("/usr/bin/tg")
         for operation_id in (13, 28, 38, 64):

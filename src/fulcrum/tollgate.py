@@ -85,7 +85,14 @@ class Tollgate:
         duration_ms = int((time.monotonic() - started) * 1000)
         if completed.returncode != 0:
             detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
-            error_type = TollgateUncertainError if mutating else TollgateError
+            # A structured service rejection is proof that the requested mutation
+            # was rejected. Timeouts, transport failures, and unstructured native
+            # failures remain uncertain because their external effect is unknown.
+            error_type = (
+                TollgateError
+                if _is_structured_rejection(detail)
+                else TollgateUncertainError if mutating else TollgateError
+            )
             raise error_type(
                 f"Tollgate operation {arguments[0]} failed: {detail}",
                 stdout=completed.stdout,
@@ -204,6 +211,14 @@ def _text(value: bytes | str | None) -> str | None:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return value
+
+
+def _is_structured_rejection(value: str) -> bool:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("error"), dict)
 
 
 _APPROVAL_SUCCESS_STATES: set[str] = {"promoted", "externally-integrated"}
