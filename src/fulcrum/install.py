@@ -469,6 +469,18 @@ def _wait_for_running_service(label: str, *, timeout: float = 10) -> ServiceObse
     return latest
 
 
+def verify_runtime_ownership_or_availability(endpoint: str) -> ServiceObservation:
+    """Reject a ready app-server endpoint not owned by the configured launchd job."""
+
+    observation = inspect_service(APP_SERVER_LABEL)
+    if _endpoint_is_ready(endpoint) and not observation.running:
+        raise InstallationError(
+            f"refusing to accept an unmanaged listener at {endpoint}; "
+            f"{APP_SERVER_LABEL} is not the running owner"
+        )
+    return observation
+
+
 def start_services(
     definitions: dict[str, str],
     *,
@@ -476,16 +488,11 @@ def start_services(
     app_server_endpoint: str | None = None,
 ) -> None:
     domain = f"gui/{os.getuid()}"
-    initial_app_server = inspect_service(APP_SERVER_LABEL)
-    if (
-        app_server_endpoint is not None
-        and _endpoint_is_ready(app_server_endpoint)
-        and not initial_app_server.running
-    ):
-        raise InstallationError(
-            f"refusing to accept an unmanaged listener at {app_server_endpoint}; "
-            f"{APP_SERVER_LABEL} is not the running owner"
-        )
+    initial_app_server = (
+        verify_runtime_ownership_or_availability(app_server_endpoint)
+        if app_server_endpoint is not None
+        else inspect_service(APP_SERVER_LABEL)
+    )
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
         observation = (
             initial_app_server if label == APP_SERVER_LABEL else inspect_service(label)

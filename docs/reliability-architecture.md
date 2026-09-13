@@ -119,8 +119,10 @@ Readiness combines configuration readiness with progress readiness. It fails whe
 - the runtime connection is down.
 
 Socket response and process existence are diagnostics, never workflow-health proof.
-`fulcrum doctor` also requires both configured launchd jobs to be loaded. A listener
-on the app-server port is reported as unmanaged and cannot satisfy topology checks.
+`fulcrum doctor` also requires both configured launchd jobs to be stably running
+with a PID and the exact installed arguments, working directory, and environment.
+A listener on the app-server port is reported as unmanaged and cannot satisfy
+topology checks.
 
 ## Command isolation
 
@@ -167,9 +169,10 @@ while the replacement Archon is still establishing policies; destructive complet
 and replacement readiness are separate response fields.
 
 Setup never treats an unmanaged app-server listener as the configured service. It
-installs current definitions, reloads stale PATHs, observes a failed bootstrap,
-retries once only when the job is confirmed absent, and verifies the loaded job and
-environment afterward. Error messages retain the launchctl domain, plist, first
+checks endpoint ownership before changing installation state, installs current
+definitions, reloads stale PATHs, observes a failed bootstrap, retries once only
+when the job is confirmed absent, and requires each job to remain running across
+multiple observations. Error messages retain the launchctl domain, plist, first
 stdout/stderr, observed state, and retry stdout/stderr.
 
 ## Validation strategy

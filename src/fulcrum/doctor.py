@@ -149,6 +149,9 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
     )
     agents = Path.home() / "Library" / "LaunchAgents"
     expected_services = service_definitions(config, paths)
+    observed_services = {
+        label: inspect_service(label) for label in (APP_SERVER_LABEL, CONTROLLER_LABEL)
+    }
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
         service_file = agents / f"{label}.plist"
         try:
@@ -175,6 +178,24 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
         except (OSError, plistlib.InvalidFileException, AttributeError) as error:
             check(f"service:{label}", False, str(error))
             check(f"service_path:{label}", False, str(error))
+        observed = observed_services[label]
+        expected = expected_services[label]
+        expected_arguments = tuple(str(item) for item in expected["ProgramArguments"])
+        expected_directory = expected.get("WorkingDirectory")
+        runtime_definition_matches = (
+            observed.program_arguments == expected_arguments
+            and observed.working_directory == expected_directory
+            and observed.executable_path == expected["EnvironmentVariables"].get("PATH")
+        )
+        check(
+            f"service_runtime:{label}",
+            observed.running and runtime_definition_matches,
+            (
+                f"pid={observed.pid}; definition matches"
+                if observed.running and runtime_definition_matches
+                else f"loaded={observed.loaded}; state={observed.state}; pid={observed.pid}; definition differs from running job"
+            ),
+        )
     endpoint = (
         config.app_server_endpoint.replace("ws://", "http://", 1)
         .replace("wss://", "https://", 1)
@@ -188,7 +209,7 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
             check("app_server_ready", app_server_ready, endpoint)
     except Exception as error:
         check("app_server_ready", False, str(error))
-    controller_service = inspect_service(CONTROLLER_LABEL)
+    controller_service = observed_services[CONTROLLER_LABEL]
     check(
         "controller_service_loaded",
         controller_service.running,
@@ -198,7 +219,7 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
             else f"loaded={controller_service.loaded}; state={controller_service.state}; pid={controller_service.pid}"
         ),
     )
-    runtime_service = inspect_service(APP_SERVER_LABEL)
+    runtime_service = observed_services[APP_SERVER_LABEL]
     check(
         "shared_runtime_active",
         runtime_service.running,

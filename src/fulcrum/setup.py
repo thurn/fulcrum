@@ -23,6 +23,7 @@ from fulcrum.install import (
     install_links,
     install_services,
     start_services,
+    verify_runtime_ownership_or_availability,
     verify_editable_source,
 )
 from fulcrum.ipc import request_sync
@@ -270,6 +271,7 @@ def run_setup(
             raise SetupError(
                 f"setup incomplete; required dependency unavailable: {command}"
             )
+    verify_runtime_ownership_or_availability(config.app_server_endpoint)
     save_installation(paths.config_file, config)
     _prepare_brain(config)
     links = install_links(config)
