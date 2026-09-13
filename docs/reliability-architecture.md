@@ -93,7 +93,13 @@ pass continues to later independent tasks.
 Ambiguous Tollgate approval is decided from the exact candidate's observed state.
 A promoted candidate with required remote synchronization, cleanup, and certificate
 is completed even when `tg approve` returned malformed output. A confirmed terminal
-failure returns to correction. A still-ambiguous candidate creates visible operator
+failure returns to correction. Once local promotion or supported external integration
+is observed, the approval operation remains complete and candidate-specific reads
+reconcile the remaining delivery contract without authorizing a replacement. Pending
+remote synchronization, automatic cleanup, or certificate finalization remains visibly
+in delivery; a post-promotion `push-blocked`, abandoned required synchronization, or
+cleanup `needs-attention` state enters operator-held delivery recovery rather than source
+correction. Only an approval whose effect is still unknown creates ambiguous-operation
 attention and disables new dispatch.
 
 Status exposes, for each nonterminal assignment and action, what it is waiting for,

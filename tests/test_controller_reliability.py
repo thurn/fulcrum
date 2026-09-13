@@ -24,8 +24,9 @@ from fulcrum.config import (
 )
 from fulcrum.controller import (
     Controller,
+    DeliveryDisposition,
     INHERITED_LOCK_FD_ENV,
-    _candidate_definitively_failed,
+    _classify_delivery_status,
     _find_candidate,
 )
 from fulcrum.kernel import LeaseRequest, acquire_lease, invariant_violations
@@ -121,6 +122,63 @@ class FakeSuccessfulTollgate:
                 }
             },
         }
+
+
+class SequencedDeliveryTollgate:
+    def __init__(
+        self, *candidates: dict[str, Any], remote_enabled: bool = True
+    ) -> None:
+        self.candidates = list(candidates)
+        self.remote_enabled = remote_enabled
+        self.approved: list[str] = []
+        self.status_calls = 0
+        self.diagnosed: list[str] = []
+
+    def approve(self, _repository: str, candidate: str) -> dict[str, Any]:
+        self.approved.append(candidate)
+        return {
+            "id": candidate,
+            "state": "promoted",
+            "remote_state": "synchronized",
+            "cleanup_state": "pending",
+            "certificate_id": "certificate-1",
+        }
+
+    def status(self, _repository: str, candidate: str | None = None) -> dict[str, Any]:
+        index = min(self.status_calls, len(self.candidates) - 1)
+        self.status_calls += 1
+        item = dict(self.candidates[index])
+        item.setdefault("id", candidate)
+        return {
+            "configuration": {"remote_enabled": self.remote_enabled},
+            "candidate": {"item": item},
+        }
+
+    def diagnose(self, _repository: str, candidate: str) -> dict[str, Any]:
+        self.diagnosed.append(candidate)
+        return {"candidate_id": candidate, "diagnosis": "retained"}
+
+
+class TerminalDeliveryTollgate(SequencedDeliveryTollgate):
+    def __init__(self, state: str) -> None:
+        super().__init__({"state": state}, remote_enabled=False)
+
+    def approve(self, _repository: str, candidate: str) -> dict[str, Any]:
+        self.approved.append(candidate)
+        raise TollgateUncertainError("approval wait ended without usable JSON")
+
+
+class TransientStatusDeliveryTollgate(SequencedDeliveryTollgate):
+    def __init__(self, failures: int, *candidates: dict[str, Any]) -> None:
+        super().__init__(*candidates)
+        self.failures = failures
+
+    def status(self, repository: str, candidate: str | None = None) -> dict[str, Any]:
+        if self.failures:
+            self.failures -= 1
+            self.status_calls += 1
+            raise TollgateError("temporary candidate status read failure")
+        return super().status(repository, candidate)
 
 
 class BlockingApprovalTollgate(FakeSuccessfulTollgate):
@@ -443,6 +501,30 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             self.controller.lock_handle.close()
             self.controller.lock_handle = None
         self.controller = Controller(self.paths, self.config)
+
+    def _prepare_delivery(self, candidate_id: str = "candidate-1") -> dict[str, Any]:
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'delivering', candidate_id = ?,
+               mandate_candidate_id = ?, mandate_scope = scope_snapshot,
+               condition = NULL, operator_hold_id = NULL WHERE id = ?""",
+            (candidate_id, candidate_id, self.assignment["id"]),
+        )
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        assert assignment is not None
+        return assignment
+
+    def _delivery_assignment(self) -> dict[str, Any]:
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        assert assignment is not None
+        return assignment
 
     def test_definitive_tollgate_failure_is_not_marked_uncertain(self) -> None:
         operation = self.controller.store.create_operation(
@@ -5788,21 +5870,463 @@ print(json.dumps({
             _find_candidate(status, str(self.worktree), source_oid="current-head")
         )
 
-    def test_promoted_candidate_with_pending_cleanup_is_not_a_failed_delivery(
-        self,
-    ) -> None:
-        self.assertFalse(
-            _candidate_definitively_failed(
+    def test_delivery_classification_respects_the_irreversible_boundary(self) -> None:
+        cases = [
+            (
                 {
                     "state": "promoted",
-                    "remote_state": "pending",
+                    "remote_state": "synchronized",
                     "cleanup_state": "pending",
-                }
-            )
+                    "certificate_id": "certificate-1",
+                },
+                True,
+                DeliveryDisposition.POST_PROMOTION_PENDING,
+            ),
+            (
+                {
+                    "state": "promoted-local-push-pending",
+                    "remote_state": "pushing",
+                    "cleanup_state": "pending",
+                    "certificate_id": "certificate-1",
+                },
+                True,
+                DeliveryDisposition.POST_PROMOTION_PENDING,
+            ),
+            (
+                {
+                    "state": "externally-integrated",
+                    "remote_state": "disabled",
+                    "cleanup_state": "not-eligible",
+                    "certificate_id": "certificate-1",
+                },
+                False,
+                DeliveryDisposition.SATISFIED,
+            ),
+            (
+                {"state": "failed"},
+                False,
+                DeliveryDisposition.SOURCE_FAILED,
+            ),
+        ]
+        for candidate, remote_enabled, expected in cases:
+            with self.subTest(state=candidate["state"]):
+                classified = _classify_delivery_status(
+                    candidate,
+                    {"configuration": {"remote_enabled": remote_enabled}},
+                )
+                self.assertEqual(classified.disposition, expected)
+
+    async def test_promoted_cleanup_pending_reconciles_without_duplicate_effects(
+        self,
+    ) -> None:
+        pending = {
+            "state": "promoted",
+            "remote_state": "synchronized",
+            "cleanup_state": "pending",
+            "certificate_id": "certificate-1",
+        }
+        completed = {**pending, "cleanup_state": "completed"}
+        tollgate = SequencedDeliveryTollgate(pending, pending, pending, completed)
+        beads = FakeBeads()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        self.controller.beads = beads  # type: ignore[assignment]
+        assignment = self._prepare_delivery()
+
+        await self.controller._deliver(assignment)
+        self.controller.runtime.ready = True
+        self.controller.starts_enabled = True
+        with (
+            patch.object(self.controller, "_update_readiness"),
+            patch.object(
+                self.controller,
+                "_refresh_delivery_pair",
+                new=AsyncMock(),
+            ),
+        ):
+            await self.controller.advance()
+            await self.controller.advance()
+
+        waiting = self._delivery_assignment()
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE kind = 'tollgate_approve'"
         )
-        self.assertTrue(_candidate_definitively_failed({"state": "failed"}))
-        self.assertTrue(_candidate_definitively_failed({"state": "canceled"}))
-        self.assertTrue(_candidate_definitively_failed({"state": "merge-conflict"}))
+        self.assertEqual(waiting["stage"], "delivering")
+        self.assertIn("cleanup is pending", waiting["condition"])
+        self.assertEqual(operation["state"], "complete")
+        self.assertEqual(tollgate.approved, ["candidate-1"])
+        self.assertEqual(beads.closed, [])
+        self.assertEqual(
+            self.controller.store.rows(
+                "SELECT * FROM actions WHERE assignment_id = ? AND kind = 'correct'",
+                (self.assignment["id"],),
+            ),
+            [],
+        )
+
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-delivery",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        await self.controller.reconcile()
+        await self.controller.reconcile()
+
+        completed_assignment = self._delivery_assignment()
+        self.assertEqual(completed_assignment["stage"], "completed")
+        self.assertEqual(tollgate.approved, ["candidate-1"])
+        self.assertEqual(beads.closed, ["p-1"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM external_operations WHERE kind = 'tollgate_approve'"
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM external_operations WHERE kind = 'beads_close'"
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM updates WHERE recipient_task_id = ? AND identity = ?",
+                (archon["id"], f"completion:{self.assignment['id']}"),
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM obligations WHERE kind = 'archive'"
+            )["count"],
+            2,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                """SELECT COUNT(*) AS count FROM state_transitions
+                   WHERE entity_type = 'assignment' AND entity_id = ?
+                     AND to_state = 'completed'""",
+                (str(self.assignment["id"]),),
+            )["count"],
+            1,
+        )
+
+    async def test_successful_approval_survives_status_failures_and_restart(
+        self,
+    ) -> None:
+        completed = {
+            "state": "promoted",
+            "remote_state": "synchronized",
+            "cleanup_state": "completed",
+            "certificate_id": "certificate-1",
+        }
+        tollgate = TransientStatusDeliveryTollgate(3, completed)
+        beads = FakeBeads()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        self.controller.beads = beads  # type: ignore[assignment]
+        assignment = self._prepare_delivery()
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-status-recovery",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+
+        await self.controller._deliver(assignment)
+
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE kind = 'tollgate_approve'"
+        )
+        attempt = self.controller.store.row(
+            "SELECT * FROM operation_attempts WHERE operation_id = ?",
+            (operation["id"],),
+        )
+        waiting = self._delivery_assignment()
+        self.assertEqual(operation["state"], "complete")
+        self.assertEqual(operation["attempt_count"], 1)
+        self.assertIn('"approval"', operation["result_json"])
+        self.assertEqual(attempt["state"], "complete")
+        self.assertEqual(waiting["stage"], "delivering")
+        self.assertIn("status is unavailable", waiting["condition"])
+        self.assertEqual(tollgate.approved, ["candidate-1"])
+
+        self.controller.runtime.ready = True
+        self.controller.starts_enabled = True
+        with (
+            patch.object(self.controller, "_update_readiness"),
+            patch.object(
+                self.controller,
+                "_refresh_delivery_pair",
+                new=AsyncMock(),
+            ),
+        ):
+            await self.controller.advance()
+            await self.controller.advance()
+
+        waiting = self._delivery_assignment()
+        self.assertEqual(waiting["stage"], "delivering")
+        self.assertIn("status is unavailable", waiting["condition"])
+        self.assertEqual(tollgate.approved, ["candidate-1"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM external_operations WHERE kind = 'tollgate_approve'"
+            )["count"],
+            1,
+        )
+
+        self._restart_controller()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        self.controller.beads = beads  # type: ignore[assignment]
+        self.controller.runtime.ready = True
+        await self.controller.reconcile()
+        await self.controller.reconcile()
+
+        completed_assignment = self._delivery_assignment()
+        self.assertEqual(completed_assignment["stage"], "completed")
+        self.assertEqual(tollgate.approved, ["candidate-1"])
+        self.assertEqual(tollgate.status_calls, 4)
+        self.assertEqual(beads.closed, ["p-1"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM external_operations WHERE kind = 'tollgate_approve'"
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM external_operations WHERE kind = 'beads_close'"
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM updates WHERE recipient_task_id = ? AND identity = ?",
+                (archon["id"], f"completion:{self.assignment['id']}"),
+            )["count"],
+            1,
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM obligations WHERE kind = 'archive'"
+            )["count"],
+            2,
+        )
+
+    async def test_remote_and_certificate_pending_remain_in_delivery(self) -> None:
+        cases = [
+            (
+                {
+                    "state": "promoted",
+                    "remote_state": "pushing",
+                    "cleanup_state": "pending",
+                    "certificate_id": "certificate-1",
+                },
+                "synchronization is pending",
+            ),
+            (
+                {
+                    "state": "promoted-local-push-pending",
+                    "remote_state": "pushing",
+                    "cleanup_state": "pending",
+                    "certificate_id": "certificate-1",
+                },
+                "synchronization is pending",
+            ),
+            (
+                {
+                    "state": "promoted",
+                    "remote_state": "synchronized",
+                    "cleanup_state": "completed",
+                    "certificate_id": None,
+                },
+                "certificate finalization is pending",
+            ),
+        ]
+        for candidate, condition in cases:
+            with self.subTest(condition=condition):
+                assignment = self._prepare_delivery()
+                self.controller.store.execute(
+                    "DELETE FROM external_operations WHERE kind = 'tollgate_approve'"
+                )
+                tollgate = SequencedDeliveryTollgate(candidate)
+                beads = FakeBeads()
+                self.controller.tollgate = tollgate  # type: ignore[assignment]
+                self.controller.beads = beads  # type: ignore[assignment]
+
+                await self.controller._deliver(assignment)
+
+                waiting = self._delivery_assignment()
+                self.assertEqual(waiting["stage"], "delivering")
+                self.assertIn(condition, waiting["condition"])
+                self.assertEqual(tollgate.approved, ["candidate-1"])
+                self.assertEqual(beads.closed, [])
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT state FROM external_operations WHERE kind = 'tollgate_approve'"
+                    )["state"],
+                    "complete",
+                )
+
+    async def test_post_promotion_attention_holds_without_correction(self) -> None:
+        cases = [
+            {
+                "state": "promoted",
+                "remote_state": "synchronized",
+                "cleanup_state": "needs-attention",
+                "certificate_id": "certificate-1",
+            },
+            {
+                "state": "promoted-local-push-pending",
+                "remote_state": "push-blocked",
+                "cleanup_state": "pending",
+                "certificate_id": "certificate-1",
+            },
+        ]
+        for candidate in cases:
+            with self.subTest(candidate=candidate):
+                assignment = self._prepare_delivery()
+                self.controller.store.execute("DELETE FROM holds")
+                self.controller.store.execute(
+                    "DELETE FROM external_operations WHERE kind = 'tollgate_approve'"
+                )
+                tollgate = SequencedDeliveryTollgate(candidate, candidate)
+                self.controller.tollgate = tollgate  # type: ignore[assignment]
+                self.controller.beads = FakeBeads()  # type: ignore[assignment]
+
+                await self.controller._deliver(assignment)
+                await self.controller._reconcile_uncertain_operations()
+
+                held = self._delivery_assignment()
+                self.assertEqual(held["stage"], "recovering")
+                self.assertIsNotNone(held["operator_hold_id"])
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT COUNT(*) AS count FROM holds WHERE released_at IS NULL"
+                    )["count"],
+                    1,
+                )
+                self.assertEqual(tollgate.approved, ["candidate-1"])
+                self.assertEqual(
+                    self.controller.store.rows(
+                        "SELECT * FROM actions WHERE assignment_id = ? AND kind = 'correct'",
+                        (self.assignment["id"],),
+                    ),
+                    [],
+                )
+
+    async def test_terminal_delivery_states_retain_diagnosis_and_correct(self) -> None:
+        for state in ("failed", "canceled", "merge-conflict"):
+            with self.subTest(state=state):
+                assignment = self._prepare_delivery()
+                self.controller.store.execute(
+                    "DELETE FROM external_operations WHERE kind = 'tollgate_approve'"
+                )
+                tollgate = TerminalDeliveryTollgate(state)
+                self.controller.tollgate = tollgate  # type: ignore[assignment]
+
+                await self.controller._deliver(assignment)
+
+                correcting = self._delivery_assignment()
+                operation = self.controller.store.row(
+                    "SELECT * FROM external_operations WHERE kind = 'tollgate_approve'"
+                )
+                self.assertEqual(correcting["stage"], "correcting")
+                self.assertEqual(
+                    correcting["condition"], f"Tollgate candidate ended in {state}"
+                )
+                self.assertEqual(operation["state"], "failed")
+                self.assertIn('"diagnosis": "retained"', operation["result_json"])
+                self.assertEqual(tollgate.diagnosed, ["candidate-1"])
+
+    async def test_restart_adopts_effected_approval_without_reauthorizing(self) -> None:
+        assignment = self._prepare_delivery()
+        operation_id = self.controller.store.create_operation(
+            "tollgate_approve", "candidate-1", {"repository_id": "tg-p"}
+        )
+        self.controller.store.begin_operation_attempt(operation_id)
+        pending = {
+            "state": "promoted",
+            "remote_state": "synchronized",
+            "cleanup_state": "pending",
+            "certificate_id": "certificate-1",
+        }
+
+        self._restart_controller()
+        tollgate = SequencedDeliveryTollgate(pending)
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        self.controller.beads = FakeBeads()  # type: ignore[assignment]
+        self.controller._adopt_stranded_operations()
+        await self.controller._reconcile_uncertain_operations()
+        await self.controller._reconcile_uncertain_operations()
+
+        retained = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        waiting = self._delivery_assignment()
+        self.assertEqual(retained["state"], "complete")
+        self.assertEqual(retained["reconciliation_used"], 1)
+        self.assertEqual(waiting["stage"], "delivering")
+        self.assertIn("cleanup is pending", waiting["condition"])
+        self.assertEqual(tollgate.approved, [])
+        self.assertEqual(
+            self.controller.store.rows(
+                "SELECT * FROM actions WHERE assignment_id = ? AND kind = 'correct'",
+                (self.assignment["id"],),
+            ),
+            [],
+        )
+
+    async def test_restart_repairs_legacy_cleanup_pending_misclassification(
+        self,
+    ) -> None:
+        self._prepare_delivery()
+        operation_id = self.controller.store.create_operation(
+            "tollgate_approve", "candidate-1", {"repository_id": "tg-p"}
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        pending = {
+            "id": "candidate-1",
+            "state": "promoted",
+            "remote_state": "synchronized",
+            "cleanup_state": "pending",
+            "certificate_id": "certificate-1",
+        }
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="failed",
+            result={"status": {"candidate": {"item": pending}}},
+            error="candidate worktree cleanup is incomplete",
+            native_id="candidate-1",
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET prior_stage = 'delivering', stage = 'correcting',
+               condition = 'candidate worktree cleanup is incomplete' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+
+        self._restart_controller()
+        tollgate = SequencedDeliveryTollgate(pending)
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        await self.controller._reconcile_uncertain_operations()
+
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        assignment = self._delivery_assignment()
+        self.assertEqual(operation["state"], "complete")
+        self.assertEqual(assignment["stage"], "delivering")
+        self.assertIn("cleanup is pending", assignment["condition"])
+        self.assertEqual(tollgate.approved, [])
+        self.assertEqual(
+            self.controller.store.rows(
+                "SELECT * FROM actions WHERE assignment_id = ? AND kind = 'correct'",
+                (self.assignment["id"],),
+            ),
+            [],
+        )
 
     async def test_ambiguous_approval_is_reconciled_to_completed_delivery(self) -> None:
         self.controller.store.execute(

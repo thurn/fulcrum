@@ -23,4 +23,7 @@ conflicting finishes fail. The accepted forms are implemented and documented by
 Assignment stages are `queued`, `preparing`, `implementing`, `review_pending`,
 `reviewing`, `correcting`, `delivering`, `recovering`, `completed`, and `canceled`.
 A hold preserves the stage. Completion requires promotion, configured source
-synchronization, owned cleanup, and Beads closure—not merely a green check.
+synchronization, retained certification, owned cleanup, and Beads closure—not merely
+a green check. Promotion already effected with a pending synchronization, cleanup, or
+certificate postcondition remains delivery reconciliation; post-promotion attention is
+delivery recovery, never a request to replace the promoted source.

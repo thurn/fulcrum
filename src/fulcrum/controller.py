@@ -11,7 +11,9 @@ import subprocess
 import time
 import traceback
 import uuid
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,6 @@ from watchfiles import awatch
 
 from fulcrum.beads import Beads
 from fulcrum.brain import BrainRepository
-from dataclasses import replace
 
 from fulcrum.config import InstallationConfig, RuntimePaths, save_installation
 from fulcrum.intake import (
@@ -87,6 +88,20 @@ RUNTIME_TELEMETRY_EVENTS: frozenset[str] = frozenset(
     }
 )
 MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
+
+
+class DeliveryDisposition(StrEnum):
+    SATISFIED = "satisfied"
+    SOURCE_FAILED = "source-failed"
+    POST_PROMOTION_PENDING = "post-promotion-pending"
+    POST_PROMOTION_ATTENTION = "post-promotion-attention"
+    UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True)
+class DeliveryStatus:
+    disposition: DeliveryDisposition
+    condition: str | None = None
 
 
 class Controller:
@@ -1189,11 +1204,31 @@ class Controller:
             )
 
     async def _reconcile_uncertain_operations(self) -> None:
-        for operation in self.store.rows("""SELECT * FROM external_operations
-               WHERE (state = 'uncertain' AND reconciliation_used = 0)
-               OR (kind = 'tollgate_approve' AND state = 'failed'
-                   AND condition = 'Tollgate candidate ended in promoted')
-               ORDER BY id"""):
+        for operation in self.store.rows("""SELECT operation.*
+               FROM external_operations operation
+               WHERE (operation.state = 'uncertain'
+                      AND operation.reconciliation_used = 0)
+                  OR (operation.kind = 'tollgate_approve'
+                      AND operation.state = 'complete'
+                      AND EXISTS (
+                          SELECT 1 FROM assignments assignment
+                          WHERE assignment.candidate_id = operation.target
+                            AND assignment.stage IN ('delivering','recovering')
+                      ))
+                  OR (operation.kind = 'tollgate_approve'
+                      AND operation.state = 'failed'
+                      AND operation.condition IN (
+                          'Tollgate candidate ended in promoted',
+                          'candidate was promoted but source synchronization is incomplete',
+                          'candidate worktree cleanup is incomplete',
+                          'candidate has no retained Tollgate certificate'
+                      )
+                      AND EXISTS (
+                          SELECT 1 FROM assignments assignment
+                          WHERE assignment.candidate_id = operation.target
+                            AND assignment.stage NOT IN ('completed','canceled')
+                      ))
+               ORDER BY operation.id"""):
             if operation["kind"] == "turn_start":
                 await self._reconcile_turn_start(operation)
             elif operation["kind"] == "thread_start":
@@ -1474,47 +1509,10 @@ class Controller:
                 operation, "cannot reconcile Tollgate approval against its assignment"
             )
             return
-        observed = await asyncio.to_thread(
-            self.tollgate.status,
-            assignment["tollgate_repo_id"],
-            assignment["candidate_id"],
-        )
-        candidate = _candidate_by_id(observed, assignment["candidate_id"])
-        delivery_failure = _delivery_contract_failure(candidate, observed)
-        if delivery_failure is None:
-            self.store.execute(
-                "UPDATE external_operations SET state = 'complete', reconciliation_used = 1, result_json = ?, condition = NULL, updated_at = ? WHERE id = ?",
-                (json.dumps(observed), utc_now(), operation["id"]),
-            )
-            self.store.execute(
-                "UPDATE assignments SET stage = 'delivering', condition = NULL, updated_at = ? WHERE id = ?",
-                (utc_now(), assignment["id"]),
-            )
-            self._release_operator_hold("assignment", int(assignment["id"]))
-            await self._close_delivered_assignment(assignment)
-            return
-        if _candidate_definitively_failed(candidate):
-            diagnosis = await self._candidate_diagnosis(
-                assignment["tollgate_repo_id"],
-                assignment["candidate_id"],
-                candidate,
-            )
-            assert isinstance(candidate, dict)
-            condition = f"Tollgate candidate ended in {candidate.get('state')}"
-            self.store.execute(
-                "UPDATE external_operations SET state = 'failed', reconciliation_used = 1, result_json = ?, condition = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(diagnosis), condition, utc_now(), operation["id"]),
-            )
-            self.store.execute(
-                "UPDATE assignments SET stage = 'correcting', condition = ?, updated_at = ? WHERE id = ?",
-                (condition, utc_now(), assignment["id"]),
-            )
-            return
-        condition = "Tollgate approval remains ambiguous after one candidate-specific status read; operator must confirm authorization before retry"
-        self._retain_uncertain_condition(operation, condition)
-        self.store.execute(
-            "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
-            (condition, utc_now(), assignment["id"]),
+        await self._observe_delivery_operation(
+            assignment,
+            operation,
+            reconciled=True,
         )
 
     async def _reconcile_tollgate_candidate(self, operation: dict[str, Any]) -> None:
@@ -2562,6 +2560,20 @@ class Controller:
     def _hold_assignment(self, assignment: dict[str, Any], reason: str) -> None:
         timestamp = utc_now()
         with self.store.transaction() as connection:
+            current = connection.execute(
+                "SELECT operator_hold_id FROM assignments WHERE id = ?",
+                (assignment["id"],),
+            ).fetchone()
+            if current is not None and current["operator_hold_id"] is not None:
+                connection.execute(
+                    "UPDATE holds SET reason = ? WHERE id = ? AND released_at IS NULL",
+                    (reason, current["operator_hold_id"]),
+                )
+                connection.execute(
+                    "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
+                    (reason, timestamp, assignment["id"]),
+                )
+                return
             hold = connection.execute(
                 """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
                    VALUES ('assignment', ?, ?, 1, 'operator supplies a specific recovery decision', ?)""",
@@ -3133,22 +3145,11 @@ class Controller:
         if previous and previous["state"] in {"sent", "uncertain"}:
             return
         if previous and previous["state"] == "complete":
-            tollgate = self.tollgate
-            assert tollgate is not None
-            observed = await asyncio.to_thread(
-                tollgate.status,
-                project["tollgate_repo_id"],
-                assignment["candidate_id"],
+            await self._observe_delivery_operation(
+                assignment,
+                previous,
+                repository_id=str(project["tollgate_repo_id"]),
             )
-            candidate = _candidate_by_id(observed, assignment["candidate_id"])
-            failure = _delivery_contract_failure(candidate, observed)
-            if failure is None:
-                await self._close_delivered_assignment(assignment)
-            elif _candidate_definitively_failed(candidate):
-                self.store.execute(
-                    "UPDATE assignments SET prior_stage = 'delivering', stage = 'correcting', condition = ?, updated_at = ? WHERE id = ?",
-                    (failure, utc_now(), assignment["id"]),
-                )
             return
         await self._refresh_delivery_pair(assignment)
         authority_error = self._delivery_authority_error(assignment)
@@ -3167,57 +3168,14 @@ class Controller:
         )
         attempt = self.store.begin_operation_attempt(operation)
         started = time.monotonic()
+        tollgate = self.tollgate
+        assert tollgate is not None
         try:
-            tollgate = self.tollgate
-            assert tollgate is not None
             result = await asyncio.to_thread(
                 tollgate.approve,
                 project["tollgate_repo_id"],
                 assignment["candidate_id"],
             )
-            observed = await asyncio.to_thread(
-                tollgate.status,
-                project["tollgate_repo_id"],
-                assignment["candidate_id"],
-            )
-            candidate = _candidate_by_id(observed, assignment["candidate_id"])
-            failure = _delivery_contract_failure(candidate, observed)
-            if failure is not None:
-                diagnosis: dict[str, Any] | None = None
-                if _candidate_definitively_failed(candidate):
-                    diagnosis = await self._candidate_diagnosis(
-                        project["tollgate_repo_id"],
-                        assignment["candidate_id"],
-                        candidate,
-                    )
-                detail = {
-                    "approval": result,
-                    "status": observed,
-                    "diagnosis": diagnosis,
-                }
-                self.store.finish_operation_attempt(
-                    operation,
-                    attempt,
-                    state="failed",
-                    result=detail,
-                    error=failure,
-                    native_id=str(assignment["candidate_id"]),
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                )
-                self.store.execute(
-                    "UPDATE assignments SET prior_stage = 'delivering', stage = 'correcting', condition = ?, updated_at = ? WHERE id = ?",
-                    (failure, utc_now(), assignment["id"]),
-                )
-                return
-            self.store.finish_operation_attempt(
-                operation,
-                attempt,
-                state="complete",
-                result={"approval": result, "status": observed},
-                native_id=str(assignment["candidate_id"]),
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-            await self._close_delivered_assignment(assignment)
         except Exception as error:
             self._operation_failed(
                 operation,
@@ -3231,6 +3189,298 @@ class Controller:
             )
             if retained is not None:
                 await self._reconcile_tollgate_approve(retained)
+            return
+
+        retained = self.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation,)
+        )
+        assert retained is not None
+        approval_candidate = _approval_candidate(
+            result, str(assignment["candidate_id"])
+        )
+        if _candidate_crossed_promotion(approval_candidate):
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result={"approval": result},
+                native_id=str(assignment["candidate_id"]),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            self._restore_delivering_assignment(
+                assignment,
+                "candidate promotion succeeded; candidate-specific delivery status is pending",
+            )
+            retained = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation,)
+            )
+            assert retained is not None
+            await self._observe_delivery_operation(
+                assignment,
+                retained,
+                repository_id=str(project["tollgate_repo_id"]),
+            )
+            return
+
+        try:
+            observed = await asyncio.to_thread(
+                tollgate.status,
+                project["tollgate_repo_id"],
+                assignment["candidate_id"],
+            )
+            await self._apply_delivery_observation(
+                assignment,
+                retained,
+                observed,
+                approval=result,
+                attempt=attempt,
+                started=started,
+            )
+        except Exception as error:
+            self._operation_failed(
+                operation,
+                error,
+                attempt=attempt,
+                started=started,
+                mutation=True,
+            )
+            retained = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation,)
+            )
+            if retained is not None:
+                await self._reconcile_tollgate_approve(retained)
+
+    async def _observe_delivery_operation(
+        self,
+        assignment: dict[str, Any],
+        operation: dict[str, Any],
+        *,
+        reconciled: bool = False,
+        repository_id: str | None = None,
+    ) -> None:
+        tollgate = self.tollgate
+        assert tollgate is not None
+        repository_id = repository_id or str(assignment["tollgate_repo_id"])
+        try:
+            observed = await asyncio.to_thread(
+                tollgate.status,
+                repository_id,
+                assignment["candidate_id"],
+            )
+        except Exception as error:
+            if operation["state"] != "complete":
+                raise
+            condition = (
+                "candidate promotion succeeded; candidate-specific delivery status "
+                f"is unavailable: {error}"
+            )
+            self._restore_delivering_assignment(assignment, condition)
+            self.store.event(
+                "delivery_observation_failed",
+                condition,
+                entity_type="assignment",
+                entity_id=assignment["id"],
+                detail={
+                    "candidate_id": assignment["candidate_id"],
+                    "operation_id": operation["id"],
+                },
+            )
+            return
+        await self._apply_delivery_observation(
+            assignment,
+            operation,
+            observed,
+            reconciled=reconciled,
+        )
+
+    async def _apply_delivery_observation(
+        self,
+        assignment: dict[str, Any],
+        operation: dict[str, Any],
+        observed: dict[str, Any],
+        *,
+        approval: dict[str, Any] | None = None,
+        attempt: int | None = None,
+        started: float | None = None,
+        reconciled: bool = False,
+    ) -> None:
+        """Apply one candidate-specific delivery observation idempotently."""
+
+        candidate_id = str(assignment["candidate_id"])
+        candidate = _candidate_by_id(observed, candidate_id)
+        retained_candidate = _retained_delivery_candidate(operation, candidate_id)
+        approval_candidate = _approval_candidate(approval, candidate_id)
+        if not _candidate_crossed_promotion(candidate):
+            if _candidate_crossed_promotion(approval_candidate):
+                candidate = approval_candidate
+            elif _candidate_crossed_promotion(retained_candidate):
+                candidate = retained_candidate
+        delivery = _classify_delivery_status(candidate, observed)
+        duration_ms = (
+            int((time.monotonic() - started) * 1000) if started is not None else None
+        )
+        result = _delivery_operation_result(operation, observed, approval)
+
+        if delivery.disposition is DeliveryDisposition.SOURCE_FAILED:
+            diagnosis = await self._candidate_diagnosis(
+                assignment["tollgate_repo_id"],
+                candidate_id,
+                candidate,
+            )
+            result["diagnosis"] = diagnosis
+            if attempt is not None:
+                self.store.finish_operation_attempt(
+                    int(operation["id"]),
+                    attempt,
+                    state="failed",
+                    result=result,
+                    error=delivery.condition,
+                    native_id=candidate_id,
+                    duration_ms=duration_ms,
+                )
+            else:
+                self.store.execute(
+                    """UPDATE external_operations SET state = 'failed',
+                       result_json = ?, native_id = ?, reconciliation_used = ?,
+                       condition = ?, completed_at = NULL, updated_at = ? WHERE id = ?""",
+                    (
+                        json.dumps(result, sort_keys=True),
+                        candidate_id,
+                        int(reconciled or operation["reconciliation_used"]),
+                        delivery.condition,
+                        utc_now(),
+                        operation["id"],
+                    ),
+                )
+            self._set_delivery_correction(assignment, str(delivery.condition))
+            return
+
+        if delivery.disposition is DeliveryDisposition.UNRESOLVED:
+            condition = str(delivery.condition)
+            if attempt is not None:
+                self.store.finish_operation_attempt(
+                    int(operation["id"]),
+                    attempt,
+                    state="uncertain",
+                    result=result,
+                    error=condition,
+                    native_id=candidate_id,
+                    duration_ms=duration_ms,
+                )
+                operation = (
+                    self.store.row(
+                        "SELECT * FROM external_operations WHERE id = ?",
+                        (operation["id"],),
+                    )
+                    or operation
+                )
+            if operation["state"] != "complete":
+                self._retain_uncertain_condition(operation, condition)
+            else:
+                self.store.execute(
+                    "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
+                    (condition, utc_now(), assignment["id"]),
+                )
+            return
+
+        if attempt is not None:
+            self.store.finish_operation_attempt(
+                int(operation["id"]),
+                attempt,
+                state="complete",
+                result=result,
+                native_id=candidate_id,
+                duration_ms=duration_ms,
+            )
+        else:
+            timestamp = utc_now()
+            self.store.execute(
+                """UPDATE external_operations SET state = 'complete', result_json = ?,
+                   native_id = ?, reconciliation_used = ?, condition = NULL,
+                   completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE id = ?""",
+                (
+                    json.dumps(result, sort_keys=True),
+                    candidate_id,
+                    int(reconciled or operation["reconciliation_used"]),
+                    timestamp,
+                    timestamp,
+                    operation["id"],
+                ),
+            )
+
+        if delivery.disposition is DeliveryDisposition.POST_PROMOTION_ATTENTION:
+            current = self.store.row(
+                "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+            )
+            assert current is not None
+            self._hold_assignment(current, str(delivery.condition))
+            return
+
+        self._restore_delivering_assignment(assignment, delivery.condition)
+        if delivery.disposition is DeliveryDisposition.SATISFIED:
+            current = self.store.row(
+                "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+            )
+            assert current is not None
+            await self._close_delivered_assignment(current)
+
+    def _restore_delivering_assignment(
+        self, assignment: dict[str, Any], condition: str | None
+    ) -> None:
+        timestamp = utc_now()
+        with self.store.transaction() as connection:
+            current = connection.execute(
+                "SELECT stage, operator_hold_id FROM assignments WHERE id = ?",
+                (assignment["id"],),
+            ).fetchone()
+            if current is not None and current["operator_hold_id"] is not None:
+                connection.execute(
+                    "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
+                    (timestamp, current["operator_hold_id"]),
+                )
+            if current is not None and current["stage"] == "delivering":
+                connection.execute(
+                    """UPDATE assignments SET prior_stage = NULL,
+                       operator_hold_id = NULL, next_attempt_at = NULL, condition = ?,
+                       updated_at = ? WHERE id = ?""",
+                    (condition, timestamp, assignment["id"]),
+                )
+            else:
+                connection.execute(
+                    """UPDATE assignments SET stage = 'delivering', prior_stage = NULL,
+                       operator_hold_id = NULL, next_attempt_at = NULL, condition = ?,
+                       updated_at = ? WHERE id = ?""",
+                    (condition, timestamp, assignment["id"]),
+                )
+
+    def _set_delivery_correction(
+        self, assignment: dict[str, Any], condition: str
+    ) -> None:
+        timestamp = utc_now()
+        with self.store.transaction() as connection:
+            current = connection.execute(
+                "SELECT stage, operator_hold_id FROM assignments WHERE id = ?",
+                (assignment["id"],),
+            ).fetchone()
+            if current is not None and current["operator_hold_id"] is not None:
+                connection.execute(
+                    "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
+                    (timestamp, current["operator_hold_id"]),
+                )
+            if current is not None and current["stage"] == "correcting":
+                connection.execute(
+                    """UPDATE assignments SET prior_stage = 'delivering',
+                       operator_hold_id = NULL, next_attempt_at = NULL, condition = ?,
+                       updated_at = ? WHERE id = ?""",
+                    (condition, timestamp, assignment["id"]),
+                )
+            else:
+                connection.execute(
+                    """UPDATE assignments SET prior_stage = 'delivering', stage = 'correcting',
+                       operator_hold_id = NULL, next_attempt_at = NULL, condition = ?,
+                       updated_at = ? WHERE id = ?""",
+                    (condition, timestamp, assignment["id"]),
+                )
 
     async def _candidate_diagnosis(
         self,
@@ -6305,30 +6555,147 @@ def _candidate_by_id(value: Any, candidate_id: str) -> dict[str, Any] | None:
     return None
 
 
-def _delivery_contract_failure(
+_PROMOTION_EFFECTED_STATES = {
+    "promoted-local-push-pending",
+    "promoted",
+    "externally-integrated",
+}
+_SOURCE_FAILURE_STATES = {"canceled", "failed", "merge-conflict"}
+_REMOTE_PENDING_STATES = {"preflight-pending", "ready", "pushing"}
+
+
+def _classify_delivery_status(
     candidate: dict[str, Any] | None, status: dict[str, Any]
-) -> str | None:
+) -> DeliveryStatus:
     if candidate is None:
-        return "Tollgate no longer reports the retained candidate"
-    if candidate.get("state") != "promoted":
-        return f"Tollgate candidate ended in {candidate.get('state', 'unknown')}"
+        return DeliveryStatus(
+            DeliveryDisposition.UNRESOLVED,
+            "Tollgate no longer reports the retained candidate; candidate-specific observation is required",
+        )
+    state = str(candidate.get("state", "unknown"))
+    if state in _SOURCE_FAILURE_STATES:
+        return DeliveryStatus(
+            DeliveryDisposition.SOURCE_FAILED,
+            f"Tollgate candidate ended in {state}",
+        )
+    if state not in _PROMOTION_EFFECTED_STATES:
+        return DeliveryStatus(
+            DeliveryDisposition.UNRESOLVED,
+            f"Tollgate approval is not yet observable for candidate in {state}",
+        )
+
     configuration = status.get("configuration")
     remote_enabled = bool(
         isinstance(configuration, dict) and configuration.get("remote_enabled")
     )
-    if remote_enabled and candidate.get("remote_state") != "synchronized":
-        return "candidate was promoted but source synchronization is incomplete"
-    if candidate.get("cleanup_state") not in {"completed", "not-eligible"}:
-        return "candidate worktree cleanup is incomplete"
+    remote_state = candidate.get("remote_state")
+    remote_required = remote_enabled or state == "promoted-local-push-pending"
+    if remote_required and remote_state in {"abandoned", "push-blocked"}:
+        return DeliveryStatus(
+            DeliveryDisposition.POST_PROMOTION_ATTENTION,
+            f"candidate was promoted but source synchronization requires attention (remote_state={remote_state})",
+        )
+    if remote_required and remote_state != "synchronized":
+        if remote_state is None or remote_state in _REMOTE_PENDING_STATES:
+            return DeliveryStatus(
+                DeliveryDisposition.POST_PROMOTION_PENDING,
+                f"candidate was promoted; source synchronization is pending (remote_state={remote_state or 'unknown'})",
+            )
+        return DeliveryStatus(
+            DeliveryDisposition.POST_PROMOTION_ATTENTION,
+            f"candidate was promoted but source synchronization cannot complete automatically (remote_state={remote_state})",
+        )
+    if state == "promoted-local-push-pending":
+        return DeliveryStatus(
+            DeliveryDisposition.POST_PROMOTION_PENDING,
+            "candidate was locally promoted; Tollgate has not finalized remote synchronization",
+        )
+
+    cleanup_state = candidate.get("cleanup_state")
+    if cleanup_state == "needs-attention":
+        return DeliveryStatus(
+            DeliveryDisposition.POST_PROMOTION_ATTENTION,
+            "candidate was promoted but worktree cleanup requires operator attention",
+        )
+    if cleanup_state not in {"completed", "not-eligible"}:
+        if cleanup_state is None or cleanup_state in {"pending", "running"}:
+            return DeliveryStatus(
+                DeliveryDisposition.POST_PROMOTION_PENDING,
+                f"candidate was promoted; worktree cleanup is pending (cleanup_state={cleanup_state or 'unknown'})",
+            )
+        return DeliveryStatus(
+            DeliveryDisposition.POST_PROMOTION_ATTENTION,
+            f"candidate was promoted but worktree cleanup cannot complete automatically (cleanup_state={cleanup_state})",
+        )
     if not candidate.get("certificate_id"):
-        return "candidate has no retained Tollgate certificate"
-    return None
+        if state == "externally-integrated":
+            return DeliveryStatus(
+                DeliveryDisposition.POST_PROMOTION_ATTENTION,
+                "candidate was externally integrated without a retained Tollgate certificate; delivery recovery is required",
+            )
+        return DeliveryStatus(
+            DeliveryDisposition.POST_PROMOTION_PENDING,
+            "candidate was promoted; Tollgate certificate finalization is pending",
+        )
+    return DeliveryStatus(DeliveryDisposition.SATISFIED)
 
 
-def _candidate_definitively_failed(candidate: dict[str, Any] | None) -> bool:
-    return bool(
-        candidate and candidate.get("state") in {"canceled", "failed", "merge-conflict"}
-    )
+def _candidate_crossed_promotion(candidate: dict[str, Any] | None) -> bool:
+    return bool(candidate and candidate.get("state") in _PROMOTION_EFFECTED_STATES)
+
+
+def _approval_candidate(
+    approval: dict[str, Any] | None, candidate_id: str
+) -> dict[str, Any] | None:
+    if not isinstance(approval, dict):
+        return None
+    wait_statuses = approval.get("wait_statuses")
+    if isinstance(wait_statuses, list):
+        for status in reversed(wait_statuses):
+            candidate = _candidate_by_id(status, candidate_id)
+            if candidate is not None:
+                return candidate
+    return _candidate_by_id(approval, candidate_id)
+
+
+def _retained_delivery_candidate(
+    operation: dict[str, Any], candidate_id: str
+) -> dict[str, Any] | None:
+    if not operation.get("result_json"):
+        return None
+    try:
+        result = json.loads(operation["result_json"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    for key in ("latest_status", "status"):
+        candidate = _candidate_by_id(result.get(key), candidate_id)
+        if _candidate_crossed_promotion(candidate):
+            return candidate
+    approval = result.get("approval")
+    return _approval_candidate(
+        approval if isinstance(approval, dict) else None, candidate_id
+    ) or _candidate_by_id(result, candidate_id)
+
+
+def _delivery_operation_result(
+    operation: dict[str, Any],
+    observed: dict[str, Any],
+    approval: dict[str, Any] | None,
+) -> dict[str, Any]:
+    retained: dict[str, Any] = {}
+    if operation.get("result_json"):
+        try:
+            decoded = json.loads(operation["result_json"])
+        except (TypeError, json.JSONDecodeError):
+            decoded = None
+        if isinstance(decoded, dict):
+            retained.update(decoded)
+    if approval is not None:
+        retained["approval"] = approval
+    retained["latest_status"] = observed
+    return retained
 
 
 def _find_codex_project_id(
