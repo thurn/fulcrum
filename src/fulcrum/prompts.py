@@ -288,9 +288,19 @@ def action_message(
         raise PromptError(f"{kind} action requires its assignment")
     lead = {"implement": "Implement", "correct": "Correct", "review": "Review"}[kind]
     lines = [
-        f"{lead} {assignment['bead_id']}. Approved scope:\n{assignment['scope_snapshot']}",
-        f"Worktree: {assignment.get('worktree_path') or 'unavailable'}.",
+        f"{lead} {assignment['bead_id']}. Approved scope:\n{assignment['scope_snapshot']}"
     ]
+    run_context = {
+        key: value
+        for key, value in {
+            "run_id": payload.get("run_id") or assignment.get("run_id"),
+            "role": payload.get("role"),
+        }.items()
+        if value is not None
+    }
+    if run_context:
+        lines.append("Run context: " + _facts(run_context))
+    lines.append(f"Worktree: {assignment.get('worktree_path') or 'unavailable'}.")
     candidate = payload.get("candidate") or {}
     if candidate.get("id") or assignment.get("candidate_id"):
         lines.append(

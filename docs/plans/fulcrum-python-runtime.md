@@ -1304,10 +1304,13 @@ operation or undo promotion. If a required stop cannot be established through
 existing interfaces, hold further work and expose the limitation; do not require
 a Tollgate change or silently claim safe revocation.
 
-When reusing the pair, confirm the previous bead's cleanup and bind both roles
-to the new assignment. Update Executor's effective worktree and permissions
-through supported runtime configuration and verify its Git root before edits. If
-the runtime cannot safely change that context, hold the run as an integration
+When reusing a logical pair for a later assignment, confirm the previous bead's
+cleanup, retire and archive both prior native conversations, and provision fresh
+Executor and Overseer conversations under the same run identity. The new action
+prompt carries the role, run, current scope, candidate, and handoff; prior
+assignments' prompts and tool output are not replayed. Bind only the current
+assignment to the replacement tasks. Verify Executor's Git root before edits. If
+the runtime cannot safely establish that context, hold the run as an integration
 failure rather than continue in the previous worktree. Overseer receives the new
 scope independently of Executor's narrative; earlier mandates do not apply.
 

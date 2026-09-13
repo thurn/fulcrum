@@ -136,6 +136,46 @@ class FakeArchiveRuntime:
             raise RuntimeError("rollout is missing")
 
 
+class FreshConversationRuntime:
+    def __init__(self, previous_marker: str) -> None:
+        self.ready = True
+        self.histories = {
+            "executor": previous_marker,
+            "overseer": previous_marker,
+        }
+        self.created: list[str] = []
+        self.started: list[tuple[str, str]] = []
+        self.archived: list[str] = []
+
+    async def create_thread(self, **_kwargs: Any) -> dict[str, Any]:
+        thread_id = f"fresh-{len(self.created) + 1}"
+        self.created.append(thread_id)
+        self.histories[thread_id] = ""
+        return {"thread": {"id": thread_id}}
+
+    async def set_name(self, _thread_id: str, _name: str) -> None:
+        return None
+
+    async def start_turn(self, thread_id: str, prompt: str, **_kwargs: Any) -> str:
+        context = self.histories[thread_id] + prompt
+        self.started.append((thread_id, context))
+        return f"turn-{len(self.started)}"
+
+    async def read_thread(
+        self, thread_id: str, *, include_turns: bool = True
+    ) -> dict[str, Any]:
+        thread: dict[str, Any] = {
+            "id": thread_id,
+            "status": {"type": "active"},
+        }
+        if include_turns:
+            thread["turns"] = [{"id": "turn-1", "status": "inProgress", "items": []}]
+        return thread
+
+    async def archive(self, thread_id: str) -> None:
+        self.archived.append(thread_id)
+
+
 class FakeResetTollgate:
     def __init__(self) -> None:
         self.active = True
@@ -452,8 +492,56 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pending["value"], "0")
         self.assertEqual(os.environ[INHERITED_LOCK_FD_ENV], str(descriptor))
 
-    async def test_run_reuses_one_pair_for_later_beads(self) -> None:
+    async def test_new_assignment_replaces_pair_conversations_without_old_history(
+        self,
+    ) -> None:
         now = "2026-01-01T00:00:00Z"
+        previous_marker = "FIRST-ASSIGNMENT-RAW-TOOL-OUTPUT-9f3b"
+        old_payload = json.dumps({"raw_output": previous_marker})
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'implement', ?, 'processed',
+                         'ready_for_review', ?, ?, ?)""",
+            (
+                self.executor["id"],
+                self.assignment["id"],
+                old_payload,
+                old_payload,
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET candidate_id = 'candidate-1',
+                   source_oid = 'source-1', tested_oid = 'tested-1' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+            (self.assignment["id"], implementation.lastrowid, old_payload, now),
+        )
+        self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'review', ?, 'processed', 'approved', ?, ?, ?)""",
+            (
+                self.overseer["id"],
+                self.assignment["id"],
+                old_payload,
+                old_payload,
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (self.assignment["id"],),
+        )
         self.controller.store.execute(
             """INSERT INTO beads(
                    bead_id, intake_key, project_id, title, description, activation,
@@ -469,8 +557,11 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             (self.assignment["run_id"],),
         )
         later = self.controller.store.execute(
-            "INSERT INTO assignments(run_id, bead_id, stage, scope_snapshot, created_at, updated_at) VALUES (?, 'p-2', 'queued', 'Second scope', ?, ?)",
-            (self.assignment["run_id"], now, now),
+            """INSERT INTO assignments(
+                   run_id, bead_id, stage, scope_snapshot, worktree_path,
+                   created_at, updated_at
+               ) VALUES (?, 'p-2', 'queued', 'Second scope', ?, ?, ?)""",
+            (self.assignment["run_id"], str(self.worktree), now, now),
         )
         self.assertIsNotNone(position)
         assignment = self.controller.store.row(
@@ -478,12 +569,141 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
                WHERE a.id = ?""",
             (later.lastrowid,),
         )
+        runtime = FreshConversationRuntime(previous_marker)
+        self.controller.runtime = runtime
+
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'active' WHERE id = ?",
+            (self.overseer["id"],),
+        )
+        with self.assertRaisesRegex(StoreError, "cannot replace active overseer"):
+            await self.controller._ensure_pair(assignment)
+        unchanged = self.controller.store.rows(
+            "SELECT state FROM tasks WHERE id IN (?, ?) ORDER BY id",
+            (self.executor["id"], self.overseer["id"]),
+        )
+        self.assertEqual([task["state"] for task in unchanged], ["idle", "idle"])
+        self.assertEqual(runtime.created, [])
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'idle' WHERE id = ?",
+            (self.overseer["id"],),
+        )
         await self.controller._ensure_pair(assignment)
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (later.lastrowid,),
+        )
+        fresh_executor_id = assignment["executor_task_id"]
+        current_marker = "CURRENT-ASSIGNMENT-HANDOFF-e7c1"
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'processed',
+                         'ready_for_review', ?, ?, ?)""",
+            (
+                fresh_executor_id,
+                assignment["id"],
+                json.dumps({"evidence": current_marker}),
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+            (
+                assignment["id"],
+                implementation.lastrowid,
+                json.dumps({"evidence": current_marker}),
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'review_pending',
+                   candidate_id = 'candidate-2', source_oid = 'source-2',
+                   tested_oid = 'tested-2' WHERE id = ?""",
+            (assignment["id"],),
+        )
+        assignment.update(
+            self.controller.store.row(
+                "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+            )
+        )
+
+        await self.controller._start_assignment_action(assignment)
+
         retained = self.controller.store.row(
             "SELECT * FROM assignments WHERE id = ?", (later.lastrowid,)
         )
-        self.assertEqual(retained["executor_task_id"], self.executor["id"])
-        self.assertEqual(retained["overseer_task_id"], self.overseer["id"])
+        first_retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        old_tasks = self.controller.store.rows(
+            "SELECT * FROM tasks WHERE id IN (?, ?) ORDER BY id",
+            (self.executor["id"], self.overseer["id"]),
+        )
+        archive_targets = {
+            row["target"]
+            for row in self.controller.store.rows(
+                "SELECT * FROM obligations WHERE kind = 'archive' AND state = 'pending'"
+            )
+        }
+        self.assertEqual([task["state"] for task in old_tasks], ["retired", "retired"])
+        self.assertEqual(archive_targets, {"executor", "overseer"})
+        self.assertEqual(first_retained["executor_task_id"], self.executor["id"])
+        self.assertEqual(first_retained["overseer_task_id"], self.overseer["id"])
+        self.assertNotEqual(retained["executor_task_id"], self.executor["id"])
+        self.assertNotEqual(retained["overseer_task_id"], self.overseer["id"])
+        self.assertEqual(runtime.created, ["fresh-1", "fresh-2"])
+        self.assertEqual(runtime.started[0][0], "fresh-2")
+        second_context = runtime.started[0][1]
+        self.assertNotIn(previous_marker, second_context)
+        self.assertIn("Second scope", second_context)
+        self.assertIn(f'run id: {assignment["run_id"]}', second_context)
+        self.assertIn("role: overseer", second_context)
+        self.assertIn(str(self.worktree), second_context)
+        self.assertIn("candidate-2", second_context)
+        self.assertIn("source-2", second_context)
+        self.assertIn("tested-2", second_context)
+        self.assertIn(current_marker, second_context)
+
+        await self.controller.reconcile()
+        await self.controller.advance()
+
+        archived_tasks = self.controller.store.rows(
+            "SELECT state, archived FROM tasks WHERE id IN (?, ?) ORDER BY id",
+            (self.executor["id"], self.overseer["id"]),
+        )
+        completed_obligations = self.controller.store.rows(
+            """SELECT target, state FROM obligations
+               WHERE kind = 'archive' ORDER BY target"""
+        )
+        current_run = self.controller.store.row(
+            "SELECT * FROM runs WHERE id = ?", (assignment["run_id"],)
+        )
+        current_assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+        )
+        self.assertEqual(runtime.archived, ["executor", "overseer"])
+        self.assertEqual(
+            [(task["state"], task["archived"]) for task in archived_tasks],
+            [("archived", 1), ("archived", 1)],
+        )
+        self.assertEqual(
+            [(item["target"], item["state"]) for item in completed_obligations],
+            [("executor", "complete"), ("overseer", "complete")],
+        )
+        self.assertEqual(current_run["executor_task_id"], retained["executor_task_id"])
+        self.assertEqual(current_run["overseer_task_id"], retained["overseer_task_id"])
+        self.assertEqual(
+            current_assignment["executor_task_id"], retained["executor_task_id"]
+        )
+        self.assertEqual(
+            current_assignment["overseer_task_id"], retained["overseer_task_id"]
+        )
 
     async def test_overseer_is_provisioned_only_when_review_starts(self) -> None:
         now = "2026-01-01T00:00:00Z"

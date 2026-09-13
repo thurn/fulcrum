@@ -573,7 +573,7 @@ class Controller:
 
         self.store.execute(
             """UPDATE tasks SET state = 'idle', updated_at = ?
-               WHERE archived = 0 AND state != 'idle'
+               WHERE archived = 0 AND state IN ('provisioning','active','uncertain')
                AND last_turn_terminal = 1 AND helpers_terminal = 1
                AND NOT EXISTS (
                    SELECT 1 FROM actions
@@ -1379,14 +1379,6 @@ class Controller:
             )
             if run.get("executor_task_id")
             else None
-        ) or await self._provision_task(
-            role="executor",
-            description=bead["title"],
-            project=project,
-            model=bead["executor_model"],
-            effort=bead["executor_reasoning_effort"],
-            pair_id=int(assignment["run_id"]),
-            cwd=str(assignment["worktree_path"]),
         )
         overseer = (
             self.store.row(
@@ -1394,6 +1386,29 @@ class Controller:
             )
             if run.get("overseer_task_id")
             else None
+        )
+        replacements = [
+            task
+            for task in (executor, overseer)
+            if task is not None
+            and self._task_crossed_assignment_boundary(task, int(assignment["id"]))
+        ]
+        for task in replacements:
+            self._require_replaceable_assignment_conversation(task)
+        for task in replacements:
+            self._retire_assignment_conversation(task, int(assignment["id"]))
+            if task["role"] == "executor":
+                executor = None
+            else:
+                overseer = None
+        executor = executor or await self._provision_task(
+            role="executor",
+            description=bead["title"],
+            project=project,
+            model=bead["executor_model"],
+            effort=bead["executor_reasoning_effort"],
+            pair_id=int(assignment["run_id"]),
+            cwd=str(assignment["worktree_path"]),
         )
         if include_overseer and overseer is None:
             overseer = await self._provision_task(
@@ -1416,16 +1431,79 @@ class Controller:
         )
         self.store.execute(
             """UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ?
-               WHERE run_id = ?""",
+               WHERE id = ?""",
             (
                 executor["id"],
                 overseer["id"] if overseer else None,
                 utc_now(),
-                assignment["run_id"],
+                assignment["id"],
             ),
         )
         assignment["executor_task_id"] = executor["id"]
         assignment["overseer_task_id"] = overseer["id"] if overseer else None
+
+    def _task_crossed_assignment_boundary(
+        self, task: dict[str, Any], assignment_id: int
+    ) -> bool:
+        return (
+            self.store.row(
+                """SELECT 1 FROM actions WHERE task_id = ?
+                   AND assignment_id IS NOT NULL AND assignment_id != ? LIMIT 1""",
+                (task["id"], assignment_id),
+            )
+            is not None
+        )
+
+    def _require_replaceable_assignment_conversation(
+        self, task: dict[str, Any]
+    ) -> None:
+        active = self.store.row(
+            """SELECT id FROM actions WHERE task_id = ?
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
+            (task["id"],),
+        )
+        if (
+            active is not None
+            or not task["last_turn_terminal"]
+            or not task["helpers_terminal"]
+            or task["runtime_status"] == "active"
+        ):
+            raise StoreError(
+                f"cannot replace active {task['role']} conversation at assignment boundary"
+            )
+
+    def _retire_assignment_conversation(
+        self, task: dict[str, Any], next_assignment_id: int
+    ) -> None:
+        timestamp = utc_now()
+        with self.store.transaction() as connection:
+            connection.execute(
+                """UPDATE tasks SET state = CASE WHEN archived = 1 THEN 'archived'
+                       ELSE 'retired' END, updated_at = ? WHERE id = ?""",
+                (timestamp, task["id"]),
+            )
+            if not task["archived"]:
+                connection.execute(
+                    """INSERT OR IGNORE INTO obligations(
+                           kind, identity, target, state, created_at, updated_at
+                       ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                    (
+                        f"assignment-boundary:{task['id']}",
+                        task["native_thread_id"],
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+        self.store.event(
+            "assignment_conversation_retired",
+            f"retired {task['role']} conversation before assignment {next_assignment_id}",
+            entity_type="task",
+            entity_id=task["id"],
+            detail={
+                "next_assignment_id": next_assignment_id,
+                "pair_id": task["pair_id"],
+            },
+        )
 
     async def _provision_task(
         self,
@@ -1503,6 +1581,12 @@ class Controller:
                 "UPDATE tasks SET state = 'idle', runtime_status = 'unmaterialized', updated_at = ? WHERE id = ?",
                 (utc_now(), task["id"]),
             )
+            if pair_id is not None and role in {"executor", "overseer"}:
+                column = f"{role}_task_id"
+                self.store.execute(
+                    f"UPDATE runs SET {column} = ?, updated_at = ? WHERE id = ?",
+                    (task["id"], utc_now(), pair_id),
+                )
             task["state"] = "idle"
             task["runtime_status"] = "unmaterialized"
             return task
@@ -1565,10 +1649,6 @@ class Controller:
                 f"UPDATE runs SET {column} = ?, updated_at = ? WHERE id = ?",
                 (task["id"], utc_now(), pair_id),
             )
-            self.store.execute(
-                f"UPDATE assignments SET {column} = ?, condition = NULL, updated_at = ? WHERE run_id = ?",
-                (task["id"], utc_now(), pair_id),
-            )
         task["state"] = "idle"
         task["runtime_status"] = runtime_status
         return task
@@ -1605,6 +1685,8 @@ class Controller:
         )
         payload = {
             "purpose": kind,
+            "role": task["role"],
+            "run_id": assignment["run_id"],
             "bead_id": assignment["bead_id"],
             "predecessor_candidate_id": assignment.get("candidate_id"),
             "candidate": {
@@ -1726,6 +1808,8 @@ class Controller:
                 if isinstance(action["payload"], str)
                 else dict(action["payload"])
             )
+            payload["role"] = task["role"]
+            payload["run_id"] = assignment["run_id"]
             payload["handoffs"] = [
                 {
                     "kind": row["kind"],
