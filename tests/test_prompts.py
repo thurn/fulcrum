@@ -41,6 +41,7 @@ class PromptsTest(unittest.TestCase):
         self,
     ) -> None:
         action = {
+            "id": 42,
             "kind": "archon",
             "payload": {
                 "batch_items": [
@@ -73,11 +74,120 @@ class PromptsTest(unittest.TestCase):
             "Show an empty state when search returns no matches; test both paths.", text
         )
         self.assertIn("p 0/2", text)
-        self.assertLess(len(text.split()), 65)
+        self.assertTrue(text.startswith("Action 42. Finish required: yes."))
+        self.assertIn("fulcrum finish decisions", text)
+        self.assertLess(len(text.split()), 150)
         self.assertNotIn("unchanged", text)
         self.assertNotIn("fulcrum instructions", text)
-        self.assertNotIn("--input", text)
         self.assertNotIn("1 updates", text)
+        for irrelevant in (
+            "resolve_operation",
+            "resolve_escalation",
+            "request_specialist",
+            "retire_archon",
+            "set_models",
+            "suspend_policy",
+        ):
+            self.assertNotIn(irrelevant, text)
+
+    def test_archon_completion_message_gives_exact_minimal_acknowledgement(
+        self,
+    ) -> None:
+        text = action_message(
+            action={
+                "id": 8,
+                "kind": "archon",
+                "payload": {
+                    "batch_items": [
+                        {
+                            "update_id": 2,
+                            "content": {
+                                "kind": "assignment_completed",
+                                "bead_id": "p-1",
+                                "assignment_id": 1,
+                                "run_id": 1,
+                                "minor_fixes": [
+                                    {
+                                        "problem": "Tighten wording",
+                                        "evidence": "README.md:20",
+                                        "requested_change": "Use a shorter sentence",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "fleet_snapshot": {
+                        "capacity": {
+                            "global_usage": 0,
+                            "global_limit": 2,
+                            "project_usage": {"p": 0},
+                            "project_limits": {"p": 2},
+                        }
+                    },
+                },
+            }
+        )
+        self.assertTrue(
+            text.startswith(
+                "Action 8. Finish required: yes. Relevant outcome: decisions."
+            )
+        )
+        self.assertIn('{"decisions": [], "handled_update_ids": [2]}', text)
+        self.assertIn("Overseer nonblocking follow-up", text)
+        self.assertIn("requires a new Weaver bead", text)
+        for irrelevant in (
+            "request_specialist",
+            "resolve_operation",
+            "resolve_escalation",
+            '"decision": "approve"',
+            "fulcrum finish deferred",
+        ):
+            self.assertNotIn(irrelevant, text)
+        self.assertLess(len(text.split()), 145)
+
+    def test_archon_completion_omits_absent_minor_followup(self) -> None:
+        text = action_message(
+            action={
+                "id": 9,
+                "kind": "archon",
+                "payload": {
+                    "batch_items": [
+                        {
+                            "update_id": 3,
+                            "content": {
+                                "kind": "assignment_completed",
+                                "bead_id": "p-2",
+                                "assignment_id": 2,
+                                "run_id": 2,
+                                "minor_fixes": [],
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+        self.assertNotIn("nonblocking follow-up", text)
+        self.assertNotIn("Weaver bead", text)
+
+    def test_archon_initial_policy_message_is_project_specific(self) -> None:
+        text = action_message(
+            action={
+                "id": 1,
+                "kind": "archon",
+                "payload": {
+                    "purpose": "initial_policies",
+                    "projects": ["fulcrum", "other"],
+                    "required": "Set initial policy.",
+                },
+            }
+        )
+        self.assertTrue(text.startswith("Action 1. Finish required: yes."))
+        self.assertIn('"project_limits": {"fulcrum":', text)
+        self.assertIn('"scope": "fulcrum"', text)
+        self.assertIn('"scope": "other"', text)
+        self.assertIn("offset project Inquisitor anchors twelve hours", text)
+        self.assertNotIn("request_specialist", text)
+        self.assertNotIn("resolve_operation", text)
 
     def test_archon_preserves_relevant_conflicts_holds_and_unknown_exceptions(
         self,
@@ -260,14 +370,13 @@ class PromptsTest(unittest.TestCase):
     def test_creation_supplies_role_and_command_reference_without_fetches(self) -> None:
         text = role_instructions("archon", role="archon")
         self.assertIn("You are Archon", text)
-        self.assertIn("fulcrum finish decisions", text)
-        self.assertIn('"handled_update_ids"', text)
         self.assertNotIn("fulcrum instructions", text)
         self.assertIn("independent compatible beads", text)
-        self.assertIn("separate runs", text)
-        self.assertIn("Do not serialize", text)
-        self.assertIn("Atomically rename", text)
-        self.assertIn("only after creation succeeds", " ".join(text.split()))
+        self.assertIn("separate project-scoped runs", text)
+        self.assertIn("normal human follow-up", text)
+        self.assertNotIn("fulcrum finish decisions", text)
+        self.assertNotIn('"resolve_operation"', text)
+        self.assertLess(len(text.split()), 230)
 
     def test_executor_creation_instructions_are_concise_and_action_specific(
         self,

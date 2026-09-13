@@ -44,6 +44,8 @@ def load_template(action_kind: str, *, role: str | None = None) -> str:
 
 def role_instructions(action_kind: str, *, role: str | None = None) -> str:
     """Onboarding and command reference, supplied once at task creation."""
+    if action_kind == "archon":
+        return load_template(action_kind, role=role)
     finish_kind = "correct" if action_kind == "implement" else action_kind
     interviews_allowed = role == "sage"
     lifecycle = {
@@ -95,7 +97,134 @@ def _facts(values: dict[str, Any]) -> str:
     )
 
 
-def _archon_message(payload: dict[str, Any]) -> str:
+def _archon_finish_guidance(
+    payload: dict[str, Any], *, action_id: int | str | None
+) -> list[str]:
+    """Give Archon only the result shapes relevant to this frozen action."""
+    items = payload.get("batch_items", [])
+    update_ids = [int(item["update_id"]) for item in items]
+    contents = [
+        item["content"] for item in items if isinstance(item.get("content"), dict)
+    ]
+    kinds = {content.get("kind") for content in contents}
+    acknowledge_only = bool(update_ids) and kinds <= {
+        "assignment_completed",
+        "specialist_completed",
+        "archon_succession_completed",
+    }
+    rendered_id = action_id if action_id is not None else "current"
+    lines = [
+        f"Action {rendered_id}. Finish required: yes. Relevant outcome: "
+        + ("decisions." if acknowledge_only else "decisions or deferred.")
+    ]
+
+    if payload.get("purpose") == "initial_policies":
+        projects = [str(project) for project in payload.get("projects", [])]
+        lines.extend(
+            [
+                "Required result: choose positive global and per-project capacities, one fleet Sage cadence, and one Inquisitor cadence per project.",
+                "Use the normal 86400-second cadence unless the operator requested another cadence; offset project Inquisitor anchors twelve hours from the fleet Sage anchor. Replace the quoted integer descriptions below with your chosen numbers.",
+                "Decisions JSON shape: "
+                + json.dumps(
+                    {
+                        "decisions": [],
+                        "handled_update_ids": [],
+                        "global_limit": "positive integer",
+                        "project_limits": {
+                            project: "positive integer" for project in projects
+                        },
+                        "recurring_policies": [
+                            {
+                                "kind": "sage",
+                                "scope": None,
+                                "cadence_seconds": "positive integer",
+                                "anchor_at": "ISO timestamp",
+                            },
+                            *[
+                                {
+                                    "kind": "inquisitor",
+                                    "scope": project,
+                                    "cadence_seconds": "positive integer",
+                                    "anchor_at": "ISO timestamp",
+                                }
+                                for project in projects
+                            ],
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+    elif update_ids:
+        lines.append("Required handled_update_ids: " + json.dumps(update_ids) + ".")
+        if acknowledge_only:
+            lines.append(
+                "No scheduling change is required unless the update itself identifies one. Acknowledge with: "
+                + json.dumps(
+                    {"decisions": [], "handled_update_ids": update_ids},
+                    ensure_ascii=False,
+                )
+            )
+            if any(content.get("minor_fixes") for content in contents):
+                lines.append(
+                    "Do not schedule the nonblocking follow-up; it requires a new Weaver bead."
+                )
+        if "proposal" in kinds:
+            proposals = [
+                {
+                    "decision": "approve",
+                    "project": content["project"],
+                    "beads": [content["bead_id"]],
+                    "scope": {
+                        content["bead_id"]: (
+                            f"exact Scope text from update {item['update_id']}"
+                        )
+                    },
+                }
+                for item in items
+                if isinstance((content := item.get("content")), dict)
+                and content.get("kind") == "proposal"
+            ]
+            lines.append(
+                "For approval, use this shape and replace each scope marker with the exact Scope text above: "
+                + json.dumps(
+                    {"decisions": proposals, "handled_update_ids": update_ids},
+                    ensure_ascii=False,
+                )
+            )
+        for content in contents:
+            if content.get("kind") == "review_failure_escalation":
+                lines.append(
+                    f"Assignment {content['assignment_id']} requires resolve_escalation; resolution must be one of "
+                    + json.dumps(content.get("resolutions", []))
+                    + ". Use scope only with rescope; use evidence for complete_non_code."
+                )
+            elif content.get("kind") == "operation_resolution":
+                lines.append(
+                    f"Operation {content['operation_id']} requires resolve_operation with observed_success, observed_failure, or confirmed_unsent and concrete evidence; observed_success also requires the operation-specific result identity."
+                )
+            elif content.get("kind") == "assignment_recovery":
+                lines.append(
+                    f"Assignment {content['assignment_id']} already has an automatic retry scheduled. Acknowledge it unchanged unless the stated condition justifies a hold, run cancellation, or priority change."
+                )
+
+    snapshot = payload.get("fleet_snapshot") or {}
+    if snapshot.get("holds"):
+        lines.append(
+            "Relevant hold actions: release_hold accepts the exact hold_id after its stated condition is satisfied; a new hold requires scope, target except for global, reason, and release_condition."
+        )
+
+    lines.append(
+        'Finish decisions: write complete JSON to a sibling temporary file, atomically rename it to "/absolute/decisions.json", then run `fulcrum finish decisions --input "/absolute/decisions.json"`.'
+    )
+    if not acknowledge_only:
+        lines.append(
+            'Defer the whole batch only when it must wait: `fulcrum finish deferred --reason "why" --input "/absolute/reactivation.json"`. Reactivation JSON must contain exactly one concrete trigger: capacity, dependency, hold, operator_change, or next_check_at.'
+        )
+    return lines
+
+
+def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> str:
     """Render the pending decisions, not the entire fleet record or role manual."""
     items = payload.get("batch_items", [])
     lines: list[str] = []
@@ -129,6 +258,11 @@ def _archon_message(payload: dict[str, Any]) -> str:
                 prefix
                 + f"{content['bead_id']} completed (assignment {content['assignment_id']}, run {content['run_id']})."
             )
+            if content.get("minor_fixes"):
+                lines.append(
+                    "Overseer nonblocking follow-up (not approved work): "
+                    + _text(content["minor_fixes"])
+                )
         elif kind == "assignment_recovery":
             lines.append(
                 prefix
@@ -251,7 +385,8 @@ def _archon_message(payload: dict[str, Any]) -> str:
             lines.append("Projects: " + ", ".join(payload["projects"]) + ".")
         for policy in snapshot.get("policies", []):
             lines.append("Policy: " + _facts(policy))
-    return "\n".join(lines)
+    guidance = _archon_finish_guidance(payload, action_id=action_id)
+    return "\n".join([guidance[0], *lines, *guidance[1:]])
 
 
 def _handoff_text(content: Any) -> str:
@@ -286,9 +421,16 @@ def action_message(
     kind = action["kind"]
     payload = action_payload(action)
     if action.get("reminder_sent"):
+        if kind == "archon":
+            return (
+                f"Action {action.get('id', 'current')}. Finish required: yes. "
+                "The previous turn ended without an outcome. Submit only that "
+                "action's outstanding result using the finish shape already supplied; "
+                "do not repeat completed work."
+            )
         return "Your previous turn ended without a finish outcome. Submit the outstanding result for that action; do not repeat completed work."
     if kind == "archon":
-        return _archon_message(payload)
+        return _archon_message(payload, action_id=action.get("id"))
     if kind == "interview":
         return (
             "Workflow debrief only; do not resume prior work.\n"

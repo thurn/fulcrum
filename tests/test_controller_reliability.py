@@ -2077,7 +2077,7 @@ print(json.dumps({
         self.assertNotIn("fulcrum instructions", text)
         self.assertNotIn("You are Archon", text)
         self.assertNotIn("Exact JSON", text)
-        self.assertLess(len(text.split()), 100)
+        self.assertLess(len(text.split()), 150)
 
     async def test_third_review_failure_reaches_archon_and_cancel_resolves_hold(
         self,
