@@ -290,9 +290,7 @@ class Controller:
                     continue
                 await self.advance()
 
-    async def _handle_runtime_event(
-        self, method: str, params: dict[str, Any]
-    ) -> bool:
+    async def _handle_runtime_event(self, method: str, params: dict[str, Any]) -> bool:
         """Apply a relevant runtime event and report whether workflow may advance.
 
         Codex also emits high-volume item and token notifications. Those events do
