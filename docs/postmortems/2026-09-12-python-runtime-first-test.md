@@ -1,7 +1,7 @@
 # First Python runtime test postmortem
 
 **Incident date:** 2026-09-12  
-**Status:** Controller process alive; workflow control plane deadlocked  
+**Status:** Recovered by destructive reset; original workflow was not recoverable
 **Severity:** Critical test failure; no production impact  
 **Scope:** First live test of `docs/plans/fulcrum-python-runtime.md`
 
@@ -83,6 +83,12 @@ The 21 failed shell commands in the implementation transcript should not be equa
 20. The UI-visible `fulcrum-1` workspace/project cannot be attributed from durable audit data.
 21. A successful same-key intake retry did not resolve or supersede the failed external operation and publication obligation from the first attempt, leaving status permanently failed after recovery.
 22. Brain publication assumed the retained local checkout could fast-forward its remote. Divergent reset-derived and remote history caused a push rejection and left no controller-owned, non-destructive recovery path.
+23. Reset worktree cleanup was not idempotent. A Tollgate worktree that was already absent caused reset to abort instead of being accepted as the desired postcondition.
+24. Successful partial cleanup was not checkpointed into Fulcrum state. A retry physically removed a worktree but retained its path in the assignment row, causing a later retry to fail on that now-missing path.
+25. Reset attempted to remove a worktree retained by an active Tollgate candidate without first canceling or otherwise disposing of the queue item. Tollgate correctly rejected the removal, and Fulcrum had no ordered recovery step.
+26. One corrupt provisioned thread aborted archival of all later tasks. The missing rollout for Overseer 0002 made `thread/archive` fail, and reset had no per-task quarantine, retained archive obligation, or continue-on-independent-target behavior.
+27. A completed destructive reset returned exit status 2 because the replacement Archon's policies were pending, even though the response said `complete: true`. This made successful destructive completion look like command failure.
+28. The first reinstall/setup attempt failed to bootstrap the controller with launchctl error 5 and no actionable diagnostics or retry. Running the identical `launchctl bootstrap` command immediately afterward succeeded.
 
 ## Beads traceability
 
@@ -100,6 +106,21 @@ The brain contained eight open `project:fulcrum` Beads created during this incid
 | `brain-ue2` — Add the Vizier entrypoint and on-demand global briefing | Planned capability, not an incident defect | Part three of the approved Vizier design. It remained `activation:pending` and was not dispatched during the incident. |
 
 The first three defect Beads became the three executor assignments discussed in the timeline. The other two defect Beads and all three Vizier capability Beads were published later by Weaver but could not progress through Archon after the proposal-delivery path froze. Thus every Fulcrum Bead from the incident is accounted for either as an attempted repair or as queued product work; none establishes that the deadlocked controller recovered.
+
+## Reset and reinstall follow-up
+
+At the user's direction, a full `fulcrum reboot --reset` and reinstall were attempted at approximately 18:30-18:36 PDT. The reset eventually succeeded, but only after manual reconciliation around four additional dead ends.
+
+1. The first reset failed while trying to remove assignment 0003's worktree. Tollgate already recorded its candidate as `promoted`, its remote as `synchronized`, and cleanup as `completed`; the directory did not exist. Fulcrum still selected it because the earlier approval-parse failure had left the assignment in `recovering` with a stale worktree path.
+2. After the stale assignment 0003 path was cleared, a retry removed assignment 0002's worktree and then failed. Fulcrum did not clear the assignment's worktree path, so the next retry attempted to remove an already-absent directory and failed again.
+3. Assignment 0001's worktree could not be removed because its corrected candidate was still active in Tollgate. The candidate had to be canceled explicitly. Its worktree was then removed, but Fulcrum again retained the stale path until it was reconciled manually.
+4. Reset next archived Archon, Weaver, Executor 0001, Overseer 0001, and Executor 0002, then aborted on Overseer 0002 because the app server could not find that thread's rollout. The native thread index contained the row, but its referenced rollout file had never existed. The empty/corrupt thread had to be marked archived in both the native index and Fulcrum state before reset could continue to Executor and Overseer 0003.
+5. Reset then completed: all nine original managed native thread IDs had `archived = 1`, both disposable worktrees were absent, operational SQLite state was rebuilt, and the brain contained zero Beads. The command nevertheless exited 2 while reporting `complete: true` because the new Archon had not yet supplied policies.
+6. `./scripts/setup --non-interactive` reinstalled the locked requirements and editable package, but its first service pass failed with `Bootstrap failed: 5: Input/output error` for `dev.fulcrum.controller`. Both launchd jobs were absent and both plists passed `plutil -lint`. Manually running the exact controller bootstrap immediately succeeded. A second setup invocation waited for the new Archon's policy turn and completed with `ok: true`, `ready: true`.
+
+Final verification at 18:36 PDT showed one new idle Archon (`01a09866-6a22-7992-82ab-3d06fddabd36`), no other Fulcrum task rows, no disposable Git worktrees, zero Beads, no doctor failures, durable readiness `ready`, and dispatch enabled. The app server was still the pre-existing manually attached shared process rather than the installed launchd job; setup accepted that topology under its current reuse behavior, which reconfirmed failure 5 rather than resolving it.
+
+A pre-reset safety snapshot was retained at `~/Library/Application Support/Fulcrum Incidents/2026-09-12-python-runtime-first-test/`. It contains the Fulcrum database, Codex thread index, and configuration as captured before the first reset mutation. The direct archive-index repair for Overseer 0002 is recoverable from that snapshot; the successfully reset operational database and brain are intentionally not restored.
 
 ## Root cause
 
@@ -182,6 +203,15 @@ The conclusion that the fallback coroutine died is an inference from an alive id
 7. Do not reload executable source while a mutation or delivery transition is in flight. Restart only at a recorded quiescent boundary.
 8. Provision a supported check environment for every worktree or emit one absolute, valid check command that does not assume a worktree-local `.venv`.
 
+### Reset and setup safety
+
+1. Model reset as a checkpointed sequence over exact native objects: cancel/dispose the Tollgate queue item, confirm or remove its worktree, persist that completion, archive the native thread, and only then clear operational state.
+2. Make every cleanup step accept an already-achieved postcondition. Missing owned worktrees and already-archived threads must succeed after targeted reconciliation rather than abort a resumed reset.
+3. Persist progress after each independent cleanup target so a retry never repeats a completed destructive operation from stale assignment data.
+4. Continue archiving independent tasks when one corrupt thread cannot be archived. Retain the failed thread ID and condition for operator resolution, and make the final reset result explicitly distinguish `reset complete`, `archive exceptions`, and `replacement fleet bootstrapping`.
+5. Do not use exit status 2 for a completed reset merely because the newly created Archon is still establishing policy. Report destructive completion separately from readiness.
+6. Capture the exact launchctl domain, plist, stdout, stderr, and job state on bootstrap failure; retry only after a targeted state read shows the job absent. Setup must either establish the configured app-server job or explicitly report that it accepted an unmanaged listener.
+
 ### Test gates
 
 Add controller-level tests using realistic adapter responses and failure injection for:
@@ -196,6 +226,8 @@ Add controller-level tests using realistic adapter responses and failure injecti
 - a failed pending action becoming runnable later;
 - a critical background task raising an exception;
 - missing service `PATH`, stale installed links, and an unmanaged process occupying the app-server port; and
+- resumed reset after each individual cleanup side effect, including an already-missing worktree, an active candidate, and a corrupt thread with no rollout;
+- reset command semantics while replacement policies are pending and transient launchctl bootstrap failure; and
 - real Tollgate list/object/output shapes rather than adapter-only mocks.
 
 No live test should begin until these cases pass and setup proves the expected services, paths, readiness invariants, and reconciliation heartbeat.
