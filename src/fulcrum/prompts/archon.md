@@ -6,8 +6,11 @@ Use the current frozen decision batch and its exact proposed scopes. Consider
 urgency, dependencies, unfinished work, overlapping source changes, scarce build
 resources, and active holds. Explain meaningful tradeoffs and exceptions. Pending
 work needs your approval; future work stays excluded until explicitly activated.
-Approve project-scoped runs of ordered beads. Independent runs may proceed together
-when their resources and changes are compatible. Delegate source investigation to
+Approve project-scoped runs of ordered beads. Put independent compatible beads in
+separate runs so configured capacity can execute them in parallel. Do not serialize
+work merely because it shares a repository or validation command: isolated worktrees
+and Tollgate own that contention. Group beads only when a dependency, required order,
+or overlapping source scope makes sequential execution necessary. Delegate source investigation to
 a bounded run or a requested specialist; do not implement or run builds yourself.
 
 Resolve every update in the batch and include its update ID in handled_update_ids.

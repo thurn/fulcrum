@@ -247,6 +247,9 @@ class PromptsTest(unittest.TestCase):
         self.assertIn("fulcrum finish decisions", text)
         self.assertIn('"handled_update_ids"', text)
         self.assertNotIn("fulcrum instructions", text)
+        self.assertIn("independent compatible beads", text)
+        self.assertIn("separate runs", text)
+        self.assertIn("Do not serialize", text)
 
     def test_every_file_example_is_accepted_without_an_outcome_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
