@@ -333,18 +333,23 @@ class ConfigInstallTest(unittest.TestCase):
                 codex_bin="/bin/codex",
                 desktop_executable="/Applications/ChatGPT.app/ChatGPT",
             )
-            first = install_control_plane(config, paths)
+            first, first_updated = install_control_plane(config, paths)
             first_deployment = first.parent.resolve()
+            self.assertTrue(first_updated)
             self.assertEqual(first, control_plane_source(paths))
             self.assertEqual((first / "__init__.py").read_text(), "VALUE = 1\n")
             (package / "__init__.py").write_text("VALUE = 2\n")
-            second = install_control_plane(config, paths)
+            second, second_updated = install_control_plane(config, paths)
             second_deployment = second.parent.resolve()
+            self.assertTrue(second_updated)
             self.assertEqual(second, first)
             self.assertEqual((second / "__init__.py").read_text(), "VALUE = 2\n")
             self.assertFalse(second.is_relative_to(source))
             self.assertNotEqual(first_deployment, second_deployment)
             self.assertFalse(first_deployment.exists())
+            third, third_updated = install_control_plane(config, paths)
+            self.assertEqual(third, second)
+            self.assertFalse(third_updated)
 
     def test_control_plane_retries_if_source_changes_during_copy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -380,9 +385,10 @@ class ConfigInstallTest(unittest.TestCase):
             with patch(
                 "fulcrum.install._package_contents", side_effect=changing_contents
             ):
-                deployed = install_control_plane(config, paths)
+                deployed, updated = install_control_plane(config, paths)
 
             self.assertEqual(source_reads, 4)
+            self.assertTrue(updated)
             self.assertEqual((deployed / "__init__.py").read_text(), "VALUE = 2\n")
 
     def test_transient_bootstrap_failure_is_observed_then_retried(self) -> None:

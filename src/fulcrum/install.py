@@ -89,13 +89,19 @@ def _package_contents(package: Path) -> dict[Path, bytes]:
     }
 
 
-def install_control_plane(config: InstallationConfig, paths: RuntimePaths) -> Path:
+def install_control_plane(
+    config: InstallationConfig, paths: RuntimePaths
+) -> tuple[Path, bool]:
     """Atomically install an immutable controller snapshot outside managed source."""
 
     source = Path(config.source_root).resolve(strict=True) / "src" / "fulcrum"
     runtime_root = paths.control_root / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    current = runtime_root / "current"
+    installed = current / "fulcrum"
+    previous = _package_contents(installed) if installed.is_dir() else {}
     deployment: Path | None = None
+    copied: dict[Path, bytes] = {}
     for _attempt in range(3):
         before = _package_contents(source)
         candidate = runtime_root / f"deployment-{os.getpid()}-{uuid.uuid4().hex}"
@@ -118,7 +124,6 @@ def install_control_plane(config: InstallationConfig, paths: RuntimePaths) -> Pa
         raise InstallationError(
             "controller source changed throughout snapshot installation; retry when stable"
         )
-    current = runtime_root / "current"
     temporary = runtime_root / f".current.{os.getpid()}.tmp"
     temporary.unlink(missing_ok=True)
     temporary.symlink_to(deployment.name, target_is_directory=True)
@@ -127,7 +132,7 @@ def install_control_plane(config: InstallationConfig, paths: RuntimePaths) -> Pa
     for child in runtime_root.glob("deployment-*"):
         if child.resolve(strict=False) != active and child.is_dir():
             shutil.rmtree(child)
-    return current / "fulcrum"
+    return current / "fulcrum", previous != copied
 
 
 def controller_program_arguments(

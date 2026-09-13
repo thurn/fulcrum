@@ -19,6 +19,7 @@ from fulcrum.config import (
     save_installation,
 )
 from fulcrum.install import (
+    CONTROLLER_LABEL,
     install_control_plane,
     install_links,
     install_services,
@@ -270,8 +271,10 @@ def run_setup(
     save_installation(paths.config_file, config)
     _prepare_brain(config)
     links = install_links(config)
-    install_control_plane(config, paths)
+    _, control_plane_updated = install_control_plane(config, paths)
     services, updated_services = install_services(config, paths)
+    if control_plane_updated:
+        updated_services = updated_services | {CONTROLLER_LABEL}
     start_services(
         services,
         updated=updated_services,
