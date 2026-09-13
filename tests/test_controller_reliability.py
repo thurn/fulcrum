@@ -1398,6 +1398,7 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(_candidate_definitively_failed({"state": "failed"}))
         self.assertTrue(_candidate_definitively_failed({"state": "canceled"}))
+        self.assertTrue(_candidate_definitively_failed({"state": "merge-conflict"}))
 
     async def test_ambiguous_approval_is_reconciled_to_completed_delivery(self) -> None:
         self.controller.store.execute(

@@ -4632,7 +4632,9 @@ def _delivery_contract_failure(
 
 
 def _candidate_definitively_failed(candidate: dict[str, Any] | None) -> bool:
-    return bool(candidate and candidate.get("state") in {"canceled", "failed"})
+    return bool(
+        candidate and candidate.get("state") in {"canceled", "failed", "merge-conflict"}
+    )
 
 
 def _find_codex_project_id(
