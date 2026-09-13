@@ -21,7 +21,7 @@ from fulcrum.controller import (
 from fulcrum.kernel import LeaseRequest, acquire_lease
 from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
 from fulcrum.store import StoreError
-from fulcrum.tollgate import TollgateError, TollgateUncertainError
+from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 
 class FakeCandidateTollgate:
@@ -1605,6 +1605,61 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(attempt["state"], "uncertain")
         self.assertEqual(attempt["stdout"], "promoted but not json")
+
+    async def test_json_lines_approval_completes_delivery_without_reconciliation(
+        self,
+    ) -> None:
+        fixture = (
+            Path(__file__).parent
+            / "fixtures"
+            / "tollgate"
+            / "approve-operation-13.jsonl"
+        ).read_text(encoding="utf-8")
+        documents = [json.loads(line) for line in fixture.splitlines()]
+        candidate_id = documents[0]["item_id"]
+        repository_id = documents[1]["item"]["repository_id"]
+        self.controller.store.execute(
+            "UPDATE projects SET tollgate_repo_id = ? WHERE project_id = 'p'",
+            (repository_id,),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'delivering', candidate_id = ?,
+               mandate_candidate_id = ?, mandate_scope = scope_snapshot
+               WHERE id = ?""",
+            (candidate_id, candidate_id, self.assignment["id"]),
+        )
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        self.controller.tollgate = Tollgate("/usr/bin/tg")
+        beads = FakeBeads()
+        self.controller.beads = beads  # type: ignore[assignment]
+        completed = [
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=fixture, stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=json.dumps(documents[-1]), stderr=""
+            ),
+        ]
+
+        with patch("fulcrum.tollgate.subprocess.run", side_effect=completed):
+            await self.controller._deliver(assignment)
+
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE kind = 'tollgate_approve'"
+        )
+        attempt = self.controller.store.row(
+            "SELECT * FROM operation_attempts WHERE operation_id = ?",
+            (operation["id"],),
+        )
+        self.assertEqual(operation["state"], "complete")
+        self.assertEqual(operation["reconciliation_used"], 0)
+        self.assertEqual(attempt["state"], "complete")
+        self.assertIsNone(attempt["error"])
+        self.assertEqual(beads.closed, ["p-1"])
 
     async def test_terminal_candidate_does_not_require_diagnosis(self) -> None:
         self.controller.store.execute(
