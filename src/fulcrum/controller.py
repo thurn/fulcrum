@@ -994,12 +994,10 @@ class Controller:
             await self._close_delivered_assignment(assignment)
             return
         if _candidate_definitively_failed(candidate):
-            tollgate = self.tollgate
-            assert tollgate is not None
-            diagnosis = await asyncio.to_thread(
-                tollgate.diagnose,
+            diagnosis = await self._candidate_diagnosis(
                 assignment["tollgate_repo_id"],
                 assignment["candidate_id"],
+                candidate,
             )
             assert isinstance(candidate, dict)
             condition = f"Tollgate candidate ended in {candidate.get('state')}"
@@ -2173,10 +2171,10 @@ class Controller:
             if failure is not None:
                 diagnosis: dict[str, Any] | None = None
                 if _candidate_definitively_failed(candidate):
-                    diagnosis = await asyncio.to_thread(
-                        tollgate.diagnose,
+                    diagnosis = await self._candidate_diagnosis(
                         project["tollgate_repo_id"],
                         assignment["candidate_id"],
+                        candidate,
                     )
                 detail = {
                     "approval": result,
@@ -2219,6 +2217,24 @@ class Controller:
             )
             if retained is not None:
                 await self._reconcile_tollgate_approve(retained)
+
+    async def _candidate_diagnosis(
+        self,
+        repository_id: str,
+        candidate_id: str,
+        candidate: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        tollgate = self.tollgate
+        assert tollgate is not None
+        try:
+            return await asyncio.to_thread(
+                tollgate.diagnose, repository_id, candidate_id
+            )
+        except TollgateError as error:
+            return {
+                "diagnosis_unavailable": str(error),
+                "candidate": candidate,
+            }
 
     async def _refresh_delivery_pair(self, assignment: dict[str, Any]) -> None:
         if not self.runtime.ready:

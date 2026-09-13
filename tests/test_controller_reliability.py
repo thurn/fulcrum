@@ -72,6 +72,14 @@ class FakeApprovalTollgate:
         }
 
 
+class FakeTerminalTollgate:
+    def status(self, _repository: str, candidate: str | None = None) -> dict[str, Any]:
+        return {"item": {"id": candidate, "state": "merge-conflict"}}
+
+    def diagnose(self, _repository: str, _candidate: str) -> dict[str, Any]:
+        raise TollgateError("diagnosis requires a prepared validation generation")
+
+
 class FakeBeads:
     def __init__(self) -> None:
         self.closed: list[str] = []
@@ -1431,6 +1439,40 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(attempt["state"], "uncertain")
         self.assertEqual(attempt["stdout"], "promoted but not json")
+
+    async def test_terminal_candidate_does_not_require_diagnosis(self) -> None:
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'delivering', candidate_id = 'candidate-1',
+               mandate_candidate_id = 'candidate-1', mandate_scope = scope_snapshot
+               WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        operation = self.controller.store.create_operation(
+            "tollgate_approve",
+            "candidate-1",
+            {"repository_id": "tg-p"},
+        )
+        self.controller.store.execute(
+            "UPDATE external_operations SET state = 'uncertain' WHERE id = ?",
+            (operation,),
+        )
+        self.controller.tollgate = FakeTerminalTollgate()  # type: ignore[assignment]
+
+        retained = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation,)
+        )
+        await self.controller._reconcile_tollgate_approve(retained)
+
+        retained = self.controller.store.row(
+            "SELECT state, result_json FROM external_operations WHERE id = ?",
+            (operation,),
+        )
+        self.assertEqual(retained["state"], "failed")
+        self.assertIn("diagnosis_unavailable", retained["result_json"])
+        assignment = self.controller.store.row(
+            "SELECT stage FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(assignment["stage"], "correcting")
 
     async def test_active_pair_delays_delivery_without_operator_hold(self) -> None:
         self.controller.store.execute(
