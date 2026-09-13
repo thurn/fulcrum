@@ -48,6 +48,8 @@ from fulcrum.scheduling import (
 from fulcrum.store import Store, StoreError, utc_now
 from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
+INHERITED_LOCK_FD_ENV = "FULCRUM_INHERITED_LOCK_FD"
+
 
 class Controller:
     """Own all operational mutations for one configured environment."""
@@ -119,6 +121,25 @@ class Controller:
         if self.lock_handle is not None:
             return
         self.paths.control_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        inherited_fd = os.environ.pop(INHERITED_LOCK_FD_ENV, None)
+        if inherited_fd is not None:
+            try:
+                descriptor = int(inherited_fd)
+                descriptor_stat = os.fstat(descriptor)
+                lock_stat = self.paths.lock.stat()
+                if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+                    lock_stat.st_dev,
+                    lock_stat.st_ino,
+                ):
+                    raise ValueError("descriptor does not identify the controller lock")
+                handle = os.fdopen(descriptor, "a+", closefd=True)
+            except (OSError, TypeError, ValueError) as error:
+                raise StoreError(
+                    f"invalid inherited controller lock for {self.paths.lock}"
+                ) from error
+            os.set_inheritable(handle.fileno(), True)
+            self.lock_handle = handle
+            return
         handle = self.paths.lock.open("a+")
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -3403,6 +3424,17 @@ class Controller:
             await server.wait_closed()
         install_control_plane(self.config, self.paths)
         arguments = controller_program_arguments(self.config, self.paths)
+        self.store.execute(
+            "UPDATE meta SET value = '0' WHERE key = 'source_refresh_pending'"
+        )
+        self.store.event(
+            "source_refresh_installed",
+            "control-plane snapshot installed; transferring controller ownership",
+            detail={"program": arguments[0]},
+        )
+        if self.lock_handle is None:
+            raise StoreError("controller lock disappeared before source refresh")
+        os.environ[INHERITED_LOCK_FD_ENV] = str(self.lock_handle.fileno())
         self.store.close()
         os.execv(arguments[0], arguments)
         return True

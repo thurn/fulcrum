@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
-from fulcrum.controller import Controller
+from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV
 from fulcrum.lifecycle import apply_archon_decisions
 from fulcrum.store import StoreError
 from fulcrum.tollgate import TollgateUncertainError
@@ -188,10 +189,55 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def tearDown(self) -> None:
+        os.environ.pop(INHERITED_LOCK_FD_ENV, None)
         self.controller.store.close()
         if self.controller.lock_handle is not None:
             self.controller.lock_handle.close()
         self.temporary.cleanup()
+
+    def test_reexec_adopts_inherited_lock_without_permitting_a_contender(self) -> None:
+        inherited = os.dup(self.controller.lock_handle.fileno())
+        os.set_inheritable(inherited, True)
+        os.environ[INHERITED_LOCK_FD_ENV] = str(inherited)
+
+        successor = Controller(self.paths, self.config)
+        self.assertEqual(successor.lock_handle.fileno(), inherited)
+        successor.store.close()
+        successor.lock_handle.close()
+
+        with self.assertRaisesRegex(StoreError, "another Fulcrum controller"):
+            Controller(self.paths, self.config)
+
+    async def test_source_refresh_is_consumed_before_lock_handoff(self) -> None:
+        self.controller.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('source_refresh_pending', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+        )
+        self.controller.runtime.close = AsyncMock()  # type: ignore[method-assign]
+        descriptor = self.controller.lock_handle.fileno()
+
+        with (
+            patch("fulcrum.controller.install_control_plane"),
+            patch(
+                "fulcrum.controller.controller_program_arguments",
+                return_value=["/control/python", "serve"],
+            ),
+            patch(
+                "fulcrum.controller.os.execv",
+                side_effect=RuntimeError("exec intercepted"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
+                await self.controller._maybe_refresh_source()
+
+        with self.controller.store.__class__(
+            self.paths.database, readonly=True
+        ) as observer:
+            pending = observer.row(
+                "SELECT value FROM meta WHERE key = 'source_refresh_pending'"
+            )
+        self.assertEqual(pending["value"], "0")
+        self.assertEqual(os.environ[INHERITED_LOCK_FD_ENV], str(descriptor))
 
     async def test_controller_creates_and_captures_candidate_after_executor(
         self,
