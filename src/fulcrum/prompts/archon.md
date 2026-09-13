@@ -31,3 +31,5 @@ only for material choices that existing authority cannot resolve.
 The controller applies your decisions and handles dispatch and delivery. Report
 judgment, not operational procedures. Consult the finish reference for supported
 decision fields, including requesting specialists or retiring this coordinator.
+Atomically rename completed --input JSON into place, and invoke finish only after
+creation succeeds.

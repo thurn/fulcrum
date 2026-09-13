@@ -839,7 +839,7 @@ print(json.dumps({
                 "outcome": "deferred",
                 "options": {
                     "reason": "collect exact external evidence",
-                    "input": str(deferral_file),
+                    "input": json.loads(deferral_file.read_text()),
                 },
             }
         )
@@ -937,7 +937,7 @@ print(json.dumps({
                 "command": "finish",
                 "thread_id": "archon-recovery",
                 "outcome": "decisions",
-                "options": {"input": str(decision_file)},
+                "options": {"input": json.loads(decision_file.read_text())},
             }
         )
         self.controller.store.execute(
@@ -2160,7 +2160,7 @@ print(json.dumps({
                 self.controller.store,
                 native_thread_id="overseer",
                 outcome_kind="changes_requested",
-                options={"input": str(findings_path)},
+                options={"input": json.loads(findings_path.read_text())},
             )
             observed = observe_action_terminal(
                 self.controller.store, int(action.lastrowid)
@@ -2242,7 +2242,7 @@ print(json.dumps({
                 "command": "finish",
                 "thread_id": "archon-review-escalation",
                 "outcome": "decisions",
-                "options": {"input": str(decision_path)},
+                "options": {"input": json.loads(decision_path.read_text())},
             }
         )
         self.controller.store.execute(

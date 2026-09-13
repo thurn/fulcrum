@@ -120,7 +120,7 @@ class LifecycleTest(unittest.TestCase):
                 self.store,
                 native_thread_id="executor",
                 outcome_kind=outcome,
-                options={"input": str(path)},
+                options={"input": json.loads(path.read_text())},
             )
         return action_id, observe_action_terminal(self.store, action_id)
 
@@ -228,7 +228,7 @@ class LifecycleTest(unittest.TestCase):
                 self.store,
                 native_thread_id="executor",
                 outcome_kind="changes_requested",
-                options={"input": str(path)},
+                options={"input": json.loads(path.read_text())},
             )
         observe_action_terminal(self.store, action)
         handoff = self.store.row(
@@ -362,7 +362,7 @@ class LifecycleTest(unittest.TestCase):
                 self.store,
                 native_thread_id="executor",
                 outcome_kind="changes_requested",
-                options={"input": str(path)},
+                options={"input": json.loads(path.read_text())},
             )
         self.store.execute("""CREATE TEMP TRIGGER reject_review_escalation
                BEFORE INSERT ON updates
@@ -494,7 +494,7 @@ class LifecycleTest(unittest.TestCase):
                         self.store,
                         native_thread_id="archon",
                         outcome_kind="decisions",
-                        options={"input": str(path)},
+                        options={"input": json.loads(path.read_text())},
                     )
 
                 result = observe_action_terminal(self.store, int(action.lastrowid))
@@ -1448,7 +1448,7 @@ class LifecycleTest(unittest.TestCase):
             store,
             native_thread_id="matrix-archon",
             outcome_kind="decisions",
-            options={"input": str(decision_file)},
+            options={"input": json.loads(decision_file.read_text())},
         )
         return observe_action_terminal(store, int(action.lastrowid))
 
@@ -1530,7 +1530,7 @@ class LifecycleTest(unittest.TestCase):
             self.store,
             native_thread_id="executor",
             outcome_kind="approved",
-            options={"input": str(approval)},
+            options={"input": json.loads(approval.read_text())},
         )
         observe_action_terminal(self.store, review)
         mandate = self.store.row(

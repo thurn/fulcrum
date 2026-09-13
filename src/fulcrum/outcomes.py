@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 
@@ -50,14 +49,10 @@ def _required_text(options: dict[str, Any], name: str) -> str:
     return value.strip()
 
 
-def _json_file(options: dict[str, Any], name: str = "input") -> dict[str, Any]:
-    path = Path(_required_text(options, name)).expanduser()
-    try:
-        result = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise OutcomeError(f"cannot read valid JSON from {path}: {error}") from error
+def _json_input(options: dict[str, Any], name: str = "input") -> dict[str, Any]:
+    result = options.get(name)
     if not isinstance(result, dict):
-        raise OutcomeError(f"{path} must contain a JSON object")
+        raise OutcomeError(f"--{name.replace('_', '-')} must contain a JSON object")
     return result
 
 
@@ -80,7 +75,7 @@ def validate_outcome(
     if outcome_kind in {"blocked", "exception"}:
         return {"reason": _required_text(options, "reason")}
     if outcome_kind == "approved":
-        payload = _json_file(options)
+        payload = _json_input(options)
         assessment = payload.get("assessment")
         if not isinstance(assessment, str) or not assessment.strip():
             raise OutcomeError("approval input requires a nonempty assessment")
@@ -112,7 +107,7 @@ def validate_outcome(
         "evidence_needed",
         "interview_answer",
     }:
-        payload = _json_file(options)
+        payload = _json_input(options)
         if outcome_kind == "decisions":
             decisions = payload.get("decisions")
             if not isinstance(decisions, list):
@@ -174,7 +169,7 @@ def validate_outcome(
                 raise OutcomeError("interview answer requires an evidence list")
         return payload
     if outcome_kind == "report":
-        payload = _json_file(options)
+        payload = _json_input(options)
         if (
             not isinstance(payload.get("summary"), str)
             or not payload["summary"].strip()
@@ -220,7 +215,7 @@ def validate_outcome(
                 )
         return payload
     if outcome_kind == "deferred":
-        payload = _json_file(options)
+        payload = _json_input(options)
         conditions = {
             "capacity",
             "dependency",

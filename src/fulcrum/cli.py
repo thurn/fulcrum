@@ -170,6 +170,29 @@ def _intake_payload(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _finish_options(args: argparse.Namespace) -> dict[str, Any]:
+    """Snapshot structured finish input before contacting the controller."""
+
+    options = {
+        key: value
+        for key, value in vars(args).items()
+        if key not in {"command", "outcome", "brain_root", "state_root"}
+        and value is not None
+    }
+    input_path = options.get("input")
+    if input_path is None:
+        return options
+    path = Path(str(input_path)).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read valid JSON from {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    options["input"] = payload
+    return options
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -261,12 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     },
                 )
         elif args.command == "finish":
-            options = {
-                key: value
-                for key, value in vars(args).items()
-                if key not in {"command", "outcome", "brain_root", "state_root"}
-                and value is not None
-            }
+            options = _finish_options(args)
             result = _request(
                 paths,
                 {"command": "finish", "outcome": args.outcome, "options": options},

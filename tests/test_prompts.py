@@ -266,6 +266,8 @@ class PromptsTest(unittest.TestCase):
         self.assertIn("independent compatible beads", text)
         self.assertIn("separate runs", text)
         self.assertIn("Do not serialize", text)
+        self.assertIn("Atomically rename", text)
+        self.assertIn("only after creation succeeds", " ".join(text.split()))
 
     def test_executor_creation_instructions_are_concise_and_action_specific(
         self,
@@ -333,7 +335,7 @@ class PromptsTest(unittest.TestCase):
                         validate_outcome(
                             kind,
                             outcome,
-                            {"input": str(path), "reason": "Waiting for capacity"},
+                            {"input": example, "reason": "Waiting for capacity"},
                         )
 
     def test_finish_reference_lists_every_accepted_outcome_as_a_complete_command(
