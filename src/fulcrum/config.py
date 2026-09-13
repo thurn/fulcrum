@@ -69,8 +69,16 @@ class RuntimePaths:
         return self.control_root / "controller.lock"
 
     @property
+    def authority_lock(self) -> Path:
+        return self.control_root / "authority.lock"
+
+    @property
     def reboot_record(self) -> Path:
         return self.control_root / "reboot.json"
+
+    @property
+    def operative_journal(self) -> Path:
+        return self.control_root / "operative.json"
 
     @property
     def logs_root(self) -> Path:

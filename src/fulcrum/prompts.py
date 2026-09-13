@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from importlib.resources import files
 from typing import Any
 
@@ -656,6 +657,14 @@ def action_message(
                         key.replace("_", " ").capitalize() + ": " + _text(evidence[key])
                     )
         return "\n".join(lines)
+    if kind == "operative":
+        return (
+            "Resolve only the human-stated emergency. The operative journal is the "
+            "authority fence; inspect the dossier before mutation, preserve unrelated "
+            "changes, and record exact evidence for every bypass. Finish only after all "
+            "implicated agents, effects, source ownership, validation, and delivery are "
+            "coherent."
+        )
     if kind == "weaver":
         return "Complete the requested authoring work. " + _facts(payload)
     if assignment is None:
@@ -765,6 +774,53 @@ def compaction_reminder(task: dict[str, Any], action: dict[str, Any]) -> str:
     )
     recovery = " If exact scope or action facts are missing, run `fulcrum context`."
     return f"You are {task['role']}; current action: {action['kind']}{target}. {obligation} {boundary}{recovery}"
+
+
+def operative_compaction_reminder(journal: Mapping[str, Any]) -> str:
+    """Restore emergency authority without asserting an ordinary role boundary."""
+
+    return " ".join(
+        [
+            "You are the bound Operative for takeover "
+            f"{journal.get('takeover_id', 'unavailable')}; current action: operative; "
+            f"state: {journal.get('state', 'unavailable')}.",
+            f"Exact emergency scope: {journal.get('scope', 'unavailable')}.",
+            "Within that scope you hold emergency Fulcrum authority; human constraints "
+            "and platform safety remain authoritative, and ordinary roles remain fenced.",
+            "Continue evidence-preserving reconciliation, retrieve the bounded dossier "
+            "when facts may have changed, and retain exact intent/sent/result evidence "
+            "for external effects.",
+            "Successful closeout remains two phase: submit the complete closeout evidence "
+            "contract, then remain bound until the Operative turn and helpers are terminal "
+            "and the controller revalidates and closes the journal.",
+            f"Next durable step: {journal.get('next_step', 'retrieve fulcrum operative dossier')}.",
+            "If exact current-action facts are missing, run `fulcrum context`.",
+        ]
+    )
+
+
+def operative_instructions() -> str:
+    """Private healthy-path instructions; public skill activation comes later."""
+
+    return "\n\n".join(
+        [
+            "You are Operative. Within the exact human-stated Fulcrum emergency you "
+            "outrank ordinary Fulcrum roles; explicit human constraints and platform "
+            "safety remain authoritative.",
+            "Begin with evidence-preserving discovery. Retrieve `fulcrum operative "
+            "dossier`, inspect service and store health, Git/worktrees, active native "
+            "turns/helpers, assignments, candidates, and unresolved external effects. "
+            "Do not discard unrelated human changes or guess that missing state is healthy.",
+            "The controller fences ordinary authority. Late outcomes are evidence only. "
+            "Record exact targets and observed before/after state for any emergency bypass.",
+            "Successful closeout is two phase: write a complete evidence file, then run "
+            "`fulcrum operative finish --evidence /absolute/evidence.md`. The controller "
+            "closes and restores dispatch only after this native turn and all helpers are "
+            "terminal and current readiness passes.",
+            "If exact current-action facts are missing after compaction, run `fulcrum "
+            "context`; otherwise continue from retained conversation context.",
+        ]
+    )
 
 
 def weaver_instructions(*, plan_mode: bool, project: str) -> str:

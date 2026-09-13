@@ -407,7 +407,11 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
     check("controller_socket", paths.socket.exists(), str(paths.socket))
     if paths.database.is_file():
         try:
-            with Store(paths.database, readonly=True) as store:
+            with Store(
+                paths.database,
+                readonly=True,
+                operative_journal=paths.operative_journal,
+            ) as store:
                 integrity = store.row("PRAGMA integrity_check")
                 foreign_keys = store.row("PRAGMA foreign_keys")
                 policies = store.rows("SELECT * FROM policies WHERE active = 1")

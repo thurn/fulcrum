@@ -28,10 +28,23 @@ from fulcrum.install import (
     verify_editable_source,
 )
 from fulcrum.ipc import request_sync
+from fulcrum.operative import authority_gate, journal_is_unfinished, read_journal
+from fulcrum.store import StoreError
 
 
 class SetupError(RuntimeError):
     pass
+
+
+def require_setup_unfenced(paths: RuntimePaths) -> None:
+    """Fence setup before configuration, filesystem, or service mutation."""
+
+    try:
+        journal = read_journal(paths.operative_journal)
+    except StoreError as error:
+        raise SetupError("operative takeover active") from error
+    if journal_is_unfinished(journal):
+        raise SetupError("operative takeover active")
 
 
 def _prompt(label: str, default: str | None = None) -> str:
@@ -254,6 +267,7 @@ def _wait_for_archon_readiness(
 def run_setup(
     paths: RuntimePaths, *, input_path: Path | None, non_interactive: bool
 ) -> dict[str, Any]:
+    require_setup_unfenced(paths)
     supplied = _load_input(input_path)
     config = collect_config(paths, supplied, non_interactive=non_interactive)
     verify_editable_source(Path(config.source_root))
@@ -268,31 +282,38 @@ def run_setup(
                 f"setup incomplete; required dependency unavailable: {command}"
             )
     verify_runtime_ownership_or_availability(config.app_server_endpoint)
-    save_installation(paths.config_file, config)
-    _prepare_brain(config)
-    links = install_links(config)
-    _, control_plane_updated = install_control_plane(config, paths)
-    services, updated_services = install_services(config, paths)
-    if control_plane_updated:
-        updated_services = updated_services | {CONTROLLER_LABEL}
-    start_services(
-        services,
-        updated=updated_services,
-        app_server_endpoint=config.app_server_endpoint,
-    )
-    _wait_ready(config, paths)
-    initialized = request_sync(
-        paths.socket, {"command": "setup_initialize"}, timeout=240
-    )
-    data = initialized.get("data", {})
-    ready = bool(isinstance(data, dict) and data.get("ready"))
-    if not ready:
-        completed = _wait_for_archon_readiness(
-            paths, timeout=float(config.turn_check_after_seconds)
-        )
-        if completed is not None:
-            data = completed
-            ready = True
+    try:
+        with authority_gate(paths.authority_lock, blocking=True):
+            # The first check is a fast path. This check is authoritative because
+            # acquisition must hold the same gate while creating its journal.
+            require_setup_unfenced(paths)
+            save_installation(paths.config_file, config)
+            _prepare_brain(config)
+            links = install_links(config)
+            _, control_plane_updated = install_control_plane(config, paths)
+            services, updated_services = install_services(config, paths)
+            if control_plane_updated:
+                updated_services = updated_services | {CONTROLLER_LABEL}
+            start_services(
+                services,
+                updated=updated_services,
+                app_server_endpoint=config.app_server_endpoint,
+            )
+            _wait_ready(config, paths)
+            initialized = request_sync(
+                paths.socket, {"command": "setup_initialize"}, timeout=240
+            )
+            data = initialized.get("data", {})
+            ready = bool(isinstance(data, dict) and data.get("ready"))
+            if not ready:
+                completed = _wait_for_archon_readiness(
+                    paths, timeout=float(config.turn_check_after_seconds)
+                )
+                if completed is not None:
+                    data = completed
+                    ready = True
+    except StoreError as error:
+        raise SetupError("operative takeover active") from error
     return {
         "ok": ready,
         "ready": ready,

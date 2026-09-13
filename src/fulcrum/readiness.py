@@ -4,16 +4,33 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from fulcrum.store import Store
 from fulcrum.kernel import invariant_violations
+from fulcrum.operative import journal_is_unfinished, read_journal
+from fulcrum.store import Store, StoreError
 
 
-def state_readiness(store: Store) -> tuple[bool, list[str]]:
+def state_readiness(
+    store: Store,
+    *,
+    include_operative_fence: bool = True,
+    operative_journal: Path | None = None,
+) -> tuple[bool, list[str]]:
     """Return whether durable controller state can safely enable dispatch."""
 
     reasons: list[str] = []
+    if include_operative_fence:
+        journal_path = operative_journal or store.operative_journal_path
+        journal_fenced = False
+        if journal_path is not None:
+            try:
+                journal_fenced = journal_is_unfinished(read_journal(journal_path))
+            except StoreError:
+                journal_fenced = True
+        if journal_fenced or store.unfinished_operative_takeover() is not None:
+            reasons.append("operative takeover active")
     global_limit = store.row("SELECT value FROM meta WHERE key = 'global_limit'")
     if global_limit is None or not _positive_integer(global_limit["value"]):
         reasons.append("global capacity is missing")

@@ -19,6 +19,7 @@ class StoreError(RuntimeError):
 
 
 ROLE_CODES = {
+    "operative": ("OPR", "🗡️"),
     "weaver": ("WVR", "🧵"),
     "executor": ("EXE", "⚒️"),
     "overseer": ("OVR", "🔎"),
@@ -69,12 +70,12 @@ CREATE TABLE IF NOT EXISTS projects (
   enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)), condition TEXT
 );
 CREATE TABLE IF NOT EXISTS role_counters (
-  role TEXT PRIMARY KEY CHECK (role IN ('weaver','executor','overseer','sage','inquisitor')),
+  role TEXT PRIMARY KEY CHECK (role IN ('operative','weaver','executor','overseer','sage','inquisitor')),
   next_number INTEGER NOT NULL CHECK (next_number >= 1)
 );
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL UNIQUE,
-  role TEXT NOT NULL CHECK (role IN ('archon','weaver','executor','overseer','sage','inquisitor')),
+  role TEXT NOT NULL CHECK (role IN ('archon','operative','weaver','executor','overseer','sage','inquisitor')),
   role_number INTEGER, title TEXT NOT NULL, description TEXT NOT NULL,
   project_id TEXT REFERENCES projects(project_id), model TEXT NOT NULL,
   reasoning_effort TEXT NOT NULL, pair_id INTEGER,
@@ -184,6 +185,37 @@ CREATE TABLE IF NOT EXISTS actions (
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_thread ON actions(task_id) WHERE state NOT IN ('processed','canceled');
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_assignment ON actions(assignment_id)
   WHERE assignment_id IS NOT NULL AND state IN ('pending','starting','active','terminal','uncertain');
+CREATE TABLE IF NOT EXISTS operative_takeovers (
+  takeover_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL CHECK (state IN ('acquiring','active','closing','closed','aborted')),
+  task_id INTEGER REFERENCES tasks(id), action_id INTEGER REFERENCES actions(id),
+  native_thread_id TEXT NOT NULL, superseded_thread_ids TEXT NOT NULL DEFAULT '[]',
+  scope TEXT NOT NULL, prior_dispatch_enabled INTEGER NOT NULL CHECK (prior_dispatch_enabled IN (0, 1)),
+  completed_effects TEXT NOT NULL DEFAULT '[]', next_step TEXT NOT NULL,
+  caller_verification TEXT NOT NULL, operative_identity TEXT,
+  operative_action TEXT, evidence_path TEXT, result_json TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, activated_at TEXT,
+  closing_at TEXT, closed_at TEXT, aborted_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_operative_takeover
+  ON operative_takeovers((1)) WHERE state IN ('acquiring','active','closing','aborted');
+CREATE TABLE IF NOT EXISTS operative_evidence (
+  id INTEGER PRIMARY KEY,
+  takeover_id TEXT NOT NULL REFERENCES operative_takeovers(takeover_id),
+  evidence_key TEXT NOT NULL, kind TEXT NOT NULL,
+  coverage TEXT NOT NULL CHECK (coverage IN ('observed','unavailable','not_applicable')),
+  target_type TEXT, target_id TEXT, detail_json TEXT NOT NULL DEFAULT '{}',
+  artifact_path TEXT, created_at TEXT NOT NULL,
+  UNIQUE(takeover_id, evidence_key)
+);
+CREATE TABLE IF NOT EXISTS operative_operations (
+  id INTEGER PRIMARY KEY,
+  takeover_id TEXT NOT NULL REFERENCES operative_takeovers(takeover_id),
+  kind TEXT NOT NULL, target TEXT NOT NULL, before_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('intent','sent','complete','failed','uncertain')),
+  result_json TEXT, after_json TEXT, evidence_id INTEGER REFERENCES operative_evidence(id),
+  correlation_id TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS action_turn_usage (
   native_thread_id TEXT NOT NULL, native_turn_id TEXT NOT NULL,
   action_id INTEGER REFERENCES actions(id),
@@ -601,6 +633,20 @@ BEGIN
   INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
   VALUES ('batch', NEW.id, 'state', OLD.state, NEW.state, 'controller transition', NEW.updated_at);
 END;
+CREATE TRIGGER IF NOT EXISTS audit_operative_takeover_state
+AFTER UPDATE OF state ON operative_takeovers WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('operative_takeover', NEW.takeover_id, 'state', OLD.state, NEW.state,
+          NEW.next_step, NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_operative_takeover_created
+AFTER INSERT ON operative_takeovers
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('operative_takeover', NEW.takeover_id, 'state', NULL, NEW.state,
+          NEW.next_step, NEW.created_at);
+END;
 CREATE TRIGGER IF NOT EXISTS audit_run_state
 AFTER UPDATE OF state ON runs WHEN OLD.state IS NOT NEW.state
 BEGIN
@@ -645,9 +691,11 @@ class Store:
         *,
         readonly: bool = False,
         event_log: Path | None = None,
+        operative_journal: Path | None = None,
     ) -> None:
         self.path = path
         self.event_log = event_log
+        self.operative_journal_path = operative_journal
         self.connection: sqlite3.Connection
         if readonly:
             self.connection = sqlite3.connect(
@@ -757,6 +805,18 @@ class Store:
 
     def _migrate_existing_database(self) -> None:
         """Add correctness metadata to an existing database without a version gate."""
+
+        self._migrate_operative_role_constraints()
+
+        takeover_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(operative_takeovers)")
+        }
+        for column in ("operative_identity", "operative_action"):
+            if column not in takeover_columns:
+                self.connection.execute(
+                    f"ALTER TABLE operative_takeovers ADD COLUMN {column} TEXT"
+                )
 
         helper_columns = {
             str(row[1])
@@ -942,6 +1002,7 @@ class Store:
                  )""",
             (timestamp,),
         )
+
         self.connection.execute(
             """UPDATE external_operations
                SET state = 'failed',
@@ -1017,6 +1078,76 @@ class Store:
                    WHERE stage NOT IN ('queued','completed','canceled')"""
             )
 
+    def _migrate_operative_role_constraints(self) -> None:
+        """Expand retained role CHECK constraints for the independent Operative."""
+
+        task_table = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'"
+        ).fetchone()
+        counter_table = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'role_counters'"
+        ).fetchone()
+        if (
+            task_table is None
+            or counter_table is None
+            or "'operative'" in str(task_table[0])
+            and "'operative'" in str(counter_table[0])
+        ):
+            return
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        self.connection.execute("PRAGMA legacy_alter_table = ON")
+        try:
+            with self.transaction() as connection:
+                connection.execute("ALTER TABLE tasks RENAME TO obsolete_tasks")
+                connection.execute("""CREATE TABLE tasks (
+                      id INTEGER PRIMARY KEY, native_thread_id TEXT NOT NULL UNIQUE,
+                      role TEXT NOT NULL CHECK (role IN ('archon','operative','weaver','executor','overseer','sage','inquisitor')),
+                      role_number INTEGER, title TEXT NOT NULL, description TEXT NOT NULL,
+                      project_id TEXT REFERENCES projects(project_id), model TEXT NOT NULL,
+                      reasoning_effort TEXT NOT NULL, pair_id INTEGER,
+                      state TEXT NOT NULL DEFAULT 'idle' CHECK (state IN ('provisioning','idle','active','uncertain','retired','archived')),
+                      runtime_status TEXT, last_turn_terminal INTEGER NOT NULL DEFAULT 1 CHECK (last_turn_terminal IN (0, 1)),
+                      helpers_terminal INTEGER NOT NULL DEFAULT 1 CHECK (helpers_terminal IN (0, 1)),
+                      archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+                      archive_eligible_at TEXT, archive_idle_turn_id TEXT,
+                      created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                      UNIQUE(role, role_number),
+                      CHECK ((role = 'archon' AND role_number IS NULL) OR (role != 'archon' AND role_number IS NOT NULL))
+                    )""")
+                connection.execute("""INSERT INTO tasks(
+                         id, native_thread_id, role, role_number, title, description,
+                         project_id, model, reasoning_effort, pair_id, state,
+                         runtime_status, last_turn_terminal, helpers_terminal, archived,
+                         archive_eligible_at, archive_idle_turn_id, created_at, updated_at
+                       ) SELECT id, native_thread_id, role, role_number, title, description,
+                         project_id, model, reasoning_effort, pair_id, state,
+                         runtime_status, last_turn_terminal, helpers_terminal, archived,
+                         archive_eligible_at, archive_idle_turn_id, created_at, updated_at
+                       FROM obsolete_tasks""")
+                connection.execute("DROP TABLE obsolete_tasks")
+                connection.execute(
+                    "CREATE UNIQUE INDEX one_current_archon ON tasks(role) WHERE role = 'archon' AND state NOT IN ('retired','archived')"
+                )
+                connection.execute(
+                    """CREATE UNIQUE INDEX one_current_role_per_pair ON tasks(pair_id, role)
+                       WHERE pair_id IS NOT NULL AND role IN ('executor','overseer')
+                         AND state NOT IN ('retired','archived')"""
+                )
+                connection.execute(
+                    "ALTER TABLE role_counters RENAME TO obsolete_role_counters"
+                )
+                connection.execute("""CREATE TABLE role_counters (
+                         role TEXT PRIMARY KEY CHECK (role IN ('operative','weaver','executor','overseer','sage','inquisitor')),
+                         next_number INTEGER NOT NULL CHECK (next_number >= 1)
+                       )""")
+                connection.execute(
+                    "INSERT INTO role_counters SELECT * FROM obsolete_role_counters"
+                )
+                connection.execute("DROP TABLE obsolete_role_counters")
+        finally:
+            self.connection.execute("PRAGMA legacy_alter_table = OFF")
+            self.connection.execute("PRAGMA foreign_keys = ON")
+
     def close(self) -> None:
         self.connection.close()
 
@@ -1046,6 +1177,12 @@ class Store:
     def row(self, sql: str, parameters: Sequence[Any] = ()) -> dict[str, Any] | None:
         found = self.connection.execute(sql, parameters).fetchone()
         return dict(found) if found is not None else None
+
+    @staticmethod
+    def redacted(value: Any) -> Any:
+        """Apply the store's bounded redaction contract to a returned artifact."""
+
+        return _redact(value)
 
     def event(
         self,
@@ -1289,6 +1426,357 @@ class Store:
         if row is None:
             raise StoreError("thread has no current Fulcrum action")
         return row
+
+    def unfinished_operative_takeover(self) -> dict[str, Any] | None:
+        return self.row("""SELECT * FROM operative_takeovers
+               WHERE state IN ('acquiring','active','closing','aborted')
+               ORDER BY created_at LIMIT 1""")
+
+    def operative_takeover(self, takeover_id: str) -> dict[str, Any] | None:
+        return self.row(
+            "SELECT * FROM operative_takeovers WHERE takeover_id = ?",
+            (takeover_id,),
+        )
+
+    def reconstruct_operative_binding(
+        self, journal: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Rebuild the bound Operative task/action from journaled stable identity."""
+
+        identity = journal.get("operative_identity")
+        action_identity = journal.get("operative_action")
+        if not isinstance(identity, dict) or not isinstance(action_identity, dict):
+            raise StoreError(
+                "unfinished operative journal lacks reconstructable authority identity"
+            )
+        role_number = identity.get("role_number")
+        title = identity.get("title")
+        model = identity.get("model")
+        effort = identity.get("reasoning_effort")
+        if (
+            not isinstance(role_number, int)
+            or role_number < 1
+            or not isinstance(title, str)
+            or not title
+            or not isinstance(model, str)
+            or not model
+            or not isinstance(effort, str)
+            or not effort
+        ):
+            raise StoreError(
+                "unfinished operative journal authority identity is invalid"
+            )
+        task = self.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?",
+            (journal["native_thread_id"],),
+        )
+        if task is not None and task["role"] != "operative":
+            raise StoreError("operative journal thread is bound to different authority")
+        if task is None:
+            task = self.register_task(
+                native_thread_id=str(journal["native_thread_id"]),
+                role="operative",
+                description=str(journal["scope"]),
+                model=model,
+                reasoning_effort=effort,
+                state="active",
+                role_number=role_number,
+                title=title,
+                now=str(journal["created_at"]),
+            )
+            self.execute(
+                "UPDATE role_counters SET next_number = MAX(next_number, ?) WHERE role = 'operative'",
+                (role_number + 1,),
+            )
+        action = self.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'operative'
+               AND (state IN ('pending','starting','active','terminal','uncertain')
+                    OR (? = 'closing' AND state = 'processed'))
+               ORDER BY id DESC LIMIT 1""",
+            (task["id"], journal["state"]),
+        )
+        if action is None:
+            payload = action_identity.get("payload")
+            native_turn_id = action_identity.get("native_turn_id")
+            if not isinstance(payload, dict) or (
+                native_turn_id is not None and not isinstance(native_turn_id, str)
+            ):
+                raise StoreError(
+                    "unfinished operative journal action identity is invalid"
+                )
+            timestamp = str(journal["updated_at"])
+            cursor = self.execute(
+                """INSERT INTO actions(
+                     task_id, kind, payload, state, native_turn_id, outcome_kind,
+                     outcome_payload, created_at, updated_at
+                   ) VALUES (?, 'operative', ?, 'active', ?, ?, ?, ?, ?)""",
+                (
+                    task["id"],
+                    json.dumps(_redact(payload), sort_keys=True),
+                    native_turn_id,
+                    "complete" if journal["state"] == "closing" else None,
+                    (
+                        json.dumps({"evidence": journal.get("evidence_path")})
+                        if journal["state"] == "closing"
+                        else None
+                    ),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            action = self.row("SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,))
+            assert action is not None
+            if isinstance(native_turn_id, str):
+                self.bind_action_turn(
+                    int(action["id"]), str(task["native_thread_id"]), native_turn_id
+                )
+        return task, action
+
+    def mirror_operative_journal(self, journal: dict[str, Any]) -> dict[str, Any]:
+        """Upsert the queryable takeover mirror from the authoritative journal."""
+
+        task = self.row(
+            "SELECT id FROM tasks WHERE native_thread_id = ? AND role = 'operative'",
+            (journal["native_thread_id"],),
+        )
+        action = (
+            self.row(
+                """SELECT id FROM actions WHERE task_id = ? AND kind = 'operative'
+                   ORDER BY id DESC LIMIT 1""",
+                (task["id"],),
+            )
+            if task is not None
+            else None
+        )
+        timestamp = str(journal["updated_at"])
+        fields = {
+            "activated_at": journal.get("activated_at"),
+            "closing_at": journal.get("closing_at"),
+            "closed_at": journal.get("closed_at"),
+            "aborted_at": journal.get("aborted_at"),
+        }
+        self.execute(
+            """INSERT INTO operative_takeovers(
+                 takeover_id, state, task_id, action_id, native_thread_id,
+                 superseded_thread_ids, scope, prior_dispatch_enabled,
+                 completed_effects, next_step, caller_verification,
+                 operative_identity, operative_action, evidence_path, result_json,
+                 created_at, updated_at, activated_at, closing_at, closed_at, aborted_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(takeover_id) DO UPDATE SET
+                 state = excluded.state,
+                 task_id = COALESCE(excluded.task_id, operative_takeovers.task_id),
+                 action_id = COALESCE(excluded.action_id, operative_takeovers.action_id),
+                 native_thread_id = excluded.native_thread_id,
+                 superseded_thread_ids = excluded.superseded_thread_ids,
+                 scope = excluded.scope,
+                 prior_dispatch_enabled = excluded.prior_dispatch_enabled,
+                 completed_effects = excluded.completed_effects,
+                 next_step = excluded.next_step,
+                 caller_verification = excluded.caller_verification,
+                 operative_identity = COALESCE(excluded.operative_identity, operative_takeovers.operative_identity),
+                 operative_action = COALESCE(excluded.operative_action, operative_takeovers.operative_action),
+                 evidence_path = COALESCE(excluded.evidence_path, operative_takeovers.evidence_path),
+                 result_json = COALESCE(excluded.result_json, operative_takeovers.result_json),
+                 updated_at = excluded.updated_at,
+                 activated_at = COALESCE(excluded.activated_at, operative_takeovers.activated_at),
+                 closing_at = COALESCE(excluded.closing_at, operative_takeovers.closing_at),
+                 closed_at = COALESCE(excluded.closed_at, operative_takeovers.closed_at),
+                 aborted_at = COALESCE(excluded.aborted_at, operative_takeovers.aborted_at)""",
+            (
+                journal["takeover_id"],
+                journal["state"],
+                task["id"] if task else None,
+                action["id"] if action else None,
+                journal["native_thread_id"],
+                json.dumps(journal.get("superseded_thread_ids", []), sort_keys=True),
+                journal["scope"],
+                int(bool(journal["prior_dispatch_enabled"])),
+                json.dumps(journal.get("completed_effects", []), sort_keys=True),
+                journal["next_step"],
+                json.dumps(
+                    _redact(journal.get("caller_verification", {})), sort_keys=True
+                ),
+                (
+                    json.dumps(_redact(journal["operative_identity"]), sort_keys=True)
+                    if isinstance(journal.get("operative_identity"), dict)
+                    else None
+                ),
+                (
+                    json.dumps(_redact(journal["operative_action"]), sort_keys=True)
+                    if isinstance(journal.get("operative_action"), dict)
+                    else None
+                ),
+                journal.get("evidence_path"),
+                (
+                    json.dumps(_redact(journal["result"]), sort_keys=True)
+                    if isinstance(journal.get("result"), dict)
+                    else None
+                ),
+                journal["created_at"],
+                timestamp,
+                fields["activated_at"],
+                fields["closing_at"],
+                fields["closed_at"],
+                fields["aborted_at"],
+            ),
+        )
+        retained = self.operative_takeover(str(journal["takeover_id"]))
+        assert retained is not None
+        return retained
+
+    def operative_journal_from_mirror(self, takeover: dict[str, Any]) -> dict[str, Any]:
+        """Reconstruct a missing authority fence without inferring completion."""
+
+        try:
+            superseded = json.loads(takeover["superseded_thread_ids"])
+            effects = json.loads(takeover["completed_effects"])
+            caller = json.loads(takeover["caller_verification"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise StoreError("unfinished operative mirror is unreadable") from error
+        journal = {
+            "takeover_id": takeover["takeover_id"],
+            "state": takeover["state"],
+            "task_id": takeover.get("task_id"),
+            "action_id": takeover.get("action_id"),
+            "native_thread_id": takeover["native_thread_id"],
+            "superseded_thread_ids": superseded,
+            "scope": takeover["scope"],
+            "prior_dispatch_enabled": bool(takeover["prior_dispatch_enabled"]),
+            "completed_effects": effects,
+            "next_step": takeover["next_step"],
+            "caller_verification": caller,
+            "created_at": takeover["created_at"],
+            "updated_at": takeover["updated_at"],
+        }
+        for key in (
+            "evidence_path",
+            "activated_at",
+            "closing_at",
+            "closed_at",
+            "aborted_at",
+        ):
+            if takeover.get(key) is not None:
+                journal[key] = takeover[key]
+        if takeover.get("result_json"):
+            journal["result"] = json.loads(takeover["result_json"])
+        if takeover.get("operative_identity"):
+            journal["operative_identity"] = json.loads(takeover["operative_identity"])
+        if takeover.get("operative_action"):
+            journal["operative_action"] = json.loads(takeover["operative_action"])
+        return journal
+
+    def record_operative_evidence(
+        self,
+        takeover_id: str,
+        evidence_key: str,
+        kind: str,
+        *,
+        coverage: str,
+        target_type: str | None = None,
+        target_id: str | int | None = None,
+        detail: dict[str, Any] | None = None,
+        artifact_path: str | None = None,
+    ) -> dict[str, Any]:
+        if coverage not in {"observed", "unavailable", "not_applicable"}:
+            raise StoreError(f"invalid operative evidence coverage {coverage!r}")
+        self.execute(
+            """INSERT INTO operative_evidence(
+                 takeover_id, evidence_key, kind, coverage, target_type, target_id,
+                 detail_json, artifact_path, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(takeover_id, evidence_key) DO UPDATE SET
+                 kind = excluded.kind, coverage = excluded.coverage,
+                 target_type = excluded.target_type, target_id = excluded.target_id,
+                 detail_json = excluded.detail_json,
+                 artifact_path = COALESCE(excluded.artifact_path, operative_evidence.artifact_path)""",
+            (
+                takeover_id,
+                evidence_key,
+                kind,
+                coverage,
+                target_type,
+                None if target_id is None else str(target_id),
+                json.dumps(_redact(detail or {}), sort_keys=True),
+                artifact_path,
+                utc_now(),
+            ),
+        )
+        retained = self.row(
+            """SELECT * FROM operative_evidence
+               WHERE takeover_id = ? AND evidence_key = ?""",
+            (takeover_id, evidence_key),
+        )
+        assert retained is not None
+        return retained
+
+    def create_operative_operation(
+        self,
+        takeover_id: str,
+        kind: str,
+        target: str,
+        before: dict[str, Any],
+        *,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Retain an exact bypass intent; exact retries reuse the same row."""
+
+        timestamp = utc_now()
+        self.execute(
+            """INSERT INTO operative_operations(
+                 takeover_id, kind, target, before_json, state, correlation_id,
+                 created_at, updated_at
+               ) VALUES (?, ?, ?, ?, 'intent', ?, ?, ?)
+               ON CONFLICT(correlation_id) DO NOTHING""",
+            (
+                takeover_id,
+                kind,
+                target,
+                json.dumps(_redact(before), sort_keys=True),
+                correlation_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        retained = self.row(
+            "SELECT * FROM operative_operations WHERE correlation_id = ?",
+            (correlation_id,),
+        )
+        assert retained is not None
+        return retained
+
+    def finish_operative_operation(
+        self,
+        operation_id: int,
+        *,
+        state: str,
+        result: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+        evidence_id: int | None = None,
+    ) -> None:
+        if state not in {"complete", "failed", "uncertain"}:
+            raise StoreError(f"invalid operative operation state {state!r}")
+        self.execute(
+            """UPDATE operative_operations SET state = ?, result_json = ?,
+               after_json = ?, evidence_id = ?, updated_at = ? WHERE id = ?""",
+            (
+                state,
+                json.dumps(_redact(result or {}), sort_keys=True),
+                json.dumps(_redact(after or {}), sort_keys=True),
+                evidence_id,
+                utc_now(),
+                operation_id,
+            ),
+        )
+
+    def mark_operative_operation_sent(self, operation_id: int) -> None:
+        cursor = self.execute(
+            """UPDATE operative_operations SET state = 'sent', updated_at = ?
+               WHERE id = ? AND state = 'intent'""",
+            (utc_now(), operation_id),
+        )
+        if cursor.rowcount != 1:
+            raise StoreError("operative operation is not an unsent intent")
 
     def bind_action_turn(
         self, action_id: int, native_thread_id: str, native_turn_id: str
@@ -3417,6 +3905,7 @@ class Store:
         )
 
     def status(self, *, event_limit: int = 20) -> dict[str, Any]:
+        takeover = self.unfinished_operative_takeover()
         reservations = self.rows("SELECT * FROM reservations")
         tasks = self.rows("SELECT * FROM tasks WHERE state != 'retired' ORDER BY id")
         for task in tasks:
@@ -3540,6 +4029,16 @@ class Store:
             ),
             "readiness_reasons": self.row(
                 "SELECT value FROM meta WHERE key = 'readiness_reasons'"
+            ),
+            "operative_takeover": takeover,
+            "operative_evidence": (
+                self.rows(
+                    """SELECT * FROM operative_evidence WHERE takeover_id = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (takeover["takeover_id"], event_limit),
+                )
+                if takeover is not None
+                else []
             ),
         }
 

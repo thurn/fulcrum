@@ -134,6 +134,18 @@ def accept_finish(
     """Bind a finish to the caller's current action; exact retries are idempotent."""
 
     action = store.current_action(native_thread_id)
+    takeover = store.unfinished_operative_takeover()
+    if takeover is not None and action["role"] != "operative":
+        store.record_operative_evidence(
+            str(takeover["takeover_id"]),
+            f"late-finish:{action['id']}:{outcome_kind}",
+            "late_outcome",
+            coverage="observed",
+            target_type="action",
+            target_id=action["id"],
+            detail={"outcome": outcome_kind, "options": options},
+        )
+        raise StoreError("operative takeover active")
     payload = validate_outcome(action["kind"], outcome_kind, options)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     if action["outcome_kind"] is not None:
@@ -189,6 +201,24 @@ def observe_action_terminal(
     action = store.row("SELECT * FROM actions WHERE id = ?", (action_id,))
     if action is None:
         raise StoreError(f"unknown action {action_id}")
+    takeover = store.unfinished_operative_takeover()
+    if takeover is not None:
+        owner = store.row("SELECT role FROM tasks WHERE id = ?", (action["task_id"],))
+        if owner is not None and owner["role"] != "operative":
+            store.record_operative_evidence(
+                str(takeover["takeover_id"]),
+                f"late-terminal:{action_id}:{runtime_state}",
+                "late_runtime_outcome",
+                coverage="observed",
+                target_type="action",
+                target_id=action_id,
+                detail={"runtime_state": runtime_state},
+            )
+            return {
+                "advanced": False,
+                "quarantined": True,
+                "condition": "operative takeover active",
+            }
     if action["state"] == "processed":
         return {"advanced": True, "reused": True}
     recoverable_runtime_failure = bool(
@@ -1719,9 +1749,16 @@ def _resolve_uncertain_operation(
 
 
 def apply_archon_decisions(
-    store: Store, payload: dict[str, Any], *, connection: Any | None = None
+    store: Store,
+    payload: dict[str, Any],
+    *,
+    connection: Any | None = None,
+    operative_authorized: bool = False,
 ) -> dict[str, Any]:
     """Apply exact approved runs and policies from a frozen Archon outcome."""
+
+    if store.unfinished_operative_takeover() is not None and not operative_authorized:
+        raise StoreError("operative takeover active")
 
     decisions = payload.get("decisions", [])
     created: list[int] = []

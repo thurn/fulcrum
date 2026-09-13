@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 import traceback
 import uuid
@@ -22,7 +23,12 @@ from watchfiles import awatch
 from fulcrum.beads import Beads
 from fulcrum.brain import BrainRepository
 
-from fulcrum.config import InstallationConfig, RuntimePaths, save_installation
+from fulcrum.config import (
+    InstallationConfig,
+    RuntimePaths,
+    safe_child,
+    save_installation,
+)
 from fulcrum.intake import (
     file_graph,
     file_task,
@@ -30,7 +36,10 @@ from fulcrum.intake import (
     task_from_payload,
 )
 from fulcrum.install import (
+    APP_SERVER_LABEL,
+    CONTROLLER_LABEL,
     controller_program_arguments,
+    inspect_service,
     install_control_plane,
     provision_worktree_environment,
 )
@@ -40,6 +49,13 @@ from fulcrum.lifecycle import (
     apply_archon_decisions,
     observe_action_terminal,
     schedule_run_archival,
+)
+from fulcrum.operative import (
+    authority_gate,
+    journal_is_unfinished,
+    read_journal,
+    transition_journal,
+    write_journal,
 )
 from fulcrum.kernel import (
     LeaseRequest,
@@ -51,6 +67,7 @@ from fulcrum.prompts import (
     MAX_ARCHON_MESSAGE_CHARS,
     action_message,
     archon_action_fits,
+    operative_instructions,
     role_instructions,
     weaver_instructions,
 )
@@ -93,6 +110,20 @@ RUNTIME_TELEMETRY_EVENTS: frozenset[str] = frozenset(
 MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
 ARCHON_SCOPE_SUMMARY_CHARS = 240
 ARCHON_BATCH_LIMIT = 20
+OPERATIVE_PASSIVE_COMMANDS: frozenset[str] = frozenset(
+    {
+        "status",
+        "usage",
+        "cost",
+        "context",
+        "archon",
+        "operative_status",
+        "operative_dossier",
+    }
+)
+OPERATIVE_CONTROL_COMMANDS: frozenset[str] = frozenset(
+    {"operative_register", "operative_finish", "operative_abort", "operative_recover"}
+)
 
 
 class DeliveryDisposition(StrEnum):
@@ -117,7 +148,14 @@ class Controller:
         self.config = config
         self.lock_handle: Any = None
         self.acquire_process_lock()
-        self.store = Store(paths.database, event_log=paths.logs_root / "workflow.jsonl")
+        self.store = Store(
+            paths.database,
+            event_log=paths.logs_root / "workflow.jsonl",
+            operative_journal=paths.operative_journal,
+        )
+        self.operative_journal: dict[str, Any] | None = None
+        self.operative_journal_error: str | None = None
+        self._reconcile_operative_authority()
         self.store.mark_open_usage_gap(
             "controller restarted before terminal usage confirmation"
         )
@@ -139,6 +177,114 @@ class Controller:
             "advancement",
             "source-watch",
         }
+
+    def _reconcile_operative_authority(self) -> None:
+        """Reconcile journal/store combinations protectively while holding the OS lock."""
+
+        try:
+            journal = read_journal(self.paths.operative_journal)
+        except StoreError as error:
+            self.operative_journal_error = str(error)
+            self.store.execute(
+                """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+                   ON CONFLICT(key) DO UPDATE SET value = '0'"""
+            )
+            self.store.event(
+                "operative_journal_unreadable",
+                str(error),
+                entity_type="operative_takeover",
+                entity_id="unknown",
+            )
+            return
+        mirror = self.store.unfinished_operative_takeover()
+        if journal is None and mirror is not None:
+            journal = self.store.operative_journal_from_mirror(mirror)
+            write_journal(self.paths.operative_journal, journal)
+            self.store.event(
+                "operative_journal_reconstructed",
+                "reconstructed missing journal from unfinished SQLite mirror",
+                entity_type="operative_takeover",
+                entity_id=mirror["takeover_id"],
+            )
+        elif (
+            journal is not None
+            and mirror is not None
+            and (journal["takeover_id"] != mirror["takeover_id"])
+        ):
+            self.operative_journal_error = "operative journal conflicts with a different unfinished SQLite takeover"
+            self.store.execute(
+                """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+                   ON CONFLICT(key) DO UPDATE SET value = '0'"""
+            )
+            return
+        if journal is not None:
+            self.store.mirror_operative_journal(journal)
+            if journal_is_unfinished(journal):
+                task = self.store.row(
+                    "SELECT * FROM tasks WHERE native_thread_id = ? AND role = 'operative'",
+                    (journal["native_thread_id"],),
+                )
+                action = (
+                    self.store.row(
+                        """SELECT * FROM actions WHERE task_id = ? AND kind = 'operative'
+                           AND (state IN ('pending','starting','active','terminal','uncertain')
+                                OR (? = 'closing' AND state = 'processed'))
+                           ORDER BY id DESC LIMIT 1""",
+                        (task["id"], journal["state"]),
+                    )
+                    if task is not None
+                    else None
+                )
+                if task is None or action is None:
+                    if (
+                        journal.get("state") == "acquiring"
+                        and journal.get("operative_identity") is None
+                    ):
+                        self.operative_journal = journal
+                        self.store.execute(
+                            """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+                               ON CONFLICT(key) DO UPDATE SET value = '0'"""
+                        )
+                        return
+                    try:
+                        task, action = self.store.reconstruct_operative_binding(journal)
+                    except StoreError as error:
+                        self.operative_journal_error = str(error)
+                        self.store.execute(
+                            """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+                               ON CONFLICT(key) DO UPDATE SET value = '0'"""
+                        )
+                        return
+                    effects = list(journal["completed_effects"])
+                    if "sqlite_authority_reconstructed" not in effects:
+                        effects.append("sqlite_authority_reconstructed")
+                    journal = dict(journal)
+                    journal.update(
+                        {
+                            "task_id": task["id"],
+                            "action_id": action["id"],
+                            "completed_effects": effects,
+                            "updated_at": utc_now(),
+                        }
+                    )
+                    write_journal(self.paths.operative_journal, journal)
+                    self.store.mirror_operative_journal(journal)
+                self.store.execute(
+                    """UPDATE tasks SET state = 'active', updated_at = ?
+                       WHERE id = ? AND state NOT IN ('retired','archived')""",
+                    (utc_now(), task["id"]),
+                )
+        self.operative_journal = journal
+        if journal_is_unfinished(journal):
+            self.store.execute(
+                """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+                   ON CONFLICT(key) DO UPDATE SET value = '0'"""
+            )
+
+    def _operative_fenced(self) -> bool:
+        return self.operative_journal_error is not None or journal_is_unfinished(
+            self.operative_journal
+        )
 
     def _initialize_configuration(self) -> None:
         timestamp = utc_now()
@@ -215,7 +361,17 @@ class Controller:
 
     async def start(self) -> None:
         self.acquire_process_lock()
-        self._initialize_configuration()
+        if self._operative_fenced():
+            self.store.execute(
+                """INSERT INTO meta(key, value) VALUES ('controller_state', 'operative_only')
+                   ON CONFLICT(key) DO UPDATE SET value = 'operative_only'"""
+            )
+            self.store.event(
+                "controller_starting",
+                "controller is starting in operative-only mode",
+            )
+        else:
+            self._initialize_configuration()
         self.paths.socket.unlink(missing_ok=True)
         self.server = await asyncio.start_unix_server(
             self._handle_client, path=self.paths.socket, limit=MAX_MESSAGE_BYTES
@@ -231,13 +387,15 @@ class Controller:
                 entity_id="tollgate",
             )
         await self._connect_runtime()
-        if self.runtime.ready:
+        if self.runtime.ready and not self._operative_fenced():
             await self._verify_projects()
             await self._repair_task_project_bindings()
         await self.reconcile()
-        self.starts_enabled = self.runtime.ready
+        self.starts_enabled = self.runtime.ready and not self._operative_fenced()
         self.store.execute(
-            "INSERT INTO meta(key, value) VALUES ('controller_state', 'ready') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            """INSERT INTO meta(key, value) VALUES ('controller_state', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            ("operative_only" if self._operative_fenced() else "ready",),
         )
         workers = {
             "events": self._event_loop,
@@ -489,6 +647,8 @@ class Controller:
                     if method == "turn/completed":
                         self.store.finalize_native_turn_usage(thread_id, turn_id)
             return False
+        if self._operative_fenced():
+            return await self._handle_takeover_runtime_event(method, params, task)
         if task["archived"] and method not in {"thread/archived", "thread/unarchived"}:
             return False
         timestamp = utc_now()
@@ -619,6 +779,77 @@ class Controller:
             return False
         return True
 
+    async def _handle_takeover_runtime_event(
+        self, method: str, params: dict[str, Any], task: dict[str, Any]
+    ) -> bool:
+        """Retain runtime truth during takeover without applying ordinary authority."""
+
+        journal: dict[str, Any] | None = self.operative_journal
+        if journal is None:
+            return False
+        turn = params.get("turn")
+        turn_id = turn.get("id") if isinstance(turn, dict) else None
+        evidence_key = ":".join(
+            ["runtime", method, str(task["native_thread_id"]), str(turn_id or "-")]
+        )
+        self.store.record_operative_evidence(
+            str(journal["takeover_id"]),
+            evidence_key,
+            "runtime_event",
+            coverage="observed",
+            target_type="task",
+            target_id=task["id"],
+            detail={
+                "method": method,
+                "native_thread_id": task["native_thread_id"],
+                "native_turn_id": turn_id,
+                "status": (
+                    turn.get("status")
+                    if isinstance(turn, dict)
+                    else params.get("status")
+                ),
+                "quarantined": task["role"] != "operative",
+            },
+        )
+        if method == "turn/completed" and isinstance(turn_id, str):
+            self.store.finalize_native_turn_usage(
+                str(task["native_thread_id"]), turn_id
+            )
+        try:
+            facts = await self._observe_task(task)
+        except Exception as error:
+            self.store.record_operative_evidence(
+                str(journal["takeover_id"]),
+                evidence_key + ":refresh",
+                "runtime_observation",
+                coverage="unavailable",
+                target_type="task",
+                target_id=task["id"],
+                detail={"error": str(error)},
+            )
+            return False
+        if task["role"] != "operative":
+            return False
+        action = self.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'operative'
+               AND state IN ('pending','starting','active','terminal','uncertain')
+               ORDER BY id DESC LIMIT 1""",
+            (task["id"],),
+        )
+        if action is not None and action["native_turn_id"] is None:
+            action = self._adopt_unbound_operative_turn(
+                int(task["id"]), facts, event_turn_id=turn_id
+            )
+        if (
+            action is not None
+            and facts["last_turn_terminal"]
+            and action.get("native_turn_id") == facts.get("last_turn_id")
+        ):
+            self._finalize_action_usage(int(action["id"]))
+            if journal.get("state") == "closing":
+                await self._maybe_finalize_operative_closeout(task, facts)
+        return False
+
     def _finalize_action_usage(self, action_id: int) -> dict[str, Any]:
         """Finalize one action snapshot and emit its bounded summary once."""
 
@@ -718,11 +949,36 @@ class Controller:
         *,
         event_turn_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Bind the turn that was already running when a Weaver registered.
+        """Bind the turn that was already running when a Weaver registered."""
 
-        Human-created Weaver actions are registered from inside their native turn,
+        return self._adopt_unbound_human_turn(
+            task_id, facts, kind="weaver", event_turn_id=event_turn_id
+        )
+
+    def _adopt_unbound_operative_turn(
+        self,
+        task_id: int,
+        facts: dict[str, Any],
+        *,
+        event_turn_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self._adopt_unbound_human_turn(
+            task_id, facts, kind="operative", event_turn_id=event_turn_id
+        )
+
+    def _adopt_unbound_human_turn(
+        self,
+        task_id: int,
+        facts: dict[str, Any],
+        *,
+        kind: str,
+        event_turn_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Bind the current native turn for a human-created managed action.
+
+        Human-created actions are registered from inside their native turn,
         so the controller can miss turn/started.  Adoption is limited to the one
-        active, unbound Weaver action and an authoritative current/just-completed
+        active, unbound action and an authoritative current/just-completed
         last turn.  The registration marker covers restart before finish; an
         accepted outcome covers actions created before the marker existed.
         """
@@ -743,9 +999,9 @@ class Controller:
         if not current_shape:
             return None
         action = self.store.row(
-            """SELECT * FROM actions WHERE task_id = ? AND kind = 'weaver'
+            """SELECT * FROM actions WHERE task_id = ? AND kind = ?
                AND state = 'active' AND native_turn_id IS NULL""",
-            (task_id,),
+            (task_id, kind),
         )
         if action is None:
             return None
@@ -778,7 +1034,7 @@ class Controller:
             int(action["id"]), task["native_thread_id"], turn_id
         )
         self.store.event(
-            "weaver_turn_adopted",
+            f"{kind}_turn_adopted",
             f"adopted native turn {turn_id}",
             entity_type="action",
             entity_id=action["id"],
@@ -873,6 +1129,27 @@ class Controller:
             )
         return facts
 
+    async def _observe_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        """Observe runtime truth without repairing names, projects, or workflow state."""
+
+        thread = await self.runtime.read_thread(task["native_thread_id"])
+        facts = thread_facts(thread)
+        self.store.execute(
+            """UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?,
+               helpers_terminal = ?, archived = ?, updated_at = ? WHERE id = ?""",
+            (
+                facts["runtime_status"],
+                int(facts["last_turn_terminal"]),
+                int(facts["helpers_terminal"]),
+                int(facts["archived"]),
+                utc_now(),
+                task["id"],
+            ),
+        )
+        facts["thread_name"] = thread.get("name")
+        facts["project_id"] = thread.get("projectId")
+        return facts
+
     async def _ensure_task_project(
         self, task: dict[str, Any], thread: dict[str, Any]
     ) -> dict[str, Any]:
@@ -929,6 +1206,22 @@ class Controller:
     async def reconcile(self) -> None:
         started = time.monotonic()
         self.store.event("reconciliation_started", "reconciliation pass started")
+        if self._operative_fenced():
+            await self._reconcile_operative_mode()
+            self.store.execute(
+                """INSERT INTO meta(key, value) VALUES ('last_reconciliation', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (utc_now(),),
+            )
+            self.store.event(
+                "reconciliation_completed",
+                "operative-only reconciliation pass completed",
+                detail={
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                    "operative_takeover": True,
+                },
+            )
+            return
         self._reconcile_assignment_completions()
         self._repair_action_usage_bindings()
         if not self.runtime.ready:
@@ -1043,6 +1336,112 @@ class Controller:
                 "duration_ms": int((time.monotonic() - started) * 1000),
                 "violations": violations,
             },
+        )
+
+    async def _reconcile_operative_mode(self) -> None:
+        """Refresh observations without applying ordinary workflow authority."""
+
+        self.starts_enabled = False
+        self.store.execute(
+            """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+               ON CONFLICT(key) DO UPDATE SET value = '0'"""
+        )
+        journal = self.operative_journal
+        if journal is None:
+            return
+        self.store.mirror_operative_journal(journal)
+        if journal.get("state") == "closing" and self._close_completed_in_store(
+            journal
+        ):
+            closed_at = utc_now()
+            closed = transition_journal(
+                self.paths.operative_journal,
+                journal,
+                "closed",
+                now=closed_at,
+                next_step="ordinary controller readiness determines dispatch",
+                completed_effect="operative_archived_and_fence_released",
+                closed_at=closed_at,
+            )
+            self.operative_journal = closed
+            self.store.mirror_operative_journal(closed)
+            self.store.execute(
+                """INSERT INTO meta(key, value) VALUES ('controller_state', 'ready')
+                   ON CONFLICT(key) DO UPDATE SET value = 'ready'"""
+            )
+            self._update_readiness()
+            return
+        if not self.runtime.ready:
+            return
+        for task in self.store.rows(
+            "SELECT * FROM tasks WHERE archived = 0 ORDER BY id LIMIT 200"
+        ):
+            try:
+                facts = await self._observe_task(task)
+            except Exception as error:
+                self.store.record_operative_evidence(
+                    str(journal["takeover_id"]),
+                    f"runtime-unavailable:{task['id']}",
+                    "runtime_observation",
+                    coverage="unavailable",
+                    target_type="task",
+                    target_id=task["id"],
+                    detail={"error": str(error)},
+                )
+                continue
+            action = self.store.row(
+                """SELECT * FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')
+                   ORDER BY id DESC LIMIT 1""",
+                (task["id"],),
+            )
+            if task["role"] == "operative":
+                if action is not None and action["native_turn_id"] is None:
+                    self._adopt_unbound_operative_turn(int(task["id"]), facts)
+                if journal.get("state") == "closing":
+                    await self._maybe_finalize_operative_closeout(task, facts)
+                continue
+            if (
+                action is not None
+                and facts["last_turn_terminal"]
+                and action.get("native_turn_id") == facts.get("last_turn_id")
+            ):
+                self._finalize_action_usage(int(action["id"]))
+                self.store.record_operative_evidence(
+                    str(journal["takeover_id"]),
+                    f"late-terminal:{action['id']}:{facts.get('last_turn_status')}",
+                    "late_runtime_outcome",
+                    coverage="observed",
+                    target_type="action",
+                    target_id=action["id"],
+                    detail={
+                        "native_turn_id": facts.get("last_turn_id"),
+                        "runtime_state": facts.get("last_turn_status"),
+                        "quarantined": True,
+                    },
+                )
+
+    def _close_completed_in_store(self, journal: dict[str, Any]) -> bool:
+        action = self.store.row(
+            "SELECT state FROM actions WHERE id = ?", (journal.get("action_id"),)
+        )
+        task = self.store.row(
+            "SELECT state, archived FROM tasks WHERE id = ?", (journal.get("task_id"),)
+        )
+        operation = self.store.row(
+            """SELECT state FROM operative_operations
+               WHERE correlation_id = ?""",
+            (f"operative-close-archive:{journal['takeover_id']}",),
+        )
+        return bool(
+            "closeout_revalidated" in journal.get("completed_effects", [])
+            and action is not None
+            and action["state"] == "processed"
+            and task is not None
+            and task["state"] == "archived"
+            and bool(task["archived"])
+            and operation is not None
+            and operation["state"] == "complete"
         )
 
     def _repair_action_usage_bindings(self) -> None:
@@ -1792,6 +2191,9 @@ class Controller:
             )
 
     async def advance(self) -> None:
+        if self._operative_fenced():
+            self.starts_enabled = False
+            return
         await self._run_advancement_step(
             "occurrence-publication", self._publish_occurrences
         )
@@ -4286,8 +4688,15 @@ class Controller:
 
     async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         command = request.get("command")
+        self._enforce_operative_operation_matrix(request)
         if command == "status":
             status = self.store.status(event_limit=int(request.get("events", 20)))
+            status["operative_journal_state"] = (
+                self.operative_journal.get("state")
+                if self.operative_journal is not None
+                else None
+            )
+            status["operative_journal_error"] = self.operative_journal_error
             run_id = request.get("run")
             if isinstance(run_id, int):
                 status["runs"] = [row for row in status["runs"] if row["id"] == run_id]
@@ -4297,6 +4706,8 @@ class Controller:
             if request.get("view") == "queue":
                 return {
                     "dispatch_enabled": status["dispatch_enabled"],
+                    "operative_takeover": status["operative_takeover"],
+                    "operative_journal_state": status["operative_journal_state"],
                     "assignments": status["assignments"],
                     "pending_updates": status["pending_updates"],
                     "holds": status["holds"],
@@ -4305,6 +4716,8 @@ class Controller:
                 return {
                     "controller_state": status["controller_state"],
                     "dispatch_enabled": status["dispatch_enabled"],
+                    "operative_takeover": status["operative_takeover"],
+                    "operative_journal_state": status["operative_journal_state"],
                     "projects": status["projects"],
                     "slot_usage": status["slot_usage"],
                     "policies": status["policies"],
@@ -4393,10 +4806,63 @@ class Controller:
                 raise StoreError("resolve_operation requires a decision object")
             decision = dict(decision)
             decision["decision"] = "resolve_operation"
-            result = apply_archon_decisions(
-                self.store,
-                {"decisions": [decision]},
+            operative_authorized = bool(
+                self._operative_fenced()
+                and isinstance(request.get("thread_id"), str)
+                and self._is_bound_operative(str(request["thread_id"]))
             )
+            bypass = None
+            if operative_authorized:
+                journal = self._require_bound_operative(_thread_identity(request))
+                bypass = self.store.create_operative_operation(
+                    str(journal["takeover_id"]),
+                    "resolve_external_operation",
+                    str(decision.get("operation_id")),
+                    {
+                        "operation": self.store.row(
+                            "SELECT * FROM external_operations WHERE id = ?",
+                            (decision.get("operation_id"),),
+                        ),
+                        "decision": decision,
+                    },
+                    correlation_id=(
+                        f"operative-resolve:{journal['takeover_id']}:"
+                        f"{decision.get('operation_id')}:{decision.get('resolution')}"
+                    ),
+                )
+                if bypass["state"] == "complete":
+                    retained_result = json.loads(bypass["result_json"] or "{}")
+                    if not isinstance(retained_result, dict):
+                        raise StoreError(
+                            "retained operative operation result is invalid"
+                        )
+                    return retained_result
+                if bypass["state"] in {"sent", "uncertain", "failed"}:
+                    raise StoreError(
+                        f"operative operation {bypass['id']} is {bypass['state']}; "
+                        "exact observation is required"
+                    )
+                self.store.mark_operative_operation_sent(int(bypass["id"]))
+            try:
+                result = apply_archon_decisions(
+                    self.store,
+                    {"decisions": [decision]},
+                    operative_authorized=operative_authorized,
+                )
+            except Exception as error:
+                if bypass is not None:
+                    self.store.finish_operative_operation(
+                        int(bypass["id"]),
+                        state="failed",
+                        result={"error": str(error)},
+                        after={
+                            "operation": self.store.row(
+                                "SELECT * FROM external_operations WHERE id = ?",
+                                (decision.get("operation_id"),),
+                            )
+                        },
+                    )
+                raise
             if decision.get("resolution") == "observed_success":
                 operation = self.store.row(
                     "SELECT kind, target FROM external_operations WHERE id = ?",
@@ -4415,6 +4881,18 @@ class Controller:
                             str(action["native_thread_id"]),
                             str(action["native_turn_id"]),
                         )
+            if bypass is not None:
+                self.store.finish_operative_operation(
+                    int(bypass["id"]),
+                    state="complete",
+                    result=result,
+                    after={
+                        "operation": self.store.row(
+                            "SELECT * FROM external_operations WHERE id = ?",
+                            (decision.get("operation_id"),),
+                        )
+                    },
+                )
             self._update_readiness()
             return result
         if command == "intake":
@@ -4456,6 +4934,19 @@ class Controller:
             return result
         if command == "weaver_register":
             return await self._register_weaver(request)
+        if command == "operative_register":
+            return await self._register_operative(request)
+        if command == "operative_status":
+            return self._operative_status(request)
+        if command == "operative_dossier":
+            self._require_bound_operative(_thread_identity(request))
+            return await self._build_operative_dossier()
+        if command == "operative_finish":
+            return await self._request_operative_finish(request)
+        if command == "operative_abort":
+            return self._abort_operative(request)
+        if command == "operative_recover":
+            return await self._recover_operative(request)
         if command == "archon":
             task = self.store.row(
                 "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
@@ -4475,6 +4966,47 @@ class Controller:
             )
             return {"dispatch_enabled": True}
         raise StoreError(f"unknown controller command: {command!r}")
+
+    def _enforce_operative_operation_matrix(self, request: dict[str, Any]) -> None:
+        if not self._operative_fenced():
+            return
+        command = str(request.get("command") or "")
+        if (
+            command in OPERATIVE_PASSIVE_COMMANDS
+            or command in OPERATIVE_CONTROL_COMMANDS
+        ):
+            return
+        # A late ordinary finish is admitted only far enough for accept_finish to
+        # quarantine its exact payload as evidence before rejecting it.
+        if command == "finish":
+            return
+        thread_id = request.get("thread_id")
+        if (
+            command == "resolve_operation"
+            and isinstance(thread_id, str)
+            and self._is_bound_operative(thread_id)
+        ):
+            return
+        raise StoreError("operative takeover active")
+
+    def _is_bound_operative(self, thread_id: str) -> bool:
+        journal = self.operative_journal
+        if journal is None or journal.get("native_thread_id") != thread_id:
+            return False
+        bound = self.store.row(
+            """SELECT 1 FROM tasks t JOIN actions a ON a.task_id = t.id
+               WHERE t.native_thread_id = ? AND t.role = 'operative'
+                 AND a.kind = 'operative'
+                 AND a.state IN ('pending','starting','active','terminal','uncertain')""",
+            (thread_id,),
+        )
+        return bound is not None
+
+    def _require_bound_operative(self, thread_id: str) -> dict[str, Any]:
+        if not self._is_bound_operative(thread_id):
+            raise StoreError("current thread is not the bound Operative")
+        assert self.operative_journal is not None
+        return self.operative_journal
 
     def _require_registered_weaver(self, thread_id: object) -> dict[str, Any] | None:
         if not isinstance(thread_id, str):
@@ -4603,6 +5135,1667 @@ class Controller:
                 project=str(project_id),
             ),
         }
+
+    def _save_operative_journal(self, **changes: Any) -> dict[str, Any]:
+        journal = self.operative_journal
+        if journal is None:
+            raise StoreError("operative takeover state is unavailable")
+        updated = dict(journal)
+        updated.update(changes)
+        updated["updated_at"] = utc_now()
+        write_journal(self.paths.operative_journal, updated)
+        self.store.mirror_operative_journal(updated)
+        self.operative_journal = updated
+        return updated
+
+    def _operative_registration_result(
+        self, task: dict[str, Any], *, reused: bool
+    ) -> dict[str, Any]:
+        journal = self.operative_journal
+        assert journal is not None
+        return {
+            "takeover_id": journal["takeover_id"],
+            "state": journal["state"],
+            "thread_id": task["native_thread_id"],
+            "title": task["title"],
+            "role_number": task["role_number"],
+            "dispatch_enabled": False,
+            "reused": reused,
+            "instructions": operative_instructions(),
+            "dossier": journal.get("dossier"),
+        }
+
+    async def _register_operative(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Acquire installation-wide authority from a human-created native turn."""
+
+        if self.operative_journal_error is not None:
+            raise StoreError(self.operative_journal_error)
+        thread_id = _thread_identity(request)
+        raw_description = request.get("description")
+        if not isinstance(raw_description, str) or not raw_description.strip():
+            raise StoreError("operative registration requires a nonempty description")
+        existing_task = self.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        )
+        if existing_task is not None and existing_task["role"] != "operative":
+            raise StoreError("managed agents cannot register as Operative")
+
+        journal: dict[str, Any] | None = self.operative_journal
+        if journal_is_unfinished(journal):
+            assert journal is not None
+            if journal["native_thread_id"] != thread_id:
+                raise StoreError("operative takeover active")
+            if journal["state"] == "aborted":
+                raise StoreError(
+                    "aborted operative takeover requires explicit recovery"
+                )
+            task = existing_task
+            if task is None:
+                task = self.store.row(
+                    "SELECT * FROM tasks WHERE id = ?", (journal.get("task_id"),)
+                )
+            if task is None:
+                return await self._resume_operative_acquisition(request)
+            if journal["state"] == "acquiring":
+                return await self._resume_operative_acquisition(request)
+            return self._operative_registration_result(task, reused=True)
+        if existing_task is not None:
+            raise StoreError(
+                "a closed Operative thread cannot acquire a new takeover; use a new human task"
+            )
+
+        try:
+            with authority_gate(self.paths.authority_lock, blocking=False):
+                try:
+                    disk_journal = read_journal(self.paths.operative_journal)
+                except StoreError as error:
+                    self.operative_journal_error = str(error)
+                    raise
+                if journal_is_unfinished(disk_journal):
+                    raise StoreError("operative takeover active")
+                timestamp = utc_now()
+                dispatch = self.store.row(
+                    "SELECT value FROM meta WHERE key = 'dispatch_enabled'"
+                )
+                prior_dispatch = bool(dispatch is not None and dispatch["value"] == "1")
+                journal = {
+                    "takeover_id": str(uuid.uuid4()),
+                    "state": "acquiring",
+                    "native_thread_id": thread_id,
+                    "superseded_thread_ids": [],
+                    "scope": raw_description.strip(),
+                    "prior_dispatch_enabled": prior_dispatch,
+                    "completed_effects": ["authority_fence_written"],
+                    "next_step": "mirror operative task and action",
+                    "caller_verification": {
+                        "coverage": "observed",
+                        "method": "controller-bound current thread identity",
+                        "native_thread_id": thread_id,
+                        "managed_agent": False,
+                    },
+                    "created_at": timestamp,
+                    "updated_at": timestamp,
+                }
+                write_journal(self.paths.operative_journal, journal)
+                self.operative_journal = journal
+                self.starts_enabled = False
+                self.store.execute(
+                    """INSERT INTO meta(key, value) VALUES ('dispatch_enabled', '0')
+                       ON CONFLICT(key) DO UPDATE SET value = '0'"""
+                )
+                self.store.mirror_operative_journal(journal)
+                self.store.event(
+                    "operative_acquiring",
+                    "operative authority fence acquired",
+                    entity_type="operative_takeover",
+                    entity_id=str(journal["takeover_id"]),
+                    detail={"prior_dispatch_enabled": prior_dispatch},
+                )
+        except StoreError as error:
+            if str(error) == "Fulcrum authority mutation is already in progress":
+                raise StoreError("setup mutation active") from error
+            raise
+        return await self._resume_operative_acquisition(request)
+
+    async def _resume_operative_acquisition(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        journal = self.operative_journal
+        if journal is None or journal.get("state") != "acquiring":
+            raise StoreError("operative acquisition is not resumable")
+        thread_id = str(journal["native_thread_id"])
+        task = self.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        )
+        if task is not None and task["role"] != "operative":
+            raise StoreError("managed agents cannot register as Operative")
+        if task is None:
+            task = self.store.register_task(
+                native_thread_id=thread_id,
+                role="operative",
+                description=str(journal["scope"]),
+                model=str(request.get("model") or "gpt-6-astra"),
+                reasoning_effort=str(request.get("effort") or "high"),
+                project_id=None,
+                state="provisioning",
+            )
+        thread = await self.runtime.read_thread(thread_id)
+        facts = thread_facts(thread)
+        action = self.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'operative'
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
+            (task["id"],),
+        )
+        if action is None:
+            current_turn = (
+                facts["last_turn_id"]
+                if facts["runtime_status"] == "active"
+                and facts["last_turn_status"] == "inProgress"
+                else None
+            )
+            timestamp = utc_now()
+            cursor = self.store.execute(
+                """INSERT INTO actions(
+                     task_id, kind, payload, state, native_turn_id, created_at, updated_at
+                   ) VALUES (?, 'operative', ?, 'active', ?, ?, ?)""",
+                (
+                    task["id"],
+                    json.dumps(
+                        {
+                            "takeover_id": journal["takeover_id"],
+                            "scope": journal["scope"],
+                            "adopt_current_turn": current_turn is None,
+                        },
+                        sort_keys=True,
+                    ),
+                    current_turn,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            action = self.store.row(
+                "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
+            )
+            assert action is not None
+            if isinstance(current_turn, str):
+                self.store.bind_action_turn(int(action["id"]), thread_id, current_turn)
+        effects = list(journal["completed_effects"])
+        if "sqlite_authority_mirrored" not in effects:
+            effects.append("sqlite_authority_mirrored")
+        journal = self._save_operative_journal(
+            task_id=task["id"],
+            action_id=action["id"],
+            operative_identity={
+                "role_number": task["role_number"],
+                "title": task["title"],
+                "model": task["model"],
+                "reasoning_effort": task["reasoning_effort"],
+            },
+            operative_action={
+                "payload": json.loads(action["payload"]),
+                "native_turn_id": action["native_turn_id"],
+            },
+            completed_effects=effects,
+            next_step="name and bind invoking native turn",
+        )
+        await self._ensure_operative_name(task, thread)
+        facts = await self._observe_task(task)
+        if action["native_turn_id"] is None:
+            action = (
+                self._adopt_unbound_operative_turn(int(task["id"]), facts) or action
+            )
+        effects = list(journal["completed_effects"])
+        if "native_identity_bound" not in effects:
+            effects.append("native_identity_bound")
+        self._save_operative_journal(
+            operative_action={
+                "payload": json.loads(action["payload"]),
+                "native_turn_id": action["native_turn_id"],
+            },
+            completed_effects=effects,
+            next_step="reconcile in-flight observations and publish emergency dossier",
+        )
+        await self._reconcile_operative_mode()
+        dossier = await self._build_operative_dossier()
+        self.store.record_operative_evidence(
+            str(journal["takeover_id"]),
+            "initial-dossier",
+            "dossier",
+            coverage="observed",
+            target_type="operative_takeover",
+            target_id=journal["takeover_id"],
+            detail=dossier,
+        )
+        activated = utc_now()
+        active = transition_journal(
+            self.paths.operative_journal,
+            self.operative_journal or journal,
+            "active",
+            now=activated,
+            next_step="operative resolves the stated emergency",
+            completed_effect="initial_dossier_published",
+            activated_at=activated,
+            dossier={
+                "coverage": "observed",
+                "evidence_key": "initial-dossier",
+            },
+        )
+        self.operative_journal = active
+        self.store.mirror_operative_journal(active)
+        self.store.execute(
+            "UPDATE tasks SET state = 'active', updated_at = ? WHERE id = ?",
+            (activated, task["id"]),
+        )
+        self.store.execute(
+            """INSERT INTO meta(key, value) VALUES ('controller_state', 'operative_only')
+               ON CONFLICT(key) DO UPDATE SET value = 'operative_only'"""
+        )
+        return self._operative_registration_result(task, reused=False)
+
+    async def _ensure_operative_name(
+        self, task: dict[str, Any], observed_thread: dict[str, Any]
+    ) -> None:
+        """Name the bound thread with exact durable send/observation recovery."""
+
+        journal = self.operative_journal
+        if journal is None:
+            raise StoreError("operative takeover state is unavailable")
+        takeover_id = str(journal["takeover_id"])
+        target = str(task["native_thread_id"])
+        desired = str(task["title"])
+        current_name = observed_thread.get("name")
+        prior = self.store.rows(
+            """SELECT * FROM operative_operations
+               WHERE takeover_id = ? AND kind = 'thread_name' AND target = ?
+               ORDER BY id""",
+            (takeover_id, target),
+        )
+        latest = prior[-1] if prior else None
+        if latest is not None and latest["state"] == "complete":
+            if current_name != desired:
+                raise StoreError(
+                    "completed operative naming effect contradicts current observation"
+                )
+            return
+        if latest is not None and latest["state"] in {"sent", "uncertain"}:
+            if current_name == desired:
+                self.store.finish_operative_operation(
+                    int(latest["id"]),
+                    state="complete",
+                    result={"reconciled": True},
+                    after={"name": desired, "coverage": "observed"},
+                )
+                return
+            self.store.finish_operative_operation(
+                int(latest["id"]),
+                state="failed",
+                result={"reconciled": True, "observed_unsent": True},
+                after={"name": current_name, "coverage": "observed"},
+            )
+        attempt = len(prior) + 1
+        operation = self.store.create_operative_operation(
+            takeover_id,
+            "thread_name",
+            target,
+            {"name": current_name, "coverage": "observed"},
+            correlation_id=f"operative-name:{takeover_id}:{target}:{attempt}",
+        )
+        if operation["state"] != "intent":
+            raise StoreError("operative naming intent is not sendable")
+        if current_name == desired:
+            self.store.finish_operative_operation(
+                int(operation["id"]),
+                state="complete",
+                result={"observed_preexisting": True, "sent": False},
+                after={"name": desired, "coverage": "observed"},
+            )
+            return
+        self.store.mark_operative_operation_sent(int(operation["id"]))
+        try:
+            await self.runtime.set_name(target, desired)
+        except Exception as error:
+            try:
+                after_error = await self.runtime.read_thread(target)
+            except Exception as observation_error:
+                self.store.finish_operative_operation(
+                    int(operation["id"]),
+                    state="uncertain",
+                    result={
+                        "error": str(error),
+                        "observation_error": str(observation_error),
+                    },
+                    after={"coverage": "unavailable"},
+                )
+            else:
+                accepted = after_error.get("name") == desired
+                self.store.finish_operative_operation(
+                    int(operation["id"]),
+                    state="complete" if accepted else "failed",
+                    result={"error": str(error), "reconciled": True},
+                    after={
+                        "name": after_error.get("name"),
+                        "coverage": "observed",
+                    },
+                )
+            raise
+        try:
+            after = await self.runtime.read_thread(target)
+        except Exception as error:
+            self.store.finish_operative_operation(
+                int(operation["id"]),
+                state="uncertain",
+                result={"accepted": True, "observation_error": str(error)},
+                after={"coverage": "unavailable"},
+            )
+            raise
+        if after.get("name") != desired:
+            self.store.finish_operative_operation(
+                int(operation["id"]),
+                state="failed",
+                result={"accepted": True, "observed_unsent": True},
+                after={"name": after.get("name"), "coverage": "observed"},
+            )
+            raise StoreError("operative thread naming was not observed")
+        self.store.finish_operative_operation(
+            int(operation["id"]),
+            state="complete",
+            result={"accepted": True},
+            after={"name": desired, "coverage": "observed"},
+        )
+
+    def _operative_status(self, request: dict[str, Any]) -> dict[str, Any]:
+        journal = self._require_bound_operative(_thread_identity(request))
+        mirror = self.store.operative_takeover(str(journal["takeover_id"]))
+        return {
+            "takeover_id": journal["takeover_id"],
+            "state": journal["state"],
+            "thread_id": journal["native_thread_id"],
+            "scope": journal["scope"],
+            "prior_dispatch_enabled": journal["prior_dispatch_enabled"],
+            "next_step": journal["next_step"],
+            "completed_effects": journal["completed_effects"],
+            "sqlite_mirror": "observed" if mirror is not None else "unavailable",
+            "dispatch_enabled": False,
+        }
+
+    def _dossier_section(
+        self,
+        name: str,
+        items: list[dict[str, Any]] | dict[str, Any] | None,
+        *,
+        snapshot_id: str,
+        unavailable: str | None = None,
+        not_applicable: str | None = None,
+    ) -> dict[str, Any]:
+        if unavailable is not None:
+            return {
+                "coverage": "unavailable",
+                "reason": unavailable,
+                "complete": False,
+                "truncated": False,
+            }
+        if not_applicable is not None:
+            return {
+                "coverage": "not_applicable",
+                "reason": not_applicable,
+                "complete": True,
+                "truncated": False,
+            }
+        if isinstance(items, dict):
+            return {
+                "coverage": "observed",
+                "items": items,
+                "count": 1,
+                "complete": True,
+                "truncated": False,
+            }
+        values = items or []
+        limit = 200
+        section = {
+            "coverage": "observed",
+            "items": values[:limit],
+            "count": len(values),
+            "complete": len(values) <= limit,
+            "truncated": len(values) > limit,
+        }
+        if len(values) > limit:
+            section["snapshot_id"] = snapshot_id
+            section["overflow_section"] = name
+            section["overflow_artifact"] = self._write_dossier_overflow(
+                snapshot_id, name, values[limit:]
+            )
+        return section
+
+    def _create_dossier_snapshot(self) -> str:
+        journal = self.operative_journal
+        if journal is None:
+            raise StoreError("no operative takeover is available")
+        try:
+            root = safe_child(
+                self.paths.control_root / "operative-evidence",
+                str(journal["takeover_id"]),
+                "dossiers",
+            )
+        except ValueError as error:
+            raise StoreError(
+                "operative takeover has an unsafe artifact identity"
+            ) from error
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for directory_path in (root, root.parent, root.parent.parent):
+            directory = os.open(directory_path, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        for _attempt in range(10):
+            snapshot_id = str(uuid.uuid4())
+            snapshot_root = safe_child(root, snapshot_id)
+            try:
+                snapshot_root.mkdir(mode=0o700)
+            except FileExistsError:
+                continue
+            directory = os.open(root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            return snapshot_id
+        raise StoreError("cannot allocate an immutable operative dossier snapshot")
+
+    def _write_dossier_overflow(
+        self,
+        snapshot_id: str,
+        section: str,
+        omitted: list[dict[str, Any]],
+    ) -> str:
+        journal = self.operative_journal
+        if journal is None:
+            raise StoreError("no operative takeover is available")
+        safe_section = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in section
+        )
+        try:
+            root = safe_child(
+                self.paths.control_root / "operative-evidence",
+                str(journal["takeover_id"]),
+                "dossiers",
+                snapshot_id,
+            )
+            path = safe_child(root, f"{safe_section}-overflow.json")
+        except ValueError as error:
+            raise StoreError("operative dossier artifact identity is unsafe") from error
+        if not root.is_dir() or path.exists():
+            raise StoreError("operative dossier artifact identity is not immutable")
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        payload = {
+            "takeover_id": journal["takeover_id"],
+            "snapshot_id": snapshot_id,
+            "section": section,
+            "coverage": "observed",
+            "items": [self.store.redacted(item) for item in omitted],
+        }
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory = os.open(root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return str(path.resolve())
+
+    async def _build_operative_dossier(self) -> dict[str, Any]:
+        """Build a bounded, redacted, explicitly covered emergency inventory."""
+
+        journal = self.operative_journal
+        if journal is None:
+            raise StoreError("no operative takeover is available")
+        snapshot_id: str = self._create_dossier_snapshot()
+        tasks = self.store.rows(
+            """SELECT id, native_thread_id, role, role_number, title, project_id,
+                      state, runtime_status, last_turn_terminal, helpers_terminal,
+                      archived, updated_at
+               FROM tasks WHERE archived = 0 ORDER BY id"""
+        )
+        actions = self.store.rows(
+            """SELECT actions.id, actions.task_id, actions.assignment_id,
+                      actions.occurrence_id, actions.kind, actions.state,
+                      actions.native_turn_id, actions.outcome_kind,
+                      actions.condition, actions.created_at, actions.updated_at,
+                      tasks.role
+               FROM actions JOIN tasks ON tasks.id = actions.task_id
+               WHERE actions.state NOT IN ('processed','canceled')
+               ORDER BY actions.id"""
+        )
+        native_turns = self.store.rows(
+            """SELECT usage.native_thread_id, usage.native_turn_id,
+                      usage.action_id, usage.attributed_action_id, usage.is_helper,
+                      usage.coverage, usage.gap_reason, usage.first_observed_at,
+                      usage.last_observed_at, usage.terminal_at,
+                      CASE WHEN usage.terminal_at IS NOT NULL THEN 'terminal'
+                           WHEN usage.coverage = 'unavailable' THEN 'unavailable'
+                           ELSE 'active' END AS runtime_state
+               FROM action_turn_usage AS usage
+               ORDER BY usage.native_thread_id, usage.native_turn_id"""
+        )
+        helpers = self.store.rows(
+            """SELECT helper.id, helper.native_thread_id, helper.parent_thread_id,
+                      helper.parent_turn_id,
+                      helper.native_turn_id, helper.attributed_action_id,
+                      helper.first_observed_at, helper.last_observed_at,
+                      usage.coverage, usage.gap_reason, usage.terminal_at,
+                      CASE WHEN usage.terminal_at IS NOT NULL THEN 'terminal'
+                           WHEN usage.native_turn_id IS NULL THEN 'unavailable'
+                           ELSE 'active' END AS runtime_state
+               FROM telemetry_helper_threads AS helper
+               LEFT JOIN action_turn_usage AS usage
+                 ON usage.native_thread_id = helper.native_thread_id
+                AND usage.native_turn_id = helper.native_turn_id
+               ORDER BY id"""
+        )
+        interviews = self.store.rows(
+            """SELECT id, occurrence_id, subject_task_id, prior_archived, state,
+                      deadline_at, created_at, updated_at
+               FROM interviews
+               WHERE state NOT IN ('answered','expired') ORDER BY id"""
+        )
+        git_items: list[dict[str, Any]] = []
+        worktree_items: list[dict[str, Any]] = []
+        for project_index, project in enumerate(self.config.projects):
+            root = Path(project.repo_path)
+            if not (root / ".git").exists():
+                git_items.append(
+                    {
+                        "project_id": project.project_id,
+                        "path": str(root),
+                        "coverage": "unavailable",
+                        "reason": "Git repository is unavailable",
+                    }
+                )
+                continue
+            git_items.append(
+                self._observe_git_root(
+                    project.project_id,
+                    root,
+                    snapshot_id=snapshot_id,
+                    changes_section=f"git-changes-{project_index}",
+                )
+            )
+            try:
+                observed = subprocess.run(
+                    ["git", "worktree", "list", "--porcelain"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                if observed.returncode == 0:
+                    paths = [
+                        line.removeprefix("worktree ")
+                        for line in observed.stdout.splitlines()
+                        if line.startswith("worktree ")
+                    ]
+                    for worktree_index, path in enumerate(paths):
+                        worktree_items.append(
+                            self._observe_git_root(
+                                project.project_id,
+                                Path(path),
+                                snapshot_id=snapshot_id,
+                                changes_section=(
+                                    f"worktree-changes-{project_index}-{worktree_index}"
+                                ),
+                            )
+                        )
+                else:
+                    worktree_items.append(
+                        {
+                            "project_id": project.project_id,
+                            "path": str(root),
+                            "coverage": "unavailable",
+                            "reason": "git worktree inventory failed",
+                        }
+                    )
+            except (OSError, subprocess.SubprocessError):
+                worktree_items.append(
+                    {
+                        "project_id": project.project_id,
+                        "path": str(root),
+                        "coverage": "unavailable",
+                        "reason": "git worktree inventory failed",
+                    }
+                )
+        integrity = self.store.row("PRAGMA quick_check")
+        controller_service, app_server = self._observe_operative_services()
+        state_ok, state_reasons = state_readiness(
+            self.store, include_operative_fence=False
+        )
+        progress_ok, progress_reasons = progress_readiness(
+            self.store, critical_workers=self.critical_workers
+        )
+        sent = self.store.rows(
+            """SELECT id, kind, target, state, native_id, correlation_id, condition,
+                      created_at, updated_at
+               FROM external_operations
+               WHERE state IN ('intent','sent','uncertain','failed')
+               ORDER BY id"""
+        )
+        candidates = self.store.rows(
+            """SELECT assignments.id AS assignment_id, runs.project_id, worktree_path, candidate_id,
+                      source_oid, tested_oid, stage, condition
+               FROM assignments JOIN runs ON runs.id = assignments.run_id
+               WHERE assignments.stage NOT IN ('completed','canceled')
+               ORDER BY assignments.id"""
+        )
+        takeover_identity = {
+            key: journal.get(key)
+            for key in (
+                "takeover_id",
+                "state",
+                "native_thread_id",
+                "superseded_thread_ids",
+                "scope",
+                "prior_dispatch_enabled",
+                "caller_verification",
+                "next_step",
+                "completed_effects",
+                "created_at",
+                "updated_at",
+            )
+        }
+
+        def section(
+            name: str,
+            items: list[dict[str, Any]] | dict[str, Any] | None,
+            *,
+            unavailable: str | None = None,
+            not_applicable: str | None = None,
+        ) -> dict[str, Any]:
+            return self._dossier_section(
+                name,
+                items,
+                snapshot_id=snapshot_id,
+                unavailable=unavailable,
+                not_applicable=not_applicable,
+            )
+
+        dossier = {
+            "snapshot_id": snapshot_id,
+            "takeover": {
+                "coverage": "observed",
+                "value": takeover_identity,
+                "complete": True,
+                "truncated": False,
+            },
+            "managed_tasks": section("managed-tasks", tasks),
+            "native_turns": section("native-turns", native_turns),
+            "helpers": section("helpers", helpers),
+            "interviews": section("interviews", interviews),
+            "actions": section("actions", actions),
+            "reservations": section(
+                "reservations",
+                self.store.rows("SELECT * FROM reservations ORDER BY id"),
+            ),
+            "runs": section(
+                "runs",
+                self.store.rows(
+                    "SELECT * FROM runs WHERE state NOT IN ('completed','canceled') ORDER BY id"
+                ),
+            ),
+            "assignments": section(
+                "assignments",
+                self.store.rows(
+                    "SELECT * FROM assignments WHERE stage NOT IN ('completed','canceled') ORDER BY id"
+                ),
+            ),
+            "holds": section(
+                "holds",
+                self.store.rows(
+                    "SELECT * FROM holds WHERE released_at IS NULL ORDER BY id"
+                ),
+            ),
+            "occurrences": section(
+                "occurrences",
+                self.store.rows(
+                    "SELECT * FROM occurrences WHERE state NOT IN ('complete','skipped') ORDER BY id"
+                ),
+            ),
+            "updates": section(
+                "updates",
+                self.store.rows(
+                    """SELECT id, recipient_task_id, identity, actionable, state,
+                              created_at, updated_at FROM updates
+                       WHERE state IN ('retained','batched') ORDER BY id"""
+                ),
+            ),
+            "obligations": section(
+                "obligations",
+                self.store.rows(
+                    "SELECT * FROM obligations WHERE state NOT IN ('complete','canceled') ORDER BY id"
+                ),
+            ),
+            "worktrees": section("worktrees", worktree_items),
+            "git": section("git", git_items),
+            "candidates": section("candidates", candidates),
+            "tollgate": section(
+                "tollgate",
+                None,
+                unavailable=(
+                    "Tollgate status requires exact candidate-specific observation"
+                    if candidates
+                    else None
+                ),
+                not_applicable="no unfinished candidates" if not candidates else None,
+            ),
+            "beads_publication": section(
+                "beads-publication",
+                self.store.rows(
+                    """SELECT bead_id, project_id, activation, publication_state,
+                              updated_at FROM beads WHERE publication_state != 'complete'
+                       ORDER BY bead_id"""
+                ),
+            ),
+            "uncertain_external_operations": section(
+                "uncertain-external-operations", sent
+            ),
+            "operative_operations": section(
+                "operative-operations",
+                self.store.rows(
+                    """SELECT id, kind, target, state, correlation_id, evidence_id,
+                              created_at, updated_at FROM operative_operations
+                       WHERE takeover_id = ? ORDER BY id""",
+                    (journal["takeover_id"],),
+                ),
+            ),
+            "controller_service": controller_service,
+            "app_server": app_server,
+            "store_integrity": {
+                "coverage": "observed" if integrity is not None else "unavailable",
+                "quick_check": next(iter(integrity.values())) if integrity else None,
+                "complete": integrity is not None,
+                "truncated": False,
+            },
+            "source_snapshot": section("source-snapshot", git_items),
+            "editable_environment": {
+                "coverage": "observed",
+                "source_root": self.config.source_root,
+                "python": os.path.realpath(sys.executable),
+                "complete": True,
+                "truncated": False,
+            },
+            "readiness": {
+                "coverage": "observed",
+                "ready_without_takeover_fence": state_ok
+                and progress_ok
+                and self.runtime.ready,
+                "failures": state_reasons
+                + progress_reasons
+                + ([] if self.runtime.ready else ["App Server is unavailable"]),
+                "complete": True,
+                "truncated": False,
+            },
+            "evidence": section(
+                "evidence",
+                self.store.rows(
+                    """SELECT id, evidence_key, kind, coverage, target_type,
+                              target_id, artifact_path, created_at
+                       FROM operative_evidence WHERE takeover_id = ?
+                       ORDER BY id""",
+                    (journal["takeover_id"],),
+                ),
+            ),
+            "bounds": {"maximum_items_per_section": 200},
+        }
+        return self.store.redacted(dossier)
+
+    def _observe_operative_services(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            controller = inspect_service(CONTROLLER_LABEL)
+        except Exception as error:
+            controller_detail: dict[str, Any] = {"observation_error": str(error)}
+        else:
+            controller_detail = {
+                "launchd_loaded": controller.loaded,
+                "launchd_state": controller.state,
+                "launchd_pid": controller.pid,
+                "launchd_executable": controller.executable_path,
+            }
+        controller_result = {
+            "coverage": "observed" if self.lock_handle is not None else "unavailable",
+            "pid": os.getpid(),
+            "lock_path": str(self.paths.lock),
+            "lock_owned": self.lock_handle is not None,
+            "ownership": "controller_lock" if self.lock_handle is not None else None,
+            "mode": "operative_only",
+            "complete": self.lock_handle is not None,
+            "truncated": False,
+            **controller_detail,
+        }
+        try:
+            app = inspect_service(APP_SERVER_LABEL)
+        except Exception as error:
+            app_result = {
+                "coverage": "unavailable",
+                "connected": self.runtime.ready,
+                "ownership": "unavailable",
+                "reason": str(error),
+                "complete": False,
+                "truncated": False,
+            }
+        else:
+            owned = bool(app.running)
+            app_result = {
+                "coverage": (
+                    "observed" if self.runtime.ready and owned else "unavailable"
+                ),
+                "connected": self.runtime.ready,
+                "ownership": "launchd" if owned else "unavailable",
+                "launchd_loaded": app.loaded,
+                "launchd_state": app.state,
+                "launchd_pid": app.pid,
+                "launchd_executable": app.executable_path,
+                "complete": self.runtime.ready and owned,
+                "truncated": False,
+            }
+        return controller_result, app_result
+
+    def _observe_git_root(
+        self,
+        project_id: str,
+        root: Path,
+        *,
+        snapshot_id: str,
+        changes_section: str,
+    ) -> dict[str, Any]:
+        def git(*arguments: str) -> tuple[bool, str]:
+            try:
+                result = subprocess.run(
+                    ["git", *arguments],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False, ""
+            return result.returncode == 0, result.stdout.strip()
+
+        head_ok, head = git("rev-parse", "HEAD")
+        branch_ok, branch = git("branch", "--show-current")
+        dirty_ok, dirty = git("status", "--porcelain=v1", "--untracked-files=normal")
+        if not (head_ok and branch_ok and dirty_ok):
+            return {
+                "project_id": project_id,
+                "path": str(root),
+                "coverage": "unavailable",
+                "reason": "Git observation failed",
+            }
+        lines = dirty.splitlines()
+        return {
+            "project_id": project_id,
+            "path": str(root),
+            "coverage": "observed",
+            "head": head,
+            "branch": branch or None,
+            "dirty": bool(lines),
+            "changes": self._dossier_section(
+                changes_section,
+                [{"path": line[3:]} for line in lines],
+                snapshot_id=snapshot_id,
+            ),
+        }
+
+    @staticmethod
+    def _read_operative_evidence(path_value: object) -> tuple[str, str]:
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise StoreError("operative evidence requires an absolute readable file")
+        path = Path(path_value)
+        if not path.is_absolute() or not path.is_file():
+            raise StoreError("operative evidence requires an absolute readable file")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise StoreError(f"cannot read operative evidence: {error}") from error
+        if not content.strip():
+            raise StoreError("operative evidence must not be empty")
+        if len(content.encode("utf-8")) > MAX_EXACT_SOURCE_ARTIFACT_BYTES:
+            raise StoreError("operative evidence exceeds the retained artifact bound")
+        return str(path.resolve()), content
+
+    @classmethod
+    def _read_closeout_evidence(
+        cls, path_value: object
+    ) -> tuple[str, dict[str, Any], str]:
+        path, content = cls._read_operative_evidence(path_value)
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError as error:
+            raise StoreError(
+                "operative closeout evidence must be valid JSON"
+            ) from error
+        if not isinstance(payload, dict):
+            raise StoreError("operative closeout evidence must contain a JSON object")
+        return path, payload, content
+
+    def _closeout_artifact_path(self, takeover_id: str) -> Path:
+        try:
+            return safe_child(
+                self.paths.control_root / "operative-evidence",
+                takeover_id,
+                "closeout.json",
+            )
+        except ValueError as error:
+            raise StoreError(
+                "operative takeover has an unsafe artifact identity"
+            ) from error
+
+    def _retain_closeout_evidence(self, takeover_id: str, content: str) -> str:
+        """Atomically retain the exact accepted bytes under controller ownership."""
+
+        path = self._closeout_artifact_path(takeover_id)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return str(path.resolve())
+
+    def _read_retained_closeout_evidence(
+        self, journal: dict[str, Any]
+    ) -> tuple[str, dict[str, Any]]:
+        expected = self._closeout_artifact_path(str(journal["takeover_id"])).resolve()
+        retained = journal.get("evidence_path")
+        if not isinstance(retained, str):
+            raise StoreError("retained operative closeout evidence is unavailable")
+        try:
+            actual = Path(retained).resolve(strict=True)
+        except OSError as error:
+            raise StoreError(
+                "retained operative closeout evidence is unavailable"
+            ) from error
+        if actual != expected:
+            raise StoreError("retained operative closeout evidence identity is invalid")
+        path, payload, _ = self._read_closeout_evidence(str(actual))
+        return path, payload
+
+    @staticmethod
+    def _section_items(dossier: dict[str, Any], name: str) -> list[dict[str, Any]]:
+        section = dossier.get(name)
+        if not isinstance(section, dict) or section.get("coverage") != "observed":
+            return []
+        items = section.get("items")
+        return items if isinstance(items, list) else []
+
+    def _complete_section_items(
+        self, dossier: dict[str, Any], name: str
+    ) -> list[dict[str, Any]] | None:
+        section = dossier.get(name)
+        if not isinstance(section, dict) or section.get("coverage") != "observed":
+            return None
+        inline = section.get("items")
+        if not isinstance(inline, list):
+            return None
+        if not section.get("truncated"):
+            return inline if section.get("complete") else None
+        artifact_value = section.get("overflow_artifact")
+        if not isinstance(artifact_value, str):
+            return None
+        artifact = Path(artifact_value)
+        evidence_root = (self.paths.control_root / "operative-evidence").resolve()
+        try:
+            resolved = artifact.resolve(strict=True)
+            resolved.relative_to(evidence_root)
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        overflow = payload.get("items") if isinstance(payload, dict) else None
+        if (
+            not isinstance(overflow, list)
+            or payload.get("takeover_id")
+            != (self.operative_journal or {}).get("takeover_id")
+            or payload.get("snapshot_id") != section.get("snapshot_id")
+            or payload.get("section") != section.get("overflow_section")
+            or len(inline) + len(overflow) != section.get("count")
+        ):
+            return None
+        return inline + overflow
+
+    def _validate_closeout_evidence(
+        self, evidence: dict[str, Any], dossier: dict[str, Any]
+    ) -> list[str]:
+        failures: list[str] = []
+        scalar_fields = ("emergency_outcome", "root_cause")
+        list_fields = ("repairs", "commits", "validation", "limitations")
+        object_fields = ("source", "store", "services")
+        for field in scalar_fields:
+            if not isinstance(evidence.get(field), str) or not evidence[field].strip():
+                failures.append(f"closeout evidence missing {field}")
+        if evidence.get("emergency_outcome") != "complete":
+            failures.append("closeout evidence emergency_outcome is not complete")
+        for field in list_fields:
+            value = evidence.get(field)
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                failures.append(f"closeout evidence missing {field}")
+            elif field != "limitations" and not value:
+                failures.append(f"closeout evidence {field} must not be empty")
+        for field in object_fields:
+            value = evidence.get(field)
+            if not isinstance(value, dict) or value.get("status") != "observed":
+                failures.append(f"closeout evidence missing observed {field}")
+        dispositions = evidence.get("dispositions")
+        if not isinstance(dispositions, dict):
+            failures.append("closeout evidence missing dispositions")
+            return failures
+        for section_name in (
+            "managed_tasks",
+            "actions",
+            "uncertain_external_operations",
+            "operative_operations",
+            "worktrees",
+            "candidates",
+            "beads_publication",
+            "obligations",
+        ):
+            if self._complete_section_items(dossier, section_name) is None:
+                failures.append(
+                    f"closeout evidence inventory is incomplete for {section_name}"
+                )
+        managed_tasks = self._complete_section_items(dossier, "managed_tasks") or []
+        actions = self._complete_section_items(dossier, "actions") or []
+        external_operations = (
+            self._complete_section_items(dossier, "uncertain_external_operations") or []
+        )
+        operative_operations = (
+            self._complete_section_items(dossier, "operative_operations") or []
+        )
+        worktrees = self._complete_section_items(dossier, "worktrees") or []
+        candidates = self._complete_section_items(dossier, "candidates") or []
+        publications = self._complete_section_items(dossier, "beads_publication") or []
+        obligations = self._complete_section_items(dossier, "obligations") or []
+        ordinary_tasks = [
+            item for item in managed_tasks if item.get("role") != "operative"
+        ]
+        ordinary_task_ids = [str(item["id"]) for item in ordinary_tasks]
+        ordinary_action_ids = [
+            str(item["id"]) for item in actions if item.get("role") != "operative"
+        ]
+        effect_ids = [f"external:{item['id']}" for item in external_operations] + [
+            f"operative:{item['id']}"
+            for item in operative_operations
+            if item.get("state") in {"sent", "uncertain", "failed"}
+        ]
+        worktree_ids = [
+            str(item["path"]) for item in worktrees if item.get("path") is not None
+        ]
+        candidate_ids = [
+            str(item.get("candidate_id") or item.get("assignment_id"))
+            for item in candidates
+        ]
+        publication_ids = [f"bead:{item['bead_id']}" for item in publications] + [
+            f"obligation:{item['id']}" for item in obligations
+        ]
+        expected = {
+            "agents": ordinary_task_ids,
+            "actions": ordinary_action_ids,
+            "effects": effect_ids,
+            "worktrees": worktree_ids,
+            "candidates": candidate_ids,
+            "publication_delivery": publication_ids,
+        }
+        for category, identifiers in expected.items():
+            disposition = dispositions.get(category)
+            if not isinstance(disposition, dict):
+                failures.append(f"closeout evidence missing {category} disposition")
+                continue
+            status = disposition.get("status")
+            ids = disposition.get("ids")
+            if status not in {"resolved", "not_applicable"} or not isinstance(
+                ids, list
+            ):
+                failures.append(f"closeout evidence invalid {category} disposition")
+                continue
+            if sorted(str(item) for item in ids) != sorted(identifiers):
+                failures.append(
+                    f"closeout evidence {category} disposition does not cover current IDs"
+                )
+            if identifiers and status != "resolved":
+                failures.append(
+                    f"closeout evidence {category} disposition is unresolved"
+                )
+        return failures
+
+    def _operative_closeout_failures(
+        self, dossier: dict[str, Any], evidence: dict[str, Any]
+    ) -> list[str]:
+        failures = self._validate_closeout_evidence(evidence, dossier)
+        journal = self.operative_journal
+        if journal is None:
+            return ["operative journal is unavailable"]
+        if not journal.get("prior_dispatch_enabled"):
+            failures.append("dispatch was not permitted before takeover")
+        state_ok, state_reasons = state_readiness(
+            self.store, include_operative_fence=False
+        )
+        if not state_ok:
+            failures.extend(state_reasons)
+        progress_ok, progress_reasons = progress_readiness(
+            self.store, critical_workers=self.critical_workers
+        )
+        if not progress_ok:
+            failures.extend(progress_reasons)
+        if not self.runtime.ready:
+            failures.append("App Server is unavailable")
+        active = self.store.rows(
+            """SELECT id, title FROM tasks WHERE role != 'operative' AND archived = 0
+               AND (last_turn_terminal = 0 OR helpers_terminal = 0 OR runtime_status = 'active')
+               ORDER BY id LIMIT 20"""
+        )
+        if active:
+            failures.append(
+                "implicated managed tasks remain active: "
+                + ", ".join(str(item["id"]) for item in active)
+            )
+        unfinished_actions = self.store.rows(
+            """SELECT actions.id FROM actions JOIN tasks ON tasks.id = actions.task_id
+               WHERE tasks.role != 'operative'
+                 AND actions.state IN ('pending','starting','active','terminal','uncertain')
+               ORDER BY actions.id LIMIT 20"""
+        )
+        if unfinished_actions:
+            failures.append(
+                "ordinary actions remain unfinished: "
+                + ", ".join(str(item["id"]) for item in unfinished_actions)
+            )
+        unfinished_assignments = self.store.rows(
+            """SELECT id FROM assignments WHERE stage NOT IN ('completed','canceled')
+               ORDER BY id LIMIT 20"""
+        )
+        if unfinished_assignments:
+            failures.append(
+                "assignments remain unfinished: "
+                + ", ".join(str(item["id"]) for item in unfinished_assignments)
+            )
+        unresolved = self.store.rows("""SELECT id FROM external_operations
+               WHERE state IN ('intent','sent','uncertain') ORDER BY id LIMIT 20""")
+        if unresolved:
+            failures.append(
+                "external operations remain unresolved: "
+                + ", ".join(str(item["id"]) for item in unresolved)
+            )
+        unresolved_operative = self.store.rows(
+            """SELECT id FROM operative_operations WHERE takeover_id = ?
+               AND state IN ('intent','sent','uncertain') ORDER BY id LIMIT 20""",
+            (journal["takeover_id"],),
+        )
+        if unresolved_operative:
+            failures.append(
+                "operative effects remain unresolved: "
+                + ", ".join(str(item["id"]) for item in unresolved_operative)
+            )
+        for section in (
+            "reservations",
+            "runs",
+            "assignments",
+            "holds",
+            "occurrences",
+            "updates",
+            "obligations",
+            "interviews",
+            "candidates",
+            "beads_publication",
+        ):
+            items = self._complete_section_items(dossier, section)
+            if items is None:
+                failures.append(f"{section} inventory is incomplete")
+            elif items:
+                failures.append(f"{section} remain unresolved")
+        if any(
+            item.get("role") != "operative"
+            for item in (self._complete_section_items(dossier, "actions") or [])
+        ):
+            failures.append("ordinary actions remain unresolved")
+        git_items = self._complete_section_items(dossier, "git")
+        if git_items is None:
+            failures.append("source inventory is incomplete")
+            git_items = []
+        for item in git_items:
+            if item.get("coverage") != "observed":
+                failures.append("source state is unavailable")
+            elif item.get("dirty"):
+                failures.append(f"source worktree remains dirty: {item.get('path')}")
+            changes = item.get("changes")
+            if (
+                not isinstance(changes, dict)
+                or self._complete_section_items({"changes": changes}, "changes") is None
+            ):
+                failures.append(
+                    f"source change inventory is incomplete: {item.get('path')}"
+                )
+        worktree_items = self._complete_section_items(dossier, "worktrees")
+        if worktree_items is None:
+            failures.append("worktree inventory is incomplete")
+            worktree_items = []
+        for item in worktree_items:
+            path = item.get("path")
+            if not isinstance(path, str) or not path:
+                failures.append("worktree is unaccounted")
+            if item.get("coverage") != "observed":
+                failures.append(f"worktree state is unavailable: {path}")
+                continue
+            if (
+                not isinstance(item.get("head"), str)
+                or not item.get("head")
+                or "branch" not in item
+                or not isinstance(item.get("dirty"), bool)
+            ):
+                failures.append(f"worktree observation is incomplete: {path}")
+            elif item["dirty"]:
+                failures.append(f"worktree remains dirty: {path}")
+            changes = item.get("changes")
+            if (
+                not isinstance(changes, dict)
+                or self._complete_section_items({"changes": changes}, "changes") is None
+            ):
+                failures.append(f"worktree change inventory is incomplete: {path}")
+        store_integrity = dossier.get("store_integrity")
+        if not isinstance(store_integrity, dict) or (
+            store_integrity.get("coverage") != "observed"
+            or store_integrity.get("quick_check") != "ok"
+        ):
+            failures.append("store integrity is not observed healthy")
+        controller_service = dossier.get("controller_service")
+        if not isinstance(controller_service, dict) or not controller_service.get(
+            "complete", False
+        ):
+            failures.append("controller ownership is unavailable")
+        app_server = dossier.get("app_server")
+        if not isinstance(app_server, dict) or not app_server.get("complete", False):
+            failures.append("App Server ownership/connectivity is unavailable")
+        readiness = dossier.get("readiness")
+        if not isinstance(readiness, dict) or not readiness.get(
+            "ready_without_takeover_fence", False
+        ):
+            failures.append("current readiness does not pass")
+        return failures
+
+    async def _request_operative_finish(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        journal = self._require_bound_operative(_thread_identity(request))
+        if journal["state"] == "closing":
+            return {
+                "ok": True,
+                "takeover_id": journal["takeover_id"],
+                "state": "closing",
+                "reused": True,
+            }
+        if journal["state"] != "active":
+            raise StoreError(
+                f"cannot finish an operative takeover in {journal['state']}"
+            )
+        source_evidence_path, evidence, evidence_content = self._read_closeout_evidence(
+            request.get("evidence")
+        )
+        dossier = await self._build_operative_dossier()
+        failures = self._operative_closeout_failures(dossier, evidence)
+        if failures:
+            self.store.record_operative_evidence(
+                str(journal["takeover_id"]),
+                f"closeout-refused:{utc_now()}",
+                "closeout_readiness",
+                coverage="observed",
+                target_type="operative_takeover",
+                target_id=journal["takeover_id"],
+                detail={"failures": failures},
+                artifact_path=source_evidence_path,
+            )
+            raise StoreError("operative closeout refused: " + "; ".join(failures))
+        evidence_path = self._retain_closeout_evidence(
+            str(journal["takeover_id"]), evidence_content
+        )
+        retained = self.store.record_operative_evidence(
+            str(journal["takeover_id"]),
+            "successful-closeout-request",
+            "closeout",
+            coverage="observed",
+            target_type="operative_takeover",
+            target_id=journal["takeover_id"],
+            detail={"contract": evidence},
+            artifact_path=evidence_path,
+        )
+        closing_at = utc_now()
+        closing = transition_journal(
+            self.paths.operative_journal,
+            journal,
+            "closing",
+            now=closing_at,
+            next_step="wait for the operative turn and helpers to become terminal",
+            completed_effect="closeout_evidence_retained",
+            closing_at=closing_at,
+            evidence_path=evidence_path,
+            result={"evidence_id": retained["id"]},
+        )
+        self.operative_journal = closing
+        self.store.mirror_operative_journal(closing)
+        self.store.execute(
+            "UPDATE actions SET outcome_kind = 'complete', outcome_payload = ?, updated_at = ? WHERE id = ?",
+            (json.dumps({"evidence": evidence_path}), closing_at, journal["action_id"]),
+        )
+        return {
+            "ok": True,
+            "takeover_id": journal["takeover_id"],
+            "state": "closing",
+            "reused": False,
+        }
+
+    async def _maybe_finalize_operative_closeout(
+        self, task: dict[str, Any], facts: dict[str, Any]
+    ) -> bool:
+        journal = self.operative_journal
+        if journal is None or journal.get("state") != "closing":
+            return False
+        action = self.store.row(
+            "SELECT * FROM actions WHERE id = ?", (journal.get("action_id"),)
+        )
+        if action is None or action.get("native_turn_id") != facts.get("last_turn_id"):
+            return False
+        if not facts["last_turn_terminal"] or not facts["helpers_terminal"]:
+            return False
+        retained_path, retained_contract = self._read_retained_closeout_evidence(
+            journal
+        )
+        evidence_record = self.store.row(
+            """SELECT detail_json FROM operative_evidence
+               WHERE id = ? AND takeover_id = ? AND kind = 'closeout'""",
+            (
+                (journal.get("result") or {}).get("evidence_id"),
+                journal["takeover_id"],
+            ),
+        )
+        if evidence_record is None:
+            recovered = self.store.record_operative_evidence(
+                str(journal["takeover_id"]),
+                "successful-closeout-request",
+                "closeout",
+                coverage="observed",
+                target_type="operative_takeover",
+                target_id=journal["takeover_id"],
+                detail={"contract": retained_contract},
+                artifact_path=retained_path,
+            )
+            journal = self._save_operative_journal(
+                result={"evidence_id": recovered["id"]}
+            )
+            evidence_record = {
+                "detail_json": json.dumps({"contract": retained_contract})
+            }
+        try:
+            retained_detail = json.loads(evidence_record["detail_json"])
+            closeout_evidence = retained_detail["contract"]
+        except (KeyError, TypeError, json.JSONDecodeError) as error:
+            raise StoreError(
+                "retained operative closeout evidence is invalid"
+            ) from error
+        if not isinstance(closeout_evidence, dict):
+            raise StoreError("retained operative closeout evidence is invalid")
+        if closeout_evidence != retained_contract:
+            raise StoreError("retained operative closeout evidence is mismatched")
+        dossier = await self._build_operative_dossier()
+        failures = self._operative_closeout_failures(dossier, closeout_evidence)
+        if failures:
+            active = transition_journal(
+                self.paths.operative_journal,
+                journal,
+                "active",
+                now=utc_now(),
+                next_step="resolve current closeout readiness failures",
+                closeout_failures=failures,
+            )
+            self.operative_journal = active
+            self.store.mirror_operative_journal(active)
+            return False
+        correlation = f"operative-close-archive:{journal['takeover_id']}"
+        operation = self.store.create_operative_operation(
+            str(journal["takeover_id"]),
+            "thread_archive",
+            str(task["native_thread_id"]),
+            {"archived": bool(facts["archived"]), "terminal": True},
+            correlation_id=correlation,
+        )
+        if operation["state"] in {"sent", "uncertain"} and not facts["archived"]:
+            return False
+        if facts["archived"] and operation["state"] != "complete":
+            self.store.finish_operative_operation(
+                int(operation["id"]),
+                state="complete",
+                result={"observed": True},
+                after={"archived": True},
+            )
+        if not facts["archived"] and operation["state"] != "complete":
+            self.store.mark_operative_operation_sent(int(operation["id"]))
+            try:
+                await self.runtime.archive(str(task["native_thread_id"]))
+            except Exception as error:
+                self.store.finish_operative_operation(
+                    int(operation["id"]),
+                    state="uncertain",
+                    result={"error": str(error)},
+                    after={"archived": "unavailable"},
+                )
+                return False
+            try:
+                observed = thread_facts(
+                    await self.runtime.read_thread(str(task["native_thread_id"]))
+                )
+            except Exception as error:
+                self.store.finish_operative_operation(
+                    int(operation["id"]),
+                    state="uncertain",
+                    result={"accepted": True, "observation_error": str(error)},
+                    after={"archived": "unavailable"},
+                )
+                return False
+            if not observed["archived"]:
+                self.store.finish_operative_operation(
+                    int(operation["id"]),
+                    state="uncertain",
+                    result={"accepted": True},
+                    after={"archived": False},
+                )
+                return False
+            self.store.finish_operative_operation(
+                int(operation["id"]),
+                state="complete",
+                result={"accepted": True},
+                after={"archived": True},
+            )
+        final_dossier = await self._build_operative_dossier()
+        final_failures = self._operative_closeout_failures(
+            final_dossier, closeout_evidence
+        )
+        if final_failures:
+            active = transition_journal(
+                self.paths.operative_journal,
+                journal,
+                "active",
+                now=utc_now(),
+                next_step="resolve current closeout readiness failures",
+                closeout_failures=final_failures,
+            )
+            self.operative_journal = active
+            self.store.mirror_operative_journal(active)
+            return False
+        effects = list(journal["completed_effects"])
+        if "closeout_revalidated" not in effects:
+            effects.append("closeout_revalidated")
+        journal = self._save_operative_journal(
+            completed_effects=effects,
+            next_step="finalize durable Operative archival and close the fence",
+        )
+        closed_at = utc_now()
+        self.store.execute(
+            "UPDATE actions SET state = 'processed', updated_at = ? WHERE id = ?",
+            (closed_at, action["id"]),
+        )
+        self.store.execute(
+            """UPDATE tasks SET state = 'archived', archived = 1,
+               runtime_status = 'idle', last_turn_terminal = 1, helpers_terminal = 1,
+               updated_at = ? WHERE id = ?""",
+            (closed_at, task["id"]),
+        )
+        closed = transition_journal(
+            self.paths.operative_journal,
+            journal,
+            "closed",
+            now=closed_at,
+            next_step="ordinary controller readiness determines dispatch",
+            completed_effect="operative_archived_and_fence_released",
+            closed_at=closed_at,
+        )
+        self.operative_journal = closed
+        self.store.mirror_operative_journal(closed)
+        self.store.execute(
+            """INSERT INTO meta(key, value) VALUES ('controller_state', 'ready')
+               ON CONFLICT(key) DO UPDATE SET value = 'ready'"""
+        )
+        self._update_readiness()
+        self.advance_requested.set()
+        return True
+
+    def _abort_operative(self, request: dict[str, Any]) -> dict[str, Any]:
+        journal = self._require_bound_operative(_thread_identity(request))
+        if journal["state"] == "aborted":
+            return {
+                "ok": False,
+                "takeover_id": journal["takeover_id"],
+                "state": "aborted",
+                "reused": True,
+            }
+        if journal["state"] != "active":
+            raise StoreError(
+                f"cannot abort an operative takeover in {journal['state']}"
+            )
+        reason = request.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise StoreError("operative abort requires an explicit human reason")
+        evidence_path, evidence = self._read_operative_evidence(request.get("evidence"))
+        self.store.record_operative_evidence(
+            str(journal["takeover_id"]),
+            "abort",
+            "abort",
+            coverage="observed",
+            target_type="operative_takeover",
+            target_id=journal["takeover_id"],
+            detail={"reason": reason.strip(), "content": evidence},
+            artifact_path=evidence_path,
+        )
+        aborted_at = utc_now()
+        aborted = transition_journal(
+            self.paths.operative_journal,
+            journal,
+            "aborted",
+            now=aborted_at,
+            next_step="explicit human recovery of this same takeover",
+            completed_effect="abort_evidence_retained",
+            aborted_at=aborted_at,
+            evidence_path=evidence_path,
+            result={"reason": reason.strip()},
+        )
+        self.operative_journal = aborted
+        self.store.mirror_operative_journal(aborted)
+        return {
+            "ok": False,
+            "takeover_id": journal["takeover_id"],
+            "state": "aborted",
+            "reused": False,
+        }
+
+    async def _recover_operative(self, request: dict[str, Any]) -> dict[str, Any]:
+        journal = self.operative_journal
+        if journal is None or journal.get("state") != "aborted":
+            raise StoreError("no aborted operative takeover is available for recovery")
+        if request.get("takeover_id") != journal["takeover_id"]:
+            raise StoreError("operative recovery requires the exact takeover ID")
+        thread_id = _thread_identity(request)
+        existing = self.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        )
+        if existing is not None and existing["role"] != "operative":
+            raise StoreError("managed agents cannot recover as Operative")
+        evidence_path, evidence = self._read_operative_evidence(request.get("evidence"))
+        old_thread = str(journal["native_thread_id"])
+        self.store.record_operative_evidence(
+            str(journal["takeover_id"]),
+            f"recovery:{thread_id}",
+            "successor_recovery",
+            coverage="observed",
+            target_type="thread",
+            target_id=old_thread,
+            detail={"successor_thread_id": thread_id, "content": evidence},
+            artifact_path=evidence_path,
+        )
+        if thread_id != old_thread:
+            self.store.execute(
+                """UPDATE actions SET state = 'canceled', condition = ?, updated_at = ?
+                   WHERE id = ? AND state IN ('pending','starting','active','terminal','uncertain')""",
+                (
+                    "superseded by explicit operative recovery",
+                    utc_now(),
+                    journal["action_id"],
+                ),
+            )
+            self.store.execute(
+                "UPDATE tasks SET state = 'retired', updated_at = ? WHERE id = ?",
+                (utc_now(), journal["task_id"]),
+            )
+        superseded = list(journal["superseded_thread_ids"])
+        if thread_id != old_thread and old_thread not in superseded:
+            superseded.append(old_thread)
+        acquiring = transition_journal(
+            self.paths.operative_journal,
+            journal,
+            "acquiring",
+            now=utc_now(),
+            next_step="bind the explicitly authorized recovery thread",
+            completed_effect="explicit_recovery_authorized",
+            native_thread_id=thread_id,
+            superseded_thread_ids=superseded,
+            task_id=None if thread_id != old_thread else journal.get("task_id"),
+            action_id=None if thread_id != old_thread else journal.get("action_id"),
+            caller_verification={
+                "coverage": "observed",
+                "method": "explicit recovery command with exact takeover ID",
+                "native_thread_id": thread_id,
+                "managed_agent": False,
+            },
+        )
+        self.operative_journal = acquiring
+        self.store.mirror_operative_journal(acquiring)
+        return await self._resume_operative_acquisition(request)
 
     async def _request_specialist(self, request: dict[str, Any]) -> dict[str, Any]:
         kind = request.get("kind")
@@ -4979,7 +7172,12 @@ class Controller:
         progress_ready, progress_reasons = progress_readiness(
             self.store, critical_workers=self.critical_workers
         )
-        ready = state_ready and progress_ready and self.runtime.ready
+        ready = (
+            state_ready
+            and progress_ready
+            and self.runtime.ready
+            and not self._operative_fenced()
+        )
         self.store.execute(
             "INSERT INTO meta(key, value) VALUES ('dispatch_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             ("1" if ready else "0",),
@@ -6769,7 +8967,9 @@ class Controller:
 
                 shutil.rmtree(child)
         self.store = Store(
-            self.paths.database, event_log=self.paths.logs_root / "workflow.jsonl"
+            self.paths.database,
+            event_log=self.paths.logs_root / "workflow.jsonl",
+            operative_journal=self.paths.operative_journal,
         )
         self._initialize_configuration()
         for worker_name in self.critical_workers:
@@ -6795,6 +8995,19 @@ class Controller:
             self.store.heartbeat("source-watch")
             if not any(str(path).endswith((".py", ".md")) for _, path in changes):
                 continue
+            if self._operative_fenced():
+                journal = self.operative_journal
+                if journal is not None:
+                    self.store.record_operative_evidence(
+                        str(journal["takeover_id"]),
+                        f"source-change:{utc_now()}",
+                        "source_observation",
+                        coverage="observed",
+                        target_type="source",
+                        target_id=str(source),
+                        detail={"change_count": len(changes)},
+                    )
+                continue
             self.starts_enabled = False
             async with self.mutation_lock:
                 self.store.event(
@@ -6807,6 +9020,8 @@ class Controller:
             self.advance_requested.set()
 
     async def _maybe_refresh_source(self) -> bool:
+        if self._operative_fenced():
+            return False
         requested = self.store.row(
             "SELECT value FROM meta WHERE key = 'source_refresh_pending'"
         )

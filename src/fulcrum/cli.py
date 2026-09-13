@@ -15,7 +15,8 @@ from fulcrum.config import load_installation, resolve_paths
 from fulcrum.controller import run_controller
 from fulcrum.doctor import doctor
 from fulcrum.ipc import request_sync
-from fulcrum.setup import run_setup
+from fulcrum.operative import read_journal
+from fulcrum.setup import require_setup_unfenced, run_setup
 from fulcrum.store import Store
 
 
@@ -65,7 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
     usage.add_argument("--run", type=int)
     usage.add_argument(
         "--role",
-        choices=("archon", "weaver", "executor", "overseer", "sage", "inquisitor"),
+        choices=(
+            "archon",
+            "operative",
+            "weaver",
+            "executor",
+            "overseer",
+            "sage",
+            "inquisitor",
+        ),
     )
     usage.add_argument("--project")
     usage.add_argument(
@@ -82,7 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
     cost.add_argument("--run", type=int)
     cost.add_argument(
         "--role",
-        choices=("archon", "weaver", "executor", "overseer", "sage", "inquisitor"),
+        choices=(
+            "archon",
+            "operative",
+            "weaver",
+            "executor",
+            "overseer",
+            "sage",
+            "inquisitor",
+        ),
     )
     cost.add_argument("--project")
     cost.add_argument("--workflow")
@@ -118,6 +135,28 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--model", default="gpt-5.6-sol")
     register.add_argument("--effort", default="high")
     register.add_argument("--plan-mode", action="store_true")
+    operative = commands.add_parser(
+        "operative", help="manage a human-authorized emergency takeover"
+    )
+    operative_sub = operative.add_subparsers(dest="operative_command", required=True)
+    operative_register = operative_sub.add_parser("register")
+    operative_register.add_argument(
+        "--description", required=True, type=_nonempty_description
+    )
+    operative_register.add_argument("--model", default="gpt-6-astra")
+    operative_register.add_argument("--effort", default="high")
+    operative_sub.add_parser("status")
+    operative_sub.add_parser("dossier")
+    operative_finish = operative_sub.add_parser("finish")
+    operative_finish.add_argument("--evidence", required=True)
+    operative_abort = operative_sub.add_parser("abort")
+    operative_abort.add_argument("--reason", required=True)
+    operative_abort.add_argument("--evidence", required=True)
+    operative_recover = operative_sub.add_parser("recover")
+    operative_recover.add_argument("--takeover-id", required=True)
+    operative_recover.add_argument("--evidence", required=True)
+    operative_recover.add_argument("--model", default="gpt-6-astra")
+    operative_recover.add_argument("--effort", default="high")
     intake = commands.add_parser(
         "intake", help="file one task or a complete task graph"
     )
@@ -248,6 +287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             asyncio.run(run_controller(paths, config))
             return 0
         if args.command == "setup":
+            require_setup_unfenced(paths)
             result = run_setup(
                 paths,
                 input_path=Path(args.config) if args.config else None,
@@ -258,6 +298,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "status" and not paths.socket.exists():
             with Store(paths.database, readonly=True) as store:
                 result = store.status(event_limit=args.events)
+            try:
+                journal = read_journal(paths.operative_journal)
+                result["operative_journal_state"] = (
+                    journal.get("state") if journal is not None else None
+                )
+                if journal is None and result.get("operative_takeover") is not None:
+                    result["operative_journal_error"] = (
+                        "unfinished SQLite takeover has no authoritative journal"
+                    )
+            except Exception as error:
+                result["operative_journal_state"] = None
+                result["operative_journal_error"] = str(error)
             result["stale"] = True
             result = _status_view(result, args)
         elif args.command == "status":
@@ -358,6 +410,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "writable": not args.plan_mode,
                 },
             )
+        elif args.command == "operative":
+            command = args.operative_command
+            payload: dict[str, Any] = {"command": f"operative_{command}"}
+            if command == "register":
+                payload.update(
+                    {
+                        "description": args.description,
+                        "model": args.model,
+                        "effort": args.effort,
+                    }
+                )
+            elif command == "finish":
+                payload["evidence"] = args.evidence
+            elif command == "abort":
+                payload.update({"reason": args.reason, "evidence": args.evidence})
+            elif command == "recover":
+                payload.update(
+                    {
+                        "takeover_id": args.takeover_id,
+                        "evidence": args.evidence,
+                        "model": args.model,
+                        "effort": args.effort,
+                    }
+                )
+            result = _request(paths, payload)
         elif args.command == "intake":
             payload = _intake_payload(args)
             if "tasks" in payload:
@@ -417,6 +494,8 @@ def _status_view(result: dict[str, Any], args: argparse.Namespace) -> dict[str, 
     if args.queue:
         return {
             "dispatch_enabled": result.get("dispatch_enabled"),
+            "operative_takeover": result.get("operative_takeover"),
+            "operative_journal_state": result.get("operative_journal_state"),
             "assignments": result.get("assignments", []),
             "pending_updates": result.get("pending_updates", []),
             "holds": result.get("holds", []),
@@ -425,6 +504,8 @@ def _status_view(result: dict[str, Any], args: argparse.Namespace) -> dict[str, 
         return {
             "controller_state": result.get("controller_state"),
             "dispatch_enabled": result.get("dispatch_enabled"),
+            "operative_takeover": result.get("operative_takeover"),
+            "operative_journal_state": result.get("operative_journal_state"),
             "projects": result.get("projects", []),
             "slot_usage": result.get("slot_usage", {}),
             "policies": result.get("policies", []),
