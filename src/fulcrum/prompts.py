@@ -44,8 +44,12 @@ def load_template(action_kind: str, *, role: str | None = None) -> str:
 
 def role_instructions(action_kind: str, *, role: str | None = None) -> str:
     """Onboarding and command reference, supplied once at task creation."""
+    context_hint = (
+        "If exact current-action facts are missing after compaction, run "
+        "`fulcrum context`; otherwise continue from retained conversation context."
+    )
     if action_kind == "archon":
-        return load_template(action_kind, role=role)
+        return load_template(action_kind, role=role) + "\n\n" + context_hint
     finish_kind = "correct" if action_kind == "implement" else action_kind
     interviews_allowed = role == "sage"
     lifecycle = {
@@ -70,6 +74,7 @@ def role_instructions(action_kind: str, *, role: str | None = None) -> str:
         [
             load_template(action_kind, role=role),
             lifecycle,
+            context_hint,
             finish_syntax(finish_kind, interviews_allowed=interviews_allowed),
             finish_contract(finish_kind, interviews_allowed=interviews_allowed),
         ]
@@ -416,6 +421,8 @@ def action_message(
     action: dict[str, Any],
     assignment: dict[str, Any] | None = None,
     constraints: list[str] | None = None,
+    include_scope: bool = True,
+    full_context: bool = False,
 ) -> str:
     """Deliver the actual action inline, with no prerequisite instruction read."""
     kind = action["kind"]
@@ -455,6 +462,24 @@ def action_message(
                 lines.append(_facts(answer))
             if payload.get("missing_evidence"):
                 lines.append("Missing responses: " + _text(payload["missing_evidence"]))
+            if full_context:
+                evidence = payload.get("retained_evidence") or {}
+                for key in (
+                    "window",
+                    "captured_at",
+                    "projects",
+                    "coverage",
+                    "assignments",
+                    "recent_events",
+                    "prior_reports",
+                ):
+                    if evidence.get(key):
+                        lines.append(
+                            "Retained "
+                            + key.replace("_", " ")
+                            + ": "
+                            + _text(evidence[key])
+                        )
         else:
             evidence = payload.get("retained_evidence") or {}
             for key in (
@@ -476,9 +501,17 @@ def action_message(
     if assignment is None:
         raise PromptError(f"{kind} action requires its assignment")
     lead = {"implement": "Implement", "correct": "Correct", "review": "Review"}[kind]
-    lines = [
-        f"{lead} {assignment['bead_id']}. Approved scope:\n{assignment['scope_snapshot']}"
-    ]
+    lines = (
+        [
+            f"{lead} {assignment['bead_id']}. Approved scope:\n"
+            f"{assignment['scope_snapshot']}"
+        ]
+        if include_scope
+        else [
+            f"{lead} {assignment['bead_id']}. The approved scope is unchanged from "
+            "this task's earlier assignment action."
+        ]
+    )
     run_context = {
         key: value
         for key, value in {
@@ -570,7 +603,8 @@ def compaction_reminder(task: dict[str, Any], action: dict[str, Any]) -> str:
         if action["kind"] == "interview"
         else "The controller handles dispatch and delivery."
     )
-    return f"You are {task['role']}; current action: {action['kind']}{target}. {obligation} {boundary}"
+    recovery = " If exact scope or action facts are missing, run `fulcrum context`."
+    return f"You are {task['role']}; current action: {action['kind']}{target}. {obligation} {boundary}{recovery}"
 
 
 def weaver_instructions(*, plan_mode: bool, project: str) -> str:
@@ -588,6 +622,8 @@ def weaver_instructions(*, plan_mode: bool, project: str) -> str:
             "directly. Wait for any required native helper reviews before "
             "submitting. If a finish command fails, correct the reported error "
             "and retry that same outcome.",
+            "If exact current-action facts are missing after compaction, run "
+            "`fulcrum context`; otherwise continue from retained conversation context.",
             finish_contract("weaver"),
             finish_syntax("weaver"),
         ]

@@ -1979,9 +1979,13 @@ class Controller:
         action: dict[str, Any],
         task: dict[str, Any],
         assignment: dict[str, Any] | None,
+        *,
+        full_context: bool = False,
     ) -> str:
         """Compose only the facts needed for this action, delivered directly in its turn."""
 
+        if full_context and action.get("reminder_sent"):
+            action = {**action, "reminder_sent": 0}
         constraints: list[str] = []
         if assignment is not None:
             bead = self.store.row(
@@ -2036,8 +2040,23 @@ class Controller:
                         operation["result_json"] or "{}"
                     )
             action = {**action, "payload": payload}
+        include_scope = True
+        if assignment is not None and not full_context:
+            include_scope = (
+                self.store.row(
+                    """SELECT 1 FROM actions
+                       WHERE task_id = ? AND assignment_id = ? AND state = 'processed'
+                       LIMIT 1""",
+                    (task["id"], assignment["id"]),
+                )
+                is None
+            )
         return action_message(
-            action=action, assignment=assignment, constraints=constraints
+            action=action,
+            assignment=assignment,
+            constraints=constraints if include_scope else [],
+            include_scope=include_scope,
+            full_context=full_context,
         )
 
     async def _ensure_worktree_environment(self, worktree: Path) -> None:
@@ -3163,6 +3182,31 @@ class Controller:
                     "policies": status["policies"],
                 }
             return status
+        if command == "context":
+            thread_id = _thread_identity(request)
+            action = self.store.current_action(thread_id)
+            task = self.store.row(
+                "SELECT * FROM tasks WHERE id = ?", (action["task_id"],)
+            )
+            if task is None:
+                raise StoreError("current action task is missing")
+            assignment = None
+            if action.get("assignment_id") is not None:
+                assignment = self.store.row(
+                    """SELECT a.*, r.project_id FROM assignments a
+                       JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+                    (action["assignment_id"],),
+                )
+                if assignment is None:
+                    raise StoreError("current action assignment is missing")
+            return {
+                "action_id": action["id"],
+                "action_kind": action["kind"],
+                "role": task["role"],
+                "context": self._build_action_message(
+                    action, task, assignment, full_context=True
+                ),
+            }
         if command == "finish":
             return accept_finish(
                 self.store,

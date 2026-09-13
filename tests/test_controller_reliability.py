@@ -2919,6 +2919,72 @@ print(json.dumps({
         self.assertIn("actual failed check log", text)
         self.assertNotIn("fulcrum instructions", text)
 
+    async def test_context_recovers_full_current_action_after_delta_dispatch(
+        self,
+    ) -> None:
+        earlier = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'processed', 'earlier', 'earlier')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        self.controller.store.execute(
+            "UPDATE actions SET kind = 'review', outcome_kind = 'changes_requested' WHERE id = ?",
+            (earlier.lastrowid,),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'review_findings', ?, 'earlier')""",
+            (
+                self.assignment["id"],
+                earlier.lastrowid,
+                json.dumps("repair the boundary check"),
+            ),
+        )
+        current = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, created_at, updated_at
+               ) VALUES (?, ?, 'correct', ?, 'active', 'now', 'now')""",
+            (
+                self.executor["id"],
+                self.assignment["id"],
+                "{}",
+            ),
+        )
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (current.lastrowid,)
+        )
+        assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+
+        dispatched = self.controller._build_action_message(
+            action, self.executor, assignment
+        )
+        self.controller.store.execute(
+            "UPDATE actions SET reminder_sent = 1 WHERE id = ?",
+            (current.lastrowid,),
+        )
+        recovered = await self.controller.handle_request(
+            {"command": "context", "thread_id": "executor"}
+        )
+
+        self.assertNotIn("Scope", dispatched)
+        self.assertIn("scope is unchanged", dispatched)
+        self.assertEqual(recovered["role"], "executor")
+        self.assertEqual(recovered["action_kind"], "correct")
+        self.assertEqual(recovered["action_id"], current.lastrowid)
+        self.assertIn("Scope", recovered["context"])
+        self.assertIn("repair the boundary check", recovered["context"])
+        self.assertNotIn("previous turn ended", recovered["context"])
+
+    async def test_context_rejects_an_actionless_thread(self) -> None:
+        with self.assertRaisesRegex(StoreError, "no current Fulcrum action"):
+            await self.controller.handle_request(
+                {"command": "context", "thread_id": "overseer"}
+            )
+
     def test_specialist_evidence_reports_interval_scope_and_truncation(self) -> None:
         scope = json.dumps({"global": False, "projects": ["p"]})
         self.controller.store.execute(

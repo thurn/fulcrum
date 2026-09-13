@@ -257,6 +257,17 @@ class PromptsTest(unittest.TestCase):
             self.assertNotIn("history", text)
             self.assertNotIn("fulcrum instructions", text)
             self.assertNotIn("--section", text)
+            self.assertIn("fulcrum context", text)
+
+    def test_followup_assignment_message_omits_unchanged_scope(self) -> None:
+        text = action_message(
+            action={"kind": "implement", "payload": {}},
+            assignment=self.assignment,
+            include_scope=False,
+        )
+
+        self.assertIn("approved scope is unchanged", text)
+        self.assertNotIn("Full approved scope", text)
 
     def test_correction_inlines_current_finding_and_permission_only(self) -> None:
         action = {
@@ -337,6 +348,10 @@ class PromptsTest(unittest.TestCase):
         self.assertNotIn("old log", text)
         self.assertNotIn("fulcrum instructions", text)
 
+        recovered = action_message(action=action, full_context=True)
+        self.assertIn("Retained recent events", recovered)
+        self.assertIn("old log", recovered)
+
     def test_interview_contains_the_question_and_finish_shape(self) -> None:
         text = action_message(
             action={
@@ -350,6 +365,22 @@ class PromptsTest(unittest.TestCase):
 
     def test_cli_has_no_instruction_fetch_interface(self) -> None:
         self.assertNotIn("instructions", build_parser().format_help())
+
+    def test_role_creation_exposes_optional_context_recovery(self) -> None:
+        for action_kind, role in (
+            ("archon", "archon"),
+            ("implement", "executor"),
+            ("review", "overseer"),
+            ("specialist", "sage"),
+            ("specialist", "inquisitor"),
+        ):
+            self.assertIn("fulcrum context", role_instructions(action_kind, role=role))
+        self.assertIn(
+            "fulcrum context", weaver_instructions(plan_mode=False, project="p")
+        )
+        self.assertNotIn(
+            "fulcrum context", weaver_instructions(plan_mode=True, project="p")
+        )
 
     def test_cli_exposes_bootstrap_operation_resolution(self) -> None:
         args = build_parser().parse_args(

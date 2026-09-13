@@ -29,6 +29,11 @@ Use `fulcrum status --json` for tasks, assignments, stages, runtime activity,
 capacity, holds, queues, operations, obligations, occurrences, and concise recent
 events. `fulcrum doctor --json` checks the assembled installation.
 
+A managed agent may run `fulcrum context` when compaction has removed an exact
+current-action fact. The command is read-only, derives identity solely from the
+calling Codex task, and accepts no selector for another task or an older action.
+Routine action messages remain self-contained; this is an optional recovery path.
+
 Fleet replacement is explicit:
 
 - `reboot --soft` drains active managed turns before replacing conversations.

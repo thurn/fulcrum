@@ -780,14 +780,23 @@ Separate three instruction surfaces:
   An Archon proposal includes the bead, exact proposed scope, dependencies or
   conflicts, and relevant capacity. A completion update can be one sentence.
   Do not send a count of updates followed by a required tool read. Do not repeat
-  the full fleet snapshot, unchanged policies, or all prior handoffs.
+  the full fleet snapshot, unchanged policies, or all prior handoffs. Send an
+  assignment's complete approved scope on its first action in a managed task; later
+  actions in that task identify the unchanged scope and carry only the new evidence
+  or correction.
 - Compaction supplies only a brief role/current-action reminder, normally under
   50 words. Continue from the conversation summary. Do not replay the manual,
-  action payload, history, or schemas, or instruct a routine context fetch.
+  action payload, history, or schemas, or instruct a routine context fetch. Mention
+  the optional `fulcrum context` recovery command for cases where exact facts are
+  missing from the retained summary.
   Unrelated, retired, and actionless tasks (including planning Weaver) receive nothing.
 
-There is no instruction-fetching CLI or sectioned context interface. Keep short
-messages substantive; never hide the same prompt behind a mandatory read. Preserve
+`fulcrum context` is a read-only, role-aware recovery interface for the caller's
+current managed action. It accepts no task, action, or role selector and fails when
+the calling task has no current action. It uses the same renderer and controller
+records as dispatch, but includes the complete approved scope so an agent can recover
+after lossy compaction. It is optional: never hide a routine request behind a
+mandatory read. Keep short messages substantive. Preserve
 exact approved requirements even when they need more space than a routine update.
 Existing source/log/artifact references are appropriate for bulky evidence, but
 include the current findings and decisions themselves in the message. Retain exact
@@ -1100,7 +1109,8 @@ Writable Weaver authoring has a current action; Plan-mode naming alone does not
 create one.
 
 Startup and `SessionStart` compaction hooks only restore the current role/action
-instructions from local controller facts. They do not enforce finish at stop,
+identity from local controller facts and mention the optional `fulcrum context`
+recovery command. They do not enforce finish at stop,
 send reminders, or maintain correction counters. Keep these reads comfortably
 within the two-second hook ceiling; an unavailable controller produces a clear
 context diagnostic rather than a fleet scan or a second state writer.
@@ -1858,7 +1868,7 @@ exercise native boundaries with isolated disposable state and retained evidence.
 | Three substantive review failures, missing evidence, or covered repair | Only new substantive source rejections count; Archon decides after three; permitted repair records rationale/linkage without another Overseer turn |
 | Flaky/failed CI or a later unexplained green result | Diagnosis and concrete repair; no Fulcrum CI retry or automatic diagnostic replay; native certification after repair |
 | Source push, cleanup, or brain publication fails | Reuse retained candidate/report/intake; Python owns the remaining obligation; no duplicate implementation or analysis |
-| Follow-up, compaction, or missing template | Short notices and compaction reminders; necessary scope and current evidence are delivered inline; finish needs no turn/dispatch ID; actionless tasks receive no hook text |
+| Follow-up, compaction, or missing template | Short notices and compaction reminders; first actions carry full scope, later actions carry deltas, and optional `fulcrum context` recovers exact current facts; finish needs no turn/dispatch ID; actionless tasks receive no hook text |
 | Partial/duplicate intake, dependency cycle, scope edit, or unsupported model | No partial graph dispatch or silent scope/model change; preserve native Beads identities and explicit future exclusion |
 | Specialist overdue after downtime, duplicate finding, or speculative observation | One occurrence; reuse known findings; only evidence-backed submitted findings produce pending beads; zero findings is valid |
 | Busy/archived/unavailable interview subject and collection timeout | One request per subject; correct restoration; expire unstarted requests; reconcile uncertain starts; one Sage continuation with explicit missing evidence |

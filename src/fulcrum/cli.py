@@ -51,6 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--queue", action="store_true")
     status.add_argument("--capabilities", action="store_true")
     status.add_argument("--run", type=int)
+    commands.add_parser(
+        "context", help="show the current managed action's authoritative context"
+    )
     commands.add_parser("archon", help="locate the current Archon task")
     resolve_operation = commands.add_parser(
         "resolve-operation",
@@ -231,6 +234,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "run": args.run,
                 },
             )
+        elif args.command == "context":
+            result = _request(paths, {"command": "context"})
         elif args.command == "archon":
             result = _request(paths, {"command": "archon"})
         elif args.command == "resolve-operation":
