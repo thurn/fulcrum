@@ -575,6 +575,20 @@ class Store:
         self.connection.execute(
             """UPDATE external_operations
                SET state = 'failed',
+                   condition = 'retained Tollgate response proves the operation failed',
+                   updated_at = ?
+               WHERE kind = 'tollgate_candidate_create' AND state = 'uncertain'
+                 AND EXISTS (
+                   SELECT 1 FROM operation_attempts attempt
+                   WHERE attempt.operation_id = external_operations.id
+                     AND (attempt.stderr LIKE '%\"retryable\":false%'
+                          OR attempt.error LIKE '%\"retryable\":false%')
+                 )""",
+            (timestamp,),
+        )
+        self.connection.execute(
+            """UPDATE external_operations
+               SET state = 'failed',
                    condition = 'superseded duplicate candidate operation',
                    updated_at = ?
                WHERE kind = 'tollgate_candidate_create'

@@ -267,6 +267,33 @@ class StoreTest(unittest.TestCase):
                 (now, now),
             )
 
+    def test_open_recovers_legacy_definitive_tollgate_failure(self) -> None:
+        operation = self.store.create_operation(
+            "tollgate_candidate_create",
+            "7",
+            {"worktree": "/tmp/worktree"},
+            correlation_id="legacy-definitive-failure",
+        )
+        attempt = self.store.begin_operation_attempt(operation)
+        response = '{"error":{"message":"repository is dirty","retryable":false}}'
+        self.store.finish_operation_attempt(
+            operation,
+            attempt,
+            state="uncertain",
+            stderr=response,
+            error=response,
+        )
+
+        self.store.close()
+        self.store = Store(Path(self.temporary.name) / "state.sqlite3")
+
+        recovered = self.store.row(
+            "SELECT state, condition FROM external_operations WHERE id = ?",
+            (operation,),
+        )
+        self.assertEqual(recovered["state"], "failed")
+        self.assertIn("proves the operation failed", recovered["condition"])
+
     def test_existing_recovery_without_progress_is_migrated_to_a_hold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"

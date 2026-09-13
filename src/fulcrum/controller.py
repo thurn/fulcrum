@@ -1993,7 +1993,13 @@ class Controller:
                 )
                 if retained is not None and retained["state"] == "uncertain":
                     await self._reconcile_tollgate_candidate(retained)
-                return False
+                    return False
+                self.store.execute(
+                    """UPDATE assignments SET candidate_id = NULL, source_oid = NULL,
+                       tested_oid = NULL, condition = ?, updated_at = ? WHERE id = ?""",
+                    (str(error), utc_now(), assignment_id),
+                )
+                return True
         self._record_candidate(assignment, candidate)
         return True
 
@@ -2396,7 +2402,8 @@ class Controller:
     ) -> None:
         state = (
             "uncertain"
-            if mutation or isinstance(error, (TollgateUncertainError, AppServerError))
+            if isinstance(error, (TollgateUncertainError, AppServerError))
+            or (mutation and not isinstance(error, TollgateError))
             else "failed"
         )
         current = self.store.row(

@@ -14,7 +14,7 @@ from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
 from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV, _find_candidate
 from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
 from fulcrum.store import StoreError
-from fulcrum.tollgate import TollgateUncertainError
+from fulcrum.tollgate import TollgateError, TollgateUncertainError
 
 
 class FakeCandidateTollgate:
@@ -204,6 +204,22 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         if self.controller.lock_handle is not None:
             self.controller.lock_handle.close()
         self.temporary.cleanup()
+
+    def test_definitive_tollgate_failure_is_not_marked_uncertain(self) -> None:
+        operation = self.controller.store.create_operation(
+            "tollgate_candidate_create", "definitive", {}
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation)
+        self.controller._operation_failed(
+            operation,
+            TollgateError("rejected", returncode=1),
+            attempt=attempt,
+            mutation=True,
+        )
+        retained = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation,)
+        )
+        self.assertEqual(retained["state"], "failed")
 
     def test_reexec_adopts_inherited_lock_without_permitting_a_contender(self) -> None:
         inherited = os.dup(self.controller.lock_handle.fileno())
