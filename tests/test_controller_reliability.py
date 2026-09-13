@@ -1105,7 +1105,7 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(relevant)
 
-    async def test_runtime_notification_stream_is_coalesced_without_losing_fallback_or_evidence(
+    async def test_runtime_loops_bound_noise_and_deduplicate_completion(
         self,
     ) -> None:
         decision = acquire_lease(
@@ -1123,7 +1123,19 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         assert decision.action is not None
         runtime = AsyncMock()
         runtime.ready = True
-        runtime.start_turn.return_value = "turn-stream"
+        runtime.start_turn.side_effect = ["turn-stream", "turn-reminder"]
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "name": self.executor["title"],
+            "status": {"type": "idle"},
+            "turns": [
+                {
+                    "id": "turn-stream",
+                    "status": "completed",
+                    "items": [],
+                }
+            ],
+        }
         self.controller.runtime = runtime
         self.executor["runtime_status"] = "unmaterialized"
         await self.controller._dispatch_action(
@@ -1144,67 +1156,104 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
 
         reconcile = AsyncMock()
         advance = AsyncMock()
+        advancement_done = asyncio.Event()
+        advance.side_effect = advancement_done.set
         event_worker = asyncio.create_task(self.controller._event_loop())
+        advancement_worker = asyncio.create_task(self.controller._advancement_loop())
         try:
             with (
                 patch.object(self.controller, "reconcile", new=reconcile),
                 patch.object(self.controller, "advance", new=advance),
             ):
-                dormant_advancement = asyncio.create_task(
-                    self.controller._advancement_loop()
-                )
-                try:
-                    for sequence in range(1_000):
-                        await self.controller._queue_runtime_event(
-                            "item/agentMessage/delta",
-                            {
-                                "threadId": "executor",
-                                "delta": f"token-{sequence}",
-                            },
-                        )
-                    await asyncio.wait_for(self.controller.events.join(), timeout=2)
+                events_before_noise = self.controller.store.row(
+                    "SELECT COUNT(*) AS count FROM events"
+                )["count"]
+                for sequence in range(10_000):
+                    await self.controller._queue_runtime_event(
+                        "item/agentMessage/delta",
+                        {
+                            "threadId": "executor",
+                            "delta": f"token-{sequence}",
+                        },
+                    )
+                for _ in range(1_000):
+                    await self.controller._queue_runtime_event(
+                        "thread/status/changed",
+                        {"threadId": "executor", "status": {"type": "active"}},
+                    )
+                await asyncio.wait_for(self.controller.events.join(), timeout=3)
 
-                    self.assertFalse(self.controller.advance_requested.is_set())
-                    reconcile.assert_not_awaited()
-                    advance.assert_not_awaited()
-                finally:
-                    dormant_advancement.cancel()
-                    await asyncio.gather(dormant_advancement, return_exceptions=True)
+                events_after_noise = self.controller.store.row(
+                    "SELECT COUNT(*) AS count FROM events"
+                )["count"]
+                self.assertEqual(events_after_noise, events_before_noise)
+                self.assertFalse(self.controller.advance_requested.is_set())
+                reconcile.assert_not_awaited()
+                advance.assert_not_awaited()
+                runtime.start_turn.assert_awaited_once()
 
-            # Both notifications change retained state, but asyncio.Event holds a
-            # single pending wake-up no matter how many relevant events arrive.
-            for status in ("waiting", "active"):
                 await self.controller._queue_runtime_event(
-                    "thread/status/changed",
-                    {"threadId": "executor", "status": {"type": status}},
+                    "turn/completed",
+                    {
+                        "threadId": "executor",
+                        "turn": {"id": "turn-stream", "status": "completed"},
+                    },
                 )
-            await asyncio.wait_for(self.controller.events.join(), timeout=1)
-            self.assertTrue(self.controller.advance_requested.is_set())
+                await asyncio.wait_for(self.controller.events.join(), timeout=1)
+                await asyncio.wait_for(advancement_done.wait(), timeout=1)
 
-            advancement_done = asyncio.Event()
-
-            async def mark_advanced() -> None:
-                advancement_done.set()
-
-            advance.side_effect = mark_advanced
-            with (
-                patch.object(self.controller, "reconcile", new=reconcile),
-                patch.object(self.controller, "advance", new=advance),
-            ):
-                advancement_worker = asyncio.create_task(
-                    self.controller._advancement_loop()
+                self.assertEqual(reconcile.await_count, 1)
+                self.assertEqual(advance.await_count, 1)
+                self.assertEqual(runtime.start_turn.await_count, 2)
+                self.assertEqual(
+                    runtime.start_turn.await_args_list[-1].args[0], "executor"
                 )
-                try:
-                    await asyncio.wait_for(advancement_done.wait(), timeout=1)
-                    self.assertEqual(reconcile.await_count, 1)
-                    self.assertEqual(advance.await_count, 1)
-                    self.assertFalse(self.controller.advance_requested.is_set())
-                finally:
-                    advancement_worker.cancel()
-                    await asyncio.gather(advancement_worker, return_exceptions=True)
+                self.assertIn(
+                    "finish outcome",
+                    runtime.start_turn.await_args_list[-1].args[1],
+                )
+                self.assertFalse(self.controller.advance_requested.is_set())
+
+                events_after_completion = self.controller.store.row(
+                    "SELECT COUNT(*) AS count FROM events"
+                )["count"]
+                await self.controller._queue_runtime_event(
+                    "turn/completed",
+                    {
+                        "threadId": "executor",
+                        "turn": {"id": "turn-stream", "status": "completed"},
+                    },
+                )
+                await asyncio.wait_for(self.controller.events.join(), timeout=1)
+                await asyncio.sleep(0)
+
+                self.assertEqual(reconcile.await_count, 1)
+                self.assertEqual(advance.await_count, 1)
+                self.assertEqual(runtime.start_turn.await_count, 2)
+                self.assertEqual(
+                    self.controller.store.row("SELECT COUNT(*) AS count FROM events")[
+                        "count"
+                    ],
+                    events_after_completion,
+                )
+                self.assertFalse(self.controller.advance_requested.is_set())
+
+                # The loop itself also rejects a producer that bypasses the
+                # queueing boundary, without taking the mutation lock or logging.
+                await self.controller.events.put(
+                    (
+                        "item/agentMessage/delta",
+                        {"threadId": "executor", "delta": "direct"},
+                    )
+                )
+                await asyncio.wait_for(self.controller.events.join(), timeout=1)
+                self.assertEqual(reconcile.await_count, 1)
         finally:
             event_worker.cancel()
-            await asyncio.gather(event_worker, return_exceptions=True)
+            advancement_worker.cancel()
+            await asyncio.gather(
+                event_worker, advancement_worker, return_exceptions=True
+            )
 
         fallback_intervals: list[int | float] = []
         fallback_done = asyncio.Event()

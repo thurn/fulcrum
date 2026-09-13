@@ -56,6 +56,16 @@ from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 INHERITED_LOCK_FD_ENV = "FULCRUM_INHERITED_LOCK_FD"
 FALLBACK_RECONCILIATION_SECONDS = 30
+RUNTIME_WORKFLOW_EVENTS: frozenset[str] = frozenset(
+    {
+        "fulcrum/runtime/disconnected",
+        "thread/archived",
+        "thread/status/changed",
+        "thread/unarchived",
+        "turn/completed",
+        "turn/started",
+    }
+)
 MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
 
 
@@ -259,6 +269,10 @@ class Controller:
             )
 
     async def _queue_runtime_event(self, method: str, params: dict[str, Any]) -> None:
+        # Item, token, and other observational notifications do not mutate the
+        # workflow. Drop them before they can contend for mutation_lock.
+        if method not in RUNTIME_WORKFLOW_EVENTS:
+            return
         await self.events.put((method, params))
 
     async def _event_loop(self) -> None:
@@ -266,6 +280,10 @@ class Controller:
             self.store.heartbeat("events")
             method, params = await self.events.get()
             try:
+                # Keep the worker boundary defensive for tests and any future
+                # producer that writes directly to the queue.
+                if method not in RUNTIME_WORKFLOW_EVENTS:
+                    continue
                 async with self.mutation_lock:
                     if await self._handle_runtime_event(method, params):
                         self.advance_requested.set()
@@ -354,55 +372,77 @@ class Controller:
                 (status, timestamp, task["id"]),
             )
         elif method == "turn/completed":
-            facts = await self._refresh_task(task)
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None
+            if not isinstance(turn_id, str):
+                return False
             status = (
                 turn.get("status", "completed")
                 if isinstance(turn, dict)
                 else "completed"
             )
-            action = (
-                self.store.row(
-                    """SELECT * FROM actions WHERE task_id = ? AND native_turn_id = ?
-                       AND state IN ('active','terminal')""",
-                    (task["id"], turn_id),
-                )
-                if turn_id
-                else None
+            action = self.store.row(
+                """SELECT * FROM actions WHERE task_id = ? AND native_turn_id = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (task["id"], turn_id),
             )
-            if action is not None:
-                if facts["last_turn_id"] != turn_id:
+            if action is None:
+                current = self.store.row(
+                    """SELECT native_turn_id, state FROM actions WHERE task_id = ?
+                       AND state IN ('pending','starting','active','terminal','uncertain')
+                       ORDER BY id DESC LIMIT 1""",
+                    (task["id"],),
+                )
+                # A starting/uncertain action may have completed before its turn
+                # identifier was retained. Reconciliation repairs that race. A
+                # different retained turn means this is stale delivery.
+                return bool(current is not None and not current["native_turn_id"])
+            if action["state"] in {"processed", "canceled"}:
+                return False
+            if action["state"] == "failed" and not (
+                status == "completed"
+                and action["outcome_kind"] is not None
+                and str(action["condition"] or "").startswith("runtime turn ")
+            ):
+                return False
+            facts = await self._refresh_task(task)
+            if facts["last_turn_id"] != turn_id:
+                return False
+            observed_status = (
+                str(facts["last_turn_status"])
+                if facts["last_turn_terminal"] and facts["last_turn_status"] is not None
+                else str(status)
+            )
+            if (
+                observed_status == "completed"
+                and action["outcome_kind"]
+                in {"ready_for_review", "permitted_repair_complete"}
+                and action["assignment_id"] is not None
+            ):
+                captured = await self._capture_submitted_candidate(
+                    int(action["assignment_id"])
+                )
+                if not captured:
                     return True
-                observed_status = (
-                    str(facts["last_turn_status"])
-                    if facts["last_turn_terminal"]
-                    and facts["last_turn_status"] is not None
-                    else str(status)
+            result = observe_action_terminal(
+                self.store, int(action["id"]), runtime_state=observed_status
+            )
+            if result.get("reminder"):
+                action["reminder_sent"] = 1
+                self.store.execute(
+                    "UPDATE actions SET state = 'pending', updated_at = ? WHERE id = ?",
+                    (timestamp, action["id"]),
                 )
-                if (
-                    observed_status == "completed"
-                    and action["outcome_kind"]
-                    in {"ready_for_review", "permitted_repair_complete"}
-                    and action["assignment_id"] is not None
-                ):
-                    captured = await self._capture_submitted_candidate(
-                        int(action["assignment_id"])
-                    )
-                    if not captured:
-                        return True
-                result = observe_action_terminal(
-                    self.store, int(action["id"]), runtime_state=observed_status
-                )
-                if result.get("reminder"):
-                    action["reminder_sent"] = 1
-                    self.store.execute(
-                        "UPDATE actions SET state = 'pending', updated_at = ? WHERE id = ?",
-                        (timestamp, action["id"]),
-                    )
-                    await self._dispatch_action(action)
+                await self._dispatch_action(action)
+            return bool(
+                result.get("advanced")
+                or result.get("reminder")
+                or result.get("condition")
+            )
         elif method in {"thread/archived", "thread/unarchived"}:
             archived = int(method == "thread/archived")
+            if int(task["archived"]) == archived:
+                return False
             state = "archived" if archived else "idle"
             self.store.execute(
                 "UPDATE tasks SET archived = ?, state = ?, updated_at = ? WHERE id = ?",
