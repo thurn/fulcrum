@@ -253,6 +253,33 @@ class LifecycleTest(unittest.TestCase):
                 },
             )
 
+    def test_archon_policy_reapplication_is_idempotent_for_global_scope(self) -> None:
+        payload = {
+            "recurring_policies": [
+                {
+                    "kind": "sage",
+                    "scope": None,
+                    "cadence_seconds": 86400,
+                    "anchor_at": "2026-01-01T06:00:00Z",
+                },
+                {
+                    "kind": "inquisitor",
+                    "scope": "p",
+                    "cadence_seconds": 86400,
+                    "anchor_at": "2026-01-01T18:00:00Z",
+                },
+            ]
+        }
+
+        apply_archon_decisions(self.store, payload)
+        apply_archon_decisions(self.store, payload)
+
+        policies = self.store.rows("SELECT kind, scope FROM policies ORDER BY kind")
+        self.assertEqual(
+            [(row["kind"], row["scope"]) for row in policies],
+            [("inquisitor", "p"), ("sage", None)],
+        )
+
     def test_unknown_archon_decision_rolls_back_the_entire_payload(self) -> None:
         before = len(self.store.rows("SELECT * FROM runs"))
         now = "2026-01-01T00:00:00Z"

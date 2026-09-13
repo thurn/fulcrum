@@ -836,7 +836,7 @@ def apply_archon_decisions(
             connection.execute(
                 """INSERT INTO policies(kind, scope, cadence_seconds, anchor_at, next_due_at, config_json, active)
                    VALUES (?, ?, ?, ?, ?, ?, 1)
-                   ON CONFLICT(kind, scope) DO UPDATE SET cadence_seconds = excluded.cadence_seconds,
+                   ON CONFLICT DO UPDATE SET cadence_seconds = excluded.cadence_seconds,
                    anchor_at = excluded.anchor_at, next_due_at = excluded.next_due_at,
                    config_json = excluded.config_json, active = 1""",
                 (
