@@ -2372,7 +2372,9 @@ class Controller:
         if assignment["scope_snapshot"] != assignment["mandate_scope"]:
             return "assignment scope differs from the retained review mandate"
         active = self.store.row(
-            "SELECT 1 FROM tasks WHERE id IN (?, ?) AND (last_turn_terminal = 0 OR helpers_terminal = 0 OR runtime_status != 'idle')",
+            """SELECT 1 FROM tasks WHERE id IN (?, ?)
+               AND (last_turn_terminal = 0 OR helpers_terminal = 0
+                    OR runtime_status = 'active')""",
             (assignment["executor_task_id"], assignment["overseer_task_id"]),
         )
         if active is not None:

@@ -1471,6 +1471,10 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
                operator_hold_id = ? WHERE id = ?""",
             (hold.lastrowid, self.assignment["id"]),
         )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'notLoaded' WHERE id IN (?, ?)",
+            (self.executor["id"], self.overseer["id"]),
+        )
 
         await self.controller._reconcile_delivery_boundary_holds()
 
