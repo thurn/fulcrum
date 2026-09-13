@@ -34,6 +34,8 @@ For unattended setup:
 
 ## Operate
 
+Human users create and register Weaver tasks; Fulcrum creates Archon, Executor, and Overseer tasks.
+
 ```sh
 fulcrum status --json
 fulcrum doctor --json
