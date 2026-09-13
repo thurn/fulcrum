@@ -220,6 +220,23 @@ class CodexRuntime:
         thread = result.get("thread")
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
             raise AppServerError("thread/start returned no native thread ID")
+        if project_id is not None and thread.get("projectId") != project_id:
+            updated = await self.assign_thread_project(thread["id"], project_id)
+            result["thread"] = updated["thread"]
+        return result
+
+    async def assign_thread_project(
+        self, thread_id: str, project_id: str
+    ) -> dict[str, Any]:
+        result = await self.request(
+            "thread/metadata/update",
+            {"threadId": thread_id, "projectId": project_id},
+        )
+        thread = result.get("thread")
+        if not isinstance(thread, dict) or thread.get("projectId") != project_id:
+            raise AppServerError(
+                f"thread {thread_id} did not retain Codex project {project_id}"
+            )
         return result
 
     async def list_threads(

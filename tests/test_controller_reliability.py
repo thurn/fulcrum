@@ -1591,8 +1591,18 @@ print(json.dumps({
         runtime.read_thread.return_value = {
             "id": "weaver-thread",
             "name": "temporary",
+            "projectId": None,
             "status": {"type": "active"},
             "turns": [{"id": "weaver-turn", "status": "inProgress", "items": []}],
+        }
+        runtime.assign_thread_project.return_value = {
+            "thread": {
+                "id": "weaver-thread",
+                "name": "temporary",
+                "projectId": "codex-p",
+                "status": {"type": "active"},
+                "turns": [{"id": "weaver-turn", "status": "inProgress", "items": []}],
+            }
         }
         self.controller.runtime = runtime
 
@@ -1612,6 +1622,124 @@ print(json.dumps({
         )
         self.assertEqual(action["native_turn_id"], "weaver-turn")
         self.assertEqual(result["thread_id"], "weaver-thread")
+        runtime.assign_thread_project.assert_awaited_once_with(
+            "weaver-thread", "codex-p"
+        )
+
+    async def test_project_verification_replaces_a_mismatched_saved_identity(
+        self,
+    ) -> None:
+        runtime = AsyncMock()
+        runtime.list_projects.return_value = [
+            {
+                "id": "wrong-project",
+                "roots": [{"path": str(self.temporary.name)}],
+            },
+            {
+                "id": "correct-project",
+                "roots": [{"path": self.config.source_root}],
+            },
+        ]
+        self.controller.runtime = runtime
+
+        await self.controller._verify_projects()
+
+        self.assertEqual(
+            self.controller.config.projects[0].codex_project_id,
+            "correct-project",
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT codex_project_id FROM projects WHERE project_id = 'p'"
+            )["codex_project_id"],
+            "correct-project",
+        )
+
+    async def test_thread_reconciliation_adopts_and_attaches_unassigned_thread(
+        self,
+    ) -> None:
+        inputs = {
+            "role": "executor",
+            "description": "Recovered executor",
+            "project_id": "codex-p",
+            "local_project_id": "p",
+            "cwd": str(self.worktree),
+            "model": "sol",
+            "effort": "high",
+            "pair_id": None,
+            "role_number": 2,
+            "title": "Recovered executor",
+        }
+        operation_id = self.controller.store.create_operation(
+            "thread_start", "executor", inputs
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="connection ended after dispatch",
+        )
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        created_at = datetime.fromisoformat(
+            operation["created_at"].replace("Z", "+00:00")
+        )
+        unassigned = {
+            "id": "unassigned-executor",
+            "model": "sol",
+            "projectId": None,
+            "createdAt": int(created_at.timestamp()),
+            "status": {"type": "idle"},
+            "turns": [],
+        }
+        runtime = AsyncMock()
+        runtime.list_threads.side_effect = [[], [unassigned]]
+        runtime.assign_thread_project.return_value = {
+            "thread": {**unassigned, "projectId": "codex-p"}
+        }
+        self.controller.runtime = runtime
+
+        await self.controller._reconcile_thread_start(operation)
+
+        self.assertEqual(
+            runtime.list_threads.await_args_list[0].kwargs["project_id"], "codex-p"
+        )
+        self.assertIsNone(runtime.list_threads.await_args_list[1].kwargs["project_id"])
+        runtime.assign_thread_project.assert_awaited_once_with(
+            "unassigned-executor", "codex-p"
+        )
+        retained = self.controller.store.row(
+            "SELECT state, native_id FROM external_operations WHERE id = ?",
+            (operation_id,),
+        )
+        self.assertEqual(
+            retained, {"state": "complete", "native_id": "unassigned-executor"}
+        )
+
+    async def test_startup_repairs_an_existing_unassigned_task(self) -> None:
+        self.controller.store.execute(
+            "UPDATE tasks SET archived = 1 WHERE id = ?", (self.overseer["id"],)
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "projectId": None,
+        }
+        runtime.assign_thread_project.return_value = {
+            "thread": {"id": "executor", "projectId": "codex-p"}
+        }
+        self.controller.runtime = runtime
+
+        await self.controller._repair_task_project_bindings()
+
+        runtime.read_thread.assert_awaited_once_with("executor", include_turns=False)
+        runtime.assign_thread_project.assert_awaited_once_with("executor", "codex-p")
+        event = self.controller.store.row(
+            "SELECT * FROM events WHERE kind = 'task_project_repaired'"
+        )
+        self.assertEqual(event["entity_id"], str(self.executor["id"]))
 
     async def test_dispatch_resumes_a_not_loaded_thread_before_starting(self) -> None:
         self.controller.store.execute(
@@ -1630,11 +1758,13 @@ print(json.dumps({
         runtime.read_thread.side_effect = [
             {
                 "id": "executor",
+                "projectId": "codex-p",
                 "status": {"type": "notLoaded"},
                 "turns": [],
             },
             {
                 "id": "executor",
+                "projectId": "codex-p",
                 "status": {"type": "idle"},
                 "turns": [],
             },
@@ -2471,6 +2601,7 @@ print(json.dumps({
         runtime.read_thread.return_value = {
             "id": "executor",
             "name": self.executor["title"],
+            "projectId": "codex-p",
             "status": {"type": "notLoaded"},
             "archived": False,
             "turns": [],
@@ -2547,6 +2678,7 @@ print(json.dumps({
         runtime.read_thread.return_value = {
             "id": "executor",
             "name": self.executor["title"],
+            "projectId": "codex-p",
             "status": {"type": "idle"},
             "turns": [
                 {
@@ -2758,6 +2890,7 @@ print(json.dumps({
         runtime = AsyncMock()
         runtime.ready = True
         runtime.read_thread.return_value = {
+            "projectId": "codex-p",
             "status": {"type": "idle"},
             "turns": [],
         }
@@ -2861,6 +2994,7 @@ print(json.dumps({
         runtime.read_thread.return_value = {
             "id": "executor",
             "name": self.executor["title"],
+            "projectId": "codex-p",
             "status": {"type": "idle"},
             "turns": [{"id": "done", "status": "completed", "items": []}],
         }
@@ -3473,6 +3607,7 @@ print(json.dumps({
             {
                 "id": "target-observed-successor",
                 "model": "sol",
+                "projectId": "codex-p",
                 "createdAt": int(created_at.timestamp()),
                 "turns": [],
             }
@@ -4540,6 +4675,7 @@ print(json.dumps({
             return {
                 "id": thread_id,
                 "name": task["title"],
+                "projectId": "codex-p",
                 "status": {"type": native_status[thread_id]},
                 "turns": [
                     {

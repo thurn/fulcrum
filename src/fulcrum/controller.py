@@ -195,6 +195,9 @@ class Controller:
                 entity_id="tollgate",
             )
         await self._connect_runtime()
+        if self.runtime.ready:
+            await self._verify_projects()
+            await self._repair_task_project_bindings()
         await self.reconcile()
         self.starts_enabled = self.runtime.ready
         self.store.execute(
@@ -462,6 +465,7 @@ class Controller:
 
     async def _refresh_task(self, task: dict[str, Any]) -> dict[str, Any]:
         thread = await self.runtime.read_thread(task["native_thread_id"])
+        thread = await self._ensure_task_project(task, thread)
         if thread.get("name") != task["title"]:
             await self.runtime.set_name(task["native_thread_id"], task["title"])
         facts = thread_facts(thread)
@@ -491,6 +495,40 @@ class Controller:
                 (utc_now(), task["id"]),
             )
         return facts
+
+    async def _ensure_task_project(
+        self, task: dict[str, Any], thread: dict[str, Any]
+    ) -> dict[str, Any]:
+        if task.get("project_id"):
+            project = self.store.row(
+                "SELECT codex_project_id FROM projects WHERE project_id = ?",
+                (task["project_id"],),
+            )
+            expected_project_id = project["codex_project_id"] if project else None
+            if expected_project_id and thread.get("projectId") != expected_project_id:
+                result = await self.runtime.assign_thread_project(
+                    task["native_thread_id"], expected_project_id
+                )
+                thread = result["thread"]
+                self.store.event(
+                    "task_project_repaired",
+                    f"attached {task['title']} to its Codex project",
+                    entity_type="task",
+                    entity_id=task["id"],
+                    detail={"codex_project_id": expected_project_id},
+                )
+        return thread
+
+    async def _repair_task_project_bindings(self) -> None:
+        for task in self.store.rows(
+            """SELECT t.* FROM tasks t JOIN projects p ON p.project_id = t.project_id
+               WHERE t.archived = 0 AND p.enabled = 1
+                 AND p.codex_project_id IS NOT NULL ORDER BY t.id"""
+        ):
+            thread = await self.runtime.read_thread(
+                task["native_thread_id"], include_turns=False
+            )
+            await self._ensure_task_project(task, thread)
 
     async def _fallback_loop(self) -> None:
         while True:
@@ -947,15 +985,32 @@ class Controller:
             cwd=inputs["cwd"], project_id=inputs.get("project_id")
         )
         created = datetime.fromisoformat(operation["created_at"].replace("Z", "+00:00"))
-        candidates = [
-            thread
-            for thread in threads
-            if thread.get("model") == inputs["model"]
-            and isinstance(thread.get("createdAt"), int)
-            and abs(datetime.fromtimestamp(thread["createdAt"], timezone.utc) - created)
-            <= timedelta(minutes=2)
-            and not thread.get("turns")
-        ]
+
+        def candidates_in(
+            items: list[dict[str, Any]], *, model: str, created_at: datetime
+        ) -> list[dict[str, Any]]:
+            return [
+                thread
+                for thread in items
+                if thread.get("model") == model
+                and isinstance(thread.get("createdAt"), int)
+                and abs(
+                    datetime.fromtimestamp(thread["createdAt"], timezone.utc)
+                    - created_at
+                )
+                <= timedelta(minutes=2)
+                and not thread.get("turns")
+            ]
+
+        candidates = candidates_in(
+            threads, model=str(inputs["model"]), created_at=created
+        )
+        if not candidates and inputs.get("project_id"):
+            candidates = candidates_in(
+                await self.runtime.list_threads(cwd=inputs["cwd"], project_id=None),
+                model=str(inputs["model"]),
+                created_at=created,
+            )
         if len(candidates) == 1:
             await self._register_created_thread(operation, inputs, candidates[0])
             return
@@ -1801,6 +1856,12 @@ class Controller:
         thread_id = thread.get("id")
         if not isinstance(thread_id, str):
             raise AppServerError("discovered thread has no native ID")
+        expected_project_id = inputs.get("project_id")
+        if expected_project_id and thread.get("projectId") != expected_project_id:
+            result = await self.runtime.assign_thread_project(
+                thread_id, expected_project_id
+            )
+            thread = result["thread"]
         task = self.store.register_task(
             native_thread_id=thread_id,
             role=inputs["role"],
@@ -3699,8 +3760,10 @@ class Controller:
         codex_projects = await self.runtime.list_projects()
         resolved_projects = []
         for project in self.config.projects:
-            codex_id = project.codex_project_id or _find_codex_project_id(
-                codex_projects, project.repo_path
+            codex_id = _find_codex_project_id(
+                codex_projects,
+                project.repo_path,
+                preferred_id=project.codex_project_id,
             )
             tollgate_id = project.tollgate_repo_id or _find_tollgate_repository_id(
                 tollgate_repositories, project.repo_path
@@ -5437,7 +5500,10 @@ def _candidate_definitively_failed(candidate: dict[str, Any] | None) -> bool:
 
 
 def _find_codex_project_id(
-    projects: list[dict[str, Any]], repo_path: str
+    projects: list[dict[str, Any]],
+    repo_path: str,
+    *,
+    preferred_id: str | None = None,
 ) -> str | None:
     expected = str(Path(repo_path).resolve())
     matches = []
@@ -5451,8 +5517,12 @@ def _find_codex_project_id(
             and str(Path(root["path"]).resolve()) == expected
             for root in roots
         ):
-            matches.append(project.get("id"))
-    return matches[0] if len(matches) == 1 and isinstance(matches[0], str) else None
+            identifier = project.get("id")
+            if isinstance(identifier, str):
+                matches.append(identifier)
+    if preferred_id in matches:
+        return preferred_id
+    return matches[0] if len(matches) == 1 else None
 
 
 def _find_tollgate_repository_id(value: Any, repo_path: str) -> str | None:

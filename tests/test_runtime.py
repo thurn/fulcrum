@@ -89,6 +89,11 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                     await connection.send(
                         json.dumps({"id": identifier, "result": {"thread": thread}})
                     )
+                elif method == "thread/metadata/update":
+                    thread["projectId"] = message["params"]["projectId"]
+                    await connection.send(
+                        json.dumps({"id": identifier, "result": {"thread": thread}})
+                    )
                 elif method == "thread/name/set":
                     thread["name"] = message["params"]["name"]
                     await connection.send(json.dumps({"id": identifier, "result": {}}))
@@ -131,6 +136,7 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 project_id="project",
             )
             self.assertEqual(created["thread"]["id"], "thread-1")
+            self.assertEqual(created["thread"]["projectId"], "project")
             create_request = next(
                 item for item in received if item.get("method") == "thread/start"
             )
@@ -142,6 +148,15 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                     "projectId": "project",
                     "runtimeWorkspaceRoots": ["/workspace"],
                 },
+            )
+            metadata_request = next(
+                item
+                for item in received
+                if item.get("method") == "thread/metadata/update"
+            )
+            self.assertEqual(
+                metadata_request["params"],
+                {"threadId": "thread-1", "projectId": "project"},
             )
             await runtime.set_name("thread-1", "Canonical")
             self.assertEqual(
