@@ -318,14 +318,21 @@ class Controller:
         if method == "turn/started":
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None
+            action = self.store.row(
+                """SELECT id FROM actions WHERE task_id = ?
+                   AND state IN ('starting','pending') ORDER BY id DESC LIMIT 1""",
+                (task["id"],),
+            )
+            if action is None:
+                return
             self.store.execute(
                 "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, updated_at = ? WHERE id = ?",
                 (timestamp, task["id"]),
             )
             if isinstance(turn_id, str):
                 self.store.execute(
-                    "UPDATE actions SET state = 'active', native_turn_id = ?, updated_at = ? WHERE task_id = ? AND state IN ('starting','pending')",
-                    (turn_id, timestamp, task["id"]),
+                    "UPDATE actions SET state = 'active', native_turn_id = ?, updated_at = ? WHERE id = ?",
+                    (turn_id, timestamp, action["id"]),
                 )
         elif method == "thread/status/changed":
             raw_status = params.get("status")
@@ -403,6 +410,20 @@ class Controller:
                 task["id"],
             ),
         )
+        if (
+            facts["can_start"]
+            and not task["archived"]
+            and self.store.row(
+                """SELECT 1 FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')""",
+                (task["id"],),
+            )
+            is None
+        ):
+            self.store.execute(
+                "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
+                (utc_now(), task["id"]),
+            )
         return facts
 
     async def _fallback_loop(self) -> None:

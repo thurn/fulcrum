@@ -719,6 +719,45 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(retained, {"state": "archived", "archived": 1})
 
+    async def test_late_unowned_start_event_does_not_reactivate_idle_task(self) -> None:
+        await self.controller._handle_runtime_event(
+            "turn/started",
+            {
+                "threadId": "executor",
+                "turn": {"id": "late-turn", "status": "inProgress"},
+            },
+        )
+
+        retained = self.controller.store.row(
+            "SELECT state, runtime_status FROM tasks WHERE id = ?",
+            (self.executor["id"],),
+        )
+        self.assertEqual(retained["state"], "idle")
+
+    async def test_refresh_repairs_idle_runtime_without_current_action(self) -> None:
+        self.controller.store.execute(
+            "UPDATE tasks SET state = 'active' WHERE id = ?", (self.executor["id"],)
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "name": self.executor["title"],
+            "status": {"type": "idle"},
+            "turns": [{"id": "done", "status": "completed", "items": []}],
+        }
+        self.controller.runtime = runtime
+
+        await self.controller._refresh_task(
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE id = ?", (self.executor["id"],)
+            )
+        )
+
+        retained = self.controller.store.row(
+            "SELECT state FROM tasks WHERE id = ?", (self.executor["id"],)
+        )
+        self.assertEqual(retained["state"], "idle")
+
     async def test_repair_context_exposes_permission_and_retained_diagnosis(
         self,
     ) -> None:
