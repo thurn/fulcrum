@@ -246,9 +246,10 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(result["advanced"])
         self.assertEqual(
             self.store.row(
-                "SELECT state FROM actions WHERE id = ?", (cursor.lastrowid,)
-            )["state"],
-            "processed",
+                "SELECT state, condition FROM actions WHERE id = ?",
+                (cursor.lastrowid,),
+            ),
+            {"state": "processed", "condition": None},
         )
 
     def test_archon_cannot_lower_capacity_below_active_usage(self) -> None:

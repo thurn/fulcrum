@@ -128,7 +128,7 @@ def observe_action_terminal(
                 "DELETE FROM reservations WHERE action_id = ?", (action_id,)
             )
             connection.execute(
-                "UPDATE actions SET state = 'processed', updated_at = ? WHERE id = ?",
+                "UPDATE actions SET state = 'processed', condition = NULL, updated_at = ? WHERE id = ?",
                 (utc_now(), action_id),
             )
             connection.execute(
