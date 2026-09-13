@@ -215,6 +215,69 @@ class ControlledArchiveRuntime:
         self.archived.append(thread_id)
 
 
+class DelayedWeaverRuntime:
+    def __init__(self, thread_id: str, *, project_id: str | None = "codex-p") -> None:
+        self.ready = True
+        self.thread_id = thread_id
+        self.project_id = project_id
+        self.name = "temporary"
+        self.status = "active"
+        self.turn_visible = False
+        self.turn_id = "weaver-current-turn"
+        self.turn_status = "inProgress"
+        self.archived: list[str] = []
+        self.archive_attempts: list[str] = []
+
+    async def set_name(self, thread_id: str, name: str) -> None:
+        assert thread_id == self.thread_id
+        self.name = name
+
+    async def read_thread(
+        self, thread_id: str, *, include_turns: bool = True
+    ) -> dict[str, Any]:
+        assert thread_id == self.thread_id
+        thread: dict[str, Any] = {
+            "id": thread_id,
+            "name": self.name,
+            "projectId": self.project_id,
+            "status": {"type": self.status},
+            "archived": thread_id in self.archived,
+        }
+        if include_turns:
+            thread["turns"] = (
+                [
+                    {
+                        "id": self.turn_id,
+                        "status": self.turn_status,
+                        "items": [],
+                    }
+                ]
+                if self.turn_visible
+                else []
+            )
+        return thread
+
+    async def assign_thread_project(
+        self, thread_id: str, project_id: str
+    ) -> dict[str, Any]:
+        assert thread_id == self.thread_id
+        self.project_id = project_id
+        # thread/metadata/update may return a summary with no turn history.
+        return {
+            "thread": {
+                "id": thread_id,
+                "name": self.name,
+                "projectId": project_id,
+                "status": {"type": self.status},
+            }
+        }
+
+    async def archive(self, thread_id: str) -> None:
+        assert thread_id == self.thread_id
+        self.archive_attempts.append(thread_id)
+        self.archived.append(thread_id)
+
+
 class FreshConversationRuntime:
     def __init__(self, previous_marker: str) -> None:
         self.ready = True
@@ -1637,7 +1700,6 @@ print(json.dumps({
                 "name": "temporary",
                 "projectId": "codex-p",
                 "status": {"type": "active"},
-                "turns": [{"id": "weaver-turn", "status": "inProgress", "items": []}],
             }
         }
         self.controller.runtime = runtime
@@ -1671,6 +1733,243 @@ print(json.dumps({
         runtime.assign_thread_project.assert_awaited_once_with(
             "weaver-thread", "codex-p"
         )
+
+    async def test_unbound_weaver_reconciles_and_archives_after_idle_delay(
+        self,
+    ) -> None:
+        runtime = DelayedWeaverRuntime("delayed-weaver", project_id=None)
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        await self.controller._register_weaver(
+            {
+                "thread_id": "delayed-weaver",
+                "project": "p",
+                "description": "Retain delayed intake",
+                "writable": True,
+            }
+        )
+        task = self.controller.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = 'delayed-weaver'"
+        )
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ?", (task["id"],)
+        )
+        self.assertIsNone(action["native_turn_id"])
+        self.assertTrue(json.loads(action["payload"])["adopt_current_turn"])
+        accept_finish(
+            self.controller.store,
+            native_thread_id="delayed-weaver",
+            outcome_kind="intake_complete",
+            options={},
+        )
+
+        self._restart_controller()
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        runtime.turn_visible = True
+        await self.controller.reconcile()
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.assertEqual(action["native_turn_id"], runtime.turn_id)
+        self.assertEqual(action["state"], "active")
+
+        runtime.status = "idle"
+        runtime.turn_status = "completed"
+        await self.controller.reconcile()
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.assertEqual(action["state"], "processed")
+        obligations = self.controller.store.rows(
+            "SELECT * FROM obligations WHERE kind = 'archive' AND target = ?",
+            ("delayed-weaver",),
+        )
+        self.assertEqual(len(obligations), 1)
+
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:00:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archive_attempts, [])
+        deadline = self.controller.store.row(
+            "SELECT archive_eligible_at FROM tasks WHERE id = ?", (task["id"],)
+        )["archive_eligible_at"]
+        self.assertEqual(deadline, "2026-01-01T00:10:00Z")
+
+        self._restart_controller()
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:05:00Z"):
+            await self.controller.reconcile()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT archive_eligible_at FROM tasks WHERE id = ?", (task["id"],)
+            )["archive_eligible_at"],
+            deadline,
+        )
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:09:59Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archive_attempts, [])
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:10:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archive_attempts, ["delayed-weaver"])
+
+    async def test_completion_event_adopts_matching_unbound_weaver_turn(self) -> None:
+        runtime = DelayedWeaverRuntime("event-weaver")
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        await self.controller._register_weaver(
+            {
+                "thread_id": "event-weaver",
+                "project": "p",
+                "description": "Complete event intake",
+                "writable": True,
+            }
+        )
+        accept_finish(
+            self.controller.store,
+            native_thread_id="event-weaver",
+            outcome_kind="intake_complete",
+            options={},
+        )
+        action = self.controller.store.current_action("event-weaver")
+        # Retain the pre-repair payload shape from already-stranded installations.
+        self.controller.store.execute(
+            "UPDATE actions SET payload = ? WHERE id = ?",
+            (json.dumps({"mode": "intake", "project": "p"}), action["id"]),
+        )
+        runtime.turn_visible = True
+        runtime.status = "idle"
+        runtime.turn_status = "completed"
+
+        handled = await self.controller._handle_runtime_event(
+            "turn/completed",
+            {
+                "threadId": "event-weaver",
+                "turn": {"id": runtime.turn_id, "status": "completed"},
+            },
+        )
+
+        self.assertTrue(handled)
+        action = self.controller.store.row("""SELECT * FROM actions WHERE task_id =
+                   (SELECT id FROM tasks WHERE native_thread_id = 'event-weaver')""")
+        self.assertEqual(action["native_turn_id"], runtime.turn_id)
+        self.assertEqual(action["state"], "processed")
+
+    async def test_invisible_completion_does_not_authorize_a_later_turn(self) -> None:
+        runtime = DelayedWeaverRuntime("eventually-consistent-weaver")
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        await self.controller._register_weaver(
+            {
+                "thread_id": "eventually-consistent-weaver",
+                "project": "p",
+                "description": "Retain the original completion",
+                "writable": True,
+            }
+        )
+        accept_finish(
+            self.controller.store,
+            native_thread_id="eventually-consistent-weaver",
+            outcome_kind="intake_complete",
+            options={},
+        )
+
+        handled = await self.controller._handle_runtime_event(
+            "turn/completed",
+            {
+                "threadId": "eventually-consistent-weaver",
+                "turn": {"id": "original-turn", "status": "completed"},
+            },
+        )
+        self.assertTrue(handled)
+        action = self.controller.store.current_action("eventually-consistent-weaver")
+        self.assertIsNone(action["native_turn_id"])
+        self.assertEqual(
+            json.loads(action["payload"])["unbound_completion_turn_id"],
+            "original-turn",
+        )
+
+        self._restart_controller()
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        runtime.turn_visible = True
+        runtime.turn_id = "later-unrelated-turn"
+        await self.controller.reconcile()
+        action = self.controller.store.current_action("eventually-consistent-weaver")
+        self.assertIsNone(action["native_turn_id"])
+        self.assertEqual(action["state"], "active")
+
+        runtime.turn_id = "original-turn"
+        runtime.turn_status = "completed"
+        runtime.status = "idle"
+        await self.controller.reconcile()
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.assertEqual(action["native_turn_id"], "original-turn")
+        self.assertEqual(action["state"], "processed")
+        self.assertEqual(
+            len(
+                self.controller.store.rows(
+                    """SELECT * FROM obligations
+                       WHERE kind = 'archive' AND target = ?""",
+                    ("eventually-consistent-weaver",),
+                )
+            ),
+            1,
+        )
+
+    async def test_unbound_weaver_does_not_adopt_mismatched_or_preexisting_turn(
+        self,
+    ) -> None:
+        runtime = DelayedWeaverRuntime("stale-weaver")
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        await self.controller._register_weaver(
+            {
+                "thread_id": "stale-weaver",
+                "project": "p",
+                "description": "Reject stale completion",
+                "writable": True,
+            }
+        )
+        runtime.turn_visible = True
+        runtime.status = "idle"
+        runtime.turn_status = "completed"
+
+        handled = await self.controller._handle_runtime_event(
+            "turn/completed",
+            {
+                "threadId": "stale-weaver",
+                "turn": {"id": "different-old-turn", "status": "completed"},
+            },
+        )
+        self.assertFalse(handled)
+        action = self.controller.store.row("""SELECT * FROM actions WHERE task_id =
+                   (SELECT id FROM tasks WHERE native_thread_id = 'stale-weaver')""")
+        self.assertIsNone(action["native_turn_id"])
+        self.controller.store.execute(
+            "UPDATE actions SET state = 'canceled' WHERE id = ?", (action["id"],)
+        )
+
+        idle_runtime = DelayedWeaverRuntime("preexisting-weaver")
+        idle_runtime.status = "idle"
+        self.controller.runtime = idle_runtime  # type: ignore[assignment]
+        await self.controller._register_weaver(
+            {
+                "thread_id": "preexisting-weaver",
+                "project": "p",
+                "description": "Reject pre-registration history",
+                "writable": True,
+            }
+        )
+        accept_finish(
+            self.controller.store,
+            native_thread_id="preexisting-weaver",
+            outcome_kind="intake_complete",
+            options={},
+        )
+        idle_runtime.turn_visible = True
+        idle_runtime.turn_status = "completed"
+        await self.controller.reconcile()
+        preexisting = self.controller.store.row(
+            """SELECT * FROM actions WHERE task_id =
+                   (SELECT id FROM tasks WHERE native_thread_id = 'preexisting-weaver')"""
+        )
+        self.assertIsNone(preexisting["native_turn_id"])
 
     async def test_weaver_registration_rejects_missing_and_empty_descriptions(
         self,

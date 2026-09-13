@@ -396,6 +396,7 @@ class Controller:
                 (status, status, status, timestamp, task["id"]),
             )
         elif method == "turn/completed":
+            facts: dict[str, Any] | None = None
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None
             if not isinstance(turn_id, str):
@@ -411,16 +412,16 @@ class Controller:
                 (task["id"], turn_id),
             )
             if action is None:
-                current = self.store.row(
-                    """SELECT native_turn_id, state FROM actions WHERE task_id = ?
-                       AND state IN ('pending','starting','active','terminal','uncertain')
-                       ORDER BY id DESC LIMIT 1""",
-                    (task["id"],),
+                facts = await self._refresh_task(task)
+                action = self._adopt_unbound_weaver_turn(
+                    int(task["id"]), facts, event_turn_id=turn_id
                 )
-                # A starting/uncertain action may have completed before its turn
-                # identifier was retained. Reconciliation repairs that race. A
-                # different retained turn means this is stale delivery.
-                return bool(current is not None and not current["native_turn_id"])
+                if action is None:
+                    if facts["last_turn_id"] is not None:
+                        return False
+                    return self._retain_unbound_weaver_completion(
+                        int(task["id"]), turn_id
+                    )
             if action["state"] in {"processed", "canceled"}:
                 return False
             if action["state"] == "failed" and not (
@@ -429,7 +430,10 @@ class Controller:
                 and str(action["condition"] or "").startswith("runtime turn ")
             ):
                 return False
-            facts = await self._refresh_task(task)
+            if action["native_turn_id"] != turn_id:
+                return False
+            if facts is None:
+                facts = await self._refresh_task(task)
             if facts["last_turn_id"] != turn_id:
                 return False
             observed_status = (
@@ -474,6 +478,115 @@ class Controller:
             )
         else:
             return False
+        return True
+
+    def _adopt_unbound_weaver_turn(
+        self,
+        task_id: int,
+        facts: dict[str, Any],
+        *,
+        event_turn_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Bind the turn that was already running when a Weaver registered.
+
+        Human-created Weaver actions are registered from inside their native turn,
+        so the controller can miss turn/started.  Adoption is limited to the one
+        active, unbound Weaver action and an authoritative current/just-completed
+        last turn.  The registration marker covers restart before finish; an
+        accepted outcome covers actions created before the marker existed.
+        """
+
+        turn_id = facts.get("last_turn_id")
+        if not isinstance(turn_id, str) or (
+            event_turn_id is not None and event_turn_id != turn_id
+        ):
+            return None
+        last_status = facts.get("last_turn_status")
+        current_shape = bool(
+            (last_status == "inProgress" and facts.get("runtime_status") == "active")
+            or (
+                facts.get("last_turn_terminal")
+                and facts.get("runtime_status") == "idle"
+            )
+        )
+        if not current_shape:
+            return None
+        action = self.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'weaver'
+               AND state = 'active' AND native_turn_id IS NULL""",
+            (task_id,),
+        )
+        if action is None:
+            return None
+        try:
+            payload = json.loads(action["payload"])
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        allowed_by_registration = payload.get("adopt_current_turn") is True
+        legacy_finished_action = bool(
+            "adopt_current_turn" not in payload and action["outcome_kind"] is not None
+        )
+        if not (allowed_by_registration or legacy_finished_action):
+            return None
+        retained_completion = payload.get("unbound_completion_turn_id")
+        if retained_completion is not None and retained_completion != turn_id:
+            return None
+        timestamp = utc_now()
+        cursor = self.store.execute(
+            """UPDATE actions SET native_turn_id = ?, updated_at = ?
+               WHERE id = ? AND state = 'active' AND native_turn_id IS NULL""",
+            (turn_id, timestamp, action["id"]),
+        )
+        if cursor.rowcount != 1:
+            return None
+        self.store.event(
+            "weaver_turn_adopted",
+            f"adopted native turn {turn_id}",
+            entity_type="action",
+            entity_id=action["id"],
+            detail={"native_turn_id": turn_id},
+        )
+        return self.store.row("SELECT * FROM actions WHERE id = ?", (action["id"],))
+
+    def _retain_unbound_weaver_completion(self, task_id: int, turn_id: str) -> bool:
+        """Pin an unmaterialized completion event for later confirmation."""
+
+        action = self.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'weaver'
+               AND state = 'active' AND native_turn_id IS NULL""",
+            (task_id,),
+        )
+        if action is None:
+            return False
+        try:
+            payload = json.loads(action["payload"])
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+        allowed_by_registration = payload.get("adopt_current_turn") is True
+        legacy_finished_action = bool(
+            "adopt_current_turn" not in payload and action["outcome_kind"] is not None
+        )
+        if not (allowed_by_registration or legacy_finished_action):
+            return False
+        retained_completion = payload.get("unbound_completion_turn_id")
+        if retained_completion is not None:
+            return retained_completion == turn_id
+        payload["unbound_completion_turn_id"] = turn_id
+        timestamp = utc_now()
+        cursor = self.store.execute(
+            """UPDATE actions SET payload = ?, updated_at = ?
+               WHERE id = ? AND state = 'active' AND native_turn_id IS NULL""",
+            (json.dumps(payload, sort_keys=True), timestamp, action["id"]),
+        )
+        if cursor.rowcount != 1:
+            return False
+        self.store.event(
+            "weaver_completion_retained",
+            f"retained unmaterialized native turn {turn_id}",
+            entity_type="action",
+            entity_id=action["id"],
+            detail={"native_turn_id": turn_id},
+        )
         return True
 
     async def _refresh_task(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -535,7 +648,12 @@ class Controller:
                 result = await self.runtime.assign_thread_project(
                     task["native_thread_id"], expected_project_id
                 )
-                thread = result["thread"]
+                assigned = result["thread"]
+                if not isinstance(assigned.get("turns"), list) or (
+                    not assigned["turns"] and thread.get("turns")
+                ):
+                    assigned["turns"] = thread.get("turns", [])
+                thread = assigned
                 self.store.event(
                     "task_project_repaired",
                     f"attached {task['title']} to its Codex project",
@@ -606,6 +724,11 @@ class Controller:
                        ORDER BY id DESC LIMIT 1""",
                     (task["id"],),
                 )
+                if action is not None and action["native_turn_id"] is None:
+                    action = (
+                        self._adopt_unbound_weaver_turn(int(task["id"]), facts)
+                        or action
+                    )
                 if (
                     action is not None
                     and facts["last_turn_terminal"]
@@ -3493,6 +3616,14 @@ class Controller:
             )
             if existing is None:
                 timestamp = utc_now()
+                payload = {
+                    "mode": "intake",
+                    "project": project_id,
+                    "adopt_current_turn": bool(
+                        facts["runtime_status"] == "active"
+                        and facts["last_turn_id"] is None
+                    ),
+                }
                 cursor = self.store.execute(
                     """INSERT INTO actions(
                            task_id, kind, payload, state, native_turn_id,
@@ -3500,7 +3631,7 @@ class Controller:
                        ) VALUES (?, 'weaver', ?, 'active', ?, ?, ?)""",
                     (
                         task["id"],
-                        json.dumps({"mode": "intake", "project": project_id}),
+                        json.dumps(payload),
                         facts["last_turn_id"],
                         timestamp,
                         timestamp,
@@ -3509,11 +3640,8 @@ class Controller:
                 existing = self.store.row(
                     "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
                 )
-            elif existing["native_turn_id"] is None and facts["last_turn_id"]:
-                self.store.execute(
-                    "UPDATE actions SET native_turn_id = ?, updated_at = ? WHERE id = ?",
-                    (facts["last_turn_id"], utc_now(), existing["id"]),
-                )
+            elif existing["native_turn_id"] is None:
+                self._adopt_unbound_weaver_turn(int(task["id"]), facts)
         self.store.execute(
             "UPDATE tasks SET state = 'active', archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
             (utc_now(), task["id"]),
