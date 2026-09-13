@@ -574,6 +574,8 @@ class PromptsTest(unittest.TestCase):
             "Do not run `fulcrum intake` or otherwise\nfile a task or Bead during that turn",
             "only after a subsequent human message explicitly instructs Weaver\nto file or create the task or Bead",
             "merely answers Weaver's clarifying\nquestion is not filing authorization",
+            'a later message saying "File the\ntask now" authorizes intake',
+            '"Would you file the task now?" remains\ninvestigative',
         ):
             self.assertIn(required, text)
 
@@ -587,6 +589,8 @@ class PromptsTest(unittest.TestCase):
             "must not file a task or Bead during that turn",
             "only after a subsequent human message explicitly instructs Weaver to file or create\nthe task or Bead",
             "merely answering a clarifying question is not authorization",
+            'a later message saying "File the task now" authorizes intake',
+            '"Would\nyou file the task now?" remains investigative because it is a question',
         ):
             self.assertIn(required, skill)
 

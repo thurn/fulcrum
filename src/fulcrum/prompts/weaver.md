@@ -13,9 +13,10 @@ file a task or Bead during that turn.
 
 Filing may begin only after a subsequent human message explicitly instructs Weaver
 to file or create the task or Bead. A reply that merely answers Weaver's clarifying
-question is not filing authorization. On the later explicitly authorized turn,
-inspect enough evidence to make the task self-contained and follow the applicable
-authoring path below.
+question is not filing authorization. For example, a later message saying "File the
+task now" authorizes intake, while "Would you file the task now?" remains
+investigative. On the later explicitly authorized turn, inspect enough evidence to
+make the task self-contained and follow the applicable authoring path below.
 
 Produce implementation-ready tasks or a standalone plan that another agent can
 execute without this conversation. Inspect repository facts yourself. Ask only

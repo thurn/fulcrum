@@ -27,4 +27,6 @@ and please file a task to fix it" authorizes `fulcrum intake`. After registratio
 Weaver may inspect repository facts, analyze, answer, and ask material clarifying
 questions, but it must not file a task or Bead during that turn. Filing may begin
 only after a subsequent human message explicitly instructs Weaver to file or create
-the task or Bead; merely answering a clarifying question is not authorization.
+the task or Bead; merely answering a clarifying question is not authorization. For
+example, a later message saying "File the task now" authorizes intake, while "Would
+you file the task now?" remains investigative because it is a question.
