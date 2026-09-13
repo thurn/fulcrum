@@ -220,6 +220,25 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(transition["from_state"], "active")
         self.assertEqual(transition["to_state"], "failed")
 
+    def test_open_replaces_stale_invariant_trigger_definitions(self) -> None:
+        self.store.execute("DROP TRIGGER handoff_must_match_terminal_source")
+        self.store.execute("""CREATE TRIGGER handoff_must_match_terminal_source
+               BEFORE INSERT ON handoffs
+               WHEN NOT EXISTS (
+                 SELECT 1 FROM actions WHERE id = NEW.source_action_id
+                 AND outcome_payload = NEW.content_json
+               )
+               BEGIN
+                 SELECT RAISE(ABORT, 'legacy trigger');
+               END""")
+        self.store.close()
+        self.store = Store(Path(self.temporary.name) / "state.sqlite3")
+        trigger = self.store.row(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            ("handoff_must_match_terminal_source",),
+        )
+        self.assertNotIn("outcome_payload = NEW.content_json", trigger["sql"])
+
     def test_existing_recovery_without_progress_is_migrated_to_a_hold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"

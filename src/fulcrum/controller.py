@@ -974,6 +974,7 @@ class Controller:
             observed,
             inputs.get("worktree_path"),
             exclude_id=inputs.get("predecessor_candidate_id"),
+            source_oid=inputs.get("revision"),
         )
         if candidate is None or not isinstance(candidate.get("id"), str):
             condition = (
@@ -1886,6 +1887,11 @@ class Controller:
         predecessor = payload.get("predecessor_candidate_id")
         if assignment["candidate_id"] and assignment["candidate_id"] != predecessor:
             return True
+        source_oid = await asyncio.to_thread(
+            _worktree_head, assignment["worktree_path"]
+        )
+        if source_oid is None:
+            raise StoreError("cannot resolve the Executor worktree HEAD")
         result = await asyncio.to_thread(
             tollgate.status, project["tollgate_repo_id"], None
         )
@@ -1893,6 +1899,7 @@ class Controller:
             result,
             assignment["worktree_path"],
             exclude_id=predecessor,
+            source_oid=source_oid,
         )
         if candidate is None:
             operation = self.store.create_operation(
@@ -1901,7 +1908,7 @@ class Controller:
                 {
                     "repository_id": project["tollgate_repo_id"],
                     "worktree_path": assignment["worktree_path"],
-                    "revision": "HEAD",
+                    "revision": source_oid,
                     "predecessor_candidate_id": predecessor,
                 },
             )
@@ -1911,7 +1918,7 @@ class Controller:
                 submitted = await asyncio.to_thread(
                     tollgate.submit_candidate,
                     project["tollgate_repo_id"],
-                    "HEAD",
+                    source_oid,
                     cwd=Path(str(assignment["worktree_path"])),
                 )
                 observed = await asyncio.to_thread(
@@ -1921,6 +1928,7 @@ class Controller:
                     observed,
                     assignment["worktree_path"],
                     exclude_id=predecessor,
+                    source_oid=source_oid,
                 )
                 if candidate is None:
                     raise TollgateUncertainError(
@@ -4355,7 +4363,11 @@ def _occurrence_scope(value: Any) -> dict[str, Any]:
 
 
 def _find_candidate(
-    value: Any, worktree_path: str | None, *, exclude_id: str | None = None
+    value: Any,
+    worktree_path: str | None,
+    *,
+    exclude_id: str | None = None,
+    source_oid: str | None = None,
 ) -> dict[str, Any] | None:
     matches: list[dict[str, Any]] = []
 
@@ -4368,6 +4380,10 @@ def _find_candidate(
                     isinstance(metadata, dict)
                     and metadata.get("worktree_path") == worktree_path
                     and item.get("id") != exclude_id
+                    and (
+                        source_oid is None or _oid(item.get("source_oid")) == source_oid
+                    )
+                    and item.get("state") not in {"canceled", "failed", "promoted"}
                 ):
                     merged = dict(item)
                     generation = node.get("generation")
@@ -4387,6 +4403,23 @@ def _find_candidate(
         matches,
         key=lambda item: int(item.get("admission_sequence") or 0),
     )
+
+
+def _worktree_head(worktree_path: str | None) -> str | None:
+    if not worktree_path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", worktree_path, "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
 
 
 def _oid(value: Any) -> str | None:

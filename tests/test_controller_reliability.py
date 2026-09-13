@@ -11,7 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
-from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV
+from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV, _find_candidate
 from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
 from fulcrum.store import StoreError
 from fulcrum.tollgate import TollgateUncertainError
@@ -932,9 +932,10 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         tollgate = FakeCandidateTollgate(str(self.worktree))
         self.controller.tollgate = tollgate  # type: ignore[assignment]
-        captured = await self.controller._capture_submitted_candidate(
-            int(self.assignment["id"])
-        )
+        with patch("fulcrum.controller._worktree_head", return_value="source-1"):
+            captured = await self.controller._capture_submitted_candidate(
+                int(self.assignment["id"])
+            )
         self.assertTrue(captured)
         self.assertEqual(tollgate.submissions, [self.worktree])
         updated = self.controller.store.row(
@@ -946,6 +947,24 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM external_operations WHERE kind = 'tollgate_candidate_create'"
         )
         self.assertEqual(operation["state"], "complete")
+
+    def test_candidate_lookup_ignores_stale_reused_worktree_history(self) -> None:
+        status = {
+            "history_items": [
+                {
+                    "item": {
+                        "id": "stale",
+                        "metadata": {"worktree_path": str(self.worktree)},
+                        "source_oid": "old-head",
+                        "state": "canceled",
+                        "admission_sequence": 9,
+                    }
+                }
+            ]
+        }
+        self.assertIsNone(
+            _find_candidate(status, str(self.worktree), source_oid="current-head")
+        )
 
     async def test_ambiguous_approval_is_reconciled_to_completed_delivery(self) -> None:
         self.controller.store.execute(

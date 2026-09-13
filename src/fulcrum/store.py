@@ -485,12 +485,23 @@ class Store:
             self.connection.execute("PRAGMA synchronous = FULL")
             self.connection.executescript(SCHEMA)
             self._migrate_existing_database()
+            self._replace_invariant_triggers()
             self.connection.executescript(INVARIANT_TRIGGERS)
             for role in ROLE_CODES:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO role_counters(role, next_number) VALUES (?, 1)",
                     (role,),
                 )
+
+    def _replace_invariant_triggers(self) -> None:
+        """Replace retained trigger definitions when controller invariants change."""
+
+        triggers = self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+        ).fetchall()
+        for trigger in triggers:
+            name = str(trigger[0]).replace('"', '""')
+            self.connection.execute(f'DROP TRIGGER "{name}"')
 
     def _migrate_existing_database(self) -> None:
         """Add correctness metadata to an existing database without a version gate."""
