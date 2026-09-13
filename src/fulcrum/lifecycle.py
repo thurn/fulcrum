@@ -423,10 +423,30 @@ def apply_archon_decisions(store: Store, payload: dict[str, Any]) -> dict[str, A
     created: list[int] = []
     timestamp = utc_now()
     with store.transaction() as connection:
+        enabled_projects = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT project_id FROM projects WHERE enabled = 1"
+            ).fetchall()
+        }
         if "global_limit" in payload:
-            global_limit = int(payload["global_limit"])
-            if global_limit <= 0:
+            supplied_global_limit = payload["global_limit"]
+            if (
+                not isinstance(supplied_global_limit, int)
+                or isinstance(supplied_global_limit, bool)
+                or supplied_global_limit <= 0
+            ):
                 raise StoreError("global capacity must be positive")
+            global_limit = supplied_global_limit
+            global_usage = int(
+                connection.execute(
+                    "SELECT COALESCE(SUM(global_slots), 0) FROM reservations"
+                ).fetchone()[0]
+            )
+            if global_limit < global_usage:
+                raise StoreError(
+                    f"global capacity {global_limit} is below active usage {global_usage}"
+                )
             connection.execute(
                 "INSERT INTO meta(key, value) VALUES ('global_limit', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (str(global_limit),),
@@ -441,6 +461,33 @@ def apply_archon_decisions(store: Store, payload: dict[str, Any]) -> dict[str, A
                 for project, limit in limits.items()
             ):
                 raise StoreError("project capacities must be positive integer mappings")
+            if set(limits) != enabled_projects:
+                missing = sorted(enabled_projects - set(limits))
+                unknown = sorted(set(limits) - enabled_projects)
+                raise StoreError(
+                    "project capacities must exactly cover enabled projects; "
+                    f"missing={missing}; unknown={unknown}"
+                )
+            usage: dict[str, int] = {}
+            for reservation in connection.execute(
+                "SELECT project_ids FROM reservations"
+            ).fetchall():
+                for project_id in json.loads(reservation[0]):
+                    project = str(project_id)
+                    usage[project] = usage.get(project, 0) + 1
+            exceeded = {
+                project: count
+                for project, count in usage.items()
+                if count > limits.get(project, 0)
+            }
+            if exceeded:
+                raise StoreError(
+                    "project capacity is below active usage: "
+                    + ", ".join(
+                        f"{project}={count}>{limits.get(project, 0)}"
+                        for project, count in sorted(exceeded.items())
+                    )
+                )
             connection.execute(
                 "INSERT INTO meta(key, value) VALUES ('project_limits', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (json.dumps(payload["project_limits"], sort_keys=True),),
@@ -451,10 +498,31 @@ def apply_archon_decisions(store: Store, payload: dict[str, Any]) -> dict[str, A
                 "inquisitor",
             }:
                 raise StoreError("recurring policies require a sage or inquisitor kind")
-            cadence = int(policy.get("cadence_seconds", 86400))
-            if cadence <= 0:
+            kind = str(policy["kind"])
+            scope = policy.get("scope")
+            if kind == "sage" and scope is not None:
+                raise StoreError("fleet Sage policy cannot have a project scope")
+            if kind == "inquisitor" and (
+                not isinstance(scope, str) or scope not in enabled_projects
+            ):
+                raise StoreError("Inquisitor policy requires an enabled project scope")
+            supplied_cadence = policy.get("cadence_seconds", 86400)
+            if (
+                not isinstance(supplied_cadence, int)
+                or isinstance(supplied_cadence, bool)
+                or supplied_cadence <= 0
+            ):
                 raise StoreError("recurring policy cadence must be positive")
+            cadence = supplied_cadence
             anchor = str(policy.get("anchor_at") or timestamp)
+            try:
+                parsed_anchor = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise StoreError(
+                    "recurring policy anchor must be an ISO timestamp"
+                ) from error
+            if parsed_anchor.tzinfo is None:
+                raise StoreError("recurring policy anchor must include a timezone")
             connection.execute(
                 """INSERT INTO policies(kind, scope, cadence_seconds, anchor_at, next_due_at, config_json, active)
                    VALUES (?, ?, ?, ?, ?, ?, 1)
@@ -462,8 +530,8 @@ def apply_archon_decisions(store: Store, payload: dict[str, Any]) -> dict[str, A
                    anchor_at = excluded.anchor_at, next_due_at = excluded.next_due_at,
                    config_json = excluded.config_json, active = 1""",
                 (
-                    policy["kind"],
-                    policy.get("scope"),
+                    kind,
+                    scope,
                     cadence,
                     anchor,
                     anchor,

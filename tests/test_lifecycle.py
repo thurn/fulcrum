@@ -127,6 +127,70 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(assignment["stage"], "recovering")
         self.assertIsNotNone(assignment["next_attempt_at"])
 
+    def test_archon_cannot_lower_capacity_below_active_usage(self) -> None:
+        self.store.execute("UPDATE meta SET value = '2' WHERE key = 'global_limit'")
+        self.store.execute(
+            "UPDATE meta SET value = '{\"p\": 2}' WHERE key = 'project_limits'"
+        )
+        self._action()
+        second = self.store.register_task(
+            native_thread_id="second-executor",
+            role="executor",
+            description="Second",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        now = "2026-01-01T00:00:00Z"
+        action = self.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at)
+               VALUES (?, 'implement', '{}', 'active', ?, ?)""",
+            (second["id"], now, now),
+        )
+        self.store.execute(
+            """INSERT INTO reservations(action_id, project_ids, state, created_at)
+               VALUES (?, '[\"p\"]', 'active', ?)""",
+            (action.lastrowid, now),
+        )
+
+        with self.assertRaisesRegex(StoreError, "below active usage"):
+            apply_archon_decisions(self.store, {"global_limit": 1})
+        self.assertEqual(
+            self.store.row("SELECT value FROM meta WHERE key = 'global_limit'")[
+                "value"
+            ],
+            "2",
+        )
+
+    def test_archon_policy_must_describe_complete_valid_topology(self) -> None:
+        self.store.execute(
+            "INSERT INTO projects(project_id, repo_path) VALUES ('q', '/tmp/q')"
+        )
+        with self.assertRaisesRegex(StoreError, "exactly cover enabled projects"):
+            apply_archon_decisions(self.store, {"project_limits": {"p": 1}})
+        with self.assertRaisesRegex(StoreError, "fleet Sage"):
+            apply_archon_decisions(
+                self.store,
+                {
+                    "recurring_policies": [
+                        {"kind": "sage", "scope": "p", "cadence_seconds": 60}
+                    ]
+                },
+            )
+        with self.assertRaisesRegex(StoreError, "enabled project scope"):
+            apply_archon_decisions(
+                self.store,
+                {
+                    "recurring_policies": [
+                        {
+                            "kind": "inquisitor",
+                            "scope": "missing",
+                            "cadence_seconds": 60,
+                        }
+                    ]
+                },
+            )
+
     def test_approval_and_covered_repair_retain_exact_mandate_linkage(self) -> None:
         self.store.execute(
             "UPDATE assignments SET candidate_id = 'candidate-1' WHERE id = ?",
