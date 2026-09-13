@@ -327,6 +327,7 @@ class CodexRuntime:
         workspace_root: str,
         model: str,
         effort: str,
+        developer_instructions: str | None = None,
     ) -> None:
         await self.request(
             "thread/settings/update",
@@ -342,7 +343,7 @@ class CodexRuntime:
                     "settings": {
                         "model": model,
                         "reasoning_effort": effort,
-                        "developer_instructions": None,
+                        "developer_instructions": developer_instructions,
                     },
                 },
             },
@@ -358,6 +359,7 @@ class CodexRuntime:
         model: str,
         effort: str,
         correlation: str | None = None,
+        developer_instructions: str | None = None,
     ) -> str:
         await self.configure_thread(
             thread_id,
@@ -365,6 +367,7 @@ class CodexRuntime:
             workspace_root=workspace_root,
             model=model,
             effort=effort,
+            developer_instructions=developer_instructions,
         )
         result = await self.request(
             "turn/start",

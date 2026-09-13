@@ -1813,12 +1813,16 @@ print(json.dumps({
         runtime.resume_thread.assert_awaited_once_with("executor")
         runtime.start_turn.assert_awaited_once()
         self.assertEqual(
-            runtime.start_turn.await_args.kwargs["cwd"], str(self.worktree)
+            runtime.start_turn.await_args.kwargs["cwd"], self.config.source_root
         )
         self.assertEqual(
             runtime.start_turn.await_args.kwargs["workspace_root"],
             self.config.source_root,
         )
+        routing = runtime.start_turn.await_args.kwargs["developer_instructions"]
+        self.assertIn(str(self.worktree), routing)
+        self.assertIn(self.config.source_root, routing)
+        self.assertIn("Do not modify the canonical checkout", routing)
 
     async def test_source_refresh_is_consumed_before_lock_handoff(self) -> None:
         self.controller.store.execute(
@@ -2421,6 +2425,7 @@ print(json.dumps({
         self.assertIn("# Current action", prompt)
         self.assertNotIn("--section", prompt)
         self.assertEqual(start.await_args.kwargs["cwd"], self.config.source_root)
+        self.assertIsNone(start.await_args.kwargs["developer_instructions"])
 
     async def test_archon_batch_dispatch_contains_actual_proposal(self) -> None:
         self.controller.store.register_task(
@@ -2954,6 +2959,7 @@ print(json.dumps({
         }
         self.controller.runtime = runtime
         self.executor["runtime_status"] = "unmaterialized"
+        self.assignment["worktree_path"] = str(self.worktree)
         await self.controller._dispatch_action(
             decision.action,
             task=self.executor,

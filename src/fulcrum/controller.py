@@ -2249,10 +2249,19 @@ class Controller:
         )
         if project is None:
             raise StoreError("action project is missing")
+        cwd = str(project["repo_path"])
+        developer_instructions = None
         if assignment and action["kind"] in {"implement", "correct"}:
-            cwd = assignment["worktree_path"]
-        else:
-            cwd = project["repo_path"]
+            worktree = assignment["worktree_path"]
+            if not worktree:
+                raise StoreError("executor action worktree is missing")
+            developer_instructions = (
+                "Fulcrum workspace routing: keep this Codex task associated with "
+                f"the canonical project at {cwd}. For this implementation, treat "
+                f"{worktree} as the effective working directory: run every repository "
+                "command there and make every repository edit there. Do not modify "
+                f"the canonical checkout at {cwd}."
+            )
         prompt = self._build_action_message(action, task, assignment)
         if facts["last_turn_id"] is None:
             instruction_kind = (
@@ -2299,6 +2308,7 @@ class Controller:
                 model=task["model"],
                 effort=task["reasoning_effort"],
                 correlation=f"fulcrum-operation-{operation}",
+                developer_instructions=developer_instructions,
             )
             self.store.finish_operation_attempt(
                 operation,

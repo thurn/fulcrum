@@ -170,6 +170,7 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 model="sol",
                 effort="high",
                 correlation="operation-1",
+                developer_instructions="Use the assigned worktree.",
             )
             self.assertEqual(turn, "turn-1")
             settings_request = next(
@@ -191,7 +192,7 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                         "settings": {
                             "model": "sol",
                             "reasoning_effort": "high",
-                            "developer_instructions": None,
+                            "developer_instructions": "Use the assigned worktree.",
                         },
                     },
                 },
