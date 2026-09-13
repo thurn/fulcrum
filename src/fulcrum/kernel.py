@@ -301,6 +301,34 @@ def invariant_violations(store: Store) -> list[str]:
         violations.append(
             f"external operation {row['id']} is uncertain after targeted observation"
         )
+    for row in store.rows("""SELECT r.id FROM runs r
+           WHERE r.state NOT IN ('completed','canceled')
+             AND EXISTS (
+               SELECT 1 FROM assignments assigned WHERE assigned.run_id = r.id
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM assignments unfinished
+               WHERE unfinished.run_id = r.id
+                 AND unfinished.stage NOT IN ('completed','canceled')
+             )
+           ORDER BY r.id"""):
+        violations.append(
+            f"run {row['id']} is nonterminal with only terminal assignments"
+        )
+    for row in store.rows("""SELECT r.id AS run_id, pair_task.id AS task_id
+           FROM runs r JOIN tasks pair_task
+             ON pair_task.id IN (r.executor_task_id, r.overseer_task_id)
+           WHERE r.state = 'completed'
+             AND NOT EXISTS (
+               SELECT 1 FROM obligations archive
+               WHERE archive.kind = 'archive'
+                 AND archive.identity = CAST(pair_task.id AS TEXT)
+                 AND archive.target = pair_task.native_thread_id
+             )
+           ORDER BY r.id, pair_task.id"""):
+        violations.append(
+            f"completed run {row['run_id']} has no archive obligation for task {row['task_id']}"
+        )
 
     global_row = store.row("SELECT value FROM meta WHERE key = 'global_limit'")
     if global_row is not None:

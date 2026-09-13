@@ -298,6 +298,13 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             self.controller.lock_handle.close()
         self.temporary.cleanup()
 
+    def _restart_controller(self) -> None:
+        self.controller.store.close()
+        if self.controller.lock_handle is not None:
+            self.controller.lock_handle.close()
+            self.controller.lock_handle = None
+        self.controller = Controller(self.paths, self.config)
+
     def test_definitive_tollgate_failure_is_not_marked_uncertain(self) -> None:
         operation = self.controller.store.create_operation(
             "tollgate_candidate_create", "definitive", {}
@@ -3056,6 +3063,238 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(attempt["state"], "uncertain")
         self.assertEqual(attempt["stdout"], "promoted but not json")
+
+    def test_assignment_completion_is_one_transaction_at_every_mutation(self) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'delivering' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+
+        for crash_after in range(1, 6):
+            with self.subTest(crash_after=crash_after):
+                assignment = self.controller.store.row(
+                    "SELECT * FROM assignments WHERE id = ?",
+                    (self.assignment["id"],),
+                )
+                assert assignment is not None
+                original_execute = self.controller.store.execute
+                mutation_count = 0
+
+                def execute_then_crash(
+                    sql: str, parameters: tuple[Any, ...] = ()
+                ) -> Any:
+                    nonlocal mutation_count
+                    cursor = original_execute(sql, parameters)
+                    mutation_count += 1
+                    if mutation_count == crash_after:
+                        raise RuntimeError("simulated controller crash")
+                    return cursor
+
+                with (
+                    patch.object(
+                        self.controller.store,
+                        "execute",
+                        side_effect=execute_then_crash,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "simulated controller crash"),
+                ):
+                    self.controller._record_assignment_completed(assignment)
+
+                self._restart_controller()
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT stage FROM assignments WHERE id = ?",
+                        (self.assignment["id"],),
+                    ),
+                    {"stage": "delivering"},
+                )
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT state FROM runs WHERE id = ?",
+                        (self.assignment["run_id"],),
+                    ),
+                    {"state": "active"},
+                )
+                self.assertIsNone(
+                    self.controller.store.row(
+                        "SELECT 1 FROM updates WHERE recipient_task_id = ? AND identity = ?",
+                        (archon["id"], f"completion:{self.assignment['id']}"),
+                    )
+                )
+                self.assertEqual(
+                    self.controller.store.rows(
+                        "SELECT * FROM obligations WHERE kind = 'archive'"
+                    ),
+                    [],
+                )
+
+    async def test_restart_repairs_every_assignment_completion_crash_prefix(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        operation_id = self.controller.store.create_operation(
+            "beads_close", self.assignment["bead_id"], {"candidate_id": "candidate-1"}
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="complete",
+            result={"closed": True},
+            native_id=self.assignment["bead_id"],
+        )
+        timestamp = "2026-01-02T00:00:00Z"
+        pair = (self.executor, self.overseer)
+        completion = json.dumps(
+            {
+                "kind": "assignment_completed",
+                "assignment_id": self.assignment["id"],
+                "run_id": self.assignment["run_id"],
+                "bead_id": self.assignment["bead_id"],
+                "candidate_id": None,
+                "source_revision": None,
+                "tested_revision": None,
+            },
+            sort_keys=True,
+        )
+
+        for completed_mutations in range(1, 6):
+            with self.subTest(completed_mutations=completed_mutations):
+                self.controller.store.execute(
+                    "DELETE FROM obligations WHERE kind = 'archive'"
+                )
+                self.controller.store.execute(
+                    "DELETE FROM updates WHERE identity = ?",
+                    (f"completion:{self.assignment['id']}",),
+                )
+                self.controller.store.execute(
+                    "UPDATE runs SET state = 'active' WHERE id = ?",
+                    (self.assignment["run_id"],),
+                )
+                self.controller.store.execute(
+                    "UPDATE assignments SET stage = 'delivering' WHERE id = ?",
+                    (self.assignment["id"],),
+                )
+                self.controller.store.execute("DELETE FROM state_transitions")
+
+                mutations = [
+                    (
+                        "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+                        (self.assignment["id"],),
+                    ),
+                    (
+                        """INSERT INTO updates(
+                               recipient_task_id, identity, content, actionable,
+                               state, created_at, updated_at
+                           ) VALUES (?, ?, ?, 1, 'retained', ?, ?)""",
+                        (
+                            archon["id"],
+                            f"completion:{self.assignment['id']}",
+                            completion,
+                            timestamp,
+                            timestamp,
+                        ),
+                    ),
+                    (
+                        "UPDATE runs SET state = 'completed' WHERE id = ?",
+                        (self.assignment["run_id"],),
+                    ),
+                    (
+                        """INSERT INTO obligations(
+                               kind, identity, target, state, created_at, updated_at
+                           ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                        (
+                            str(pair[0]["id"]),
+                            pair[0]["native_thread_id"],
+                            timestamp,
+                            timestamp,
+                        ),
+                    ),
+                    (
+                        """INSERT INTO obligations(
+                               kind, identity, target, state, created_at, updated_at
+                           ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                        (
+                            str(pair[1]["id"]),
+                            pair[1]["native_thread_id"],
+                            timestamp,
+                            timestamp,
+                        ),
+                    ),
+                ]
+                for sql, parameters in mutations[:completed_mutations]:
+                    self.controller.store.execute(sql, parameters)
+
+                before_repair = invariant_violations(self.controller.store)
+                if completed_mutations < len(mutations):
+                    self.assertTrue(before_repair)
+                else:
+                    self.assertEqual(before_repair, [])
+
+                self._restart_controller()
+                self.controller.runtime.ready = True
+                await self.controller.reconcile()
+
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT stage FROM assignments WHERE id = ?",
+                        (self.assignment["id"],),
+                    ),
+                    {"stage": "completed"},
+                )
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT state FROM runs WHERE id = ?",
+                        (self.assignment["run_id"],),
+                    ),
+                    {"state": "completed"},
+                )
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT COUNT(*) AS count FROM updates WHERE identity = ?",
+                        (f"completion:{self.assignment['id']}",),
+                    ),
+                    {"count": 1},
+                )
+                self.assertEqual(
+                    self.controller.store.rows(
+                        """SELECT identity, target FROM obligations
+                           WHERE kind = 'archive' ORDER BY identity"""
+                    ),
+                    [
+                        {
+                            "identity": str(self.executor["id"]),
+                            "target": "executor",
+                        },
+                        {
+                            "identity": str(self.overseer["id"]),
+                            "target": "overseer",
+                        },
+                    ],
+                )
+                self.assertEqual(
+                    self.controller.store.row(
+                        """SELECT COUNT(*) AS count FROM state_transitions
+                           WHERE entity_type = 'assignment' AND entity_id = ?
+                             AND to_state = 'completed'""",
+                        (str(self.assignment["id"]),),
+                    ),
+                    {"count": 1},
+                )
+                self.assertEqual(invariant_violations(self.controller.store), [])
 
     async def test_json_lines_approval_completes_delivery_without_reconciliation(
         self,

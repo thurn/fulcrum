@@ -505,6 +505,7 @@ class Controller:
     async def reconcile(self) -> None:
         started = time.monotonic()
         self.store.event("reconciliation_started", "reconciliation pass started")
+        self._reconcile_assignment_completions()
         if not self.runtime.ready:
             self.store.event(
                 "reconciliation_skipped",
@@ -2762,55 +2763,101 @@ class Controller:
         self._record_assignment_completed(assignment)
 
     def _record_assignment_completed(self, assignment: dict[str, Any]) -> None:
-        self.store.execute(
-            "UPDATE assignments SET stage = 'completed', condition = NULL, updated_at = ? WHERE id = ?",
-            (utc_now(), assignment["id"]),
-        )
-        self._queue_archon_update(
-            f"completion:{assignment['id']}",
-            {
-                "kind": "assignment_completed",
-                "assignment_id": assignment["id"],
-                "run_id": assignment["run_id"],
-                "bead_id": assignment["bead_id"],
-                "candidate_id": assignment.get("candidate_id"),
-                "source_revision": assignment.get("source_oid"),
-                "tested_revision": assignment.get("tested_oid"),
-            },
-        )
-        remaining = self.store.row(
-            "SELECT 1 FROM assignments WHERE run_id = ? AND stage NOT IN ('completed','canceled')",
-            (assignment["run_id"],),
-        )
-        if remaining is not None:
-            return
-        self.store.execute(
-            "UPDATE runs SET state = 'completed', updated_at = ? WHERE id = ?",
-            (utc_now(), assignment["run_id"]),
-        )
-        run = (
-            self.store.row(
-                "SELECT executor_task_id, overseer_task_id FROM runs WHERE id = ?",
+        timestamp = utc_now()
+        with self.store.transaction():
+            self.store.execute(
+                "UPDATE assignments SET stage = 'completed', condition = NULL, updated_at = ? WHERE id = ?",
+                (timestamp, assignment["id"]),
+            )
+            self._queue_archon_update(
+                f"completion:{assignment['id']}",
+                {
+                    "kind": "assignment_completed",
+                    "assignment_id": assignment["id"],
+                    "run_id": assignment["run_id"],
+                    "bead_id": assignment["bead_id"],
+                    "candidate_id": assignment.get("candidate_id"),
+                    "source_revision": assignment.get("source_oid"),
+                    "tested_revision": assignment.get("tested_oid"),
+                },
+            )
+            remaining = self.store.row(
+                "SELECT 1 FROM assignments WHERE run_id = ? AND stage NOT IN ('completed','canceled')",
                 (assignment["run_id"],),
             )
-            or {}
-        )
-        for key in ("executor_task_id", "overseer_task_id"):
-            task_id = run.get(key)
-            if task_id:
-                task = self.store.row(
-                    "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
+            if remaining is not None:
+                return
+            self.store.execute(
+                "UPDATE runs SET state = 'completed', updated_at = ? WHERE id = ?",
+                (timestamp, assignment["run_id"]),
+            )
+            run = (
+                self.store.row(
+                    "SELECT executor_task_id, overseer_task_id FROM runs WHERE id = ?",
+                    (assignment["run_id"],),
                 )
-                if task:
-                    self.store.execute(
-                        "INSERT OR IGNORE INTO obligations(kind, identity, target, state, created_at, updated_at) VALUES ('archive', ?, ?, 'pending', ?, ?)",
-                        (
-                            str(task_id),
-                            task["native_thread_id"],
-                            utc_now(),
-                            utc_now(),
-                        ),
+                or {}
+            )
+            for key in ("executor_task_id", "overseer_task_id"):
+                task_id = run.get(key)
+                if task_id:
+                    task = self.store.row(
+                        "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
                     )
+                    if task:
+                        self.store.execute(
+                            "INSERT OR IGNORE INTO obligations(kind, identity, target, state, created_at, updated_at) VALUES ('archive', ?, ?, 'pending', ?, ?)",
+                            (
+                                str(task_id),
+                                task["native_thread_id"],
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+
+    def _reconcile_assignment_completions(self) -> None:
+        """Finish any delivery completion whose durable aggregate is incomplete."""
+
+        assignments = self.store.rows(
+            """SELECT a.* FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE r.state != 'canceled' AND (
+                 (a.stage = 'delivering' AND EXISTS (
+                    SELECT 1 FROM external_operations operation
+                    WHERE operation.kind = 'beads_close'
+                      AND operation.target = a.bead_id
+                      AND operation.state = 'complete'
+                 ))
+                 OR (a.stage = 'completed' AND (
+                    (r.state != 'completed' AND NOT EXISTS (
+                       SELECT 1 FROM assignments unfinished
+                       WHERE unfinished.run_id = a.run_id
+                         AND unfinished.stage NOT IN ('completed','canceled')
+                    ))
+                    OR (r.state = 'completed' AND EXISTS (
+                       SELECT 1 FROM tasks pair_task
+                       WHERE pair_task.id IN (r.executor_task_id, r.overseer_task_id)
+                         AND NOT EXISTS (
+                           SELECT 1 FROM obligations archive
+                           WHERE archive.kind = 'archive'
+                             AND archive.identity = CAST(pair_task.id AS TEXT)
+                             AND archive.target = pair_task.native_thread_id
+                         )
+                    ))
+                    OR EXISTS (
+                       SELECT 1 FROM tasks archon
+                       WHERE archon.role = 'archon'
+                         AND archon.state NOT IN ('retired','archived')
+                         AND NOT EXISTS (
+                           SELECT 1 FROM updates completion
+                           WHERE completion.identity = 'completion:' || a.id
+                         )
+                    )
+                 ))
+               )
+               ORDER BY a.id"""
+        )
+        for assignment in assignments:
+            self._record_assignment_completed(assignment)
 
     def _delivery_authority_error(self, assignment: dict[str, Any]) -> str | None:
         if assignment["candidate_id"] != assignment["mandate_candidate_id"]:
