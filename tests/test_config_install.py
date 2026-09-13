@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fulcrum.config import (
     InstallationConfig,
     ProjectConfig,
+    RuntimePaths,
     load_installation,
     resolve_paths,
     save_installation,
@@ -28,17 +29,29 @@ from fulcrum.install import (
     service_executable_path,
     start_services,
 )
-from fulcrum.setup import _dispatch_is_ready
+from fulcrum.setup import _wait_for_archon_readiness
 
 
 class ConfigInstallTest(unittest.TestCase):
-    def test_setup_waits_for_controller_dispatch_readiness(self) -> None:
-        self.assertTrue(
-            _dispatch_is_ready({"data": {"dispatch_enabled": {"value": "1"}}})
+    def test_setup_polls_initialization_until_archon_is_ready(self) -> None:
+        paths = RuntimePaths(
+            brain_root=Path("/brain"),
+            state_root=Path("/state"),
+            config_file=Path("/config"),
+            control_root=Path("/control"),
         )
-        self.assertFalse(
-            _dispatch_is_ready({"data": {"dispatch_enabled": {"value": "0"}}})
-        )
+        responses = [
+            {"data": {"ready": False, "condition": "materializing"}},
+            {"data": {"ready": True, "archon": "thread-1"}},
+        ]
+        with (
+            patch("fulcrum.setup.request_sync", side_effect=responses) as request,
+            patch("fulcrum.setup.time.monotonic", side_effect=[0.0, 0.1, 0.2]),
+            patch("fulcrum.setup.time.sleep"),
+        ):
+            result = _wait_for_archon_readiness(paths, timeout=1)
+        self.assertEqual(result, responses[-1]["data"])
+        self.assertEqual(request.call_count, 2)
 
     def test_round_trip_has_no_format_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

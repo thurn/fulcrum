@@ -101,6 +101,13 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 (await runtime.list_threads(cwd="/tmp", project_id="project"))[0]["id"],
                 "thread-1",
             )
+            self.assertTrue(await runtime.thread_is_listed("thread-1"))
+            listing_requests = [
+                item for item in received if item.get("method") == "thread/list"
+            ]
+            self.assertTrue(
+                all("sourceKinds" not in item["params"] for item in listing_requests)
+            )
             created = await runtime.create_thread(
                 cwd="/tmp",
                 model="sol",

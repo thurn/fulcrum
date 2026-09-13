@@ -30,13 +30,26 @@ from fulcrum.store import Store
 from fulcrum.tollgate import Tollgate
 
 
-async def _runtime_inventory(
-    endpoint: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+async def _runtime_inventory(endpoint: str, archon_id: str | None) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any] | None,
+    bool,
+    str | None,
+]:
     runtime = CodexRuntime(endpoint)
     try:
         await runtime.connect()
-        return await runtime.list_models(), await runtime.list_projects()
+        models = await runtime.list_models()
+        projects = await runtime.list_projects()
+        if archon_id is None:
+            return models, projects, None, False, None
+        try:
+            thread = await runtime.read_thread(archon_id)
+            listed = await runtime.thread_is_listed(archon_id)
+            return models, projects, thread, listed, None
+        except Exception as error:
+            return models, projects, None, False, str(error)
     finally:
         await runtime.close()
 
@@ -66,6 +79,15 @@ def _json_command(command: list[str]) -> tuple[Any, str | None]:
 def doctor(paths: RuntimePaths) -> dict[str, Any]:
     config = load_installation(paths.config_file)
     checks: list[dict[str, Any]] = []
+    configured_archon: dict[str, Any] | None = None
+    if paths.database.is_file():
+        try:
+            with Store(paths.database, readonly=True) as store:
+                configured_archon = store.row(
+                    "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
+                )
+        except Exception:
+            configured_archon = None
 
     def check(name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": ok, "detail": detail})
@@ -238,10 +260,26 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
 
     models: list[dict[str, Any]] = []
     codex_projects: list[dict[str, Any]] = []
+    runtime_archon: dict[str, Any] | None = None
+    archon_listed = False
+    archon_runtime_error: str | None = None
     if app_server_ready:
         try:
-            models, codex_projects = asyncio.run(
-                _runtime_inventory(config.app_server_endpoint)
+            (
+                models,
+                codex_projects,
+                runtime_archon,
+                archon_listed,
+                archon_runtime_error,
+            ) = asyncio.run(
+                _runtime_inventory(
+                    config.app_server_endpoint,
+                    (
+                        str(configured_archon["native_thread_id"])
+                        if configured_archon is not None
+                        else None
+                    ),
+                )
             )
             configured_model = next(
                 (
@@ -404,6 +442,31 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
                 archon is not None,
                 archon["native_thread_id"] if archon else "missing",
             )
+            if archon is not None:
+                turns = (
+                    runtime_archon.get("turns")
+                    if isinstance(runtime_archon, dict)
+                    else None
+                )
+                check(
+                    "archon_materialized",
+                    isinstance(turns, list) and bool(turns),
+                    (
+                        f"{len(turns)} turns"
+                        if isinstance(turns, list)
+                        else archon_runtime_error or "runtime thread unavailable"
+                    ),
+                )
+                check(
+                    "archon_visible",
+                    archon_listed,
+                    (
+                        "discoverable through thread/list"
+                        if archon_listed
+                        else archon_runtime_error
+                        or "missing from active thread/list; rerun ./scripts/setup"
+                    ),
+                )
             check("policies", bool(policies), f"{len(policies)} active")
             check(
                 "durable_readiness",

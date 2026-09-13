@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -216,6 +217,62 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(StoreError, "another Fulcrum controller"):
             Controller(self.paths, self.config)
+
+    async def test_setup_materializes_a_new_archon_when_policies_are_retained(
+        self,
+    ) -> None:
+        self.controller.config = replace(
+            self.controller.config,
+            archon_model="sol",
+            archon_reasoning_effort="high",
+        )
+        archon = self.controller.store.register_task(
+            native_thread_id="new-archon",
+            role="archon",
+            description="",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'unmaterialized' WHERE id = ?",
+            (archon["id"],),
+        )
+        self.controller.store.execute(
+            "INSERT INTO policies(kind, scope, cadence_seconds, anchor_at, next_due_at, active) VALUES ('sage', NULL, 86400, 'now', 'later', 1)"
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.list_models.return_value = [
+            {
+                "model": "sol",
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+            }
+        ]
+        runtime.read_thread.return_value = {
+            "id": "new-archon",
+            "status": {"type": "idle"},
+            "turns": [],
+        }
+        self.controller.runtime = runtime
+
+        with (
+            patch.object(self.controller, "_verify_projects", new=AsyncMock()),
+            patch.object(self.controller, "_setup_smoke_check", new=AsyncMock()),
+            patch.object(
+                self.controller, "_dispatch_action", new=AsyncMock()
+            ) as dispatch,
+        ):
+            result = await self.controller._setup_initialize()
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["condition"], "Archon materialization pending")
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ?", (archon["id"],)
+        )
+        self.assertIsNotNone(action)
+        self.assertEqual(json.loads(action["payload"])["purpose"], "materialize_archon")
+        dispatch.assert_awaited_once()
 
     async def test_source_refresh_is_consumed_before_lock_handoff(self) -> None:
         self.controller.store.execute(

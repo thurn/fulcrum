@@ -231,7 +231,6 @@ class CodexRuntime:
             "limit": 20,
             "sortKey": "created_at",
             "sortDirection": "desc",
-            "sourceKinds": ["appServer"],
             "useStateDbOnly": True,
         }
         if project_id is not None:
@@ -243,6 +242,37 @@ class CodexRuntime:
             if isinstance(data, list)
             else []
         )
+
+    async def thread_is_listed(self, thread_id: str) -> bool:
+        """Return whether an active thread is discoverable by history clients."""
+
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            params: dict[str, Any] = {
+                "limit": 100,
+                "sortKey": "created_at",
+                "sortDirection": "desc",
+                "archived": False,
+            }
+            if cursor is not None:
+                params["cursor"] = cursor
+            result = await self.request("thread/list", params)
+            data = result.get("data")
+            if isinstance(data, list) and any(
+                isinstance(thread, dict) and thread.get("id") == thread_id
+                for thread in data
+            ):
+                return True
+            next_cursor = result.get("nextCursor")
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                return False
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
 
     async def set_name(self, thread_id: str, name: str) -> None:
         await self.request("thread/name/set", {"threadId": thread_id, "name": name})

@@ -43,6 +43,15 @@ class ReadinessTest(unittest.TestCase):
                 store.execute(
                     "INSERT INTO policies(kind, scope, cadence_seconds, anchor_at, next_due_at, active) VALUES ('inquisitor', 'one', 86400, 'now', 'later', 1)"
                 )
+                store.execute(
+                    "UPDATE tasks SET runtime_status = 'unmaterialized' WHERE role = 'archon'"
+                )
+                ready, reasons = state_readiness(store)
+                self.assertFalse(ready)
+                self.assertIn("Archon has no materialized turn", reasons)
+                store.execute(
+                    "UPDATE tasks SET runtime_status = 'idle' WHERE role = 'archon'"
+                )
                 ready, reasons = state_readiness(store)
                 self.assertTrue(ready)
                 self.assertEqual(reasons, [])

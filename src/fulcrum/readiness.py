@@ -62,10 +62,12 @@ def state_readiness(store: Store) -> tuple[bool, list[str]]:
         reasons.append("recurring policy definition is missing: " + ", ".join(rendered))
 
     archon = store.row(
-        "SELECT id FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
+        "SELECT id, runtime_status FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
     )
     if archon is None:
         reasons.append("Archon is missing")
+    elif archon["runtime_status"] == "unmaterialized":
+        reasons.append("Archon has no materialized turn")
     return not reasons, reasons
 
 

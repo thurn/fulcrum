@@ -2659,9 +2659,13 @@ class Controller:
                 model=str(self.config.archon_model),
                 effort=str(self.config.archon_reasoning_effort),
             )
+        thread = await self.runtime.read_thread(archon["native_thread_id"])
+        turns = thread.get("turns")
+        materialized = isinstance(turns, list) and bool(turns)
         policies = self.store.rows("SELECT * FROM policies")
         capacities = self.store.row("SELECT value FROM meta WHERE key = 'global_limit'")
-        if not policies or capacities is None:
+        needs_policies = not policies or capacities is None
+        if needs_policies or not materialized:
             existing = self.store.row(
                 """SELECT * FROM actions WHERE task_id = ?
                    AND state IN ('pending','starting','active','terminal','uncertain')""",
@@ -2669,13 +2673,20 @@ class Controller:
             )
             if existing is None:
                 timestamp = utc_now()
-                payload = {
-                    "purpose": "initial_policies",
+                purpose = "initial_policies" if needs_policies else "materialize_archon"
+                payload: dict[str, Any] = {
+                    "purpose": purpose,
                     "projects": [
                         project.project_id for project in self.config.projects
                     ],
-                    "required": "Set explicit global/project capacity and recurring Sage/Inquisitor policies.",
+                    "required": (
+                        "Set explicit global/project capacity and recurring Sage/Inquisitor policies."
+                        if needs_policies
+                        else "Confirm the retained fleet configuration by returning an empty decisions list unless a change is required."
+                    ),
                 }
+                if not needs_policies:
+                    payload["fleet_snapshot"] = self._fleet_snapshot()
                 cursor = self.store.execute(
                     "INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at) VALUES (?, 'archon', ?, 'pending', ?, ?)",
                     (archon["id"], json.dumps(payload), timestamp, timestamp),
@@ -2688,10 +2699,38 @@ class Controller:
             return {
                 "ready": False,
                 "archon": archon["native_thread_id"],
-                "condition": "Archon policies pending",
+                "condition": (
+                    "Archon policies pending"
+                    if needs_policies
+                    else "Archon materialization pending"
+                ),
             }
+        facts = thread_facts(thread)
+        if not facts["last_turn_terminal"] or not facts["helpers_terminal"]:
+            return {
+                "ready": False,
+                "archon": archon["native_thread_id"],
+                "condition": "Archon setup turn is still active",
+            }
+        if not await self.runtime.thread_is_listed(archon["native_thread_id"]):
+            self.store.execute(
+                "UPDATE tasks SET runtime_status = 'unmaterialized', updated_at = ? WHERE id = ?",
+                (utc_now(), archon["id"]),
+            )
+            self._update_readiness()
+            raise StoreError(
+                "Archon thread is not discoverable through thread/list; setup cannot expose it in Codex"
+            )
+        self.store.execute(
+            "UPDATE tasks SET runtime_status = ?, last_turn_terminal = 1, helpers_terminal = 1, updated_at = ? WHERE id = ?",
+            (str(facts["runtime_status"]), utc_now(), archon["id"]),
+        )
         self._update_readiness()
-        return {"ready": True, "archon": archon["native_thread_id"]}
+        return {
+            "ready": self.starts_enabled,
+            "archon": archon["native_thread_id"],
+            "condition": None if self.starts_enabled else "controller is not ready",
+        }
 
     async def _setup_smoke_check(self) -> None:
         if self.store.row("SELECT value FROM meta WHERE key = 'desktop_smoke_check'"):

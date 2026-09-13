@@ -233,26 +233,21 @@ def _wait_ready(
     )
 
 
-def _dispatch_is_ready(response: dict[str, Any]) -> bool:
-    data = response.get("data")
-    if not isinstance(data, dict):
-        return False
-    dispatch = data.get("dispatch_enabled")
-    return isinstance(dispatch, dict) and dispatch.get("value") == "1"
-
-
-def _wait_for_archon_policies(paths: RuntimePaths, *, timeout: float) -> bool:
+def _wait_for_archon_readiness(
+    paths: RuntimePaths, *, timeout: float
+) -> dict[str, Any] | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = request_sync(
+        initialized = request_sync(
             paths.socket,
-            {"command": "status", "events": 0, "view": "capabilities"},
+            {"command": "setup_initialize"},
             timeout=10,
         )
-        if _dispatch_is_ready(status):
-            return True
+        data = initialized.get("data")
+        if isinstance(data, dict) and data.get("ready"):
+            return data
         time.sleep(0.5)
-    return False
+    return None
 
 
 def run_setup(
@@ -289,16 +284,19 @@ def run_setup(
     data = initialized.get("data", {})
     ready = bool(isinstance(data, dict) and data.get("ready"))
     if not ready:
-        ready = _wait_for_archon_policies(
+        completed = _wait_for_archon_readiness(
             paths, timeout=float(config.turn_check_after_seconds)
         )
+        if completed is not None:
+            data = completed
+            ready = True
     return {
         "ok": ready,
         "ready": ready,
         "status": (
             "ready"
             if ready
-            else "setup incomplete; Archon must establish capacity and recurring policies"
+            else "setup incomplete; Archon must materialize and establish the required fleet configuration"
         ),
         "archon": data.get("archon") if isinstance(data, dict) else None,
         "projects": [project.project_id for project in config.projects],

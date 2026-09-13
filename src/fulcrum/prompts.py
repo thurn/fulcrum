@@ -86,7 +86,11 @@ def action_notice(action: dict[str, Any]) -> str:
         lead = (
             f"{count} updates need your scheduling decision."
             if count
-            else "Set the initial fleet capacity and recurring policies."
+            else (
+                "Confirm the retained fleet configuration and initialize this coordinator."
+                if payload.get("purpose") == "materialize_archon"
+                else "Set the initial fleet capacity and recurring policies."
+            )
         )
     elif kind == "implement":
         lead = f"Implement bead {payload.get('bead_id', 'in the current assignment')}."
