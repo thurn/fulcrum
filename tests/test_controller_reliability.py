@@ -274,6 +274,40 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(action["payload"])["purpose"], "materialize_archon")
         dispatch.assert_awaited_once()
 
+    async def test_dispatch_resumes_a_not_loaded_thread_before_starting(self) -> None:
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'notLoaded' WHERE id = ?",
+            (self.executor["id"],),
+        )
+        cursor = self.controller.store.execute(
+            """INSERT INTO actions(task_id, assignment_id, kind, payload, state, created_at, updated_at)
+               VALUES (?, ?, 'implement', '{}', 'pending', 'now', 'now')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.side_effect = [
+            {
+                "id": "executor",
+                "status": {"type": "notLoaded"},
+                "turns": [],
+            },
+            {
+                "id": "executor",
+                "status": {"type": "idle"},
+                "turns": [],
+            },
+        ]
+        runtime.start_turn.return_value = "turn-1"
+        self.controller.runtime = runtime
+
+        await self.controller._dispatch_action(action)
+
+        runtime.resume_thread.assert_awaited_once_with("executor")
+        runtime.start_turn.assert_awaited_once()
+
     async def test_source_refresh_is_consumed_before_lock_handoff(self) -> None:
         self.controller.store.execute(
             "INSERT INTO meta(key, value) VALUES ('source_refresh_pending', '1') "

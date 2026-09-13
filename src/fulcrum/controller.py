@@ -1772,11 +1772,21 @@ class Controller:
         facts = (
             {
                 "last_turn_id": None,
+                "last_turn_terminal": True,
+                "helpers_terminal": True,
+                "runtime_status": "unmaterialized",
                 "can_start": True,
             }
             if task["runtime_status"] == "unmaterialized"
             else await self._refresh_task(task)
         )
+        if (
+            facts["runtime_status"] == "notLoaded"
+            and facts["last_turn_terminal"]
+            and facts["helpers_terminal"]
+        ):
+            await self.runtime.resume_thread(task["native_thread_id"])
+            facts = await self._refresh_task(task)
         if not facts["can_start"]:
             raise StoreError(f"task {task['title']} is not ready for a new turn")
         if assignment and action["kind"] in {"implement", "correct"}:
