@@ -153,6 +153,38 @@ class StoreTest(unittest.TestCase):
                 "UPDATE assignments SET stage = 'recovering' WHERE id = ?",
                 (assignment.lastrowid,),
             )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "retry deadline"):
+            self.store.execute(
+                """INSERT INTO assignments(
+                       run_id, bead_id, stage, scope_snapshot, created_at, updated_at
+                   ) VALUES (?, 'b', 'recovering', 'scope', ?, ?)""",
+                (run.lastrowid, now, now),
+            )
+
+    def test_failed_action_is_evidence_not_current_work(self) -> None:
+        task = self.store.register_task(
+            native_thread_id="retryable",
+            role="executor",
+            description="Retryable",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+        )
+        now = "2026-01-01T00:00:00Z"
+        failed = self.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at)
+               VALUES (?, 'implement', '{}', 'failed', ?, ?)""",
+            (task["id"], now, now),
+        )
+        pending = self.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at)
+               VALUES (?, 'implement', '{}', 'pending', ?, ?)""",
+            (task["id"], now, now),
+        )
+
+        current = self.store.current_action("retryable")
+        self.assertEqual(current["id"], pending.lastrowid)
+        self.assertNotEqual(current["id"], failed.lastrowid)
 
     def test_terminal_action_automatically_releases_reservation(self) -> None:
         task = self.store.register_task(

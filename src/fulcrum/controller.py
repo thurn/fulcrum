@@ -1413,7 +1413,8 @@ class Controller:
         if task is None:
             return
         existing = self.store.row(
-            "SELECT * FROM actions WHERE task_id = ? AND state NOT IN ('processed','canceled')",
+            """SELECT * FROM actions WHERE task_id = ?
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
             (task["id"],),
         )
         if existing is not None:
@@ -2318,7 +2319,8 @@ class Controller:
         existing: dict[str, Any] | None = None
         if request.get("writable", True):
             existing = self.store.row(
-                "SELECT * FROM actions WHERE task_id = ? AND state NOT IN ('processed','canceled')",
+                """SELECT * FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')""",
                 (task["id"],),
             )
             if existing is None:
@@ -2428,7 +2430,8 @@ class Controller:
         capacities = self.store.row("SELECT value FROM meta WHERE key = 'global_limit'")
         if not policies or capacities is None:
             existing = self.store.row(
-                "SELECT * FROM actions WHERE task_id = ? AND state NOT IN ('processed','canceled')",
+                """SELECT * FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')""",
                 (archon["id"],),
             )
             if existing is None:
@@ -2658,7 +2661,8 @@ class Controller:
         if archon is None:
             return
         current = self.store.row(
-            "SELECT 1 FROM actions WHERE task_id = ? AND state NOT IN ('processed','canceled')",
+            """SELECT 1 FROM actions WHERE task_id = ?
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
             (archon["id"],),
         )
         if current is not None:
@@ -2715,7 +2719,9 @@ class Controller:
             (now,),
         ):
             action = self.store.row(
-                "SELECT * FROM actions WHERE occurrence_id = ? AND task_id = ? AND kind = 'interview' AND state NOT IN ('processed','canceled')",
+                """SELECT * FROM actions WHERE occurrence_id = ? AND task_id = ?
+                   AND kind = 'interview'
+                   AND state IN ('pending','starting','active','terminal','uncertain')""",
                 (interview["occurrence_id"], interview["subject_task_id"]),
             )
             if action is not None and action["state"] in {
@@ -2868,7 +2874,8 @@ class Controller:
         if task is None or task["state"] != "idle":
             return
         existing = self.store.row(
-            "SELECT 1 FROM actions WHERE occurrence_id = ? AND kind = 'specialist' AND state NOT IN ('processed','canceled')",
+            """SELECT 1 FROM actions WHERE occurrence_id = ? AND kind = 'specialist'
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
             (occurrence["id"],),
         )
         if existing is not None:

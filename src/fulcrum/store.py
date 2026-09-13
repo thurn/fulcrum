@@ -265,6 +265,14 @@ WHEN NEW.stage = 'recovering'
 BEGIN
   SELECT RAISE(ABORT, 'recovering assignment requires retry deadline or operator hold');
 END;
+CREATE TRIGGER IF NOT EXISTS inserted_recovery_requires_progress
+BEFORE INSERT ON assignments
+WHEN NEW.stage = 'recovering'
+ AND NEW.next_attempt_at IS NULL
+ AND NEW.operator_hold_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'recovering assignment requires retry deadline or operator hold');
+END;
 CREATE TRIGGER IF NOT EXISTS audit_task_state
 AFTER UPDATE OF state ON tasks WHEN OLD.state IS NOT NEW.state
 BEGIN
@@ -604,7 +612,8 @@ class Store:
     def current_action(self, native_thread_id: str) -> dict[str, Any]:
         row = self.row(
             """SELECT a.*, t.native_thread_id, t.role, t.title FROM actions a JOIN tasks t ON t.id = a.task_id
-               WHERE t.native_thread_id = ? AND a.state NOT IN ('processed','canceled')""",
+               WHERE t.native_thread_id = ?
+               AND a.state IN ('pending','starting','active','terminal','uncertain')""",
             (native_thread_id,),
         )
         if row is None:
