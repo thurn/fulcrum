@@ -96,6 +96,34 @@ class LifecycleTest(unittest.TestCase):
         )
         return int(cursor.lastrowid)
 
+    def _finish_review(
+        self, outcome: str = "changes_requested", *, label: str = "defect"
+    ) -> tuple[int, dict[str, object]]:
+        action_id = self._action("review")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "review.json"
+            content = (
+                {
+                    "findings": [
+                        {
+                            "problem": label,
+                            "evidence": f"evidence for {label}",
+                            "required_change": f"correct {label}",
+                        }
+                    ]
+                }
+                if outcome == "changes_requested"
+                else {"missing_evidence": [label]}
+            )
+            path.write_text(json.dumps(content), encoding="utf-8")
+            accept_finish(
+                self.store,
+                native_thread_id="executor",
+                outcome_kind=outcome,
+                options={"input": str(path)},
+            )
+        return action_id, observe_action_terminal(self.store, action_id)
+
     def test_finish_is_bound_idempotent_and_advances_after_runtime_terminal(
         self,
     ) -> None:
@@ -211,6 +239,313 @@ class LifecycleTest(unittest.TestCase):
             json.loads(handoff["content_json"])["findings"][0]["problem"],
             "wrong result",
         )
+
+    def test_third_review_failure_atomically_retains_one_archon_escalation(
+        self,
+    ) -> None:
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+
+        first_action, first = self._finish_review(label="first defect")
+        second_action, second = self._finish_review(label="second defect")
+
+        self.assertEqual(first["stage"], "correcting")
+        self.assertEqual(first["review_failures"], 1)
+        self.assertEqual(second["stage"], "correcting")
+        self.assertEqual(second["review_failures"], 2)
+        self.assertEqual(self.store.rows("SELECT * FROM holds"), [])
+        self.assertEqual(self.store.rows("SELECT * FROM updates"), [])
+        self.assertEqual(
+            len(
+                self.store.rows(
+                    "SELECT * FROM handoffs WHERE source_action_id IN (?, ?)",
+                    (first_action, second_action),
+                )
+            ),
+            2,
+        )
+
+        third_action, third = self._finish_review(label="third defect")
+
+        self.assertEqual(third["stage"], "recovering")
+        self.assertEqual(third["review_failures"], 3)
+        assignment = self.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        holds = self.store.rows(
+            """SELECT * FROM holds WHERE scope = 'assignment' AND target = ?
+               AND released_at IS NULL""",
+            (str(self.assignment["id"]),),
+        )
+        updates = self.store.rows(
+            "SELECT * FROM updates WHERE recipient_task_id = ?", (archon["id"],)
+        )
+        handoffs = self.store.rows(
+            "SELECT * FROM handoffs WHERE source_action_id = ?", (third_action,)
+        )
+        self.assertEqual(assignment["stage"], "recovering")
+        self.assertEqual(assignment["prior_stage"], "correcting")
+        self.assertEqual(assignment["operator_hold_id"], holds[0]["id"])
+        self.assertEqual(len(holds), 1)
+        self.assertEqual(holds[0]["urgent"], 1)
+        self.assertEqual(
+            holds[0]["release_condition"],
+            "Archon resolves escalation with retry, rescope, or cancel",
+        )
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(handoffs[0]["kind"], "review_findings")
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(
+            updates[0]["identity"],
+            f"review-escalation:{self.assignment['id']}:{third_action}",
+        )
+        self.assertEqual(updates[0]["state"], "retained")
+        escalation = json.loads(updates[0]["content"])
+        self.assertEqual(
+            escalation,
+            {
+                "action_id": third_action,
+                "assignment_id": self.assignment["id"],
+                "condition": "three substantive review failures require Archon decision",
+                "hold_id": holds[0]["id"],
+                "kind": "review_failure_escalation",
+                "required_decision": "resolve_escalation",
+                "resolutions": ["retry", "rescope", "cancel"],
+                "review_action": "changes_requested",
+                "review_failures": 3,
+            },
+        )
+
+        self.assertEqual(
+            observe_action_terminal(self.store, third_action),
+            {"advanced": True, "reused": True},
+        )
+        self.assertEqual(len(self.store.rows("SELECT * FROM holds")), 1)
+        self.assertEqual(len(self.store.rows("SELECT * FROM updates")), 1)
+        self.assertEqual(len(self.store.rows("SELECT * FROM handoffs")), 6)
+
+    def test_review_escalation_rolls_back_all_transition_effects_on_failure(
+        self,
+    ) -> None:
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        self._finish_review(label="first defect")
+        self._finish_review(label="second defect")
+        third_action = self._action("review")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "review.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "problem": "third defect",
+                                "evidence": "third failure evidence",
+                                "required_change": "correct the third defect",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            accept_finish(
+                self.store,
+                native_thread_id="executor",
+                outcome_kind="changes_requested",
+                options={"input": str(path)},
+            )
+        self.store.execute("""CREATE TEMP TRIGGER reject_review_escalation
+               BEFORE INSERT ON updates
+               WHEN NEW.identity LIKE 'review-escalation:%'
+               BEGIN SELECT RAISE(ABORT, 'forced escalation insert failure'); END""")
+
+        failed = observe_action_terminal(self.store, third_action)
+
+        self.assertFalse(failed["advanced"])
+        self.assertIn("forced escalation insert failure", failed["condition"])
+        assignment = self.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(assignment["stage"], "review_pending")
+        self.assertEqual(assignment["review_failures"], 2)
+        self.assertIsNone(assignment["operator_hold_id"])
+        self.assertEqual(self.store.rows("SELECT * FROM holds"), [])
+        self.assertEqual(
+            self.store.rows(
+                "SELECT * FROM updates WHERE recipient_task_id = ?", (archon["id"],)
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.store.rows(
+                "SELECT * FROM handoffs WHERE source_action_id = ?", (third_action,)
+            ),
+            [],
+        )
+
+    def test_archon_cannot_consume_review_escalation_without_exact_resolution(
+        self,
+    ) -> None:
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        self._finish_review(label="first defect")
+        self._finish_review(label="second defect")
+        self._finish_review(label="third defect")
+        escalation = self.store.row(
+            "SELECT * FROM updates WHERE recipient_task_id = ?", (archon["id"],)
+        )
+        self.assertIsNotNone(escalation)
+        assignment_id = int(self.assignment["id"])
+        cases = [
+            ("missing", [], "requires exactly one"),
+            (
+                "mismatched",
+                [
+                    {
+                        "decision": "resolve_escalation",
+                        "assignment_id": 999,
+                        "resolution": "cancel",
+                        "reason": "not the frozen escalation",
+                    }
+                ],
+                "requires exactly one",
+            ),
+            (
+                "duplicate",
+                [
+                    {
+                        "decision": "resolve_escalation",
+                        "assignment_id": assignment_id,
+                        "resolution": "retry",
+                        "reason": "first duplicate",
+                    },
+                    {
+                        "decision": "resolve_escalation",
+                        "assignment_id": assignment_id,
+                        "resolution": "retry",
+                        "reason": "second duplicate",
+                    },
+                ],
+                "requires exactly one",
+            ),
+            (
+                "unsupported",
+                [
+                    {
+                        "decision": "resolve_escalation",
+                        "assignment_id": assignment_id,
+                        "resolution": "complete_non_code",
+                        "reason": "not one of the frozen choices",
+                        "evidence": "irrelevant",
+                    }
+                ],
+                "supports only",
+            ),
+        ]
+        for label, decisions, expected_error in cases:
+            with self.subTest(label=label):
+                action = self.store.execute(
+                    """INSERT INTO actions(
+                           task_id, kind, payload, state, created_at, updated_at
+                       ) VALUES (?, 'archon', '{}', 'active', 'now', 'now')""",
+                    (archon["id"],),
+                )
+                batch = self.store.execute(
+                    """INSERT INTO batches(
+                           recipient_task_id, state, action_id, created_at, updated_at
+                       ) VALUES (?, 'frozen', ?, 'now', 'now')""",
+                    (archon["id"], action.lastrowid),
+                )
+                self.store.execute(
+                    "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+                    (batch.lastrowid, escalation["id"]),
+                )
+                self.store.execute(
+                    "UPDATE updates SET state = 'batched' WHERE id = ?",
+                    (escalation["id"],),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "decisions.json"
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "decisions": decisions,
+                                "handled_update_ids": [escalation["id"]],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    accept_finish(
+                        self.store,
+                        native_thread_id="archon",
+                        outcome_kind="decisions",
+                        options={"input": str(path)},
+                    )
+
+                result = observe_action_terminal(self.store, int(action.lastrowid))
+
+                self.assertFalse(result["advanced"])
+                self.assertIn(expected_error, result["condition"])
+                self.assertEqual(
+                    self.store.row(
+                        "SELECT state FROM batches WHERE id = ?", (batch.lastrowid,)
+                    )["state"],
+                    "failed",
+                )
+                self.assertEqual(
+                    self.store.row(
+                        "SELECT state FROM updates WHERE id = ?", (escalation["id"],)
+                    )["state"],
+                    "retained",
+                )
+
+        assignment = self.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        hold_id = json.loads(escalation["content"])["hold_id"]
+        self.assertEqual(assignment["stage"], "recovering")
+        self.assertEqual(assignment["operator_hold_id"], hold_id)
+        self.assertIsNone(
+            self.store.row("SELECT released_at FROM holds WHERE id = ?", (hold_id,))[
+                "released_at"
+            ]
+        )
+        self.assertEqual(len(self.store.rows("SELECT * FROM updates")), 1)
+
+    def test_missing_evidence_does_not_cross_substantive_failure_threshold(
+        self,
+    ) -> None:
+        self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        self._finish_review(label="first defect")
+        self._finish_review(label="second defect")
+
+        _, result = self._finish_review("incomplete", label="validation transcript")
+
+        self.assertEqual(result["stage"], "correcting")
+        self.assertEqual(result["review_failures"], 2)
+        self.assertEqual(self.store.rows("SELECT * FROM holds"), [])
+        self.assertEqual(self.store.rows("SELECT * FROM updates"), [])
 
     def test_one_missing_outcome_reminder_then_condition(self) -> None:
         action = self._action()

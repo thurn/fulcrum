@@ -20,6 +20,8 @@ model choices, and recurring policies only when a decision requires changing the
 Adjudicate escalations with an evidence-backed retry, rescope, cancellation, or
 non-code completion. Use complete_non_code only when the approved result is fully
 satisfied without a repository candidate, and cite concrete completion evidence.
+When an escalation update supplies an explicit resolution list, choose only from
+that list.
 If you cannot decide, defer with a concrete reactivation condition. Ask the human
 only for material choices that existing authority cannot resolve.
 

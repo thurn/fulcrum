@@ -127,6 +127,20 @@ def _archon_message(payload: dict[str, Any]) -> str:
                     }
                 )
             )
+        elif kind == "review_failure_escalation":
+            lines.append(
+                prefix
+                + f"Assignment {content['assignment_id']} reached {content['review_failures']} substantive review failures: {content['condition']}. "
+                + _facts(
+                    {
+                        "review_action_id": content.get("action_id"),
+                        "review_action": content.get("review_action"),
+                        "hold_id": content.get("hold_id"),
+                        "required_decision": content.get("required_decision"),
+                        "resolutions": content.get("resolutions"),
+                    }
+                )
+            )
         elif kind == "specialist_completed":
             lines.append(
                 prefix
@@ -155,7 +169,12 @@ def _archon_message(payload: dict[str, Any]) -> str:
     scheduling = not items or any(
         isinstance(item["content"], dict)
         and item["content"].get("kind")
-        in {"proposal", "assignment_recovery", "archon_succession_completed"}
+        in {
+            "proposal",
+            "assignment_recovery",
+            "review_failure_escalation",
+            "archon_succession_completed",
+        }
         for item in items
     )
     if scheduling:

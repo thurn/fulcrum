@@ -1816,6 +1816,238 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Exact JSON", text)
         self.assertLess(len(text.split()), 100)
 
+    async def test_third_review_failure_reaches_archon_and_cancel_resolves_hold(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-review-escalation",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        findings_path = Path(self.temporary.name) / "review-findings.json"
+        self.controller.store.execute(
+            """UPDATE assignments SET candidate_id = 'candidate-review-escalation',
+               source_oid = 'review-source' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, outcome_kind,
+                   outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'processed',
+                         'ready_for_review', ?, ?, ?)""",
+            (
+                self.executor["id"],
+                self.assignment["id"],
+                json.dumps({"evidence": "retained implementation"}),
+                utc_now(),
+                utc_now(),
+            ),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+            (
+                self.assignment["id"],
+                implementation.lastrowid,
+                json.dumps({"evidence": "retained implementation"}),
+                utc_now(),
+            ),
+        )
+
+        review_action_ids: list[int] = []
+        for failure in range(1, 4):
+            self.controller.store.execute(
+                "UPDATE assignments SET stage = 'reviewing' WHERE id = ?",
+                (self.assignment["id"],),
+            )
+            action = self.controller.store.execute(
+                """INSERT INTO actions(
+                       task_id, assignment_id, kind, payload, state, created_at,
+                       updated_at
+                   ) VALUES (?, ?, 'review', '{}', 'active', ?, ?)""",
+                (
+                    self.overseer["id"],
+                    self.assignment["id"],
+                    utc_now(),
+                    utc_now(),
+                ),
+            )
+            review_action_ids.append(int(action.lastrowid))
+            findings_path.write_text(
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "problem": f"substantive defect {failure}",
+                                "evidence": f"review evidence {failure}",
+                                "required_change": f"correct defect {failure}",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            accept_finish(
+                self.controller.store,
+                native_thread_id="overseer",
+                outcome_kind="changes_requested",
+                options={"input": str(findings_path)},
+            )
+            observed = observe_action_terminal(
+                self.controller.store, int(action.lastrowid)
+            )
+            self.assertTrue(observed["advanced"])
+
+        escalation = self.controller.store.row(
+            "SELECT * FROM updates WHERE recipient_task_id = ?", (archon["id"],)
+        )
+        self.assertIsNotNone(escalation)
+        self.assertEqual(
+            escalation["identity"],
+            f"review-escalation:{self.assignment['id']}:{review_action_ids[-1]}",
+        )
+        hold_id = json.loads(escalation["content"])["hold_id"]
+
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.return_value = "archon-escalation-turn"
+        self.controller.runtime = runtime
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "can_start": True,
+                    "last_turn_id": None,
+                    "runtime_status": "idle",
+                }
+            ),
+        ):
+            await self.controller._deliver_update_batch()
+            await self.controller._deliver_update_batch()
+
+        runtime.start_turn.assert_awaited_once()
+        prompt = runtime.start_turn.await_args.args[1]
+        self.assertIn(
+            f"Assignment {self.assignment['id']} reached 3 substantive review failures",
+            prompt,
+        )
+        self.assertIn(f"review action id: {review_action_ids[-1]}", prompt)
+        self.assertIn(f"hold id: {hold_id}", prompt)
+        self.assertIn('resolutions: ["retry", "rescope", "cancel"]', prompt)
+        frozen_action = self.controller.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'
+               ORDER BY id DESC LIMIT 1""",
+            (archon["id"],),
+        )
+        batch = self.controller.store.row(
+            "SELECT * FROM batches WHERE action_id = ?", (frozen_action["id"],)
+        )
+        self.assertEqual(batch["state"], "frozen")
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (escalation["id"],)
+            )["state"],
+            "batched",
+        )
+
+        decision_path = Path(self.temporary.name) / "review-decision.json"
+        decision_path.write_text(
+            json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "decision": "resolve_escalation",
+                            "assignment_id": self.assignment["id"],
+                            "resolution": "cancel",
+                            "reason": "Repeated substantive failures make the work unsuitable.",
+                        }
+                    ],
+                    "handled_update_ids": [escalation["id"]],
+                }
+            ),
+            encoding="utf-8",
+        )
+        await self.controller.handle_request(
+            {
+                "command": "finish",
+                "thread_id": "archon-review-escalation",
+                "outcome": "decisions",
+                "options": {"input": str(decision_path)},
+            }
+        )
+        self.controller.store.execute(
+            """UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1
+               WHERE id = ?""",
+            (archon["id"],),
+        )
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "last_turn_id": "archon-escalation-turn",
+                    "last_turn_status": "completed",
+                    "last_turn_terminal": True,
+                    "helpers_terminal": True,
+                }
+            ),
+        ):
+            handled = await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "archon-review-escalation",
+                    "turn": {
+                        "id": "archon-escalation-turn",
+                        "status": "completed",
+                    },
+                },
+            )
+
+        self.assertTrue(handled)
+        assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(assignment["stage"], "canceled")
+        self.assertIsNone(assignment["operator_hold_id"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM runs WHERE id = ?", (self.assignment["run_id"],)
+            )["state"],
+            "canceled",
+        )
+        self.assertIsNotNone(
+            self.controller.store.row(
+                "SELECT released_at FROM holds WHERE id = ?", (hold_id,)
+            )["released_at"]
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (escalation["id"],)
+            )["state"],
+            "processed",
+        )
+        self.assertEqual(
+            observe_action_terminal(self.controller.store, frozen_action["id"]),
+            {"advanced": True, "reused": True},
+        )
+        self.assertEqual(
+            len(
+                self.controller.store.rows(
+                    "SELECT * FROM updates WHERE identity = ?",
+                    (escalation["identity"],),
+                )
+            ),
+            1,
+        )
+        self.assertEqual(invariant_violations(self.controller.store), [])
+
     async def test_missing_finish_notice_preserves_original_batch(self) -> None:
         archon = self.controller.store.register_task(
             native_thread_id="archon-notice",

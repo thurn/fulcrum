@@ -397,11 +397,10 @@ def _apply_outcome(
             assignment = store.row(
                 "SELECT review_failures FROM assignments WHERE id = ?", (assignment_id,)
             )
-            failures = (
-                int(assignment["review_failures"])
-                + (1 if outcome == "changes_requested" else 0)
-                if assignment
-                else 0
+            if assignment is None:
+                raise StoreError("review assignment disappeared")
+            failures = int(assignment["review_failures"]) + (
+                1 if outcome == "changes_requested" else 0
             )
             stage = "recovering" if failures >= 3 else "correcting"
             condition = (
@@ -412,21 +411,53 @@ def _apply_outcome(
             if failures >= 3:
                 hold = store.execute(
                     """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
-                       VALUES ('assignment', ?, ?, 1, 'Archon decides whether to rescope or cancel', ?)""",
+                       VALUES ('assignment', ?, ?, 1,
+                               'Archon resolves escalation with retry, rescope, or cancel', ?)""",
                     (str(assignment_id), condition, timestamp),
                 )
+                hold_id = int(hold.lastrowid)
                 store.execute(
-                    """UPDATE assignments SET stage = ?, review_failures = ?, condition = ?,
+                    """UPDATE assignments SET prior_stage = 'correcting', stage = ?,
+                       review_failures = ?, condition = ?,
                        operator_hold_id = ?, next_attempt_at = NULL, updated_at = ? WHERE id = ?""",
                     (
                         stage,
                         failures,
                         condition,
-                        hold.lastrowid,
+                        hold_id,
                         timestamp,
                         assignment_id,
                     ),
                 )
+                archon = store.row("""SELECT id FROM tasks WHERE role = 'archon'
+                       AND state NOT IN ('retired','archived')""")
+                if archon is not None:
+                    store.execute(
+                        """INSERT OR IGNORE INTO updates(
+                               recipient_task_id, identity, content, actionable,
+                               state, created_at, updated_at
+                           ) VALUES (?, ?, ?, 1, 'retained', ?, ?)""",
+                        (
+                            archon["id"],
+                            f"review-escalation:{assignment_id}:{action['id']}",
+                            json.dumps(
+                                {
+                                    "kind": "review_failure_escalation",
+                                    "assignment_id": assignment_id,
+                                    "action_id": action["id"],
+                                    "review_action": outcome,
+                                    "review_failures": failures,
+                                    "condition": condition,
+                                    "hold_id": hold_id,
+                                    "required_decision": "resolve_escalation",
+                                    "resolutions": ["retry", "rescope", "cancel"],
+                                },
+                                sort_keys=True,
+                            ),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
             else:
                 store.execute(
                     "UPDATE assignments SET stage = ?, review_failures = ?, condition = ?, updated_at = ? WHERE id = ?",
@@ -648,6 +679,7 @@ def _apply_outcome(
     if kind == "archon" and outcome == "decisions":
         batch = store.row("SELECT id FROM batches WHERE action_id = ?", (action["id"],))
         required_operation_ids: set[int] = set()
+        required_escalations: dict[int, tuple[int, set[str]]] = {}
         if batch is not None:
             expected = {
                 int(row["update_id"])
@@ -668,7 +700,42 @@ def _apply_outcome(
                 (batch["id"],),
             ):
                 content = json.loads(row["content"])
-                if content.get("kind") != "operation_resolution":
+                update_kind = content.get("kind")
+                if update_kind == "review_failure_escalation":
+                    assignment_id = content.get("assignment_id")
+                    hold_id = content.get("hold_id")
+                    resolutions = content.get("resolutions")
+                    if (
+                        not isinstance(assignment_id, int)
+                        or isinstance(assignment_id, bool)
+                        or not isinstance(hold_id, int)
+                        or isinstance(hold_id, bool)
+                        or not isinstance(resolutions, list)
+                        or not resolutions
+                        or not all(isinstance(item, str) for item in resolutions)
+                    ):
+                        raise StoreError(
+                            "review-failure escalation update has invalid resolution context"
+                        )
+                    unresolved = store.row(
+                        """SELECT 1 FROM assignments a JOIN holds h
+                           ON h.id = a.operator_hold_id
+                           WHERE a.id = ? AND a.stage = 'recovering'
+                             AND a.operator_hold_id = ? AND h.released_at IS NULL""",
+                        (assignment_id, hold_id),
+                    )
+                    if unresolved is not None:
+                        if assignment_id in required_escalations:
+                            raise StoreError(
+                                "frozen batch has multiple unresolved review-failure "
+                                f"escalations for assignment {assignment_id}"
+                            )
+                        required_escalations[assignment_id] = (
+                            hold_id,
+                            set(resolutions),
+                        )
+                    continue
+                if update_kind != "operation_resolution":
                     continue
                 operation_id = content.get("operation_id")
                 if not isinstance(operation_id, int):
@@ -702,6 +769,40 @@ def _apply_outcome(
                     "one matching resolve_operation decision; "
                     f"missing={sorted(missing)} duplicates={duplicates}"
                 )
+            supplied_escalations: dict[int, list[dict[str, Any]]] = {}
+            for decision in payload.get("decisions", []):
+                if (
+                    isinstance(decision, dict)
+                    and decision.get("decision") == "resolve_escalation"
+                    and isinstance(decision.get("assignment_id"), int)
+                    and not isinstance(decision.get("assignment_id"), bool)
+                ):
+                    supplied_escalations.setdefault(
+                        int(decision["assignment_id"]), []
+                    ).append(decision)
+            missing_escalations = sorted(
+                assignment_id
+                for assignment_id in required_escalations
+                if not supplied_escalations.get(assignment_id)
+            )
+            duplicate_escalations = sorted(
+                assignment_id
+                for assignment_id in required_escalations
+                if len(supplied_escalations.get(assignment_id, [])) > 1
+            )
+            if missing_escalations or duplicate_escalations:
+                raise StoreError(
+                    "every unresolved review-failure escalation requires exactly "
+                    "one matching resolve_escalation decision; "
+                    f"missing={missing_escalations} duplicates={duplicate_escalations}"
+                )
+            for assignment_id, (_, resolutions) in required_escalations.items():
+                resolution = supplied_escalations[assignment_id][0].get("resolution")
+                if resolution not in resolutions:
+                    raise StoreError(
+                        f"review-failure escalation for assignment {assignment_id} "
+                        f"supports only {sorted(resolutions)}; got {resolution!r}"
+                    )
         result = apply_archon_decisions(store, payload, connection=connection)
         unresolved = [
             operation_id
@@ -715,6 +816,23 @@ def _apply_outcome(
         if unresolved:
             raise StoreError(
                 f"operation resolution did not transition operations {unresolved}"
+            )
+        unresolved_escalations = [
+            assignment_id
+            for assignment_id, (hold_id, _) in required_escalations.items()
+            if store.row(
+                """SELECT 1 FROM assignments a JOIN holds h
+                   ON h.id = a.operator_hold_id
+                   WHERE a.id = ? AND a.stage = 'recovering'
+                     AND a.operator_hold_id = ? AND h.released_at IS NULL""",
+                (assignment_id, hold_id),
+            )
+            is not None
+        ]
+        if unresolved_escalations:
+            raise StoreError(
+                "review escalation resolution did not transition assignments "
+                f"{unresolved_escalations}"
             )
         succession = store.row(
             "SELECT value FROM meta WHERE key = 'archon_succession_request'"
