@@ -45,6 +45,10 @@ def assignment_blockers(store: Store, assignment: dict[str, Any]) -> list[str]:
                 and hold["target"] == assignment["project_id"]
             )
             or (hold["scope"] == "run" and hold["target"] == str(assignment["run_id"]))
+            or (
+                hold["scope"] == "assignment"
+                and hold["target"] == str(assignment["id"])
+            )
         ):
             blockers.append(f"hold {hold['id']}: {hold['reason']}")
     dependencies = store.rows(
@@ -78,10 +82,17 @@ def ready_assignments(store: Store) -> list[dict[str, Any]]:
     if enabled is None or enabled["value"] != "1":
         return []
     assignments = store.rows(
-        """SELECT a.*, r.project_id, rb.position FROM assignments a JOIN runs r ON r.id = a.run_id
+        """SELECT a.*, r.project_id, r.priority, rb.position FROM assignments a JOIN runs r ON r.id = a.run_id
            JOIN run_beads rb ON rb.run_id = a.run_id AND rb.bead_id = a.bead_id
            WHERE r.state IN ('approved','active') AND a.stage IN ('queued','preparing','review_pending','correcting')
-           ORDER BY CASE WHEN a.stage = 'queued' THEN 1 ELSE 0 END, r.id, rb.position, a.id"""
+           AND NOT EXISTS (
+             SELECT 1 FROM run_beads earlier
+             JOIN assignments prior ON prior.run_id = earlier.run_id AND prior.bead_id = earlier.bead_id
+             WHERE earlier.run_id = rb.run_id AND earlier.position < rb.position
+             AND prior.stage NOT IN ('completed','canceled')
+           )
+           ORDER BY CASE WHEN a.stage = 'queued' THEN 1 ELSE 0 END,
+                    r.priority DESC, r.id, rb.position, a.id"""
     )
     return [
         assignment

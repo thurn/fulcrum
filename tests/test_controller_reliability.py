@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
 from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV
-from fulcrum.lifecycle import apply_archon_decisions
+from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
 from fulcrum.store import StoreError
 from fulcrum.tollgate import TollgateUncertainError
 
@@ -76,6 +77,7 @@ class FakeBeads:
 class FakeArchiveRuntime:
     def __init__(self) -> None:
         self.archived: list[str] = []
+        self.ready = True
 
     async def archive(self, thread_id: str) -> None:
         self.archived.append(thread_id)
@@ -168,6 +170,7 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             model="sol",
             reasoning_effort="high",
             project_id="p",
+            pair_id=run_id,
         )
         self.overseer = self.controller.store.register_task(
             native_thread_id="overseer",
@@ -176,6 +179,12 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             model="sol",
             reasoning_effort="high",
             project_id="p",
+            pair_id=run_id,
+        )
+        self.controller.store.execute(
+            """UPDATE runs SET state = 'active', executor_task_id = ?,
+               overseer_task_id = ? WHERE id = ?""",
+            (self.executor["id"], self.overseer["id"], run_id),
         )
         self.controller.store.execute(
             """UPDATE assignments SET stage = 'implementing', worktree_path = ?,
@@ -238,6 +247,387 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(pending["value"], "0")
         self.assertEqual(os.environ[INHERITED_LOCK_FD_ENV], str(descriptor))
+
+    async def test_run_reuses_one_pair_for_later_beads(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """INSERT INTO beads(
+                   bead_id, intake_key, project_id, title, description, activation,
+                   executor_model, executor_reasoning_effort, overseer_model,
+                   overseer_reasoning_effort, model_provenance, publication_state,
+                   created_at, updated_at
+               ) VALUES ('p-2','key-2','p','Second','Second scope','pending',
+                         'sol','high','sol','high','default','complete',?,?)""",
+            (now, now),
+        )
+        position = self.controller.store.execute(
+            "INSERT INTO run_beads(run_id, bead_id, position, scope_snapshot) VALUES (?, 'p-2', 1, 'Second scope')",
+            (self.assignment["run_id"],),
+        )
+        later = self.controller.store.execute(
+            "INSERT INTO assignments(run_id, bead_id, stage, scope_snapshot, created_at, updated_at) VALUES (?, 'p-2', 'queued', 'Second scope', ?, ?)",
+            (self.assignment["run_id"], now, now),
+        )
+        self.assertIsNotNone(position)
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (later.lastrowid,),
+        )
+        await self.controller._ensure_pair(assignment)
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (later.lastrowid,)
+        )
+        self.assertEqual(retained["executor_task_id"], self.executor["id"])
+        self.assertEqual(retained["overseer_task_id"], self.overseer["id"])
+
+    async def test_refreshed_instructions_retain_scope_candidate_and_handoffs(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            "UPDATE assignments SET candidate_id = 'candidate-1', source_oid = 'abc' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at)
+               VALUES (?, ?, 'implement', '{}', 'processed', 'ready_for_review', ?, ?, ?)""",
+            (
+                self.executor["id"],
+                self.assignment["id"],
+                json.dumps({"evidence": "commit abc; tests passed"}),
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(assignment_id, source_action_id, kind, content_json, created_at)
+               VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+            (
+                self.assignment["id"],
+                implementation.lastrowid,
+                json.dumps({"evidence": "commit abc; tests passed"}),
+                now,
+            ),
+        )
+        action = self.controller.store.execute(
+            """INSERT INTO actions(task_id, assignment_id, kind, payload, state,
+                   created_at, updated_at) VALUES (?, ?, 'review', ?, 'active', ?, ?)""",
+            (
+                self.overseer["id"],
+                self.assignment["id"],
+                json.dumps({"candidate": {"id": "candidate-1"}}),
+                now,
+                now,
+            ),
+        )
+        result = await self.controller.handle_request(
+            {"command": "instructions", "thread_id": "overseer"}
+        )
+        prompt = result["instructions"]
+        self.assertIn("Approved scope:\n\nScope", prompt)
+        self.assertIn("implementation_evidence", prompt)
+        self.assertIn("commit abc; tests passed", prompt)
+
+    async def test_failed_specialist_publication_remains_runnable(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        occurrence = self.controller.store.execute(
+            """INSERT INTO occurrences(kind, authority, state, report_json, created_at, updated_at)
+               VALUES ('inquisitor','test','publishing',?, ?, ?)""",
+            (
+                json.dumps(
+                    {
+                        "summary": "No findings",
+                        "coverage": ["source"],
+                        "findings": [],
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        await self.controller._publish_occurrences()
+        retained = self.controller.store.row(
+            "SELECT * FROM occurrences WHERE id = ?", (occurrence.lastrowid,)
+        )
+        obligation = self.controller.store.row(
+            "SELECT * FROM obligations WHERE kind = 'finding_publication' AND identity = ?",
+            (str(occurrence.lastrowid),),
+        )
+        self.assertEqual(retained["state"], "publishing")
+        self.assertEqual(obligation["state"], "failed")
+        self.assertIsNotNone(obligation["next_attempt_at"])
+
+    async def test_specialist_report_is_committed_notified_and_archived(self) -> None:
+        brain = self.paths.brain_root
+        brain.mkdir()
+        subprocess.run(["git", "-C", str(brain), "init", "-q"], check=True)
+        subprocess.run(
+            ["git", "-C", str(brain), "config", "user.email", "test@example.com"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(brain), "config", "user.name", "Test"], check=True
+        )
+        (brain / "README.md").write_text("brain\n")
+        subprocess.run(["git", "-C", str(brain), "add", "README.md"], check=True)
+        subprocess.run(
+            ["git", "-C", str(brain), "commit", "-q", "-m", "init"], check=True
+        )
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        specialist = self.controller.store.register_task(
+            native_thread_id="inquisitor",
+            role="inquisitor",
+            description="Review",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        now = "2026-01-01T00:00:00Z"
+        occurrence = self.controller.store.execute(
+            """INSERT INTO occurrences(
+                   kind, authority, state, report_json, evidence_json, created_at, updated_at
+               ) VALUES ('inquisitor','test','publishing',?, ?, ?, ?)""",
+            (
+                json.dumps(
+                    {
+                        "summary": "No findings",
+                        "coverage": ["all source"],
+                        "findings": [],
+                    }
+                ),
+                json.dumps(
+                    {"projects": [{"project_id": "p", "source_revision": "abc"}]}
+                ),
+                now,
+                now,
+            ),
+        )
+        self.controller.store.execute(
+            """INSERT INTO actions(task_id, occurrence_id, kind, payload, state,
+                   created_at, updated_at) VALUES (?, ?, 'specialist', '{}', 'processed', ?, ?)""",
+            (specialist["id"], occurrence.lastrowid, now, now),
+        )
+        await self.controller._publish_occurrences()
+        retained = self.controller.store.row(
+            "SELECT * FROM occurrences WHERE id = ?", (occurrence.lastrowid,)
+        )
+        self.assertEqual(retained["state"], "complete")
+        self.assertTrue(retained["publication_revision"])
+        report_path = brain / "reports" / "inquisitor" / f"{occurrence.lastrowid}.json"
+        self.assertTrue(report_path.is_file())
+        self.assertEqual(
+            json.loads(report_path.read_text())["reviewed_evidence"]["projects"][0][
+                "source_revision"
+            ],
+            "abc",
+        )
+        self.assertIsNotNone(
+            self.controller.store.row(
+                "SELECT 1 FROM updates WHERE recipient_task_id = ? AND identity = ?",
+                (archon["id"], f"specialist:{occurrence.lastrowid}"),
+            )
+        )
+        self.assertIsNotNone(
+            self.controller.store.row(
+                "SELECT 1 FROM obligations WHERE kind = 'archive' AND target = 'inquisitor'"
+            )
+        )
+
+    async def test_deferred_archon_batch_reactivates_without_losing_updates(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        update = self.controller.store.execute(
+            """INSERT INTO updates(recipient_task_id, identity, content, state, created_at, updated_at)
+               VALUES (?, 'proposal:test', '{}', 'batched', ?, ?)""",
+            (archon["id"], now, now),
+        )
+        action = self.controller.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, outcome_kind,
+                   outcome_payload, created_at, updated_at)
+               VALUES (?, 'archon', '{}', 'active', 'deferred', ?, ?, ?)""",
+            (
+                archon["id"],
+                json.dumps(
+                    {
+                        "reason": "wait",
+                        "reactivation": {"next_check_at": "2020-01-01T00:00:00Z"},
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        batch = self.controller.store.execute(
+            """INSERT INTO batches(recipient_task_id, state, action_id, created_at, updated_at)
+               VALUES (?, 'frozen', ?, ?, ?)""",
+            (archon["id"], action.lastrowid, now, now),
+        )
+        self.controller.store.execute(
+            "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+            (batch.lastrowid, update.lastrowid),
+        )
+        observe_action_terminal(self.controller.store, int(action.lastrowid))
+        self.assertIsNotNone(
+            self.controller.store.row(
+                "SELECT * FROM deferred_batches WHERE batch_id = ?",
+                (batch.lastrowid,),
+            )
+        )
+        self.controller._reactivate_deferred_batches()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (update.lastrowid,)
+            )["state"],
+            "retained",
+        )
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT * FROM deferred_batches WHERE batch_id = ?",
+                (batch.lastrowid,),
+            )
+        )
+        repeated = self.controller.store.execute(
+            """INSERT INTO batches(recipient_task_id, state, created_at, updated_at)
+               VALUES (?, 'frozen', ?, ?)""",
+            (archon["id"], now, now),
+        )
+        self.controller.store.execute(
+            "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+            (repeated.lastrowid, update.lastrowid),
+        )
+
+    async def test_operator_change_reactivates_a_deferred_archon_batch(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        old_update = self.controller.store.execute(
+            """INSERT INTO updates(recipient_task_id, identity, content, state, created_at, updated_at)
+               VALUES (?, 'proposal:old', '{}', 'batched', ?, ?)""",
+            (archon["id"], now, now),
+        )
+        action = self.controller.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, outcome_kind,
+                   outcome_payload, created_at, updated_at)
+               VALUES (?, 'archon', '{}', 'active', 'deferred', ?, ?, ?)""",
+            (
+                archon["id"],
+                json.dumps(
+                    {
+                        "reason": "wait for operator input",
+                        "reactivation": {"operator_change": True},
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        batch = self.controller.store.execute(
+            """INSERT INTO batches(recipient_task_id, state, action_id, created_at, updated_at)
+               VALUES (?, 'frozen', ?, ?, ?)""",
+            (archon["id"], action.lastrowid, now, now),
+        )
+        self.controller.store.execute(
+            "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+            (batch.lastrowid, old_update.lastrowid),
+        )
+        observe_action_terminal(self.controller.store, int(action.lastrowid))
+
+        self.controller._reactivate_deferred_batches()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (old_update.lastrowid,)
+            )["state"],
+            "batched",
+        )
+        self.controller.store.execute(
+            """INSERT INTO updates(recipient_task_id, identity, content, state, created_at, updated_at)
+               VALUES (?, 'operator:new', '{}', 'retained', ?, ?)""",
+            (archon["id"], now, now),
+        )
+        self.controller._reactivate_deferred_batches()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (old_update.lastrowid,)
+            )["state"],
+            "retained",
+        )
+
+    async def test_archon_succession_progresses_while_dispatch_is_disabled(
+        self,
+    ) -> None:
+        old = self.controller.store.register_task(
+            native_thread_id="old-archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        self.controller.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('archon_succession_request', ?)",
+            (
+                json.dumps(
+                    {
+                        "task_id": old["id"],
+                        "successor_model": "sol",
+                        "successor_reasoning_effort": "high",
+                        "reason": "handover",
+                    }
+                ),
+            ),
+        )
+        runtime = FakeArchiveRuntime()
+        self.controller.runtime = runtime  # type: ignore[assignment]
+
+        async def provision(**_arguments: Any) -> dict[str, Any]:
+            return self.controller.store.register_task(
+                native_thread_id="new-archon",
+                role="archon",
+                description="Fleet",
+                model="sol",
+                reasoning_effort="high",
+            )
+
+        self.controller.starts_enabled = False
+        with patch.object(self.controller, "_provision_task", side_effect=provision):
+            await self.controller.advance()
+        self.assertEqual(runtime.archived, ["old-archon"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM tasks WHERE id = ?", (old["id"],)
+            )["state"],
+            "archived",
+        )
+        self.assertIsNotNone(
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = 'new-archon'"
+            )
+        )
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT * FROM meta WHERE key = 'archon_succession_request'"
+            )
+        )
 
     async def test_controller_creates_and_captures_candidate_after_executor(
         self,

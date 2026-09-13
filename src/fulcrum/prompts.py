@@ -6,7 +6,7 @@ import json
 from importlib.resources import files
 from typing import Any
 
-from fulcrum.outcomes import finish_syntax
+from fulcrum.outcomes import finish_contract, finish_syntax
 
 
 class PromptError(RuntimeError):
@@ -19,13 +19,16 @@ TEMPLATES = {
     "review": "overseer.md",
     "archon": "archon.md",
     "weaver": "weaver.md",
-    "specialist": "specialist.md",
     "interview": "interview.md",
 }
 
 
-def load_template(action_kind: str) -> str:
-    name = TEMPLATES.get(action_kind)
+def load_template(action_kind: str, *, role: str | None = None) -> str:
+    name = (
+        f"{role}.md"
+        if action_kind == "specialist" and role in {"sage", "inquisitor"}
+        else TEMPLATES.get(action_kind)
+    )
     if name is None:
         raise PromptError(f"no prompt template for {action_kind}")
     resource = files("fulcrum").joinpath("prompts", name)
@@ -53,7 +56,7 @@ def build_prompt(
         except json.JSONDecodeError:
             payload = {"detail": payload}
     lines = [
-        load_template(action_kind),
+        load_template(action_kind, role=str(task.get("role") or "")),
         "",
         f"Identity: {task['title']} ({task['native_thread_id']}).",
     ]
@@ -86,6 +89,8 @@ def build_prompt(
         [
             "Finish exactly once with one compatible command:",
             finish_syntax(action_kind),
+            "Exact JSON contract for file-backed outcomes:\n"
+            + finish_contract(action_kind),
             "End after the finish command succeeds.",
         ]
     )

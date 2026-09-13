@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,19 @@ ALLOWED: dict[str, set[str]] = {
     "weaver": {"intake_complete", "future_plan", "blocked"},
     "specialist": {"report", "evidence_needed", "blocked"},
     "interview": {"interview_answer", "blocked"},
+}
+
+ARCHON_DECISIONS = {
+    "approve",
+    "hold",
+    "release_hold",
+    "cancel_run",
+    "resolve_escalation",
+    "set_priority",
+    "suspend_policy",
+    "request_specialist",
+    "set_models",
+    "retire_archon",
 }
 
 
@@ -81,23 +96,84 @@ def validate_outcome(
         "interview_answer",
     }:
         payload = _json_file(options)
-        if outcome_kind == "decisions" and not isinstance(
-            payload.get("decisions"), list
-        ):
-            raise OutcomeError("decisions input requires a decisions list")
+        if outcome_kind == "decisions":
+            decisions = payload.get("decisions")
+            if not isinstance(decisions, list):
+                raise OutcomeError("decisions input requires a decisions list")
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    raise OutcomeError("each Archon decision must be an object")
+                kind = decision.get("decision")
+                if kind not in ARCHON_DECISIONS:
+                    raise OutcomeError(f"unsupported Archon decision: {kind!r}")
+            handled = payload.get("handled_update_ids")
+            if handled is not None and (
+                not isinstance(handled, list)
+                or not all(isinstance(item, int) for item in handled)
+            ):
+                raise OutcomeError("handled_update_ids must be an integer list")
+        if outcome_kind == "changes_requested":
+            findings = payload.get("findings")
+            if not isinstance(findings, list) or not findings:
+                raise OutcomeError("changes-requested input requires findings")
+            for finding in findings:
+                if not isinstance(finding, dict) or not all(
+                    isinstance(finding.get(field), str) and finding[field].strip()
+                    for field in ("problem", "evidence", "required_change")
+                ):
+                    raise OutcomeError(
+                        "each review finding requires problem, evidence, and required_change"
+                    )
+        if outcome_kind == "incomplete":
+            missing = payload.get("missing_evidence")
+            if (
+                not isinstance(missing, list)
+                or not missing
+                or not all(isinstance(item, str) and item.strip() for item in missing)
+            ):
+                raise OutcomeError("incomplete input requires missing_evidence strings")
         if outcome_kind == "evidence_needed" and not isinstance(
             payload.get("requests"), list
         ):
             raise OutcomeError("evidence-needed input requires a requests list")
+        if outcome_kind == "evidence_needed":
+            for request in payload["requests"]:
+                if not isinstance(request, dict) or not all(
+                    isinstance(request.get(field), str) and request[field].strip()
+                    for field in ("subject", "question")
+                ):
+                    raise OutcomeError(
+                        "each evidence request requires subject and question"
+                    )
+        if outcome_kind == "interview_answer":
+            if (
+                not isinstance(payload.get("answer"), str)
+                or not payload["answer"].strip()
+            ):
+                raise OutcomeError("interview answer requires nonempty answer")
+            if not isinstance(payload.get("evidence"), list) or not all(
+                isinstance(item, str) and item.strip() for item in payload["evidence"]
+            ):
+                raise OutcomeError("interview answer requires an evidence list")
         return payload
     if outcome_kind == "report":
         payload = _json_file(options)
+        if (
+            not isinstance(payload.get("summary"), str)
+            or not payload["summary"].strip()
+        ):
+            raise OutcomeError("report input requires a nonempty summary")
+        if not isinstance(payload.get("coverage"), list) or not all(
+            isinstance(item, str) and item.strip() for item in payload["coverage"]
+        ):
+            raise OutcomeError("report input requires an explicit coverage list")
         if not isinstance(payload.get("findings"), list):
             raise OutcomeError("report input requires an explicit findings list")
         for finding in payload["findings"]:
             if not isinstance(finding, dict):
                 raise OutcomeError("each finding must be an object")
             for field in (
+                "identity",
                 "problem",
                 "evidence",
                 "expected_benefit",
@@ -109,6 +185,14 @@ def validate_outcome(
                     or not finding[field].strip()
                 ):
                     raise OutcomeError(f"each finding requires nonempty {field}")
+            identity = finding["identity"]
+            if (
+                len(identity) > 200
+                or re.fullmatch(r"[A-Za-z0-9._/-]+", identity) is None
+            ):
+                raise OutcomeError(
+                    "finding identity must be at most 200 URL-safe path characters"
+                )
         return payload
     if outcome_kind == "deferred":
         payload = _json_file(options)
@@ -123,10 +207,142 @@ def validate_outcome(
             raise OutcomeError(
                 "deferral input requires a concrete reactivation condition"
             )
+        if "capacity" in payload and payload["capacity"] is not True:
+            raise OutcomeError("capacity reactivation must be true")
+        if "dependency" in payload and (
+            not isinstance(payload["dependency"], str)
+            or not payload["dependency"].strip()
+        ):
+            raise OutcomeError("dependency reactivation must name a bead")
+        if "hold" in payload and (
+            not isinstance(payload["hold"], int) or isinstance(payload["hold"], bool)
+        ):
+            raise OutcomeError("hold reactivation must name an integer hold ID")
+        if "operator_change" in payload and payload["operator_change"] is not True:
+            raise OutcomeError("operator_change reactivation must be true")
+        if "next_check_at" in payload:
+            value = payload["next_check_at"]
+            if not isinstance(value, str):
+                raise OutcomeError("next_check_at must be an ISO timestamp")
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise OutcomeError("next_check_at must be an ISO timestamp") from error
+            if parsed.tzinfo is None:
+                raise OutcomeError("next_check_at must include a timezone")
         return {"reason": _required_text(options, "reason"), "reactivation": payload}
     if outcome_kind == "intake_complete":
         return {}
     raise OutcomeError(f"unsupported outcome: {outcome_kind}")
+
+
+def finish_contract(action_kind: str) -> str:
+    """Return exact JSON shapes for file-backed finishes."""
+
+    contracts: dict[str, Any] = {
+        "review": {
+            "changes_requested": {
+                "findings": [
+                    {
+                        "problem": "specific defect",
+                        "evidence": "file/line, command, or observed result",
+                        "required_change": "bounded correction",
+                    }
+                ]
+            },
+            "incomplete": {"missing_evidence": ["specific missing proof"]},
+        },
+        "archon": {
+            "decisions": [
+                {
+                    "decision": "approve",
+                    "project": "project-id",
+                    "beads": ["bead-id"],
+                    "scope": {"bead-id": "exact scope"},
+                },
+                {
+                    "decision": "hold",
+                    "scope": "global|project|run|assignment",
+                    "target": "required except global",
+                    "reason": "why",
+                    "release_condition": "exact condition",
+                },
+                {"decision": "release_hold", "hold_id": 1},
+                {"decision": "cancel_run", "run_id": 1, "reason": "why"},
+                {
+                    "decision": "resolve_escalation",
+                    "assignment_id": 1,
+                    "resolution": "retry|rescope|cancel",
+                    "reason": "why",
+                    "scope": "required for rescope",
+                },
+                {"decision": "set_priority", "run_id": 1, "priority": 10},
+                {
+                    "decision": "suspend_policy",
+                    "kind": "sage|inquisitor",
+                    "scope": None,
+                },
+                {
+                    "decision": "request_specialist",
+                    "kind": "sage|inquisitor",
+                    "projects": ["project-id"],
+                    "prompt": "question",
+                },
+                {
+                    "decision": "set_models",
+                    "bead_id": "bead-id",
+                    "executor_model": "model",
+                    "executor_reasoning_effort": "effort",
+                    "overseer_model": "model",
+                    "overseer_reasoning_effort": "effort",
+                    "rationale": "why these settings are needed",
+                },
+                {
+                    "decision": "retire_archon",
+                    "reason": "why",
+                },
+            ],
+            "handled_update_ids": [1],
+            "global_limit": 2,
+            "project_limits": {"project-id": 1},
+            "recurring_policies": [
+                {"kind": "inquisitor", "scope": "project-id", "cadence_seconds": 86400}
+            ],
+        },
+        "specialist": {
+            "report": {
+                "summary": "bounded conclusion",
+                "coverage": ["evidence examined"],
+                "findings": [
+                    {
+                        "identity": "stable semantic identifier",
+                        "problem": "demonstrated problem",
+                        "evidence": "concrete evidence",
+                        "expected_benefit": "measurable benefit",
+                        "project": "project-id",
+                        "acceptance_criteria": "testable completion condition",
+                    }
+                ],
+            },
+            "evidence_needed": {
+                "requests": [
+                    {
+                        "subject": "task title or thread id",
+                        "question": "one concrete question",
+                    }
+                ]
+            },
+        },
+        "interview": {
+            "interview_answer": {"answer": "concrete answer", "evidence": ["reference"]}
+        },
+    }
+    contract = contracts.get(action_kind)
+    return (
+        json.dumps(contract, indent=2, sort_keys=True)
+        if contract
+        else "No JSON file is required for this action."
+    )
 
 
 def finish_syntax(action_kind: str) -> str:

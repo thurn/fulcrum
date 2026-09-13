@@ -173,6 +173,15 @@ def _lease_blockers(connection: Any, request: LeaseRequest) -> list[str]:
             ).fetchone()
             if run_hold is not None:
                 blockers.append(f"hold {run_hold['id']}: {run_hold['reason']}")
+            assignment_hold = connection.execute(
+                """SELECT id, reason FROM holds WHERE released_at IS NULL
+                   AND scope = 'assignment' AND target = ? LIMIT 1""",
+                (str(request.assignment_id),),
+            ).fetchone()
+            if assignment_hold is not None:
+                blockers.append(
+                    f"hold {assignment_hold['id']}: {assignment_hold['reason']}"
+                )
             missing_dependency = connection.execute(
                 """SELECT d.dependency_id FROM bead_dependencies d
                    WHERE d.bead_id = ? AND NOT EXISTS (

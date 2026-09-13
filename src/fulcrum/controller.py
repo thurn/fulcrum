@@ -18,6 +18,7 @@ from typing import Any
 from watchfiles import awatch
 
 from fulcrum.beads import Beads
+from fulcrum.brain import BrainRepository
 from dataclasses import replace
 
 from fulcrum.config import InstallationConfig, RuntimePaths, save_installation
@@ -542,18 +543,15 @@ class Controller:
             (now,),
         ):
             prior = assignment["prior_stage"]
-            target = (
-                prior
-                if prior
-                in {
-                    "queued",
-                    "preparing",
-                    "review_pending",
-                    "correcting",
-                    "delivering",
-                }
-                else "queued"
-            )
+            target = {
+                "queued": "queued",
+                "preparing": "preparing",
+                "implementing": "preparing",
+                "review_pending": "review_pending",
+                "reviewing": "review_pending",
+                "correcting": "correcting",
+                "delivering": "delivering",
+            }.get(str(prior), "queued")
             self.store.transition(
                 "assignment",
                 int(assignment["id"]),
@@ -672,6 +670,10 @@ class Controller:
                 await asyncio.to_thread(self._reconcile_beads_close, operation)
             elif operation["kind"] == "setup_runtime_smoke":
                 await self._reconcile_setup_runtime_smoke(operation)
+            elif operation["kind"] == "brain_report_publish":
+                await asyncio.to_thread(self._reconcile_brain_report, operation)
+            elif operation["kind"] == "beads_finding_comment":
+                await asyncio.to_thread(self._reconcile_finding_comment, operation)
             else:
                 self._retain_uncertain_condition(
                     operation,
@@ -713,6 +715,65 @@ class Controller:
                 "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
                 (condition, utc_now(), assignment["id"]),
             )
+
+    def _reconcile_brain_report(self, operation: dict[str, Any]) -> None:
+        inputs = json.loads(operation["input_json"])
+        path = Path(str(inputs["path"]))
+        publication = BrainRepository(self.paths.brain_root).publish(
+            [path],
+            f"docs: publish {inputs['kind']} report {operation['target']}",
+        )
+        result = {
+            "branch": publication.branch,
+            "local_revision": publication.local_revision,
+            "remote_revision": publication.remote_revision,
+            "merged_remote": publication.merged_remote,
+        }
+        timestamp = utc_now()
+        self.store.execute(
+            """UPDATE external_operations SET state = 'complete', result_json = ?,
+               native_id = ?, reconciliation_used = 1, condition = NULL,
+               completed_at = ?, updated_at = ? WHERE id = ?""",
+            (
+                json.dumps(result, sort_keys=True),
+                publication.local_revision,
+                timestamp,
+                timestamp,
+                operation["id"],
+            ),
+        )
+
+    def _reconcile_finding_comment(self, operation: dict[str, Any]) -> None:
+        inputs = json.loads(operation["input_json"])
+        observed = self.beads.show(str(inputs["bead_id"]))
+        marker = str(inputs["marker"])
+        timestamp = utc_now()
+        if observed is not None and marker in json.dumps(observed, sort_keys=True):
+            self.store.execute(
+                """UPDATE external_operations SET state = 'complete', result_json = ?,
+                   native_id = ?, reconciliation_used = 1, condition = NULL,
+                   completed_at = ?, updated_at = ? WHERE id = ?""",
+                (
+                    json.dumps({"bead_id": inputs["bead_id"], "marker": marker}),
+                    inputs["bead_id"],
+                    timestamp,
+                    timestamp,
+                    operation["id"],
+                ),
+            )
+            self._record_existing_finding(
+                str(operation["target"]),
+                int(inputs["occurrence_id"]),
+                str(inputs["bead_id"]),
+                inputs["finding"],
+            )
+            return
+        self.store.execute(
+            """UPDATE external_operations SET state = 'failed', reconciliation_used = 1,
+               condition = 'exact marker absent after targeted Beads observation',
+               updated_at = ? WHERE id = ?""",
+            (timestamp, operation["id"]),
+        )
 
     async def _reconcile_turn_start(self, operation: dict[str, Any]) -> None:
         inputs = json.loads(operation["input_json"])
@@ -1083,6 +1144,18 @@ class Controller:
                 )
 
     async def advance(self) -> None:
+        await self._run_advancement_step(
+            "occurrence-publication", self._publish_occurrences
+        )
+        if self.runtime.ready:
+            await self._run_advancement_step(
+                "archon-succession", self._process_archon_succession
+            )
+            await self._run_advancement_step("archival", self._archive_ready_tasks)
+            await self._run_advancement_step(
+                "archon-succession", self._process_archon_succession
+            )
+        self._update_readiness()
         if not self.starts_enabled or not self.runtime.ready:
             return
         # Admission is deliberately one-at-a-time. Each started action commits a
@@ -1121,24 +1194,25 @@ class Controller:
             except Exception as error:
                 self._schedule_assignment_recovery(assignment, str(error))
         for name, step in (
-            ("occurrence-publication", self._publish_occurrences),
             ("interviews", self._manage_interviews),
             ("specialists", self._start_specialists),
             ("proposals", self._queue_proposals),
             ("update-delivery", self._deliver_update_batch),
-            ("archival", self._archive_ready_tasks),
         ):
-            try:
-                await step()
-            except Exception as error:
-                self.store.event(
-                    "advancement_step_failed",
-                    f"{name}: {error}",
-                    entity_type="advancement_step",
-                    entity_id=name,
-                    detail={"traceback": traceback.format_exc()},
-                )
+            await self._run_advancement_step(name, step)
         self._update_readiness()
+
+    async def _run_advancement_step(self, name: str, step: Any) -> None:
+        try:
+            await step()
+        except Exception as error:
+            self.store.event(
+                "advancement_step_failed",
+                f"{name}: {error}",
+                entity_type="advancement_step",
+                entity_id=name,
+                detail={"traceback": traceback.format_exc()},
+            )
 
     async def _prepare_assignment(self, assignment: dict[str, Any]) -> None:
         project = self.store.row(
@@ -1222,7 +1296,22 @@ class Controller:
         await self._start_assignment_action(assignment)
 
     async def _ensure_pair(self, assignment: dict[str, Any]) -> None:
-        if assignment.get("executor_task_id") and assignment.get("overseer_task_id"):
+        run = self.store.row("SELECT * FROM runs WHERE id = ?", (assignment["run_id"],))
+        if run is None:
+            raise StoreError("assignment run disappeared")
+        if run.get("executor_task_id") and run.get("overseer_task_id"):
+            self.store.execute(
+                """UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ?
+                   WHERE id = ?""",
+                (
+                    run["executor_task_id"],
+                    run["overseer_task_id"],
+                    utc_now(),
+                    assignment["id"],
+                ),
+            )
+            assignment["executor_task_id"] = run["executor_task_id"]
+            assignment["overseer_task_id"] = run["overseer_task_id"]
             return
         bead = self.store.row(
             "SELECT * FROM beads WHERE bead_id = ?", (assignment["bead_id"],)
@@ -1234,30 +1323,36 @@ class Controller:
             raise StoreError("assignment sources disappeared")
         executor = self.store.row(
             "SELECT * FROM tasks WHERE pair_id = ? AND role = 'executor' ORDER BY id DESC LIMIT 1",
-            (assignment["id"],),
+            (assignment["run_id"],),
         ) or await self._provision_task(
             role="executor",
             description=bead["title"],
             project=project,
             model=bead["executor_model"],
             effort=bead["executor_reasoning_effort"],
-            pair_id=int(assignment["id"]),
+            pair_id=int(assignment["run_id"]),
         )
         overseer = self.store.row(
             "SELECT * FROM tasks WHERE pair_id = ? AND role = 'overseer' ORDER BY id DESC LIMIT 1",
-            (assignment["id"],),
+            (assignment["run_id"],),
         ) or await self._provision_task(
             role="overseer",
             description=bead["title"],
             project=project,
             model=bead["overseer_model"],
             effort=bead["overseer_reasoning_effort"],
-            pair_id=int(assignment["id"]),
+            pair_id=int(assignment["run_id"]),
         )
-        self.store.execute(
-            "UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ? WHERE id = ?",
-            (executor["id"], overseer["id"], utc_now(), assignment["id"]),
-        )
+        with self.store.transaction() as connection:
+            connection.execute(
+                "UPDATE runs SET executor_task_id = ?, overseer_task_id = ?, state = 'active', updated_at = ? WHERE id = ?",
+                (executor["id"], overseer["id"], utc_now(), assignment["run_id"]),
+            )
+            connection.execute(
+                """UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ?
+                   WHERE run_id = ?""",
+                (executor["id"], overseer["id"], utc_now(), assignment["run_id"]),
+            )
         assignment["executor_task_id"] = executor["id"]
         assignment["overseer_task_id"] = overseer["id"]
 
@@ -1293,15 +1388,20 @@ class Controller:
                 model=model,
                 project_id=project["codex_project_id"],
                 base_instructions=load_template(
-                    "implement"
-                    if role == "executor"
-                    else (
-                        "review"
-                        if role == "overseer"
+                    (
+                        "implement"
+                        if role == "executor"
                         else (
-                            "specialist" if role in {"sage", "inquisitor"} else "archon"
+                            "review"
+                            if role == "overseer"
+                            else (
+                                "specialist"
+                                if role in {"sage", "inquisitor"}
+                                else "archon"
+                            )
                         )
-                    )
+                    ),
+                    role=role,
                 ),
             )
             thread = result["thread"]
@@ -1389,7 +1489,11 @@ class Controller:
                 else "overseer_task_id"
             )
             self.store.execute(
-                f"UPDATE assignments SET {column} = ?, stage = 'preparing', condition = NULL, updated_at = ? WHERE id = ?",
+                f"UPDATE runs SET {column} = ?, updated_at = ? WHERE id = ?",
+                (task["id"], utc_now(), pair_id),
+            )
+            self.store.execute(
+                f"UPDATE assignments SET {column} = ?, condition = NULL, updated_at = ? WHERE run_id = ?",
                 (task["id"], utc_now(), pair_id),
             )
         task["state"] = "idle"
@@ -1419,10 +1523,28 @@ class Controller:
         )
         if existing is not None:
             return
+        handoffs = self.store.rows(
+            """SELECT kind, content_json, source_action_id FROM handoffs
+               WHERE assignment_id = ? ORDER BY id""",
+            (assignment["id"],),
+        )
         payload = {
             "purpose": kind,
             "bead_id": assignment["bead_id"],
             "predecessor_candidate_id": assignment.get("candidate_id"),
+            "candidate": {
+                "id": assignment.get("candidate_id"),
+                "source_revision": assignment.get("source_oid"),
+                "tested_revision": assignment.get("tested_oid"),
+            },
+            "handoffs": [
+                {
+                    "kind": row["kind"],
+                    "source_action_id": row["source_action_id"],
+                    "content": json.loads(row["content_json"]),
+                }
+                for row in handoffs
+            ],
         }
         decision = acquire_lease(
             self.store,
@@ -1432,7 +1554,7 @@ class Controller:
                 kind=kind,
                 payload=payload,
                 project_ids=(str(assignment["project_id"]),),
-                pair_id=int(assignment["id"]),
+                pair_id=int(assignment["run_id"]),
                 conflict_keys=self._assignment_conflict_keys(assignment),
                 check_after=(
                     datetime.now(timezone.utc)
@@ -1491,6 +1613,57 @@ class Controller:
                     keys.add(raw.strip())
         return tuple(sorted(keys))
 
+    def _build_action_prompt(
+        self,
+        action: dict[str, Any],
+        task: dict[str, Any],
+        assignment: dict[str, Any] | None,
+    ) -> str:
+        """Build the same complete brief for dispatch and later refresh."""
+
+        constraints: list[str] = []
+        evidence: list[str] = []
+        if assignment is not None:
+            bead = self.store.row(
+                "SELECT context_json FROM beads WHERE bead_id = ?",
+                (assignment["bead_id"],),
+            )
+            if bead is not None:
+                try:
+                    context = json.loads(bead["context_json"] or "[]")
+                except json.JSONDecodeError:
+                    context = []
+                constraints.extend(
+                    item if isinstance(item, str) else json.dumps(item, sort_keys=True)
+                    for item in context
+                    if isinstance(item, (str, dict))
+                )
+            dependencies = self.store.rows(
+                "SELECT dependency_id FROM bead_dependencies WHERE bead_id = ? ORDER BY dependency_id",
+                (assignment["bead_id"],),
+            )
+            constraints.extend(
+                f"dependency {row['dependency_id']} is completed"
+                for row in dependencies
+            )
+            for handoff in self.store.rows(
+                """SELECT kind, source_action_id, content_json FROM handoffs
+                   WHERE assignment_id = ? ORDER BY id""",
+                (assignment["id"],),
+            ):
+                evidence.append(
+                    f"{handoff['kind']} from action {handoff['source_action_id']}: "
+                    f"{handoff['content_json']}"
+                )
+        return build_prompt(
+            action_kind=action["kind"],
+            task=task,
+            action=action,
+            assignment=assignment,
+            constraints=constraints,
+            evidence=evidence,
+        )
+
     def _ensure_worktree_environment(self, worktree: Path) -> None:
         """Expose the retained check environment in every managed worktree."""
 
@@ -1531,6 +1704,18 @@ class Controller:
                 "retry_count": attempts,
                 "next_attempt_at": due,
                 "condition": reason,
+            },
+        )
+        self._queue_archon_update(
+            f"recovery:{assignment['id']}:{attempts}",
+            {
+                "kind": "assignment_recovery",
+                "assignment_id": assignment["id"],
+                "run_id": assignment["run_id"],
+                "bead_id": assignment["bead_id"],
+                "attempt": attempts,
+                "condition": reason,
+                "next_attempt_at": due,
             },
         )
 
@@ -1589,9 +1774,7 @@ class Controller:
             if project is None:
                 raise StoreError("action project is missing")
             cwd = project["repo_path"]
-        prompt = build_prompt(
-            action_kind=action["kind"], task=task, action=action, assignment=assignment
-        )
+        prompt = self._build_action_prompt(action, task, assignment)
         operation = self.store.create_operation(
             "turn_start",
             str(action["id"]),
@@ -1753,11 +1936,14 @@ class Controller:
         candidate_id = candidate.get("id")
         if not isinstance(candidate_id, str):
             raise StoreError("Tollgate candidate has no immutable identity")
+        source_oid = _oid(candidate.get("source_oid"))
+        if source_oid is None:
+            raise StoreError("Tollgate candidate has no immutable source revision")
         self.store.execute(
             "UPDATE assignments SET candidate_id = ?, source_oid = ?, tested_oid = ?, updated_at = ? WHERE id = ?",
             (
                 candidate_id,
-                _oid(candidate.get("source_oid")),
+                source_oid,
                 _oid(candidate.get("tested_oid")),
                 utc_now(),
                 assignment["id"],
@@ -1770,7 +1956,7 @@ class Controller:
             entity_id=assignment["id"],
             detail={
                 "candidate_id": candidate_id,
-                "source_oid": _oid(candidate.get("source_oid")),
+                "source_oid": source_oid,
                 "tested_oid": _oid(candidate.get("tested_oid")),
             },
         )
@@ -1960,6 +2146,18 @@ class Controller:
             "UPDATE assignments SET stage = 'completed', condition = NULL, updated_at = ? WHERE id = ?",
             (utc_now(), assignment["id"]),
         )
+        self._queue_archon_update(
+            f"completion:{assignment['id']}",
+            {
+                "kind": "assignment_completed",
+                "assignment_id": assignment["id"],
+                "run_id": assignment["run_id"],
+                "bead_id": assignment["bead_id"],
+                "candidate_id": assignment.get("candidate_id"),
+                "source_revision": assignment.get("source_oid"),
+                "tested_revision": assignment.get("tested_oid"),
+            },
+        )
         remaining = self.store.row(
             "SELECT 1 FROM assignments WHERE run_id = ? AND stage NOT IN ('completed','canceled')",
             (assignment["run_id"],),
@@ -1970,8 +2168,15 @@ class Controller:
             "UPDATE runs SET state = 'completed', updated_at = ? WHERE id = ?",
             (utc_now(), assignment["run_id"]),
         )
+        run = (
+            self.store.row(
+                "SELECT executor_task_id, overseer_task_id FROM runs WHERE id = ?",
+                (assignment["run_id"],),
+            )
+            or {}
+        )
         for key in ("executor_task_id", "overseer_task_id"):
-            task_id = assignment.get(key)
+            task_id = run.get(key)
             if task_id:
                 task = self.store.row(
                     "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
@@ -2266,11 +2471,16 @@ class Controller:
             task = self.store.row(
                 "SELECT * FROM tasks WHERE id = ?", (action["task_id"],)
             )
-            return {
-                "instructions": build_prompt(
-                    action_kind=action["kind"], task=task or {}, action=action
+            if task is None:
+                raise StoreError("action task is missing")
+            assignment = None
+            if action.get("assignment_id") is not None:
+                assignment = self.store.row(
+                    """SELECT a.*, r.project_id FROM assignments a
+                       JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+                    (action["assignment_id"],),
                 )
-            }
+            return {"instructions": self._build_action_prompt(action, task, assignment)}
         if command == "archon":
             task = self.store.row(
                 "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
@@ -2426,7 +2636,7 @@ class Controller:
                 model=str(self.config.archon_model),
                 effort=str(self.config.archon_reasoning_effort),
             )
-        policies = self.store.rows("SELECT * FROM policies WHERE active = 1")
+        policies = self.store.rows("SELECT * FROM policies")
         capacities = self.store.row("SELECT value FROM meta WHERE key = 'global_limit'")
         if not policies or capacities is None:
             existing = self.store.row(
@@ -2617,6 +2827,95 @@ class Controller:
         )
         self.starts_enabled = ready
 
+    def _queue_archon_update(
+        self, identity: str, content: dict[str, Any], *, actionable: bool = True
+    ) -> None:
+        archon = self.store.row(
+            "SELECT id FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
+        )
+        if archon is None:
+            return
+        timestamp = utc_now()
+        self.store.execute(
+            """INSERT INTO updates(recipient_task_id, identity, content, actionable, state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'retained', ?, ?)
+               ON CONFLICT(recipient_task_id, identity) DO UPDATE SET
+               content = excluded.content, actionable = excluded.actionable,
+               updated_at = excluded.updated_at WHERE updates.state = 'retained'""",
+            (
+                archon["id"],
+                identity,
+                json.dumps(content, sort_keys=True),
+                int(actionable),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    async def _process_archon_succession(self) -> None:
+        retained = self.store.row(
+            "SELECT value FROM meta WHERE key = 'archon_succession_request'"
+        )
+        if retained is None:
+            return
+        request = json.loads(retained["value"])
+        old_task_id = request.get("task_id")
+        if not isinstance(old_task_id, int):
+            return
+        old = self.store.row("SELECT * FROM tasks WHERE id = ?", (old_task_id,))
+        if old is not None and old["state"] not in {"retired", "archived"}:
+            active = self.store.row(
+                """SELECT 1 FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')""",
+                (old_task_id,),
+            )
+            if (
+                active is not None
+                or not old["last_turn_terminal"]
+                or not old["helpers_terminal"]
+            ):
+                return
+            self.store.execute(
+                """INSERT OR IGNORE INTO obligations(
+                       kind, identity, target, state, created_at, updated_at
+                   ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                (
+                    f"archon-succession:{old_task_id}",
+                    old["native_thread_id"],
+                    utc_now(),
+                    utc_now(),
+                ),
+            )
+            return
+        current = self.store.row(
+            "SELECT 1 FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
+        )
+        if current is not None:
+            raise StoreError("Archon succession found an unexpected current Archon")
+        context = self.store.row(
+            "SELECT * FROM projects WHERE enabled = 1 ORDER BY project_id LIMIT 1"
+        )
+        if context is None:
+            raise StoreError("Archon succession has no enabled project context")
+        successor = await self._provision_task(
+            role="archon",
+            description="",
+            project=context,
+            model=str(request["successor_model"]),
+            effort=str(request["successor_reasoning_effort"]),
+        )
+        self.store.execute("DELETE FROM meta WHERE key = 'archon_succession_request'")
+        self._queue_archon_update(
+            f"succession:{old_task_id}:{successor['id']}",
+            {
+                "kind": "archon_succession_completed",
+                "predecessor_task_id": old_task_id,
+                "successor_task_id": successor["id"],
+                "reason": request["reason"],
+            },
+            actionable=True,
+        )
+
     async def _queue_proposals(self) -> None:
         archon = self.store.row(
             "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
@@ -2631,12 +2930,37 @@ class Controller:
         )
         timestamp = utc_now()
         for bead in beads:
+            dependencies = [
+                row["dependency_id"]
+                for row in self.store.rows(
+                    "SELECT dependency_id FROM bead_dependencies WHERE bead_id = ? ORDER BY dependency_id",
+                    (bead["bead_id"],),
+                )
+            ]
             content = json.dumps(
                 {
+                    "kind": "proposal",
                     "bead_id": bead["bead_id"],
                     "project": bead["project_id"],
                     "title": bead["title"],
                     "scope": bead["description"],
+                    "dependencies": dependencies,
+                    "context": json.loads(bead["context_json"] or "[]"),
+                    "models": {
+                        "executor": [
+                            bead["executor_model"],
+                            bead["executor_reasoning_effort"],
+                        ],
+                        "overseer": [
+                            bead["overseer_model"],
+                            bead["overseer_reasoning_effort"],
+                        ],
+                        "provenance": bead["model_provenance"],
+                    },
+                    "plan": {
+                        "id": bead["plan_id"],
+                        "commit": bead["plan_commit"],
+                    },
                 },
                 sort_keys=True,
             )
@@ -2655,6 +2979,7 @@ class Controller:
             )
 
     async def _deliver_update_batch(self) -> None:
+        self._reactivate_deferred_batches()
         archon = self.store.row(
             "SELECT * FROM tasks WHERE role = 'archon' AND state = 'idle'"
         )
@@ -2675,6 +3000,7 @@ class Controller:
             return
         timestamp = utc_now()
         payload = {
+            "fleet_snapshot": self._fleet_snapshot(),
             "batch_items": [
                 {
                     "update_id": row["id"],
@@ -2682,7 +3008,7 @@ class Controller:
                     "content": json.loads(row["content"]),
                 }
                 for row in updates
-            ]
+            ],
         }
         with self.store.transaction() as connection:
             batch_cursor = connection.execute(
@@ -2711,6 +3037,94 @@ class Controller:
         )
         assert action is not None
         await self._dispatch_action(action, task=archon)
+
+    def _fleet_snapshot(self) -> dict[str, Any]:
+        return {
+            "capacity": capacity(self.store),
+            "unfinished_assignments": self.store.rows(
+                """SELECT a.id, a.run_id, a.bead_id, a.stage, a.condition,
+                          a.next_attempt_at, a.operator_hold_id, r.project_id, r.priority
+                   FROM assignments a JOIN runs r ON r.id = a.run_id
+                   WHERE a.stage NOT IN ('completed','canceled') ORDER BY r.priority DESC, a.run_id, a.id"""
+            ),
+            "approved_waiting": self.store.rows(
+                """SELECT r.id AS run_id, r.project_id, r.priority, a.id AS assignment_id,
+                          a.bead_id, a.stage
+                   FROM runs r JOIN assignments a ON a.run_id = r.id
+                   WHERE r.state IN ('approved','active') AND a.stage IN ('queued','preparing')
+                   ORDER BY r.priority DESC, r.id, a.id"""
+            ),
+            "holds": self.store.rows(
+                "SELECT id, scope, target, reason, urgent, release_condition FROM holds WHERE released_at IS NULL ORDER BY urgent DESC, id"
+            ),
+            "policies": self.store.rows(
+                "SELECT id, kind, scope, cadence_seconds, next_due_at, active FROM policies ORDER BY id"
+            ),
+        }
+
+    def _reactivate_deferred_batches(self) -> None:
+        now = utc_now()
+        for deferred in self.store.rows(
+            "SELECT * FROM deferred_batches ORDER BY batch_id"
+        ):
+            condition = json.loads(deferred["reactivation_json"])
+            ready = bool(deferred["next_check_at"] and deferred["next_check_at"] <= now)
+            dependency = condition.get("dependency")
+            if isinstance(dependency, str):
+                ready = (
+                    ready
+                    or self.store.row(
+                        "SELECT 1 FROM assignments WHERE bead_id = ? AND stage = 'completed'",
+                        (dependency,),
+                    )
+                    is not None
+                )
+            hold_id = condition.get("hold")
+            if isinstance(hold_id, int):
+                ready = (
+                    ready
+                    or self.store.row(
+                        "SELECT 1 FROM holds WHERE id = ? AND released_at IS NOT NULL",
+                        (hold_id,),
+                    )
+                    is not None
+                )
+            if condition.get("capacity"):
+                snapshot = capacity(self.store)
+                ready = ready or bool(
+                    snapshot["global_limit"] is not None
+                    and snapshot["global_usage"] < snapshot["global_limit"]
+                )
+            if condition.get("operator_change"):
+                ready = (
+                    ready
+                    or self.store.row(
+                        """SELECT 1 FROM updates u JOIN batches b
+                           ON b.recipient_task_id = u.recipient_task_id
+                           WHERE b.id = ? AND u.state = 'retained'
+                           AND u.actionable = 1 AND u.id NOT IN (
+                             SELECT update_id FROM batch_updates WHERE batch_id = ?
+                           ) LIMIT 1""",
+                        (deferred["batch_id"], deferred["batch_id"]),
+                    )
+                    is not None
+                )
+            if not ready:
+                continue
+            with self.store.transaction() as connection:
+                connection.execute(
+                    """UPDATE updates SET state = 'retained', updated_at = ?
+                       WHERE id IN (SELECT update_id FROM batch_updates WHERE batch_id = ?)""",
+                    (now, deferred["batch_id"]),
+                )
+                connection.execute(
+                    "UPDATE batches SET state = 'processed', updated_at = ? WHERE id = ?",
+                    (now, deferred["batch_id"]),
+                )
+                connection.execute(
+                    "DELETE FROM deferred_batches WHERE batch_id = ?",
+                    (deferred["batch_id"],),
+                )
 
     async def _manage_interviews(self) -> None:
         now = utc_now()
@@ -2902,6 +3316,9 @@ class Controller:
                 json.dumps(
                     {
                         "continuation": "final report after the single interview round",
+                        "retained_evidence": json.loads(
+                            occurrence["evidence_json"] or "{}"
+                        ),
                         "answers": answers,
                         "missing_evidence": missing,
                     }
@@ -2988,6 +3405,11 @@ class Controller:
             )
             if context is None:
                 continue
+            evidence = self._specialist_evidence(scope)
+            self.store.execute(
+                "UPDATE occurrences SET evidence_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(evidence, sort_keys=True), utc_now(), occurrence["id"]),
+            )
             task = await self._provision_task(
                 role=occurrence["kind"],
                 description=(
@@ -3005,7 +3427,19 @@ class Controller:
                 (
                     task["id"],
                     occurrence["id"],
-                    json.dumps({"scope": scope, "prompt": occurrence["prompt"]}),
+                    json.dumps(
+                        {
+                            "scope": scope,
+                            "prompt": occurrence["prompt"],
+                            "retained_evidence": evidence,
+                            "required_method": (
+                                "reconstruct the event timeline and identify violated workflow invariants"
+                                if occurrence["kind"] == "sage"
+                                else "inspect each named source revision and report coverage plus reproducible defects"
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
                     (
                         datetime.now(timezone.utc)
                         + timedelta(seconds=self.config.turn_check_after_seconds)
@@ -3031,26 +3465,83 @@ class Controller:
             )
             await self._dispatch_action(action, task=task)
 
+    def _specialist_evidence(self, scope: dict[str, Any]) -> dict[str, Any]:
+        projects: list[dict[str, Any]] = []
+        requested = scope.get("projects", [])
+        for project in self.store.rows(
+            "SELECT project_id, repo_path FROM projects WHERE enabled = 1 ORDER BY project_id"
+        ):
+            if requested and project["project_id"] not in requested:
+                continue
+            revision: str | None = None
+            try:
+                result = subprocess.run(
+                    ["git", "-C", project["repo_path"], "rev-parse", "HEAD"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    revision = result.stdout.strip()
+            except (OSError, subprocess.TimeoutExpired):
+                revision = None
+            projects.append({**project, "source_revision": revision})
+        return {
+            "captured_at": utc_now(),
+            "projects": projects,
+            "assignments": self.store.rows(
+                """SELECT a.id, a.run_id, a.bead_id, a.stage, a.condition,
+                          a.candidate_id, a.source_oid, a.tested_oid, r.project_id
+                   FROM assignments a JOIN runs r ON r.id = a.run_id ORDER BY a.id DESC LIMIT 100"""
+            ),
+            "recent_events": self.store.rows(
+                """SELECT id, kind, entity_type, entity_id, message, detail_json, created_at
+                   FROM events ORDER BY id DESC LIMIT 200"""
+            ),
+            "prior_reports": self.store.rows(
+                """SELECT id, kind, scope, publication_revision, report_json, created_at
+                   FROM occurrences WHERE state = 'complete' AND report_json IS NOT NULL
+                   ORDER BY id DESC LIMIT 20"""
+            ),
+        }
+
     async def _publish_occurrences(self) -> None:
         for occurrence in self.store.rows(
             "SELECT * FROM occurrences WHERE state = 'publishing'"
         ):
+            obligation = self.store.row(
+                """SELECT * FROM obligations WHERE kind = 'finding_publication'
+                   AND identity = ? AND target = ?""",
+                (str(occurrence["id"]), str(occurrence["id"])),
+            )
+            if obligation and (
+                obligation["operator_hold_id"] is not None
+                or (
+                    obligation["next_attempt_at"]
+                    and obligation["next_attempt_at"] > utc_now()
+                )
+            ):
+                continue
             report = json.loads(occurrence["report_json"] or "{}")
             try:
-                for position, finding in enumerate(report.get("findings", [])):
+                publication = await asyncio.to_thread(
+                    self._publish_specialist_report, occurrence, report
+                )
+                for finding in report.get("findings", []):
                     if finding.get("existing_bead_id"):
                         bead = self.store.row(
-                            "SELECT bead_id FROM beads WHERE bead_id = ?",
-                            (finding["existing_bead_id"],),
+                            "SELECT bead_id FROM beads WHERE bead_id = ? AND project_id = ?",
+                            (finding["existing_bead_id"], finding["project"]),
                         )
                         if bead is None:
                             raise StoreError(
                                 f"finding names unknown bead {finding['existing_bead_id']}"
                             )
                         await asyncio.to_thread(
-                            self.beads.comment,
-                            finding["existing_bead_id"],
-                            f"Specialist evidence: {finding['evidence']}\nExpected benefit: {finding['expected_benefit']}",
+                            self._publish_existing_finding,
+                            occurrence,
+                            finding,
                         )
                         continue
                     task_payload = {
@@ -3065,12 +3556,33 @@ class Controller:
                         self.beads,
                         task_from_payload(
                             task_payload,
-                            intake_key=f"finding:{occurrence['id']}:{position}",
+                            intake_key=(
+                                f"finding:{finding['project']}:{finding['identity']}"
+                            ),
                         ),
                     )
                 self.store.execute(
-                    "UPDATE occurrences SET state = 'complete', updated_at = ? WHERE id = ?",
-                    (utc_now(), occurrence["id"]),
+                    """UPDATE occurrences SET state = 'complete', publication_revision = ?,
+                       updated_at = ? WHERE id = ?""",
+                    (publication["local_revision"], utc_now(), occurrence["id"]),
+                )
+                if obligation:
+                    self.store.execute(
+                        """UPDATE obligations SET state = 'complete', detail = NULL,
+                           next_attempt_at = NULL, updated_at = ? WHERE id = ?""",
+                        (utc_now(), obligation["id"]),
+                    )
+                self._queue_archon_update(
+                    f"specialist:{occurrence['id']}",
+                    {
+                        "kind": "specialist_completed",
+                        "occurrence_id": occurrence["id"],
+                        "specialist": occurrence["kind"],
+                        "scope": _occurrence_scope(occurrence["scope"]),
+                        "summary": report.get("summary"),
+                        "finding_count": len(report.get("findings", [])),
+                        "publication_revision": publication["local_revision"],
+                    },
                 )
                 if occurrence["policy_id"] is not None:
                     policy = self.store.row(
@@ -3113,20 +3625,214 @@ class Controller:
                             ),
                         )
             except Exception as error:
-                self.store.execute(
-                    "UPDATE occurrences SET state = 'failed', updated_at = ? WHERE id = ?",
-                    (utc_now(), occurrence["id"]),
+                self._defer_occurrence_publication(occurrence, obligation, str(error))
+
+    def _publish_specialist_report(
+        self, occurrence: dict[str, Any], report: dict[str, Any]
+    ) -> dict[str, Any]:
+        report_root = self.paths.brain_root / "reports" / str(occurrence["kind"])
+        report_root.mkdir(parents=True, exist_ok=True)
+        path = report_root / f"{occurrence['id']}.json"
+        document = {
+            "occurrence": {
+                "id": occurrence["id"],
+                "kind": occurrence["kind"],
+                "scope": _occurrence_scope(occurrence["scope"]),
+                "authority": occurrence["authority"],
+                "created_at": occurrence["created_at"],
+            },
+            "reviewed_evidence": json.loads(occurrence["evidence_json"] or "{}"),
+            "report": report,
+        }
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(document, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        operation = self.store.create_operation(
+            "brain_report_publish",
+            str(occurrence["id"]),
+            {"path": str(path), "kind": occurrence["kind"]},
+        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
+        try:
+            result = BrainRepository(self.paths.brain_root).publish(
+                [path], f"docs: publish {occurrence['kind']} report {occurrence['id']}"
+            )
+            evidence = {
+                "branch": result.branch,
+                "local_revision": result.local_revision,
+                "remote_revision": result.remote_revision,
+                "merged_remote": result.merged_remote,
+            }
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result=evidence,
+                native_id=result.local_revision,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            return evidence
+        except Exception as error:
+            self._operation_failed(
+                operation,
+                error,
+                attempt=attempt,
+                started=started,
+                mutation=True,
+            )
+            raise
+
+    def _publish_existing_finding(
+        self, occurrence: dict[str, Any], finding: dict[str, Any]
+    ) -> None:
+        semantic_key = f"{finding['project']}:{finding['identity']}"
+        bead_id = str(finding["existing_bead_id"])
+        retained = self.store.row(
+            "SELECT * FROM finding_publications WHERE semantic_key = ?",
+            (semantic_key,),
+        )
+        if retained is not None:
+            if retained["bead_id"] != bead_id:
+                raise StoreError(
+                    f"finding identity {semantic_key!r} names conflicting beads"
                 )
-                self.store.execute(
-                    "INSERT OR IGNORE INTO obligations(kind, identity, target, state, detail, created_at, updated_at) VALUES ('finding_publication', ?, ?, 'failed', ?, ?, ?)",
-                    (
-                        str(occurrence["id"]),
-                        str(occurrence["id"]),
-                        str(error),
-                        utc_now(),
-                        utc_now(),
-                    ),
+            if retained["state"] == "complete":
+                return
+        marker = f"[fulcrum-finding:{semantic_key}]"
+        observed = self.beads.show(bead_id)
+        if observed is not None and marker in json.dumps(observed, sort_keys=True):
+            self._record_existing_finding(
+                semantic_key, int(occurrence["id"]), bead_id, finding
+            )
+            return
+        content = (
+            f"{marker}\nSpecialist evidence: {finding['evidence']}\n"
+            f"Expected benefit: {finding['expected_benefit']}"
+        )
+        operation = self.store.create_operation(
+            "beads_finding_comment",
+            semantic_key,
+            {
+                "bead_id": bead_id,
+                "content": content,
+                "marker": marker,
+                "occurrence_id": occurrence["id"],
+                "finding": finding,
+            },
+        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
+        try:
+            self.beads.comment(bead_id, content)
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result={"bead_id": bead_id, "marker": marker},
+                native_id=bead_id,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            self._record_existing_finding(
+                semantic_key, int(occurrence["id"]), bead_id, finding
+            )
+        except Exception as error:
+            self._operation_failed(
+                operation,
+                error,
+                attempt=attempt,
+                started=started,
+                mutation=True,
+            )
+            raise
+
+    def _record_existing_finding(
+        self,
+        semantic_key: str,
+        occurrence_id: int,
+        bead_id: str,
+        finding: dict[str, Any],
+    ) -> None:
+        timestamp = utc_now()
+        self.store.execute(
+            """INSERT INTO finding_publications(
+                   semantic_key, occurrence_id, bead_id, evidence_json, state,
+                   created_at, updated_at
+               ) VALUES (?, ?, ?, ?, 'complete', ?, ?)
+               ON CONFLICT(semantic_key) DO UPDATE SET state = 'complete',
+               evidence_json = excluded.evidence_json, updated_at = excluded.updated_at""",
+            (
+                semantic_key,
+                occurrence_id,
+                bead_id,
+                json.dumps(finding, sort_keys=True),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    def _defer_occurrence_publication(
+        self,
+        occurrence: dict[str, Any],
+        obligation: dict[str, Any] | None,
+        reason: str,
+    ) -> None:
+        retries = int(obligation["retry_count"] if obligation else 0) + 1
+        timestamp = utc_now()
+        hold_id: int | None = None
+        next_attempt: str | None = None
+        if retries >= 8:
+            hold = self.store.execute(
+                """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                   VALUES ('obligation', ?, ?, 1,
+                   'operator repairs brain or Beads publication and releases the hold', ?)""",
+                (str(occurrence["id"]), reason, timestamp),
+            )
+            hold_id = int(hold.lastrowid)
+        else:
+            next_attempt = (
+                (
+                    datetime.now(timezone.utc)
+                    + timedelta(seconds=5 * (2 ** min(retries - 1, 6)))
                 )
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        self.store.execute(
+            """INSERT INTO obligations(
+                   kind, identity, target, state, detail, retry_count,
+                   next_attempt_at, operator_hold_id, created_at, updated_at
+               ) VALUES ('finding_publication', ?, ?, 'failed', ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(kind, identity, target) DO UPDATE SET state = 'failed',
+               detail = excluded.detail, retry_count = excluded.retry_count,
+               next_attempt_at = excluded.next_attempt_at,
+               operator_hold_id = excluded.operator_hold_id,
+               updated_at = excluded.updated_at""",
+            (
+                str(occurrence["id"]),
+                str(occurrence["id"]),
+                reason,
+                retries,
+                next_attempt,
+                hold_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        self.store.event(
+            "specialist_publication_deferred",
+            reason,
+            entity_type="occurrence",
+            entity_id=occurrence["id"],
+            detail={"retry_count": retries, "next_attempt_at": next_attempt},
+        )
 
     async def _begin_reboot(
         self, mode: str, *, existing: dict[str, Any] | None = None
@@ -3214,6 +3920,11 @@ class Controller:
                 )
             self.store.execute(
                 "UPDATE assignments SET executor_task_id = NULL, overseer_task_id = NULL, stage = CASE WHEN stage = 'reviewing' THEN 'review_pending' ELSE stage END, updated_at = ? WHERE stage NOT IN ('completed','canceled')",
+                (utc_now(),),
+            )
+            self.store.execute(
+                """UPDATE runs SET executor_task_id = NULL, overseer_task_id = NULL,
+                   updated_at = ? WHERE state IN ('approved','active','held')""",
                 (utc_now(),),
             )
         initialized = await self._setup_initialize()

@@ -53,6 +53,37 @@ class LifecycleTest(unittest.TestCase):
 
     def _action(self, kind: str = "implement") -> int:
         now = "2026-01-01T00:00:00Z"
+        if kind == "review":
+            self.store.execute(
+                """UPDATE assignments SET candidate_id = COALESCE(candidate_id, 'candidate'),
+                   source_oid = 'source' WHERE id = ?""",
+                (self.assignment["id"],),
+            )
+            source = self.store.execute(
+                """INSERT INTO actions(
+                       task_id, assignment_id, kind, payload, state, outcome_kind,
+                       outcome_payload, created_at, updated_at
+                   ) VALUES (?, ?, 'implement', '{}', 'processed',
+                             'ready_for_review', ?, ?, ?)""",
+                (
+                    self.task["id"],
+                    self.assignment["id"],
+                    json.dumps({"evidence": "implementation"}),
+                    now,
+                    now,
+                ),
+            )
+            self.store.execute(
+                """INSERT INTO handoffs(
+                       assignment_id, source_action_id, kind, content_json, created_at
+                   ) VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+                (
+                    self.assignment["id"],
+                    source.lastrowid,
+                    json.dumps({"evidence": "implementation"}),
+                    now,
+                ),
+            )
         cursor = self.store.execute(
             "INSERT INTO actions(task_id, assignment_id, kind, payload, state, created_at, updated_at) VALUES (?, ?, ?, '{}', 'active', ?, ?)",
             (self.task["id"], self.assignment["id"], kind, now, now),
@@ -72,6 +103,10 @@ class LifecycleTest(unittest.TestCase):
             native_thread_id="executor",
             outcome_kind="ready_for_review",
             options={"evidence": "/tmp/evidence"},
+        )
+        self.store.execute(
+            "UPDATE assignments SET candidate_id = 'candidate', source_oid = 'source' WHERE id = ?",
+            (self.assignment["id"],),
         )
         second = accept_finish(
             self.store,
@@ -98,6 +133,46 @@ class LifecycleTest(unittest.TestCase):
         )
         self.assertIsNone(
             self.store.row("SELECT * FROM reservations WHERE action_id = ?", (action,))
+        )
+        handoff = self.store.row(
+            "SELECT * FROM handoffs WHERE source_action_id = ?", (action,)
+        )
+        self.assertEqual(handoff["kind"], "implementation_evidence")
+        self.assertEqual(
+            json.loads(handoff["content_json"])["evidence"], "/tmp/evidence"
+        )
+
+    def test_review_findings_are_retained_for_the_correction_handoff(self) -> None:
+        action = self._action("review")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "findings.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "problem": "wrong result",
+                                "evidence": "test failed",
+                                "required_change": "return the expected result",
+                            }
+                        ]
+                    }
+                )
+            )
+            accept_finish(
+                self.store,
+                native_thread_id="executor",
+                outcome_kind="changes_requested",
+                options={"input": str(path)},
+            )
+        observe_action_terminal(self.store, action)
+        handoff = self.store.row(
+            "SELECT * FROM handoffs WHERE source_action_id = ?", (action,)
+        )
+        self.assertEqual(handoff["kind"], "review_findings")
+        self.assertEqual(
+            json.loads(handoff["content_json"])["findings"][0]["problem"],
+            "wrong result",
         )
 
     def test_one_missing_outcome_reminder_then_condition(self) -> None:
@@ -177,6 +252,126 @@ class LifecycleTest(unittest.TestCase):
                     ]
                 },
             )
+
+    def test_unknown_archon_decision_rolls_back_the_entire_payload(self) -> None:
+        before = len(self.store.rows("SELECT * FROM runs"))
+        now = "2026-01-01T00:00:00Z"
+        self.store.execute(
+            """INSERT INTO beads(
+                   bead_id, intake_key, project_id, title, description, activation,
+                   executor_model, executor_reasoning_effort, overseer_model,
+                   overseer_reasoning_effort, model_provenance, publication_state,
+                   created_at, updated_at
+               ) VALUES ('p-2','key-2','p','Second','Scope','pending','sol','high',
+                         'sol','high','default','complete',?,?)""",
+            (now, now),
+        )
+        with self.assertRaisesRegex(StoreError, "unsupported Archon decision"):
+            apply_archon_decisions(
+                self.store,
+                {
+                    "decisions": [
+                        {
+                            "decision": "approve",
+                            "project": "p",
+                            "beads": ["p-2"],
+                        },
+                        {"decision": "silently-ignore-me"},
+                    ]
+                },
+            )
+        self.assertEqual(len(self.store.rows("SELECT * FROM runs")), before)
+
+    def test_invalid_archon_target_releases_the_frozen_batch_for_retry(self) -> None:
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        now = "2026-01-01T00:00:00Z"
+        update = self.store.execute(
+            """INSERT INTO updates(recipient_task_id, identity, content, state, created_at, updated_at)
+               VALUES (?, 'recovery:1', '{}', 'batched', ?, ?)""",
+            (archon["id"], now, now),
+        )
+        outcome = {
+            "decisions": [{"decision": "release_hold", "hold_id": 999}],
+            "handled_update_ids": [update.lastrowid],
+        }
+        action = self.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, outcome_kind,
+                   outcome_payload, created_at, updated_at)
+               VALUES (?, 'archon', '{}', 'active', 'decisions', ?, ?, ?)""",
+            (archon["id"], json.dumps(outcome), now, now),
+        )
+        batch = self.store.execute(
+            """INSERT INTO batches(recipient_task_id, state, action_id, created_at, updated_at)
+               VALUES (?, 'frozen', ?, ?, ?)""",
+            (archon["id"], action.lastrowid, now, now),
+        )
+        self.store.execute(
+            "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+            (batch.lastrowid, update.lastrowid),
+        )
+        result = observe_action_terminal(self.store, int(action.lastrowid))
+        self.assertFalse(result["advanced"])
+        self.assertEqual(
+            self.store.row(
+                "SELECT state FROM actions WHERE id = ?", (action.lastrowid,)
+            )["state"],
+            "failed",
+        )
+        self.assertEqual(
+            self.store.row(
+                "SELECT state FROM updates WHERE id = ?", (update.lastrowid,)
+            )["state"],
+            "retained",
+        )
+
+    def test_archon_can_hold_release_prioritize_and_request_specialist(self) -> None:
+        run_id = int(self.assignment["run_id"])
+        result = apply_archon_decisions(
+            self.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "hold",
+                        "scope": "run",
+                        "target": run_id,
+                        "reason": "conflict",
+                        "release_condition": "other run completes",
+                    },
+                    {"decision": "set_priority", "run_id": run_id, "priority": 9},
+                    {
+                        "decision": "request_specialist",
+                        "kind": "inquisitor",
+                        "projects": ["p"],
+                        "prompt": "inspect boundaries",
+                    },
+                ]
+            },
+        )
+        hold_id = result["applied_decisions"][0]["hold_id"]
+        self.assertEqual(
+            self.store.row("SELECT priority FROM runs WHERE id = ?", (run_id,))[
+                "priority"
+            ],
+            9,
+        )
+        self.assertIsNotNone(
+            self.store.row("SELECT * FROM occurrences WHERE authority = 'archon'")
+        )
+        apply_archon_decisions(
+            self.store,
+            {"decisions": [{"decision": "release_hold", "hold_id": hold_id}]},
+        )
+        self.assertIsNotNone(
+            self.store.row("SELECT released_at FROM holds WHERE id = ?", (hold_id,))[
+                "released_at"
+            ]
+        )
         with self.assertRaisesRegex(StoreError, "enabled project scope"):
             apply_archon_decisions(
                 self.store,

@@ -46,6 +46,10 @@ class ReadinessTest(unittest.TestCase):
                 ready, reasons = state_readiness(store)
                 self.assertTrue(ready)
                 self.assertEqual(reasons, [])
+                store.execute("UPDATE policies SET active = 0 WHERE kind = 'sage'")
+                ready, reasons = state_readiness(store)
+                self.assertTrue(ready)
+                self.assertEqual(reasons, [])
 
 
 if __name__ == "__main__":

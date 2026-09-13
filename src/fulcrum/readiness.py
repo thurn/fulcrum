@@ -48,7 +48,7 @@ def state_readiness(store: Store) -> tuple[bool, list[str]]:
 
     policies = {
         (row["kind"], row["scope"])
-        for row in store.rows("SELECT kind, scope FROM policies WHERE active = 1")
+        for row in store.rows("SELECT kind, scope FROM policies")
     }
     required_policies = {("sage", None)} | {
         ("inquisitor", row["project_id"]) for row in projects if row["enabled"]
@@ -59,7 +59,7 @@ def state_readiness(store: Store) -> tuple[bool, list[str]]:
             "fleet Sage" if item == ("sage", None) else f"{item[1]} Inquisitor"
             for item in missing_policies
         ]
-        reasons.append("recurring policy is missing: " + ", ".join(rendered))
+        reasons.append("recurring policy definition is missing: " + ", ".join(rendered))
 
     archon = store.row(
         "SELECT id FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"

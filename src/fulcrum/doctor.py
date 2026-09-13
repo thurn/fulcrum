@@ -116,6 +116,12 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
             check(f"prompt:{name}", True, "loaded from editable source")
         except Exception as error:
             check(f"prompt:{name}", False, str(error))
+    for role in ("sage", "inquisitor"):
+        try:
+            load_template("specialist", role=role)
+            check(f"prompt:{role}", True, "loaded from editable source")
+        except Exception as error:
+            check(f"prompt:{role}", False, str(error))
     codex_root = Path.home() / ".codex" / "skills"
     for name in HUMAN_SKILLS:
         target = codex_root / name

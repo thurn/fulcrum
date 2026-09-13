@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from fulcrum.outcomes import validate_outcome
@@ -94,16 +97,29 @@ def observe_action_terminal(
                 "finish outcome missing after reminder",
             )
         return {"advanced": False, "condition": "finish outcome missing after reminder"}
-    result = _apply_outcome(store, action)
-    store.execute("DELETE FROM reservations WHERE action_id = ?", (action_id,))
-    store.execute(
-        "UPDATE actions SET state = 'processed', updated_at = ? WHERE id = ?",
-        (utc_now(), action_id),
-    )
-    store.execute(
-        "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
-        (utc_now(), action["task_id"]),
-    )
+    try:
+        with store.transaction() as connection:
+            result = _apply_outcome(store, action, connection=connection)
+            connection.execute(
+                "DELETE FROM reservations WHERE action_id = ?", (action_id,)
+            )
+            connection.execute(
+                "UPDATE actions SET state = 'processed', updated_at = ? WHERE id = ?",
+                (utc_now(), action_id),
+            )
+            connection.execute(
+                "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
+                (utc_now(), action["task_id"]),
+            )
+    except (
+        StoreError,
+        sqlite3.Error,
+        KeyError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as error:
+        return _reject_outcome_application(store, action, str(error))
     store.event(
         "action_processed",
         f"processed {action['outcome_kind']}",
@@ -111,6 +127,96 @@ def observe_action_terminal(
         entity_id=action_id,
     )
     return {"advanced": True, **result}
+
+
+def _reject_outcome_application(
+    store: Store, action: dict[str, Any], reason: str
+) -> dict[str, Any]:
+    """Retain a bad outcome without poisoning its frozen work forever."""
+
+    timestamp = utc_now()
+    condition = f"accepted outcome could not be applied: {reason}"
+    with store.transaction() as connection:
+        connection.execute(
+            "UPDATE actions SET state = 'failed', condition = ?, updated_at = ? WHERE id = ?",
+            (condition, timestamp, action["id"]),
+        )
+        connection.execute(
+            "DELETE FROM reservations WHERE action_id = ?", (action["id"],)
+        )
+        connection.execute(
+            "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
+            (timestamp, action["task_id"]),
+        )
+        if action["kind"] == "archon":
+            batch = connection.execute(
+                "SELECT id FROM batches WHERE action_id = ?", (action["id"],)
+            ).fetchone()
+            if batch is not None:
+                connection.execute(
+                    "UPDATE batches SET state = 'failed', updated_at = ? WHERE id = ?",
+                    (timestamp, batch["id"]),
+                )
+                connection.execute(
+                    """UPDATE updates SET state = 'retained', updated_at = ?
+                       WHERE id IN (SELECT update_id FROM batch_updates WHERE batch_id = ?)""",
+                    (timestamp, batch["id"]),
+                )
+        elif action["kind"] == "review" and action["assignment_id"] is not None:
+            connection.execute(
+                """UPDATE assignments SET stage = 'review_pending', condition = ?,
+                   updated_at = ? WHERE id = ?""",
+                (condition, timestamp, action["assignment_id"]),
+            )
+        elif (
+            action["kind"] in {"implement", "correct"}
+            and action["assignment_id"] is not None
+        ):
+            assignment = connection.execute(
+                "SELECT stage, retry_count FROM assignments WHERE id = ?",
+                (action["assignment_id"],),
+            ).fetchone()
+            if assignment is not None:
+                attempts = int(assignment["retry_count"] or 0) + 1
+                due = (
+                    (
+                        datetime.now(timezone.utc)
+                        + timedelta(seconds=5 * (2 ** min(attempts - 1, 6)))
+                    )
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+                connection.execute(
+                    """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+                       retry_count = ?, next_attempt_at = ?, condition = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        attempts,
+                        due,
+                        condition,
+                        timestamp,
+                        action["assignment_id"],
+                    ),
+                )
+        elif action["kind"] == "specialist" and action["occurrence_id"] is not None:
+            connection.execute(
+                "UPDATE occurrences SET state = 'queued', updated_at = ? WHERE id = ?",
+                (timestamp, action["occurrence_id"]),
+            )
+            _archive_obligation(store, int(action["task_id"]), timestamp)
+        elif action["kind"] == "interview":
+            connection.execute(
+                """UPDATE interviews SET state = 'queued', updated_at = ?
+                   WHERE occurrence_id = ? AND subject_task_id = ? AND state = 'active'""",
+                (timestamp, action["occurrence_id"], action["task_id"]),
+            )
+    store.event(
+        "outcome_application_rejected",
+        condition,
+        entity_type="action",
+        entity_id=action["id"],
+    )
+    return {"advanced": False, "condition": condition}
 
 
 def _recover_failed_action(
@@ -154,7 +260,9 @@ def _schedule_assignment_retry(store: Store, assignment_id: int, reason: str) ->
     )
 
 
-def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
+def _apply_outcome(
+    store: Store, action: dict[str, Any], *, connection: Any
+) -> dict[str, Any]:
     kind = action["kind"]
     outcome = action["outcome_kind"]
     payload = json.loads(action["outcome_payload"] or "{}")
@@ -163,9 +271,34 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
     if kind in {"implement", "correct"} and outcome == "ready_for_review":
         if assignment_id is None:
             raise StoreError("implementation action has no assignment")
+        candidate = store.row(
+            "SELECT candidate_id, source_oid FROM assignments WHERE id = ?",
+            (assignment_id,),
+        )
+        if (
+            candidate is None
+            or not candidate["candidate_id"]
+            or not candidate["source_oid"]
+        ):
+            raise StoreError(
+                "implementation cannot enter review without an immutable candidate"
+            )
         store.execute(
             "UPDATE assignments SET stage = 'review_pending', condition = NULL, updated_at = ? WHERE id = ?",
             (timestamp, assignment_id),
+        )
+        store.execute(
+            """INSERT INTO handoffs(assignment_id, source_action_id, kind, content_json, created_at)
+               VALUES (?, ?, 'implementation_evidence', ?, ?)""",
+            (
+                assignment_id,
+                action["id"],
+                json.dumps(
+                    _retain_evidence_content(store, int(assignment_id), payload),
+                    sort_keys=True,
+                ),
+                timestamp,
+            ),
         )
         return {"assignment_id": assignment_id, "stage": "review_pending"}
     if kind == "correct" and outcome == "permitted_repair_complete":
@@ -255,6 +388,21 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
                     "UPDATE assignments SET stage = ?, review_failures = ?, condition = ?, updated_at = ? WHERE id = ?",
                     (stage, failures, condition, timestamp, assignment_id),
                 )
+            store.execute(
+                """INSERT INTO handoffs(assignment_id, source_action_id, kind, content_json, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    assignment_id,
+                    action["id"],
+                    (
+                        "review_findings"
+                        if outcome == "changes_requested"
+                        else "missing_evidence"
+                    ),
+                    action["outcome_payload"],
+                    timestamp,
+                ),
+            )
             return {
                 "assignment_id": assignment_id,
                 "stage": stage,
@@ -311,9 +459,60 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
         occurrence_id = action["occurrence_id"]
         if occurrence_id is None:
             raise StoreError("specialist action has no occurrence")
+        occurrence = store.row(
+            "SELECT scope FROM occurrences WHERE id = ?", (occurrence_id,)
+        )
+        if occurrence is None:
+            raise StoreError("specialist occurrence disappeared")
+        raw_scope = occurrence["scope"]
+        scope = (
+            json.loads(raw_scope)
+            if raw_scope and str(raw_scope).startswith("{")
+            else {}
+        )
+        allowed_projects = set(scope.get("projects", []))
+        identities: set[tuple[str, str]] = set()
+        for finding in payload.get("findings", []):
+            project = finding["project"]
+            if allowed_projects and project not in allowed_projects:
+                raise StoreError(
+                    f"finding project {project!r} is outside the specialist scope"
+                )
+            if (
+                store.row(
+                    "SELECT 1 FROM projects WHERE project_id = ? AND enabled = 1",
+                    (project,),
+                )
+                is None
+            ):
+                raise StoreError(f"finding project {project!r} is unavailable")
+            identity = (project, finding["identity"])
+            if identity in identities:
+                raise StoreError(f"duplicate finding identity {identity!r}")
+            identities.add(identity)
+            existing_bead = finding.get("existing_bead_id")
+            if (
+                existing_bead
+                and store.row(
+                    "SELECT 1 FROM beads WHERE bead_id = ? AND project_id = ?",
+                    (existing_bead, project),
+                )
+                is None
+            ):
+                raise StoreError(
+                    f"finding names unknown project bead {existing_bead!r}"
+                )
         store.execute(
             "UPDATE occurrences SET state = 'publishing', report_json = ?, updated_at = ? WHERE id = ?",
             (action["outcome_payload"], timestamp, occurrence_id),
+        )
+        store.execute(
+            """INSERT INTO obligations(
+                   kind, identity, target, state, created_at, updated_at
+               ) VALUES ('finding_publication', ?, ?, 'pending', ?, ?)
+               ON CONFLICT(kind, identity, target) DO UPDATE SET state = 'pending',
+               detail = NULL, next_attempt_at = NULL, updated_at = excluded.updated_at""",
+            (str(occurrence_id), str(occurrence_id), timestamp, timestamp),
         )
         return {"occurrence_id": occurrence_id, "state": "publishing"}
     if kind == "specialist" and outcome == "evidence_needed":
@@ -378,8 +577,41 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
             "state": "answered",
         }
     if kind == "archon" and outcome == "decisions":
-        result = apply_archon_decisions(store, payload)
         batch = store.row("SELECT id FROM batches WHERE action_id = ?", (action["id"],))
+        if batch is not None:
+            expected = {
+                int(row["update_id"])
+                for row in store.rows(
+                    "SELECT update_id FROM batch_updates WHERE batch_id = ?",
+                    (batch["id"],),
+                )
+            }
+            handled = set(payload.get("handled_update_ids", []))
+            if handled != expected:
+                raise StoreError(
+                    "Archon must handle every frozen update exactly; "
+                    f"expected={sorted(expected)} handled={sorted(handled)}"
+                )
+        result = apply_archon_decisions(store, payload, connection=connection)
+        succession = store.row(
+            "SELECT value FROM meta WHERE key = 'archon_succession_request'"
+        )
+        if succession is not None:
+            request = json.loads(succession["value"])
+            if request.get("task_id") is None:
+                request["task_id"] = action["task_id"]
+                task = store.row(
+                    "SELECT model, reasoning_effort FROM tasks WHERE id = ?",
+                    (action["task_id"],),
+                )
+                if task is None:
+                    raise StoreError("retiring Archon task disappeared")
+                request["successor_model"] = task["model"]
+                request["successor_reasoning_effort"] = task["reasoning_effort"]
+                store.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'archon_succession_request'",
+                    (json.dumps(request, sort_keys=True),),
+                )
         if batch is not None:
             store.execute(
                 "UPDATE batches SET state = 'processed', updated_at = ? WHERE id = ?",
@@ -390,7 +622,49 @@ def _apply_outcome(store: Store, action: dict[str, Any]) -> dict[str, Any]:
                 (timestamp, batch["id"]),
             )
         return result
+    if kind == "archon" and outcome == "deferred":
+        batch = store.row("SELECT id FROM batches WHERE action_id = ?", (action["id"],))
+        if batch is None:
+            raise StoreError("Archon deferral has no frozen batch")
+        reactivation = payload["reactivation"]
+        next_check = reactivation.get("next_check_at")
+        store.execute(
+            """INSERT INTO deferred_batches(batch_id, reactivation_json, next_check_at, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (
+                batch["id"],
+                json.dumps(reactivation, sort_keys=True),
+                next_check,
+                timestamp,
+            ),
+        )
+        return {"batch_id": batch["id"], "state": "deferred"}
     return {"outcome": outcome}
+
+
+def _retain_evidence_content(
+    store: Store, assignment_id: int, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Snapshot bounded evidence so a handoff never depends on disappearing context."""
+
+    retained = dict(payload)
+    reference = payload.get("evidence")
+    if not isinstance(reference, str) or not reference.strip():
+        return retained
+    assignment = store.row(
+        "SELECT worktree_path FROM assignments WHERE id = ?", (assignment_id,)
+    )
+    path = Path(reference).expanduser()
+    if not path.is_absolute() and assignment and assignment["worktree_path"]:
+        path = Path(assignment["worktree_path"]) / path
+    try:
+        if path.stat().st_size > 1_000_000:
+            raise OSError("evidence file exceeds 1 MB")
+        retained["evidence_content"] = path.read_text(encoding="utf-8")
+        retained["evidence_path"] = str(path.resolve(strict=True))
+    except (OSError, UnicodeError) as error:
+        retained["evidence_read_error"] = str(error)
+    return retained
 
 
 def _archive_obligation(store: Store, task_id: int, timestamp: str) -> None:
@@ -416,13 +690,38 @@ def _resolve_subject(store: Store, subject: str) -> dict[str, Any] | None:
     return store.row("SELECT * FROM tasks WHERE title LIKE ?", (f"%[{code}]%",))
 
 
-def apply_archon_decisions(store: Store, payload: dict[str, Any]) -> dict[str, Any]:
+def _archive_run_pair(connection: Any, run_id: int, timestamp: str) -> None:
+    run = connection.execute(
+        "SELECT executor_task_id, overseer_task_id FROM runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    if run is None:
+        return
+    for task_id in (run["executor_task_id"], run["overseer_task_id"]):
+        if task_id is None:
+            continue
+        task = connection.execute(
+            "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if task is not None:
+            connection.execute(
+                """INSERT OR IGNORE INTO obligations(
+                       kind, identity, target, state, created_at, updated_at
+                   ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                (str(task_id), task["native_thread_id"], timestamp, timestamp),
+            )
+
+
+def apply_archon_decisions(
+    store: Store, payload: dict[str, Any], *, connection: Any | None = None
+) -> dict[str, Any]:
     """Apply exact approved runs and policies from a frozen Archon outcome."""
 
     decisions = payload.get("decisions", [])
     created: list[int] = []
     timestamp = utc_now()
-    with store.transaction() as connection:
+    with (
+        store.transaction() if connection is None else nullcontext(connection)
+    ) as connection:
         enabled_projects = {
             str(row[0])
             for row in connection.execute(
@@ -538,47 +837,403 @@ def apply_archon_decisions(store: Store, payload: dict[str, Any]) -> dict[str, A
                     json.dumps(policy.get("config", {}), sort_keys=True),
                 ),
             )
+        applied: list[dict[str, Any]] = []
         for decision in decisions:
-            if not isinstance(decision, dict) or decision.get("decision") != "approve":
-                continue
-            project = decision.get("project")
-            beads = decision.get("beads")
-            if not isinstance(project, str) or not isinstance(beads, list) or not beads:
-                raise StoreError("approved decision requires project and ordered beads")
-            cursor = connection.execute(
-                "INSERT INTO runs(project_id, authority, state, created_at, updated_at) VALUES (?, ?, 'approved', ?, ?)",
-                (
-                    project,
-                    str(decision.get("authority", "archon")),
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            run_id = int(cursor.lastrowid)
-            created.append(run_id)
-            scopes = decision.get("scope", {})
-            for position, bead_id in enumerate(beads):
-                bead = connection.execute(
-                    "SELECT description, activation, publication_state FROM beads WHERE bead_id = ? AND project_id = ?",
-                    (bead_id, project),
-                ).fetchone()
+            if not isinstance(decision, dict):
+                raise StoreError("each Archon decision must be an object")
+            kind = decision.get("decision")
+            if kind == "approve":
+                project = decision.get("project")
+                beads = decision.get("beads")
                 if (
-                    bead is None
-                    or bead["activation"] != "pending"
-                    or bead["publication_state"] != "complete"
+                    not isinstance(project, str)
+                    or project not in enabled_projects
+                    or not isinstance(beads, list)
+                    or not beads
+                    or not all(isinstance(item, str) for item in beads)
+                    or len(set(beads)) != len(beads)
                 ):
-                    raise StoreError(f"bead {bead_id} is not eligible for approval")
-                scope = (
-                    scopes.get(bead_id, bead["description"])
-                    if isinstance(scopes, dict)
-                    else bead["description"]
+                    raise StoreError(
+                        "approved decision requires an enabled project and unique ordered beads"
+                    )
+                cursor = connection.execute(
+                    "INSERT INTO runs(project_id, authority, state, priority, created_at, updated_at) VALUES (?, ?, 'approved', ?, ?, ?)",
+                    (
+                        project,
+                        str(decision.get("authority", "archon")),
+                        int(decision.get("priority", 0)),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                run_id = int(cursor.lastrowid)
+                created.append(run_id)
+                scopes = decision.get("scope", {})
+                for position, bead_id in enumerate(beads):
+                    bead = connection.execute(
+                        "SELECT description, activation, publication_state FROM beads WHERE bead_id = ? AND project_id = ?",
+                        (bead_id, project),
+                    ).fetchone()
+                    if (
+                        bead is None
+                        or bead["activation"] != "pending"
+                        or bead["publication_state"] != "complete"
+                    ):
+                        raise StoreError(f"bead {bead_id} is not eligible for approval")
+                    scope = (
+                        scopes.get(bead_id, bead["description"])
+                        if isinstance(scopes, dict)
+                        else bead["description"]
+                    )
+                    if not isinstance(scope, str) or not scope.strip():
+                        raise StoreError(f"bead {bead_id} has no approved scope")
+                    connection.execute(
+                        "INSERT INTO run_beads(run_id, bead_id, position, scope_snapshot) VALUES (?, ?, ?, ?)",
+                        (run_id, bead_id, position, scope),
+                    )
+                    connection.execute(
+                        "INSERT INTO assignments(run_id, bead_id, stage, scope_snapshot, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?, ?)",
+                        (run_id, bead_id, scope, timestamp, timestamp),
+                    )
+                applied.append({"decision": kind, "run_id": run_id})
+                continue
+            if kind == "hold":
+                scope = decision.get("scope")
+                target = decision.get("target")
+                reason = decision.get("reason")
+                release = decision.get("release_condition")
+                if scope not in {"global", "project", "run", "assignment"}:
+                    raise StoreError("hold requires a supported scope")
+                if scope != "global" and (
+                    not isinstance(target, (str, int)) or isinstance(target, bool)
+                ):
+                    raise StoreError("non-global hold requires a target")
+                if scope != "global":
+                    table, column = {
+                        "project": ("projects", "project_id"),
+                        "run": ("runs", "id"),
+                        "assignment": ("assignments", "id"),
+                    }[str(scope)]
+                    if (
+                        connection.execute(
+                            f"SELECT 1 FROM {table} WHERE {column} = ?", (target,)
+                        ).fetchone()
+                        is None
+                    ):
+                        raise StoreError(f"hold target {scope}:{target} does not exist")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise StoreError("hold requires a reason")
+                if not isinstance(release, str) or not release.strip():
+                    raise StoreError("hold requires a release condition")
+                cursor = connection.execute(
+                    "INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        scope,
+                        None if scope == "global" else str(target),
+                        reason.strip(),
+                        int(bool(decision.get("urgent", False))),
+                        release.strip(),
+                        timestamp,
+                    ),
+                )
+                if scope == "run":
+                    connection.execute(
+                        "UPDATE runs SET state = 'held', updated_at = ? WHERE id = ?",
+                        (timestamp, target),
+                    )
+                applied.append({"decision": kind, "hold_id": int(cursor.lastrowid)})
+                continue
+            if kind == "release_hold":
+                hold_id = decision.get("hold_id")
+                if not isinstance(hold_id, int) or isinstance(hold_id, bool):
+                    raise StoreError("release_hold requires hold_id")
+                retained_hold = connection.execute(
+                    "SELECT scope, target FROM holds WHERE id = ? AND released_at IS NULL",
+                    (hold_id,),
+                ).fetchone()
+                changed = connection.execute(
+                    "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
+                    (timestamp, hold_id),
+                ).rowcount
+                if changed != 1:
+                    raise StoreError(f"hold {hold_id} is missing or already released")
+                if retained_hold is not None and retained_hold["scope"] == "run":
+                    connection.execute(
+                        """UPDATE runs SET state = CASE WHEN executor_task_id IS NULL
+                           THEN 'approved' ELSE 'active' END, updated_at = ?
+                           WHERE id = ? AND state = 'held'""",
+                        (timestamp, retained_hold["target"]),
+                    )
+                connection.execute(
+                    """UPDATE assignments SET operator_hold_id = NULL,
+                       next_attempt_at = COALESCE(next_attempt_at, ?), updated_at = ?
+                       WHERE operator_hold_id = ? AND stage = 'recovering'""",
+                    (timestamp, timestamp, hold_id),
+                )
+                applied.append({"decision": kind, "hold_id": hold_id})
+                continue
+            if kind == "cancel_run":
+                run_id = decision.get("run_id")
+                reason = decision.get("reason")
+                if (
+                    not isinstance(run_id, int)
+                    or isinstance(run_id, bool)
+                    or not isinstance(reason, str)
+                    or not reason.strip()
+                ):
+                    raise StoreError("cancel_run requires run_id and reason")
+                run = connection.execute(
+                    "SELECT state FROM runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                if run is None or run["state"] in {"completed", "canceled"}:
+                    raise StoreError(f"run {run_id} cannot be canceled")
+                active = connection.execute(
+                    """SELECT 1 FROM actions WHERE assignment_id IN
+                       (SELECT id FROM assignments WHERE run_id = ?)
+                       AND state IN ('starting','active','terminal','uncertain') LIMIT 1""",
+                    (run_id,),
+                ).fetchone()
+                if active is not None:
+                    raise StoreError(f"run {run_id} has an active action")
+                connection.execute(
+                    "UPDATE assignments SET stage = 'canceled', condition = ?, updated_at = ? WHERE run_id = ? AND stage NOT IN ('completed','canceled')",
+                    (reason.strip(), timestamp, run_id),
                 )
                 connection.execute(
-                    "INSERT INTO run_beads(run_id, bead_id, position, scope_snapshot) VALUES (?, ?, ?, ?)",
-                    (run_id, bead_id, position, scope),
+                    "UPDATE runs SET state = 'canceled', updated_at = ? WHERE id = ?",
+                    (timestamp, run_id),
                 )
+                _archive_run_pair(connection, run_id, timestamp)
+                applied.append({"decision": kind, "run_id": run_id})
+                continue
+            if kind == "resolve_escalation":
+                assignment_id = decision.get("assignment_id")
+                resolution = decision.get("resolution")
+                reason = decision.get("reason")
+                if (
+                    not isinstance(assignment_id, int)
+                    or isinstance(assignment_id, bool)
+                    or resolution not in {"retry", "rescope", "cancel"}
+                    or not isinstance(reason, str)
+                    or not reason.strip()
+                ):
+                    raise StoreError(
+                        "resolve_escalation requires assignment_id, retry|rescope|cancel, and reason"
+                    )
+                assignment = connection.execute(
+                    "SELECT * FROM assignments WHERE id = ?", (assignment_id,)
+                ).fetchone()
+                if assignment is None or assignment["stage"] != "recovering":
+                    raise StoreError(
+                        f"assignment {assignment_id} is not an escalated recovery"
+                    )
+                if assignment["operator_hold_id"]:
+                    connection.execute(
+                        "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
+                        (timestamp, assignment["operator_hold_id"]),
+                    )
+                if resolution == "cancel":
+                    connection.execute(
+                        "UPDATE assignments SET stage = 'canceled', operator_hold_id = NULL, next_attempt_at = NULL, condition = ?, updated_at = ? WHERE id = ?",
+                        (reason.strip(), timestamp, assignment_id),
+                    )
+                    remaining = connection.execute(
+                        """SELECT 1 FROM assignments WHERE run_id = ?
+                           AND stage NOT IN ('completed','canceled') LIMIT 1""",
+                        (assignment["run_id"],),
+                    ).fetchone()
+                    if remaining is None:
+                        connection.execute(
+                            "UPDATE runs SET state = 'canceled', updated_at = ? WHERE id = ?",
+                            (timestamp, assignment["run_id"]),
+                        )
+                        _archive_run_pair(
+                            connection, int(assignment["run_id"]), timestamp
+                        )
+                else:
+                    approved_scope = decision.get("scope")
+                    if resolution == "rescope":
+                        if (
+                            not isinstance(approved_scope, str)
+                            or not approved_scope.strip()
+                        ):
+                            raise StoreError("rescope resolution requires exact scope")
+                    else:
+                        approved_scope = assignment["scope_snapshot"]
+                    target_stage = (
+                        "correcting"
+                        if resolution == "rescope" and assignment["worktree_path"]
+                        else (
+                            {
+                                "queued": "queued",
+                                "preparing": "preparing",
+                                "implementing": "preparing",
+                                "review_pending": "review_pending",
+                                "reviewing": "review_pending",
+                                "correcting": "correcting",
+                                "delivering": "delivering",
+                            }.get(str(assignment["prior_stage"]), "queued")
+                            if resolution == "retry"
+                            else "queued"
+                        )
+                    )
+                    connection.execute(
+                        """UPDATE assignments SET stage = ?, scope_snapshot = ?,
+                           candidate_id = CASE WHEN ? = 'rescope' THEN NULL ELSE candidate_id END,
+                           source_oid = CASE WHEN ? = 'rescope' THEN NULL ELSE source_oid END,
+                           tested_oid = CASE WHEN ? = 'rescope' THEN NULL ELSE tested_oid END,
+                           mandate_candidate_id = CASE WHEN ? = 'rescope' THEN NULL ELSE mandate_candidate_id END,
+                           mandate_scope = CASE WHEN ? = 'rescope' THEN NULL ELSE mandate_scope END,
+                           repair_permissions = CASE WHEN ? = 'rescope' THEN '[]' ELSE repair_permissions END,
+                           operator_hold_id = NULL, next_attempt_at = NULL, condition = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (
+                            target_stage,
+                            approved_scope,
+                            resolution,
+                            resolution,
+                            resolution,
+                            resolution,
+                            resolution,
+                            resolution,
+                            reason.strip(),
+                            timestamp,
+                            assignment_id,
+                        ),
+                    )
+                applied.append(
+                    {
+                        "decision": kind,
+                        "assignment_id": assignment_id,
+                        "resolution": resolution,
+                    }
+                )
+                continue
+            if kind == "set_priority":
+                run_id = decision.get("run_id")
+                priority = decision.get("priority")
+                if (
+                    not isinstance(run_id, int)
+                    or isinstance(run_id, bool)
+                    or not isinstance(priority, int)
+                    or isinstance(priority, bool)
+                ):
+                    raise StoreError(
+                        "set_priority requires integer run_id and priority"
+                    )
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM runs WHERE id = ?", (run_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise StoreError(f"unknown run {run_id}")
                 connection.execute(
-                    "INSERT INTO assignments(run_id, bead_id, stage, scope_snapshot, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?, ?)",
-                    (run_id, bead_id, scope, timestamp, timestamp),
+                    "UPDATE runs SET priority = ?, updated_at = ? WHERE id = ?",
+                    (priority, timestamp, run_id),
                 )
-    return {"created_runs": created}
+                applied.append({"decision": kind, "run_id": run_id})
+                continue
+            if kind == "suspend_policy":
+                policy_kind = decision.get("kind")
+                scope = decision.get("scope")
+                changed = connection.execute(
+                    "UPDATE policies SET active = 0 WHERE kind = ? AND scope IS ? AND active = 1",
+                    (policy_kind, scope),
+                ).rowcount
+                if policy_kind not in {"sage", "inquisitor"} or changed != 1:
+                    raise StoreError("suspend_policy names no active policy")
+                applied.append({"decision": kind, "kind": policy_kind, "scope": scope})
+                continue
+            if kind == "request_specialist":
+                specialist = decision.get("kind")
+                projects = decision.get("projects", [])
+                if specialist not in {"sage", "inquisitor"}:
+                    raise StoreError("request_specialist requires sage or inquisitor")
+                if not isinstance(projects, list) or not all(
+                    isinstance(project, str) and project in enabled_projects
+                    for project in projects
+                ):
+                    raise StoreError("specialist projects must all be enabled")
+                if specialist == "inquisitor" and not projects:
+                    raise StoreError("Inquisitor requires at least one project")
+                scope = json.dumps(
+                    {"global": not projects, "projects": projects}, sort_keys=True
+                )
+                cursor = connection.execute(
+                    """INSERT INTO occurrences(kind, scope, authority, prompt, state, created_at, updated_at)
+                       VALUES (?, ?, 'archon', ?, 'queued', ?, ?)""",
+                    (specialist, scope, decision.get("prompt"), timestamp, timestamp),
+                )
+                applied.append(
+                    {"decision": kind, "occurrence_id": int(cursor.lastrowid)}
+                )
+                continue
+            if kind == "set_models":
+                bead_id = decision.get("bead_id")
+                values = [
+                    decision.get("executor_model"),
+                    decision.get("executor_reasoning_effort"),
+                    decision.get("overseer_model"),
+                    decision.get("overseer_reasoning_effort"),
+                ]
+                rationale = decision.get("rationale")
+                if (
+                    not isinstance(bead_id, str)
+                    or not all(
+                        isinstance(value, str) and value.strip() for value in values
+                    )
+                    or not isinstance(rationale, str)
+                    or not rationale.strip()
+                ):
+                    raise StoreError(
+                        "set_models requires bead_id, four model settings, and rationale"
+                    )
+                provisioned = connection.execute(
+                    "SELECT 1 FROM assignments WHERE bead_id = ? AND (executor_task_id IS NOT NULL OR overseer_task_id IS NOT NULL)",
+                    (bead_id,),
+                ).fetchone()
+                if provisioned is not None:
+                    raise StoreError("models cannot change after pair provisioning")
+                changed = connection.execute(
+                    """UPDATE beads SET executor_model = ?, executor_reasoning_effort = ?,
+                       overseer_model = ?, overseer_reasoning_effort = ?,
+                       model_provenance = 'archon', updated_at = ? WHERE bead_id = ?""",
+                    (*values, timestamp, bead_id),
+                ).rowcount
+                if changed != 1:
+                    raise StoreError(f"unknown bead {bead_id}")
+                connection.execute(
+                    """INSERT INTO model_decisions(bead_id, rationale, created_at)
+                       VALUES (?, ?, ?) ON CONFLICT(bead_id) DO UPDATE SET
+                       rationale = excluded.rationale, created_at = excluded.created_at""",
+                    (bead_id, rationale.strip(), timestamp),
+                )
+                applied.append({"decision": kind, "bead_id": bead_id})
+                continue
+            if kind == "retire_archon":
+                reason = decision.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise StoreError("retire_archon requires a reason")
+                existing = connection.execute(
+                    "SELECT value FROM meta WHERE key = 'archon_succession_request'"
+                ).fetchone()
+                if existing is not None:
+                    raise StoreError("an Archon succession is already pending")
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES ('archon_succession_request', ?)",
+                    (
+                        json.dumps(
+                            {
+                                "task_id": None,
+                                "reason": reason,
+                                "requested_at": timestamp,
+                            },
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+                applied.append({"decision": kind})
+                continue
+            raise StoreError(f"unsupported Archon decision: {kind!r}")
+    return {"created_runs": created, "applied_decisions": applied}

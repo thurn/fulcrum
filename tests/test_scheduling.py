@@ -6,7 +6,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fulcrum.scheduling import assignment_blockers, can_start_task, next_cadence
+from fulcrum.scheduling import (
+    assignment_blockers,
+    can_start_task,
+    next_cadence,
+    ready_assignments,
+)
 from fulcrum.store import Store
 
 
@@ -64,6 +69,52 @@ class SchedulingTest(unittest.TestCase):
                 (now,),
             )
             self.assertIn("quiet", " ".join(assignment_blockers(store, assignment)))
+
+    def test_only_the_earliest_unfinished_bead_in_a_run_is_ready(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            Store(Path(directory) / "state.db") as store,
+        ):
+            now = "2026-01-01T00:00:00Z"
+            store.execute(
+                "INSERT INTO projects(project_id, repo_path) VALUES ('p', '/tmp/p')"
+            )
+            for bead_id in ("b-1", "b-2"):
+                store.execute(
+                    """INSERT INTO beads(
+                           bead_id, intake_key, project_id, title, description,
+                           activation, executor_model, executor_reasoning_effort,
+                           overseer_model, overseer_reasoning_effort,
+                           model_provenance, publication_state, created_at, updated_at
+                       ) VALUES (?, ?, 'p', ?, 'scope', 'pending', 'sol', 'high',
+                                 'sol', 'high', 'default', 'complete', ?, ?)""",
+                    (bead_id, bead_id, bead_id, now, now),
+                )
+            run = store.execute(
+                "INSERT INTO runs(project_id, authority, created_at, updated_at) VALUES ('p','archon',?,?)",
+                (now, now),
+            )
+            for position, bead_id in enumerate(("b-1", "b-2")):
+                store.execute(
+                    "INSERT INTO run_beads(run_id, bead_id, position, scope_snapshot) VALUES (?, ?, ?, 'scope')",
+                    (run.lastrowid, bead_id, position),
+                )
+                store.execute(
+                    "INSERT INTO assignments(run_id, bead_id, stage, scope_snapshot, created_at, updated_at) VALUES (?, ?, 'queued', 'scope', ?, ?)",
+                    (run.lastrowid, bead_id, now, now),
+                )
+            store.execute(
+                "INSERT INTO meta(key, value) VALUES ('global_limit','1'), ('project_limits','{\"p\":1}'), ('dispatch_enabled','1')"
+            )
+            self.assertEqual(
+                [row["bead_id"] for row in ready_assignments(store)], ["b-1"]
+            )
+            store.execute(
+                "UPDATE assignments SET stage = 'completed' WHERE bead_id = 'b-1'"
+            )
+            self.assertEqual(
+                [row["bead_id"] for row in ready_assignments(store)], ["b-2"]
+            )
 
 
 if __name__ == "__main__":

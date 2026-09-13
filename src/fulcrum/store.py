@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   CHECK ((role = 'archon' AND role_number IS NULL) OR (role != 'archon' AND role_number IS NOT NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_archon ON tasks(role) WHERE role = 'archon' AND state NOT IN ('retired','archived');
+CREATE UNIQUE INDEX IF NOT EXISTS one_current_role_per_pair ON tasks(pair_id, role)
+  WHERE pair_id IS NOT NULL AND role IN ('executor','overseer') AND state NOT IN ('retired','archived');
 CREATE TABLE IF NOT EXISTS beads (
   bead_id TEXT PRIMARY KEY, intake_key TEXT NOT NULL UNIQUE,
   project_id TEXT NOT NULL REFERENCES projects(project_id), title TEXT NOT NULL,
@@ -70,6 +72,10 @@ CREATE TABLE IF NOT EXISTS intake_groups (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_decisions (
+  bead_id TEXT PRIMARY KEY REFERENCES beads(bead_id) ON DELETE CASCADE,
+  rationale TEXT NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS intake_group_beads (
   group_id TEXT NOT NULL REFERENCES intake_groups(id) ON DELETE CASCADE,
   bead_id TEXT NOT NULL UNIQUE REFERENCES beads(bead_id),
@@ -83,6 +89,9 @@ CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(project_id),
   authority TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'approved'
     CHECK (state IN ('approved','active','held','completed','canceled')),
+  executor_task_id INTEGER REFERENCES tasks(id),
+  overseer_task_id INTEGER REFERENCES tasks(id),
+  priority INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS run_beads (
@@ -105,6 +114,12 @@ CREATE TABLE IF NOT EXISTS assignments (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_assignment_per_bead ON assignments(bead_id) WHERE stage NOT IN ('completed','canceled');
+CREATE TABLE IF NOT EXISTS handoffs (
+  id INTEGER PRIMARY KEY, assignment_id INTEGER NOT NULL REFERENCES assignments(id) ON DELETE CASCADE,
+  source_action_id INTEGER NOT NULL UNIQUE REFERENCES actions(id),
+  kind TEXT NOT NULL CHECK (kind IN ('implementation_evidence','review_findings','missing_evidence')),
+  content_json TEXT NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS actions (
   id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id),
   assignment_id INTEGER REFERENCES assignments(id), occurrence_id INTEGER,
@@ -117,6 +132,8 @@ CREATE TABLE IF NOT EXISTS actions (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_thread ON actions(task_id) WHERE state NOT IN ('processed','canceled');
+CREATE UNIQUE INDEX IF NOT EXISTS one_current_action_per_assignment ON actions(assignment_id)
+  WHERE assignment_id IS NOT NULL AND state IN ('pending','starting','active','terminal','uncertain');
 CREATE TABLE IF NOT EXISTS reservations (
   id INTEGER PRIMARY KEY, action_id INTEGER NOT NULL UNIQUE REFERENCES actions(id),
   pair_id INTEGER, global_slots INTEGER NOT NULL DEFAULT 1 CHECK (global_slots >= 0),
@@ -168,9 +185,19 @@ CREATE TABLE IF NOT EXISTS batches (
   state TEXT NOT NULL CHECK (state IN ('frozen','sending','accepted','processed','uncertain','failed')),
   action_id INTEGER REFERENCES actions(id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS deferred_batches (
+  batch_id INTEGER PRIMARY KEY REFERENCES batches(id) ON DELETE CASCADE,
+  reactivation_json TEXT NOT NULL, next_check_at TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS finding_publications (
+  semantic_key TEXT PRIMARY KEY, occurrence_id INTEGER NOT NULL REFERENCES occurrences(id),
+  bead_id TEXT NOT NULL, evidence_json TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('complete','uncertain')),
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS batch_updates (
   batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
-  update_id INTEGER NOT NULL UNIQUE REFERENCES updates(id), PRIMARY KEY (batch_id, update_id)
+  update_id INTEGER NOT NULL REFERENCES updates(id), PRIMARY KEY (batch_id, update_id)
 );
 CREATE TABLE IF NOT EXISTS policies (
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, scope TEXT, cadence_seconds INTEGER,
@@ -182,7 +209,8 @@ CREATE TABLE IF NOT EXISTS occurrences (
   id INTEGER PRIMARY KEY, policy_id INTEGER REFERENCES policies(id), kind TEXT NOT NULL,
   scope TEXT, authority TEXT NOT NULL, prompt TEXT,
   state TEXT NOT NULL CHECK (state IN ('queued','active','collecting','publishing','complete','failed','skipped')),
-  deadline_at TEXT, report_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  deadline_at TEXT, report_json TEXT, evidence_json TEXT NOT NULL DEFAULT '{}',
+  publication_revision TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_unfinished_occurrence ON occurrences(policy_id) WHERE policy_id IS NOT NULL AND state NOT IN ('complete','skipped');
 CREATE TABLE IF NOT EXISTS interviews (
@@ -207,6 +235,96 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 INVARIANT_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS run_executor_must_match_pair
+BEFORE UPDATE OF executor_task_id ON runs
+WHEN NEW.executor_task_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM tasks WHERE id = NEW.executor_task_id
+  AND role = 'executor' AND pair_id = NEW.id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'run executor must be its paired Executor');
+END;
+CREATE TRIGGER IF NOT EXISTS inserted_run_executor_must_match_pair
+BEFORE INSERT ON runs
+WHEN NEW.executor_task_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM tasks WHERE id = NEW.executor_task_id
+  AND role = 'executor' AND pair_id = NEW.id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'run executor must be its paired Executor');
+END;
+CREATE TRIGGER IF NOT EXISTS run_overseer_must_match_pair
+BEFORE UPDATE OF overseer_task_id ON runs
+WHEN NEW.overseer_task_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM tasks WHERE id = NEW.overseer_task_id
+  AND role = 'overseer' AND pair_id = NEW.id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'run overseer must be its paired Overseer');
+END;
+CREATE TRIGGER IF NOT EXISTS inserted_run_overseer_must_match_pair
+BEFORE INSERT ON runs
+WHEN NEW.overseer_task_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM tasks WHERE id = NEW.overseer_task_id
+  AND role = 'overseer' AND pair_id = NEW.id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'run overseer must be its paired Overseer');
+END;
+CREATE TRIGGER IF NOT EXISTS assignment_tasks_must_match_run
+BEFORE UPDATE OF executor_task_id, overseer_task_id ON assignments
+WHEN (NEW.executor_task_id IS NOT NULL AND NEW.executor_task_id IS NOT
+      (SELECT executor_task_id FROM runs WHERE id = NEW.run_id))
+  OR (NEW.overseer_task_id IS NOT NULL AND NEW.overseer_task_id IS NOT
+      (SELECT overseer_task_id FROM runs WHERE id = NEW.run_id))
+BEGIN
+  SELECT RAISE(ABORT, 'assignment tasks must match the retained run pair');
+END;
+CREATE TRIGGER IF NOT EXISTS inserted_assignment_tasks_must_match_run
+BEFORE INSERT ON assignments
+WHEN (NEW.executor_task_id IS NOT NULL AND NEW.executor_task_id IS NOT
+      (SELECT executor_task_id FROM runs WHERE id = NEW.run_id))
+  OR (NEW.overseer_task_id IS NOT NULL AND NEW.overseer_task_id IS NOT
+      (SELECT overseer_task_id FROM runs WHERE id = NEW.run_id))
+BEGIN
+  SELECT RAISE(ABORT, 'assignment tasks must match the retained run pair');
+END;
+CREATE TRIGGER IF NOT EXISTS retained_task_cannot_leave_run_pair
+BEFORE UPDATE OF pair_id, role ON tasks
+WHEN EXISTS (
+  SELECT 1 FROM runs WHERE
+  (executor_task_id = NEW.id AND (NEW.role != 'executor' OR NEW.pair_id != id))
+  OR (overseer_task_id = NEW.id AND (NEW.role != 'overseer' OR NEW.pair_id != id))
+)
+BEGIN
+  SELECT RAISE(ABORT, 'retained task cannot leave its run pair');
+END;
+CREATE TRIGGER IF NOT EXISTS handoff_must_match_terminal_source
+BEFORE INSERT ON handoffs
+WHEN NOT EXISTS (
+  SELECT 1 FROM actions WHERE id = NEW.source_action_id
+  AND assignment_id = NEW.assignment_id
+  AND ((NEW.kind = 'implementation_evidence' AND kind IN ('implement','correct') AND outcome_kind = 'ready_for_review')
+    OR (NEW.kind = 'review_findings' AND kind = 'review' AND outcome_kind = 'changes_requested')
+    OR (NEW.kind = 'missing_evidence' AND kind = 'review' AND outcome_kind = 'incomplete'))
+)
+BEGIN
+  SELECT RAISE(ABORT, 'handoff must match its accepted source outcome');
+END;
+CREATE TRIGGER IF NOT EXISTS review_action_requires_candidate_handoff
+BEFORE INSERT ON actions
+WHEN NEW.kind = 'review' AND NEW.assignment_id IS NOT NULL AND (
+  NOT EXISTS (
+    SELECT 1 FROM assignments WHERE id = NEW.assignment_id
+    AND candidate_id IS NOT NULL AND source_oid IS NOT NULL
+  ) OR NOT EXISTS (
+    SELECT 1 FROM handoffs WHERE assignment_id = NEW.assignment_id
+    AND kind = 'implementation_evidence'
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'review action requires an immutable candidate and implementation handoff');
+END;
 CREATE TRIGGER IF NOT EXISTS reservation_requires_runnable_action
 BEFORE INSERT ON reservations
 WHEN NOT EXISTS (
@@ -377,7 +495,28 @@ class Store:
     def _migrate_existing_database(self) -> None:
         """Add correctness metadata to an existing database without a version gate."""
 
+        batch_table = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'batch_updates'"
+        ).fetchone()
+        if batch_table is not None and "NOT NULL UNIQUE" in str(batch_table[0]).upper():
+            self.connection.executescript(
+                """ALTER TABLE batch_updates RENAME TO obsolete_batch_updates;
+                CREATE TABLE batch_updates (
+                  batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+                  update_id INTEGER NOT NULL REFERENCES updates(id),
+                  PRIMARY KEY (batch_id, update_id)
+                );
+                INSERT INTO batch_updates(batch_id, update_id)
+                  SELECT batch_id, update_id FROM obsolete_batch_updates;
+                DROP TABLE obsolete_batch_updates;"""
+            )
+
         additions = {
+            "runs": {
+                "executor_task_id": "INTEGER REFERENCES tasks(id)",
+                "overseer_task_id": "INTEGER REFERENCES tasks(id)",
+                "priority": "INTEGER NOT NULL DEFAULT 0",
+            },
             "assignments": {
                 "retry_count": "INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)",
                 "next_attempt_at": "TEXT",
@@ -403,6 +542,10 @@ class Store:
                 "next_attempt_at": "TEXT",
                 "operator_hold_id": "INTEGER REFERENCES holds(id)",
             },
+            "occurrences": {
+                "evidence_json": "TEXT NOT NULL DEFAULT '{}'",
+                "publication_revision": "TEXT",
+            },
         }
         for table, columns in additions.items():
             present = {
@@ -417,6 +560,30 @@ class Store:
         self.connection.execute(
             "UPDATE external_operations SET correlation_id = 'operation-' || id WHERE correlation_id IS NULL"
         )
+        assignment_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(assignments)")
+        }
+        pair_columns = {"run_id", "executor_task_id", "overseer_task_id"}
+        if pair_columns.issubset(assignment_columns):
+            self.connection.execute("""UPDATE tasks SET pair_id = (
+                     SELECT a.run_id FROM assignments a
+                     WHERE a.executor_task_id = tasks.id OR a.overseer_task_id = tasks.id
+                     ORDER BY a.id LIMIT 1
+                   ) WHERE role IN ('executor','overseer') AND pair_id IS NULL
+                   AND EXISTS (
+                     SELECT 1 FROM assignments a
+                     WHERE a.executor_task_id = tasks.id OR a.overseer_task_id = tasks.id
+                   )""")
+            self.connection.execute("""UPDATE runs SET
+                     executor_task_id = COALESCE(executor_task_id, (
+                       SELECT executor_task_id FROM assignments a
+                       WHERE a.run_id = runs.id AND executor_task_id IS NOT NULL
+                       ORDER BY a.id LIMIT 1)),
+                     overseer_task_id = COALESCE(overseer_task_id, (
+                       SELECT overseer_task_id FROM assignments a
+                       WHERE a.run_id = runs.id AND overseer_task_id IS NOT NULL
+                       ORDER BY a.id LIMIT 1))""")
         for assignment in self.rows(
             """SELECT id FROM assignments WHERE stage = 'recovering'
                AND next_attempt_at IS NULL AND operator_hold_id IS NULL"""
@@ -440,6 +607,12 @@ class Store:
             """CREATE UNIQUE INDEX one_current_action_per_thread ON actions(task_id)
                WHERE state IN ('pending','starting','active','terminal','uncertain')"""
         )
+        if "run_id" in assignment_columns:
+            self.connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS one_started_assignment_per_run
+                   ON assignments(run_id)
+                   WHERE stage NOT IN ('queued','completed','canceled')"""
+            )
 
     def close(self) -> None:
         self.connection.close()
@@ -860,8 +1033,17 @@ class Store:
             task["desktop_context"] = f"codex://thread/{task['native_thread_id']}"
             current = self.row(
                 """SELECT a.bead_id, a.stage FROM assignments a
+                   JOIN run_beads rb ON rb.run_id = a.run_id AND rb.bead_id = a.bead_id
                    WHERE (a.executor_task_id = ? OR a.overseer_task_id = ?)
-                   AND a.stage NOT IN ('completed','canceled') ORDER BY a.id DESC LIMIT 1""",
+                   AND a.stage NOT IN ('completed','canceled')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM run_beads earlier
+                     JOIN assignments prior ON prior.run_id = earlier.run_id
+                       AND prior.bead_id = earlier.bead_id
+                     WHERE earlier.run_id = rb.run_id AND earlier.position < rb.position
+                       AND prior.stage NOT IN ('completed','canceled')
+                   )
+                   ORDER BY a.id LIMIT 1""",
                 (task["id"], task["id"]),
             )
             task["current_bead"] = current["bead_id"] if current else None

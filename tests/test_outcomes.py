@@ -25,14 +25,41 @@ class OutcomesTest(unittest.TestCase):
     def test_report_requires_explicit_evidence_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.json"
-            path.write_text(json.dumps({"findings": []}))
+            path.write_text(
+                json.dumps(
+                    {
+                        "summary": "No findings",
+                        "coverage": ["all source"],
+                        "findings": [],
+                    }
+                )
+            )
             self.assertEqual(
                 validate_outcome("specialist", "report", {"input": str(path)}),
-                {"findings": []},
+                {
+                    "summary": "No findings",
+                    "coverage": ["all source"],
+                    "findings": [],
+                },
             )
-            path.write_text(json.dumps({"findings": [{"problem": "x"}]}))
+            path.write_text(
+                json.dumps(
+                    {
+                        "summary": "Finding",
+                        "coverage": ["source"],
+                        "findings": [{"identity": "x", "problem": "x"}],
+                    }
+                )
+            )
             with self.assertRaisesRegex(OutcomeError, "evidence"):
                 validate_outcome("specialist", "report", {"input": str(path)})
+
+    def test_unknown_archon_decision_is_rejected_before_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "decisions.json"
+            path.write_text(json.dumps({"decisions": [{"decision": "wish"}]}))
+            with self.assertRaisesRegex(OutcomeError, "unsupported Archon decision"):
+                validate_outcome("archon", "decisions", {"input": str(path)})
 
     def test_deferral_needs_reactivation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
