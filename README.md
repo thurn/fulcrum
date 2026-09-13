@@ -44,8 +44,10 @@ fulcrum inquisitor --project fulcrum
 fulcrum reboot --soft
 ```
 
-Managed agents finish their current controller-bound action with the exact
-`fulcrum finish ...` form included in their brief. They never pass task, turn,
+Managed agents receive short action notices. `fulcrum instructions` retrieves
+current scope and decision data; `--section evidence`, `role`, and `finish` expose
+separate references. Agents finish with the exact `fulcrum finish ...` form in the
+finish reference. They never pass task, turn,
 assignment, or dispatch IDs and cannot write operational state directly.
 
 `scripts/check` formats, type-checks, and tests the package. Python and prompt

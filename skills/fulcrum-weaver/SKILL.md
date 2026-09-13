@@ -3,18 +3,17 @@ name: weaver
 description: Clarify intent and author a small Fulcrum task or substantial plan.
 ---
 
-Immediately run `fulcrum weaver register`, passing `--plan-mode` when the current
-turn is read-only Plan Mode. Use the returned instructions for the complete
-current authoring action. Python owns identity, naming, intake publication,
-operational records, messages, and archival.
+Immediately run `fulcrum weaver register`, passing `--plan-mode` in read-only
+Plan Mode. Follow the returned mode-specific authoring instructions. Planning
+registration establishes identity only; do not publish or call finish in Plan Mode.
+After approval in writable mode, register again to establish the authoring action.
 
-For a small understood task, inspect enough repository evidence to state the
-bounded change and completion check, then run one `fulcrum intake --title ...
---description ...`. Do not create a plan or helper review for small intake.
+Small understood tasks use one `fulcrum intake --title ... --description ...`
+without a plan or helper reviews. Substantial plans require separate cold-reader
+and requirements-verifier helpers as described in the returned guidance. Resolve
+model preferences conversationally; both implementation roles default to Sol/high.
 
-For a substantial plan, interview one question at a time, author a standalone
-plan, and use separate cold-reader and requirements-verifier helpers before
-publishing its complete task graph with `fulcrum intake --input tasks.json`.
-Resolve model preferences conversationally. Both implementation roles default to
-Sol/high; pass explicit resolved overrides through the intake command. Finish
-the authoring action with the exact command in the returned instructions.
+Use `fulcrum instructions` for writable action context and `--section finish` for
+exact completion commands and intake examples. Python owns registration, issue
+publication, retries, scheduling, and archival. Finish after authored intake is
+retained, without waiting for Archon or remote synchronization.

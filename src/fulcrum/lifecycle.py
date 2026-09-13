@@ -39,6 +39,17 @@ def accept_finish(
         raise StoreError("this action already has a different accepted outcome")
     if action["state"] in {"failed", "canceled"}:
         raise StoreError(f"cannot finish a {action['state']} action")
+    if outcome_kind == "evidence_needed":
+        context = json.loads(action["payload"])
+        if action["role"] != "sage" or context.get("continuation"):
+            raise StoreError("only Sage's initial analysis may request interviews")
+        if not payload["requests"]:
+            raise StoreError("an interview round requires at least one subject")
+        if store.row(
+            "SELECT 1 FROM interviews WHERE occurrence_id = ?",
+            (action["occurrence_id"],),
+        ):
+            raise StoreError("only one interview round is allowed")
     timestamp = utc_now()
     store.execute(
         "UPDATE actions SET outcome_kind = ?, outcome_payload = ?, updated_at = ? WHERE id = ?",

@@ -1,11 +1,15 @@
 # Hooks
 
-Fulcrum installs one advisory `SessionStart` hook for compaction. It reads the
-caller's current action from SQLite and rebuilds the same complete, current brief
-used by dispatch. If state is unavailable, it reports that limitation and grants
-no authority.
+Fulcrum installs one read-only `SessionStart` hook for compaction. For a managed
+current action it supplies a brief role/action reminder and points to
+`fulcrum instructions` if context was lost. It does not repeat the role manual,
+approved scope, history, or command schemas. These remain retrievable through
+`instructions` and its `--section evidence`, `role`, and `finish` views.
+
+Unrelated, retired, archived, and actionless tasks receive no text, including
+Plan-mode Weaver without a writable authoring action. A read failure for a known
+managed action produces an advisory diagnostic, never invented authority.
 
 There is no Stop hook enforcement, task-waiting denial, peer routing, archival,
-or operational write in hooks. Missing outcomes are detected from runtime events
-and handled once by the controller. Unrelated and Plan-mode conversations are not
-intercepted.
+or operational write in hooks. The controller sends one short missing-outcome
+reminder without changing the original action's scope, question, or decision batch.

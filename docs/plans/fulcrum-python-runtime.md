@@ -746,8 +746,8 @@ to both roles' effective defaults before storing the bead:
 
 ### Python-produced prompts
 
-Python assembles canonical role instructions and assignment-specific context at
-startup, at each managed wake, and after compaction. Executor, Overseer, Sage,
+Python supplies canonical role instructions at task creation, a short notice for
+each action, and a brief recovery reminder after compaction. Executor, Overseer, Sage,
 and Inquisitor have no installed skills or direct skill activation path. Python
 creates their tasks and supplies their instructions. Human-facing skills such
 as Weaver and setup remain thin entry points.
@@ -756,7 +756,7 @@ Store action-specific text templates in `src/fulcrum/prompts/` as package data,
 loaded afresh with `importlib.resources` from the editable checkout for each
 brief. Use ordinary Python assembly; no new template
 framework or model turn is needed to generate operational instructions. Dispatch
-and compaction use the same prompt builder and current controller records.
+and compaction use separate renderers backed by current controller records.
 
 Migrate the existing skill content by responsibility:
 
@@ -772,27 +772,39 @@ the shared skill-reading chain. Preserve substantive review and evidence
 criteria without copying the old role's entire operational manual into every
 prompt. Helpers continue to receive prompts crafted by their parent agent.
 
-Each managed prompt supplies the role, current assignment, approved scope,
-current constraints, relevant evidence references, permitted action, and exact
-finish obligation. Every wake, including follow-up and recovery turns, receives
-a self-contained brief for that action. Compaction rebuilds the same complete
-brief from current controller facts; correctness never depends on an earlier
-prompt surviving in the conversation. Required scope remains complete even
-when unchanged; do not truncate it merely to hit a prompt budget.
+Separate three instruction surfaces:
 
-Keep the role guidance short and include only the current action's instructions.
-Link to bulky source, logs, and artifacts instead of repeating them. Supply the
-exact action-specific finish command and explain only the arguments the agent
-must author. Routine outcomes require no JSON wrapper or agent-selected IDs. Do not track
-which instruction fragments an agent has seen or infer what it remembers.
-Retaining the exact dispatched input for operation reconciliation remains
-required; it is not a mechanism for constructing later prompts as deltas.
+- Creation supplies role purpose, judgment guidance, relevant boundaries, and how
+  to retrieve context and finish an action. Do not repeat this manual in turn input.
+- Each action notice is normally one to three sentences: what needs attention and
+  what decision or result is requested. A missing-finish reminder requests only
+  the outstanding result and never replaces the original action payload.
+- Compaction supplies a brief role/action reminder and recovery references, normally
+  50–100 words. Do not replay role instructions, action JSON, history, or schemas.
+  Unrelated, retired, and actionless tasks (including planning Weaver) receive nothing.
+
+`fulcrum instructions` retrieves current decision data and full approved scope.
+`--section evidence` retrieves retained handoffs, diagnosis, reports, and interview
+answers. `--section role` retrieves current role guidance; `--section finish` gives
+complete commands with exact top-level JSON file examples and selection rules.
+The default context view contains no operating manual or full command catalog.
+Detailed reads must not silently truncate approved requirements. Short notices
+must refer to this real read interface, not invented attachments. Scope and result
+identity remain controller-bound; recovery does not depend on remembering a prior
+message. Retain exact dispatched input for uncertain-operation reconciliation.
+
+Correction context includes the original approval, allowed repair categories,
+current findings, and retained delivery diagnosis. Evidence appears once in its
+own view; older review findings are history, not automatically current requests.
+Specialist context retains the requested project set and focus across continuation,
+reports actual evidence intervals and sampling limits, and distinguishes captured
+HEAD from certified source. Do not claim complete coverage from bounded samples.
+
+Routine notice example:
 
 ```text
-You are OVR0029. Review candidate c-42 for bead fc-31.
-Scope and source references are attached; inspect the actual changes.
-Return approved, changes_requested, or incomplete using fulcrum finish.
-Do not contact Executor or operate Tollgate. End after finish succeeds.
+Two updates need your scheduling decision. Read `fulcrum instructions` for details,
+then submit the appropriate finish outcome.
 ```
 
 Archon receives compact proposals and exceptions. Python persists any briefing,
@@ -1830,7 +1842,7 @@ exercise native boundaries with isolated disposable state and retained evidence.
 | Three substantive review failures, missing evidence, or covered repair | Only new substantive source rejections count; Archon decides after three; permitted repair records rationale/linkage without another Overseer turn |
 | Flaky/failed CI or a later unexplained green result | Diagnosis and concrete repair; no Fulcrum CI retry or automatic diagnostic replay; native certification after repair |
 | Source push, cleanup, or brain publication fails | Reuse retained candidate/report/intake; Python owns the remaining obligation; no duplicate implementation or analysis |
-| Follow-up, compaction, or missing template | Complete action brief and approved scope; finish command needs no turn/dispatch ID; hooks restore context only; installed templates work without role skills |
+| Follow-up, compaction, or missing template | Short notices and compaction reminders; full scope and relevant evidence remain retrievable separately; finish needs no turn/dispatch ID; actionless tasks receive no hook text |
 | Partial/duplicate intake, dependency cycle, scope edit, or unsupported model | No partial graph dispatch or silent scope/model change; preserve native Beads identities and explicit future exclusion |
 | Specialist overdue after downtime, duplicate finding, or speculative observation | One occurrence; reuse known findings; only evidence-backed submitted findings produce pending beads; zero findings is valid |
 | Busy/archived/unavailable interview subject and collection timeout | One request per subject; correct restoration; expire unstarted requests; reconcile uncertain starts; one Sage continuation with explicit missing evidence |
@@ -1867,7 +1879,7 @@ to the already verified shared runtime without disrupting existing conversations
    without waiting for Archon acknowledgment or Python-owned remote push work.
 3. Verify the bead stays pending until Archon approves its exact scope. Start
    Executor in the Python-created Tollgate worktree with the correct model and
-   a complete action brief, without an Overseer preparation turn. Measure filing
+   a short notice and retrievable complete action context, without an Overseer preparation turn. Measure filing
    to Archon dispatch, Archon decision time, Python bookkeeping, native preparation,
    and runtime/model startup separately; verify no deliberate batching delay.
 4. Submit the candidate and call the generated finish command. Delay parent or

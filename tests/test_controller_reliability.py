@@ -327,8 +327,203 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         prompt = result["instructions"]
         self.assertIn("Approved scope:\n\nScope", prompt)
-        self.assertIn("implementation_evidence", prompt)
-        self.assertIn("commit abc; tests passed", prompt)
+        self.assertNotIn("commit abc; tests passed", prompt)
+        result = await self.controller.handle_request(
+            {"command": "instructions", "thread_id": "overseer", "section": "evidence"}
+        )
+        self.assertIn("implementation_evidence", result["instructions"])
+        self.assertIn("commit abc; tests passed", result["instructions"])
+
+    async def test_missing_finish_notice_preserves_original_batch(self) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-notice",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        original = {
+            "batch_items": [
+                {"update_id": 17, "content": {"scope": "Exact approved proposal"}}
+            ]
+        }
+        action = self.controller.store.execute(
+            "INSERT INTO actions(task_id, kind, payload, state, native_turn_id, created_at, updated_at) VALUES (?, 'archon', ?, 'active', 'turn-1', 'now', 'now')",
+            (archon["id"], json.dumps(original)),
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?",
+            (archon["id"],),
+        )
+        with (
+            patch.object(self.controller, "_refresh_task", new=AsyncMock()),
+            patch.object(
+                self.controller, "_dispatch_action", new=AsyncMock()
+            ) as dispatch,
+        ):
+            await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "archon-notice",
+                    "turn": {"id": "turn-1", "status": "completed"},
+                },
+            )
+        retained = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action.lastrowid,)
+        )
+        self.assertEqual(json.loads(retained["payload"]), original)
+        self.assertEqual(retained["reminder_sent"], 1)
+        self.assertEqual(dispatch.call_args.args[0]["reminder_sent"], 1)
+        result = await self.controller.handle_request(
+            {"command": "instructions", "thread_id": "archon-notice"}
+        )
+        self.assertIn("Exact approved proposal", result["instructions"])
+
+    async def test_repair_context_exposes_permission_and_retained_diagnosis(
+        self,
+    ) -> None:
+        self.controller.store.execute(
+            "UPDATE assignments SET candidate_id = 'c-1', mandate_candidate_id = 'c-1', mandate_scope = 'Scope', repair_permissions = ? WHERE id = ?",
+            ('["bounded_in_scope_ci_fix"]', self.assignment["id"]),
+        )
+        operation = self.controller.store.create_operation(
+            "tollgate_approve", "c-1", {}
+        )
+        self.controller.store.execute(
+            "UPDATE external_operations SET result_json = ?, condition = 'CI failed' WHERE id = ?",
+            (json.dumps({"diagnosis": "actual failed check log"}), operation),
+        )
+        self.controller.store.execute(
+            "INSERT INTO actions(task_id, assignment_id, kind, payload, state, created_at, updated_at) VALUES (?, ?, 'correct', '{}', 'active', 'now', 'now')",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        context = await self.controller.handle_request(
+            {"command": "instructions", "thread_id": "executor"}
+        )
+        evidence = await self.controller.handle_request(
+            {"command": "instructions", "thread_id": "executor", "section": "evidence"}
+        )
+        self.assertIn("bounded_in_scope_ci_fix", context["instructions"])
+        self.assertIn("CI failed", context["instructions"])
+        self.assertNotIn("actual failed check log", context["instructions"])
+        self.assertIn("actual failed check log", evidence["instructions"])
+
+    def test_specialist_evidence_reports_interval_scope_and_truncation(self) -> None:
+        scope = json.dumps({"global": False, "projects": ["p"]})
+        self.controller.store.execute(
+            "INSERT INTO occurrences(kind, scope, authority, state, evidence_json, report_json, created_at, updated_at) VALUES ('sage', ?, 'test', 'complete', ?, '{}', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')",
+            (scope, json.dumps({"captured_at": "2026-01-01T00:00:00Z"})),
+        )
+        current = self.controller.store.execute(
+            "INSERT INTO occurrences(kind, scope, authority, state, created_at, updated_at) VALUES ('sage', ?, 'test', 'queued', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z')",
+            (scope,),
+        )
+        self.controller.store.event("old", "old event", now="2025-12-01T00:00:00Z")
+        for n in range(205):
+            self.controller.store.event(
+                "sample",
+                f"scoped {n}",
+                entity_type="project",
+                entity_id="p",
+                now="2026-02-01T00:00:00Z",
+            )
+        self.controller.store.event(
+            "other",
+            "outside project",
+            entity_type="project",
+            entity_id="other",
+            now="2026-02-01T00:00:00Z",
+        )
+        occurrence = self.controller.store.row(
+            "SELECT * FROM occurrences WHERE id = ?", (current.lastrowid,)
+        )
+        with patch("fulcrum.controller.utc_now", return_value="2026-03-01T00:00:00Z"):
+            evidence = self.controller._specialist_evidence(
+                json.loads(scope), occurrence=occurrence
+            )
+        self.assertEqual(evidence["window"]["after"], "2026-01-01T00:00:00Z")
+        self.assertTrue(evidence["coverage"]["events"]["truncated"])
+        self.assertEqual(len(evidence["recent_events"]), 200)
+        self.assertNotIn("old event", json.dumps(evidence))
+        self.assertNotIn("outside project", json.dumps(evidence))
+
+    async def test_global_sage_retains_project_scope_without_reserving_project_slots(
+        self,
+    ) -> None:
+        scope = {"global": True, "projects": ["p"]}
+        self.controller.store.execute(
+            "INSERT INTO occurrences(kind, scope, authority, state, created_at, updated_at) VALUES ('sage', ?, 'test', 'queued', 'now', 'now')",
+            (json.dumps(scope),),
+        )
+        sage = self.controller.store.register_task(
+            native_thread_id="sage",
+            role="sage",
+            description="Report",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        with (
+            patch.object(
+                self.controller, "_provision_task", new=AsyncMock(return_value=sage)
+            ),
+            patch.object(self.controller, "_dispatch_action", new=AsyncMock()),
+        ):
+            await self.controller._start_specialists()
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ?", (sage["id"],)
+        )
+        self.assertEqual(json.loads(action["payload"])["scope"], scope)
+        reservation = self.controller.store.row(
+            "SELECT project_ids FROM reservations WHERE action_id = ?", (action["id"],)
+        )
+        self.assertEqual(json.loads(reservation["project_ids"]), [])
+
+    async def test_specialist_findings_default_pending_and_preserve_explicit_deferral(
+        self,
+    ) -> None:
+        report = {
+            "summary": "Findings",
+            "coverage": ["source"],
+            "findings": [
+                {
+                    "identity": "first",
+                    "project": "p",
+                    "problem": "Problem",
+                    "evidence": "source",
+                    "expected_benefit": "fix",
+                    "acceptance_criteria": "verified",
+                },
+                {
+                    "identity": "second",
+                    "project": "p",
+                    "problem": "Later problem",
+                    "evidence": "source",
+                    "expected_benefit": "fix",
+                    "acceptance_criteria": "verified",
+                    "activation": "future",
+                    "deferral_reason": "human deferred",
+                },
+            ],
+        }
+        self.controller.store.execute(
+            "INSERT INTO occurrences(kind, authority, state, report_json, created_at, updated_at) VALUES ('sage', 'test', 'publishing', ?, 'now', 'now')",
+            (json.dumps(report),),
+        )
+        with (
+            patch.object(
+                self.controller,
+                "_publish_specialist_report",
+                return_value={"local_revision": "revision"},
+            ),
+            patch("fulcrum.controller.file_task", return_value={}) as publish,
+        ):
+            await self.controller._publish_occurrences()
+        self.assertEqual(
+            [call.args[2].activation for call in publish.call_args_list],
+            ["pending", "future"],
+        )
 
     async def test_failed_specialist_publication_remains_runnable(self) -> None:
         now = "2026-01-01T00:00:00Z"

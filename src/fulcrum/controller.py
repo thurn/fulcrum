@@ -36,7 +36,12 @@ from fulcrum.kernel import (
     invariant_violations,
     schedule_action_retry,
 )
-from fulcrum.prompts import build_prompt, load_template
+from fulcrum.prompts import (
+    action_notice,
+    build_context,
+    role_instructions,
+    weaver_instructions,
+)
 from fulcrum.readiness import progress_readiness, state_readiness
 from fulcrum.reset import reset_brain
 from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
@@ -365,14 +370,10 @@ class Controller:
                     self.store, int(action["id"]), runtime_state=str(status)
                 )
                 if result.get("reminder"):
-                    action["payload"] = json.dumps(
-                        {
-                            "reminder": "Your previous turn ended without the required finish outcome. Report only the retained outcome now."
-                        }
-                    )
+                    action["reminder_sent"] = 1
                     self.store.execute(
-                        "UPDATE actions SET payload = ?, state = 'pending', updated_at = ? WHERE id = ?",
-                        (action["payload"], timestamp, action["id"]),
+                        "UPDATE actions SET state = 'pending', updated_at = ? WHERE id = ?",
+                        (timestamp, action["id"]),
                     )
                     await self._dispatch_action(action)
         elif method in {"thread/archived", "thread/unarchived"}:
@@ -465,16 +466,11 @@ class Controller:
                             runtime_state=str(facts["last_turn_status"] or "completed"),
                         )
                         if result.get("reminder") and self.starts_enabled:
-                            reminder_payload = json.dumps(
-                                {
-                                    "reminder": "Your previous turn ended without the required finish outcome. Report only the retained outcome now."
-                                }
-                            )
                             self.store.execute(
-                                "UPDATE actions SET payload = ?, state = 'pending', updated_at = ? WHERE id = ?",
-                                (reminder_payload, utc_now(), action["id"]),
+                                "UPDATE actions SET state = 'pending', updated_at = ? WHERE id = ?",
+                                (utc_now(), action["id"]),
                             )
-                            action["payload"] = reminder_payload
+                            action["reminder_sent"] = 1
                             await self._dispatch_action(action, task=task)
             except Exception as error:
                 self.store.execute(
@@ -1387,7 +1383,7 @@ class Controller:
                 cwd=project["repo_path"],
                 model=model,
                 project_id=project["codex_project_id"],
-                base_instructions=load_template(
+                base_instructions=role_instructions(
                     (
                         "implement"
                         if role == "executor"
@@ -1613,16 +1609,17 @@ class Controller:
                     keys.add(raw.strip())
         return tuple(sorted(keys))
 
-    def _build_action_prompt(
+    def _build_action_context(
         self,
         action: dict[str, Any],
         task: dict[str, Any],
         assignment: dict[str, Any] | None,
+        *,
+        section: str = "context",
     ) -> str:
-        """Build the same complete brief for dispatch and later refresh."""
+        """Read the current action facts separately from notices and role guidance."""
 
         constraints: list[str] = []
-        evidence: list[str] = []
         if assignment is not None:
             bead = self.store.row(
                 "SELECT context_json FROM beads WHERE bead_id = ?",
@@ -1646,22 +1643,40 @@ class Controller:
                 f"dependency {row['dependency_id']} is completed"
                 for row in dependencies
             )
-            for handoff in self.store.rows(
-                """SELECT kind, source_action_id, content_json FROM handoffs
-                   WHERE assignment_id = ? ORDER BY id""",
-                (assignment["id"],),
-            ):
-                evidence.append(
-                    f"{handoff['kind']} from action {handoff['source_action_id']}: "
-                    f"{handoff['content_json']}"
+        if assignment is not None:
+            payload = (
+                json.loads(action["payload"])
+                if isinstance(action["payload"], str)
+                else dict(action["payload"])
+            )
+            payload["handoffs"] = [
+                {
+                    "kind": row["kind"],
+                    "source_action_id": row["source_action_id"],
+                    "content": json.loads(row["content_json"]),
+                }
+                for row in self.store.rows(
+                    "SELECT kind, source_action_id, content_json FROM handoffs WHERE assignment_id = ? ORDER BY id",
+                    (assignment["id"],),
                 )
-        return build_prompt(
-            action_kind=action["kind"],
+            ]
+            if action["kind"] == "correct" and assignment.get("candidate_id"):
+                operation = self.store.row(
+                    "SELECT result_json, condition FROM external_operations WHERE kind = 'tollgate_approve' AND target = ? ORDER BY id DESC LIMIT 1",
+                    (assignment["candidate_id"],),
+                )
+                if operation:
+                    payload["delivery_failure"] = operation["condition"]
+                    payload["delivery_evidence"] = json.loads(
+                        operation["result_json"] or "{}"
+                    )
+            action = {**action, "payload": payload}
+        return build_context(
             task=task,
             action=action,
             assignment=assignment,
             constraints=constraints,
-            evidence=evidence,
+            section=section,
         )
 
     def _ensure_worktree_environment(self, worktree: Path) -> None:
@@ -1774,7 +1789,7 @@ class Controller:
             if project is None:
                 raise StoreError("action project is missing")
             cwd = project["repo_path"]
-        prompt = self._build_action_prompt(action, task, assignment)
+        prompt = action_notice(action)
         operation = self.store.create_operation(
             "turn_start",
             str(action["id"]),
@@ -2480,7 +2495,14 @@ class Controller:
                        JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
                     (action["assignment_id"],),
                 )
-            return {"instructions": self._build_action_prompt(action, task, assignment)}
+            return {
+                "instructions": self._build_action_context(
+                    action,
+                    task,
+                    assignment,
+                    section=str(request.get("section", "context")),
+                )
+            }
         if command == "archon":
             task = self.store.row(
                 "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
@@ -2555,8 +2577,9 @@ class Controller:
             "thread_id": thread_id,
             "title": task["title"],
             "role_number": task["role_number"],
-            "instructions": build_prompt(
-                action_kind="weaver", task=task, action=existing or {"payload": "{}"}
+            "instructions": weaver_instructions(
+                plan_mode=not bool(request.get("writable", True)),
+                project=str(project_id),
             ),
         }
 
@@ -2569,7 +2592,7 @@ class Controller:
         if not isinstance(scope, dict) or not isinstance(scope.get("projects"), list):
             raise StoreError("specialist scope is invalid")
         requested_projects = scope["projects"]
-        if not requested_projects and kind == "inquisitor":
+        if not requested_projects:
             requested_projects = [
                 row["project_id"]
                 for row in self.store.rows(
@@ -3295,7 +3318,7 @@ class Controller:
         if existing is not None:
             return
         scope = _occurrence_scope(occurrence["scope"])
-        project_ids = scope.get("projects", []) if isinstance(scope, dict) else []
+        project_ids = [] if scope.get("global") else scope.get("projects", [])
         if not self._specialist_capacity_available(project_ids):
             return
         answers = [
@@ -3316,6 +3339,8 @@ class Controller:
                 json.dumps(
                     {
                         "continuation": "final report after the single interview round",
+                        "scope": scope,
+                        "prompt": occurrence["prompt"],
                         "retained_evidence": json.loads(
                             occurrence["evidence_json"] or "{}"
                         ),
@@ -3391,7 +3416,12 @@ class Controller:
                 }
             )
             project_ids = scope.get("projects", [])
-            if not self._specialist_capacity_available(project_ids):
+            reservation_projects = (
+                []
+                if occurrence["kind"] == "sage" and scope.get("global")
+                else project_ids
+            )
+            if not self._specialist_capacity_available(reservation_projects):
                 continue
             project_id = project_ids[0] if len(project_ids) == 1 else None
             context = (
@@ -3405,7 +3435,19 @@ class Controller:
             )
             if context is None:
                 continue
-            evidence = self._specialist_evidence(scope)
+            if not scope.get("projects"):
+                scope["projects"] = [
+                    row["project_id"]
+                    for row in self.store.rows(
+                        "SELECT project_id FROM projects WHERE enabled = 1 ORDER BY project_id"
+                    )
+                ]
+                self.store.execute(
+                    "UPDATE occurrences SET scope = ? WHERE id = ?",
+                    (json.dumps(scope), occurrence["id"]),
+                )
+                occurrence["scope"] = json.dumps(scope)
+            evidence = self._specialist_evidence(scope, occurrence=occurrence)
             self.store.execute(
                 "UPDATE occurrences SET evidence_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(evidence, sort_keys=True), utc_now(), occurrence["id"]),
@@ -3457,7 +3499,7 @@ class Controller:
                 raise StoreError("specialist action was not retained")
             self.store.execute(
                 "INSERT INTO reservations(action_id, global_slots, project_ids, state, created_at) VALUES (?, 1, ?, 'reserved', ?)",
-                (action["id"], json.dumps(project_ids), timestamp),
+                (action["id"], json.dumps(reservation_projects), timestamp),
             )
             self.store.execute(
                 "UPDATE occurrences SET state = 'active', updated_at = ? WHERE id = ?",
@@ -3465,7 +3507,9 @@ class Controller:
             )
             await self._dispatch_action(action, task=task)
 
-    def _specialist_evidence(self, scope: dict[str, Any]) -> dict[str, Any]:
+    def _specialist_evidence(
+        self, scope: dict[str, Any], *, occurrence: dict[str, Any]
+    ) -> dict[str, Any]:
         projects: list[dict[str, Any]] = []
         requested = scope.get("projects", [])
         for project in self.store.rows(
@@ -3487,23 +3531,93 @@ class Controller:
             except (OSError, subprocess.TimeoutExpired):
                 revision = None
             projects.append({**project, "source_revision": revision})
+        cutoff = utc_now()
+        prior = self.store.row(
+            "SELECT evidence_json, updated_at FROM occurrences WHERE kind = ? AND scope IS ? AND state = 'complete' AND id != ? ORDER BY updated_at DESC LIMIT 1",
+            (occurrence["kind"], occurrence["scope"], occurrence["id"]),
+        )
+        start = None
+        if prior:
+            start = (
+                json.loads(prior["evidence_json"] or "{}").get("captured_at")
+                or prior["updated_at"]
+            )
+        project_ids = [item["project_id"] for item in projects]
+        placeholders = ",".join("?" for _ in project_ids) or "NULL"
+        assignments = self.store.rows(
+            f"""SELECT a.id, a.run_id, a.bead_id, a.stage, a.condition,
+                      a.candidate_id, a.source_oid, a.tested_oid, r.project_id
+               FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE r.project_id IN ({placeholders}) AND a.updated_at <= ?
+                 AND (? IS NULL OR a.updated_at > ?)
+               ORDER BY a.updated_at DESC, a.id DESC LIMIT 101""",
+            (*project_ids, cutoff, start, start),
+        )
+        # Events without a project binding remain explicitly labelled fleet context.
+        # Exclude events whose direct project/task/run/assignment binding is elsewhere.
+        events = self.store.rows(
+            f"""SELECT e.id, e.kind, e.entity_type, e.entity_id, e.message,
+                       e.detail_json, e.created_at,
+                       COALESCE(t.project_id, r.project_id, ar.project_id,
+                         CASE WHEN e.entity_type = 'project' THEN e.entity_id END) AS project_id
+                FROM events e
+                LEFT JOIN tasks t ON e.entity_type = 'task' AND e.entity_id = CAST(t.id AS TEXT)
+                LEFT JOIN runs r ON e.entity_type = 'run' AND e.entity_id = CAST(r.id AS TEXT)
+                LEFT JOIN assignments a ON e.entity_type = 'assignment' AND e.entity_id = CAST(a.id AS TEXT)
+                LEFT JOIN runs ar ON ar.id = a.run_id
+                WHERE e.created_at <= ? AND (? IS NULL OR e.created_at > ?)
+                  AND (COALESCE(t.project_id, r.project_id, ar.project_id,
+                         CASE WHEN e.entity_type = 'project' THEN e.entity_id END) IS NULL
+                       OR COALESCE(t.project_id, r.project_id, ar.project_id,
+                         CASE WHEN e.entity_type = 'project' THEN e.entity_id END) IN ({placeholders}))
+                ORDER BY e.id DESC LIMIT 201""",
+            (cutoff, start, start, *project_ids),
+        )
+        reports = self.store.rows(
+            """SELECT id, kind, scope, publication_revision, report_json, created_at
+               FROM occurrences WHERE state = 'complete' AND report_json IS NOT NULL
+                 AND kind = ? AND scope IS ? ORDER BY id DESC LIMIT 21""",
+            (occurrence["kind"], occurrence["scope"]),
+        )
         return {
-            "captured_at": utc_now(),
-            "projects": projects,
-            "assignments": self.store.rows(
-                """SELECT a.id, a.run_id, a.bead_id, a.stage, a.condition,
-                          a.candidate_id, a.source_oid, a.tested_oid, r.project_id
-                   FROM assignments a JOIN runs r ON r.id = a.run_id ORDER BY a.id DESC LIMIT 100"""
-            ),
-            "recent_events": self.store.rows(
-                """SELECT id, kind, entity_type, entity_id, message, detail_json, created_at
-                   FROM events ORDER BY id DESC LIMIT 200"""
-            ),
-            "prior_reports": self.store.rows(
-                """SELECT id, kind, scope, publication_revision, report_json, created_at
-                   FROM occurrences WHERE state = 'complete' AND report_json IS NOT NULL
-                   ORDER BY id DESC LIMIT 20"""
-            ),
+            "captured_at": cutoff,
+            "window": {
+                "after": start,
+                "through": cutoff,
+                "basis": (
+                    "prior matching completed report cutoff"
+                    if start
+                    else "available retained history; no prior matching report"
+                ),
+            },
+            "projects": [
+                {
+                    **project,
+                    "revision_basis": "captured repository HEAD; certification not established",
+                }
+                for project in projects
+            ],
+            "coverage": {
+                "assignments": {
+                    "limit": 100,
+                    "truncated": len(assignments) > 100,
+                    "selection": "updated in interval, selected projects",
+                },
+                "events": {
+                    "limit": 200,
+                    "truncated": len(events) > 200,
+                    "selection": "interval events for selected projects plus unbound fleet context",
+                },
+                "prior_reports": {
+                    "limit": 20,
+                    "truncated": len(reports) > 20,
+                    "selection": "same role and retained scope",
+                },
+                "missing": "Native Codex histories, complete Tollgate logs, token/latency telemetry and existing Beads are not automatically included; inspect relevant durable sources or report gaps.",
+            },
+            "assignments": assignments[:100],
+            "recent_events": events[:200],
+            "prior_reports": reports[:20],
         }
 
     async def _publish_occurrences(self) -> None:
@@ -3546,6 +3660,7 @@ class Controller:
                         continue
                     task_payload = {
                         "project": finding["project"],
+                        "activation": finding.get("activation", "pending"),
                         "title": finding.get("title")
                         or finding["problem"].splitlines()[0][:100],
                         "description": f"{finding['problem']}\n\nEvidence: {finding['evidence']}\n\nExpected benefit: {finding['expected_benefit']}\n\nAcceptance criteria: {finding['acceptance_criteria']}",

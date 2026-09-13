@@ -172,6 +172,14 @@ def validate_outcome(
         for finding in payload["findings"]:
             if not isinstance(finding, dict):
                 raise OutcomeError("each finding must be an object")
+            activation = finding.get("activation", "pending")
+            if activation not in {"pending", "future"}:
+                raise OutcomeError("finding activation must be pending or future")
+            if activation == "future" and not (
+                isinstance(finding.get("deferral_reason"), str)
+                and finding["deferral_reason"].strip()
+            ):
+                raise OutcomeError("future findings require explicit deferral_reason")
             for field in (
                 "identity",
                 "problem",
@@ -236,8 +244,8 @@ def validate_outcome(
     raise OutcomeError(f"unsupported outcome: {outcome_kind}")
 
 
-def finish_contract(action_kind: str) -> str:
-    """Return exact JSON shapes for file-backed finishes."""
+def finish_examples(action_kind: str) -> dict[str, Any]:
+    """Return the actual file contents, keyed by outcome, for executable examples."""
 
     contracts: dict[str, Any] = {
         "review": {
@@ -262,8 +270,8 @@ def finish_contract(action_kind: str) -> str:
                 },
                 {
                     "decision": "hold",
-                    "scope": "global|project|run|assignment",
-                    "target": "required except global",
+                    "scope": "project",
+                    "target": "project-id",
                     "reason": "why",
                     "release_condition": "exact condition",
                 },
@@ -272,19 +280,19 @@ def finish_contract(action_kind: str) -> str:
                 {
                     "decision": "resolve_escalation",
                     "assignment_id": 1,
-                    "resolution": "retry|rescope|cancel",
+                    "resolution": "rescope",
                     "reason": "why",
                     "scope": "required for rescope",
                 },
                 {"decision": "set_priority", "run_id": 1, "priority": 10},
                 {
                     "decision": "suspend_policy",
-                    "kind": "sage|inquisitor",
+                    "kind": "inquisitor",
                     "scope": None,
                 },
                 {
                     "decision": "request_specialist",
-                    "kind": "sage|inquisitor",
+                    "kind": "inquisitor",
                     "projects": ["project-id"],
                     "prompt": "question",
                 },
@@ -315,10 +323,10 @@ def finish_contract(action_kind: str) -> str:
                 "coverage": ["evidence examined"],
                 "findings": [
                     {
-                        "identity": "stable semantic identifier",
+                        "identity": "review-handoff-loses-evidence",
                         "problem": "demonstrated problem",
                         "evidence": "concrete evidence",
-                        "expected_benefit": "measurable benefit",
+                        "expected_benefit": "specific expected improvement",
                         "project": "project-id",
                         "acceptance_criteria": "testable completion condition",
                     }
@@ -337,26 +345,134 @@ def finish_contract(action_kind: str) -> str:
             "interview_answer": {"answer": "concrete answer", "evidence": ["reference"]}
         },
     }
-    contract = contracts.get(action_kind)
-    return (
-        json.dumps(contract, indent=2, sort_keys=True)
-        if contract
-        else "No JSON file is required for this action."
+    contract = contracts.get(action_kind, {})
+    if action_kind == "archon":
+        return {"decisions": contract, "deferred": {"capacity": True}}
+    return contract
+
+
+def finish_contract(action_kind: str, *, interviews_allowed: bool = True) -> str:
+    examples = finish_examples(action_kind)
+    if not interviews_allowed:
+        examples.pop("evidence_needed", None)
+    lines = (
+        [
+            "Choose one outcome. Each example below is the top-level content of its "
+            "--input file; do not wrap it in the outcome name. Replace example values "
+            "with your actual evidence and IDs."
+        ]
+        if examples
+        else []
     )
+    for outcome, contents in examples.items():
+        lines.append(
+            f"{outcome} input file:\n```json\n"
+            + json.dumps(contents, indent=2, sort_keys=True)
+            + "\n```"
+        )
+    if action_kind == "archon":
+        lines.append(
+            "The decisions list above is a catalog, not a batch to copy in full: "
+            "include only intended decisions. Omit capacity or recurring-policy fields "
+            "unless changing them. Approvals require exact stored scope. Holds accept "
+            "global, project, run, or assignment scope; target is required except for "
+            "global. Escalation resolution is retry, rescope (with scope), or cancel. "
+            "Specialist kind is sage or inquisitor. Deferral needs one concrete trigger: "
+            '{"capacity": true}, {"dependency": "bead-id"}, {"hold": 1}, '
+            '{"operator_change": true}, or {"next_check_at": "2026-10-01T12:00:00Z"}.'
+        )
+    if action_kind == "weaver":
+        lines.append(
+            'For substantial approved plans, `fulcrum intake --input "/absolute/tasks.json"` accepts this graph (replace all example values). Keep intake_key stable across retries. Each task requires title and description, inherits project, and may include activation, context, depends_on, plan_id, plan_commit, executor_model, executor_reasoning_effort, overseer_model, and overseer_reasoning_effort. depends_on may name an earlier graph task\'s intake_key or an existing Beads ID. Include the approved plan reference on every planned task.\n```json\n{"project":"project-id","intake_key":"plan-name","tasks":[{"intake_key":"plan-name:first","title":"Bounded outcome","description":"Change, scope, acceptance and validation","plan_id":"plan-name","plan_commit":"actual-approved-commit","context":["/absolute/brain/plans/plan-name.md"],"depends_on":[]}]}\n```'
+        )
+    if action_kind == "specialist":
+        lines.append(
+            "An empty findings list is valid. Optional report fields may hold observations, "
+            "limitations, and unresolved questions. A finding may include existing_bead_id "
+            "for an inspected matching issue. Omit activation for pending work; use "
+            "activation: future only with a nonempty deferral_reason explaining explicit "
+            "deferral authority. identity is a descriptive problem key, not a hash."
+        )
+    if action_kind in {"implement", "correct", "weaver"}:
+        lines.append(
+            "--evidence names an absolute path to a readable text file containing the authored evidence; no JSON wrapper is needed."
+        )
+    return "\n\n".join(lines)
 
 
-def finish_syntax(action_kind: str) -> str:
-    """Render the accepted finish commands for a prompt."""
-
-    rows = {
-        "implement": "fulcrum finish ready_for_review --evidence <path> | checkpointed --evidence <path> | blocked --reason <text>",
-        "correct": "fulcrum finish ready_for_review --evidence <path> | permitted_repair_complete --repair-category <category> --repair-rationale <text> --evidence <path>",
-        "review": "fulcrum finish approved --assessment <text> [--allow-repair <category>] | changes_requested --input <findings.json> | incomplete --input <missing.json> | exception --reason <text>",
-        "archon": "fulcrum finish decisions --input <decisions.json> | deferred --reason <text> --input <reactivation.json>",
-        "weaver": "fulcrum finish intake_complete | future_plan --evidence <path> | blocked --reason <text>",
-        "specialist": "fulcrum finish report --input <report.json> | evidence_needed --input <requests.json> | blocked --reason <text>",
-        "interview": "fulcrum finish interview_answer --input <answer.json> | blocked --reason <text>",
+def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
+    """Complete commands, one per outcome, with explicit selection guidance."""
+    commands = {
+        "ready_for_review": (
+            '--evidence "/absolute/evidence.md"',
+            "Implementation or correction is ready for independent review.",
+        ),
+        "checkpointed": (
+            '--evidence "/absolute/evidence.md"',
+            "Work is intentionally paused and preserved, with unfinished validation identified.",
+        ),
+        "blocked": (
+            '--reason "Observed blocker and decision needed"',
+            "Cannot continue within the authorized scope or available evidence.",
+        ),
+        "permitted_repair_complete": (
+            '--repair-category "allowed_category" --repair-rationale "Why the concrete repair qualifies" --evidence "/absolute/evidence.md"',
+            "Repair clearly fits a retained explicit permission and has been validated.",
+        ),
+        "approved": (
+            '--assessment "Why the candidate satisfies scope"',
+            "No blocking findings remain. Optionally append --allow-repair ordinary_merge_conflict or --allow-repair bounded_in_scope_ci_fix.",
+        ),
+        "changes_requested": (
+            '--input "/absolute/findings.json"',
+            "Source has concrete blocking defects.",
+        ),
+        "incomplete": (
+            '--input "/absolute/missing.json"',
+            "Specific evidence is missing; no substantive defect is established.",
+        ),
+        "exception": (
+            '--reason "Review boundary and decision needed"',
+            "A review exception needs adjudication.",
+        ),
+        "decisions": (
+            '--input "/absolute/decisions.json"',
+            "Submit supported scheduling decisions and acknowledge the frozen update IDs.",
+        ),
+        "deferred": (
+            '--reason "Why this batch must wait" --input "/absolute/reactivation.json"',
+            "Defer the batch until a concrete trigger.",
+        ),
+        "intake_complete": (
+            "",
+            "All requested writable intake is retained; do not wait for remote synchronization.",
+        ),
+        "future_plan": (
+            '--evidence "/absolute/plan-reference.md"',
+            "An approved plan has been saved with explicit future activation.",
+        ),
+        "report": (
+            '--input "/absolute/report.json"',
+            "Analysis is complete, including an explicit findings list.",
+        ),
+        "evidence_needed": (
+            '--input "/absolute/requests.json"',
+            "Sage requests its single interview round, then ends this action.",
+        ),
+        "interview_answer": (
+            '--input "/absolute/answer.json"',
+            "Answer the current debrief question once.",
+        ),
     }
-    if action_kind not in rows:
+    if action_kind not in ALLOWED:
         raise OutcomeError(f"unknown action kind: {action_kind}")
-    return rows[action_kind]
+    rows = []
+    for outcome, (arguments, purpose) in commands.items():
+        if outcome not in ALLOWED[action_kind] or (
+            outcome == "evidence_needed" and not interviews_allowed
+        ):
+            continue
+        rows.append(
+            f"{purpose}\n`fulcrum finish {outcome} {arguments}`".replace(" `", "`")
+        )
+    return "\n\n".join(rows)

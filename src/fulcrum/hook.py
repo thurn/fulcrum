@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from fulcrum.config import resolve_paths
-from fulcrum.prompts import build_prompt
+from fulcrum.prompts import compaction_reminder
 from fulcrum.store import Store
 
 
@@ -25,24 +25,28 @@ def handle_event(event: Mapping[str, Any]) -> dict[str, Any]:
     paths = resolve_paths()
     if not paths.database.is_file():
         return {"continue": True}
+    managed = None
     try:
         with Store(paths.database, readonly=True) as store:
-            action = store.current_action(thread_id)
+            managed = store.row(
+                "SELECT id FROM tasks WHERE native_thread_id = ? AND state NOT IN ('retired', 'archived')",
+                (thread_id,),
+            )
+            if managed is None:
+                return {"continue": True}
+            action = store.row(
+                "SELECT * FROM actions WHERE task_id = ? AND state IN ('pending','starting','active','terminal','uncertain')",
+                (managed["id"],),
+            )
+            if action is None:
+                return {"continue": True}
             task = store.row("SELECT * FROM tasks WHERE id = ?", (action["task_id"],))
-            assignment = (
-                store.row(
-                    "SELECT * FROM assignments WHERE id = ?", (action["assignment_id"],)
-                )
-                if action["assignment_id"]
-                else None
-            )
-            prompt = build_prompt(
-                action_kind=action["kind"],
-                task=task or {},
-                action=action,
-                assignment=assignment,
-            )
+            if task is None:
+                return {"continue": True}
+            prompt = compaction_reminder(task, action)
     except Exception as error:
+        if managed is None:
+            return {"continue": True}
         prompt = f"Fulcrum context is temporarily unavailable: {error}. Do not invent an outcome or operational identity."
     return {
         "continue": True,
