@@ -64,6 +64,10 @@ from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 INHERITED_LOCK_FD_ENV = "FULCRUM_INHERITED_LOCK_FD"
 FALLBACK_RECONCILIATION_SECONDS = 30
+COMPLETION_ARCHIVE_DELAY = timedelta(minutes=10)
+COMPLETION_ARCHIVE_ROLES: frozenset[str] = frozenset(
+    {"weaver", "executor", "overseer", "sage", "inquisitor"}
+)
 RUNTIME_WORKFLOW_EVENTS: frozenset[str] = frozenset(
     {
         "fulcrum/runtime/disconnected",
@@ -353,6 +357,10 @@ class Controller:
             return False
         timestamp = utc_now()
         if method == "turn/started":
+            self.store.execute(
+                "UPDATE tasks SET archive_eligible_at = NULL, archive_idle_turn_id = NULL WHERE id = ?",
+                (task["id"],),
+            )
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None
             action = self.store.row(
@@ -363,7 +371,7 @@ class Controller:
             if action is None:
                 return False
             self.store.execute(
-                "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, updated_at = ? WHERE id = ?",
+                "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
                 (timestamp, task["id"]),
             )
             if isinstance(turn_id, str):
@@ -379,8 +387,13 @@ class Controller:
             if task["runtime_status"] == status:
                 return False
             self.store.execute(
-                "UPDATE tasks SET runtime_status = ?, updated_at = ? WHERE id = ?",
-                (status, timestamp, task["id"]),
+                """UPDATE tasks SET runtime_status = ?,
+                   archive_eligible_at = CASE WHEN ? = 'idle'
+                       THEN archive_eligible_at ELSE NULL END,
+                   archive_idle_turn_id = CASE WHEN ? = 'idle'
+                       THEN archive_idle_turn_id ELSE NULL END,
+                   updated_at = ? WHERE id = ?""",
+                (status, status, status, timestamp, task["id"]),
             )
         elif method == "turn/completed":
             turn = params.get("turn")
@@ -456,7 +469,7 @@ class Controller:
                 return False
             state = "archived" if archived else "idle"
             self.store.execute(
-                "UPDATE tasks SET archived = ?, state = ?, updated_at = ? WHERE id = ?",
+                "UPDATE tasks SET archived = ?, state = ?, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
                 (archived, state, timestamp, task["id"]),
             )
         else:
@@ -469,13 +482,26 @@ class Controller:
         if thread.get("name") != task["title"]:
             await self.runtime.set_name(task["native_thread_id"], task["title"])
         facts = thread_facts(thread)
+        safely_idle = bool(
+            facts["runtime_status"] == "idle"
+            and facts["last_turn_terminal"]
+            and facts["helpers_terminal"]
+        )
         self.store.execute(
-            "UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?, helpers_terminal = ?, archived = ?, updated_at = ? WHERE id = ?",
+            """UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?,
+               helpers_terminal = ?, archived = ?,
+               archive_eligible_at = CASE WHEN ? = 1
+                   THEN archive_eligible_at ELSE NULL END,
+               archive_idle_turn_id = CASE WHEN ? = 1
+                   THEN archive_idle_turn_id ELSE NULL END,
+               updated_at = ? WHERE id = ?""",
             (
                 facts["runtime_status"],
                 int(facts["last_turn_terminal"]),
                 int(facts["helpers_terminal"]),
                 int(bool(task["archived"]) or facts["archived"]),
+                int(safely_idle),
+                int(safely_idle),
                 utc_now(),
                 task["id"],
             ),
@@ -1194,7 +1220,7 @@ class Controller:
             )
             if task:
                 self.store.execute(
-                    "UPDATE tasks SET state = 'archived', archived = 1, updated_at = ? WHERE id = ?",
+                    "UPDATE tasks SET state = 'archived', archived = 1, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
                     (utc_now(), task["id"]),
                 )
             if obligation:
@@ -1676,7 +1702,9 @@ class Controller:
         with self.store.transaction() as connection:
             connection.execute(
                 """UPDATE tasks SET state = CASE WHEN archived = 1 THEN 'archived'
-                       ELSE 'retired' END, updated_at = ? WHERE id = ?""",
+                       ELSE 'retired' END, archive_eligible_at = NULL,
+                       archive_idle_turn_id = NULL,
+                       updated_at = ? WHERE id = ?""",
                 (timestamp, task["id"]),
             )
             if not task["archived"]:
@@ -2288,7 +2316,7 @@ class Controller:
                 (turn_id, utc_now(), action["id"]),
             )
             self.store.execute(
-                "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, updated_at = ? WHERE id = ?",
+                "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
                 (utc_now(), task["id"]),
             )
             self.store.execute(
@@ -3048,11 +3076,70 @@ class Controller:
                 "SELECT * FROM tasks WHERE native_thread_id = ?",
                 (obligation["target"],),
             )
-            if (
-                task is None
-                or not task["last_turn_terminal"]
-                or not task["helpers_terminal"]
-            ):
+            if task is None:
+                continue
+            if task["role"] in COMPLETION_ARCHIVE_ROLES:
+                thread = await self.runtime.read_thread(obligation["target"])
+                facts = thread_facts(thread)
+                if facts["archived"]:
+                    self.store.execute(
+                        "UPDATE obligations SET state = 'complete', updated_at = ? WHERE id = ?",
+                        (now, obligation["id"]),
+                    )
+                    self.store.execute(
+                        """UPDATE tasks SET state = 'archived', archived = 1,
+                           archive_eligible_at = NULL, archive_idle_turn_id = NULL,
+                           updated_at = ? WHERE id = ?""",
+                        (now, task["id"]),
+                    )
+                    continue
+                safely_idle = bool(
+                    facts["runtime_status"] == "idle"
+                    and facts["last_turn_terminal"]
+                    and facts["helpers_terminal"]
+                )
+                self.store.execute(
+                    """UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?,
+                       helpers_terminal = ?, archive_eligible_at = CASE WHEN ? = 1
+                           THEN archive_eligible_at ELSE NULL END,
+                       archive_idle_turn_id = CASE WHEN ? = 1
+                           THEN archive_idle_turn_id ELSE NULL END,
+                       updated_at = ? WHERE id = ?""",
+                    (
+                        facts["runtime_status"],
+                        int(facts["last_turn_terminal"]),
+                        int(facts["helpers_terminal"]),
+                        int(safely_idle),
+                        int(safely_idle),
+                        now,
+                        task["id"],
+                    ),
+                )
+                if not safely_idle:
+                    continue
+                eligible_at = task["archive_eligible_at"]
+                if (
+                    eligible_at is None
+                    or task["archive_idle_turn_id"] != facts["last_turn_id"]
+                ):
+                    eligible_at = (
+                        (
+                            datetime.fromisoformat(now.replace("Z", "+00:00"))
+                            + COMPLETION_ARCHIVE_DELAY
+                        )
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    self.store.execute(
+                        "UPDATE tasks SET archive_eligible_at = ?, archive_idle_turn_id = ? WHERE id = ?",
+                        (eligible_at, facts["last_turn_id"], task["id"]),
+                    )
+                    continue
+                if datetime.fromisoformat(
+                    eligible_at.replace("Z", "+00:00")
+                ) > datetime.fromisoformat(now.replace("Z", "+00:00")):
+                    continue
+            elif not task["last_turn_terminal"] or not task["helpers_terminal"]:
                 continue
             operation = self.store.create_operation(
                 "thread_archive", obligation["target"], {}
@@ -3066,7 +3153,7 @@ class Controller:
                     (utc_now(), obligation["id"]),
                 )
                 self.store.execute(
-                    "UPDATE tasks SET state = 'archived', archived = 1, updated_at = ? WHERE id = ?",
+                    "UPDATE tasks SET state = 'archived', archived = 1, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
                     (utc_now(), task["id"]),
                 )
                 self.store.finish_operation_attempt(
@@ -3417,7 +3504,7 @@ class Controller:
                     (facts["last_turn_id"], utc_now(), existing["id"]),
                 )
         self.store.execute(
-            "UPDATE tasks SET state = 'active', updated_at = ? WHERE id = ?",
+            "UPDATE tasks SET state = 'active', archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
             (utc_now(), task["id"]),
         )
         return {

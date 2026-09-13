@@ -29,7 +29,8 @@ Fulcrum uses a few terms throughout its status output and conversations:
 - The **controller** is Fulcrum's local Python process and sole owner of durable
   workflow changes. It creates and messages managed Codex tasks, records state,
   dispatches work, retries recoverable operations, publishes results, delivers
-  code, and archives finished conversations.
+  code, and archives finished conversations after they have remained idle for 10
+  minutes.
 - **Tollgate** is the source-delivery and continuous-integration system. A
   **candidate** is its retained, immutable source submission. Tollgate certifies
   the candidate's checks and **promotes** it into the repository's configured
@@ -255,7 +256,7 @@ Archon-approved implementation; enforce capacity and holds; create Executor and
 Overseer tasks and isolated worktrees; route implementation, review, and bounded
 repairs; retain and retry external operations; publish specialist reports and
 findings; drive Tollgate delivery; close beads; and archive completed managed
-tasks.
+conversations after 10 continuous minutes of confirmed native-thread idleness.
 
 Fulcrum does not automatically invent approval. Pending work waits for Archon,
 and a reviewed candidate waits for successful Tollgate certification and

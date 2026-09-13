@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   runtime_status TEXT, last_turn_terminal INTEGER NOT NULL DEFAULT 1 CHECK (last_turn_terminal IN (0, 1)),
   helpers_terminal INTEGER NOT NULL DEFAULT 1 CHECK (helpers_terminal IN (0, 1)),
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+  archive_eligible_at TEXT,
+  archive_idle_turn_id TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   UNIQUE(role, role_number),
   CHECK ((role = 'archon' AND role_number IS NULL) OR (role != 'archon' AND role_number IS NOT NULL))
@@ -526,6 +528,10 @@ class Store:
             )
 
         additions = {
+            "tasks": {
+                "archive_eligible_at": "TEXT",
+                "archive_idle_turn_id": "TEXT",
+            },
             "runs": {
                 "executor_task_id": "INTEGER REFERENCES tasks(id)",
                 "overseer_task_id": "INTEGER REFERENCES tasks(id)",

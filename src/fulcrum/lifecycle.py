@@ -1050,7 +1050,9 @@ def _resolve_turn_start(
         )
         connection.execute(
             """UPDATE tasks SET state = 'active', runtime_status = 'active',
-               last_turn_terminal = 0, updated_at = ? WHERE id = ?""",
+               last_turn_terminal = 0, archive_eligible_at = NULL,
+               archive_idle_turn_id = NULL,
+               updated_at = ? WHERE id = ?""",
             (timestamp, action["task_id"]),
         )
         return

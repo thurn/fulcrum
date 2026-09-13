@@ -179,6 +179,42 @@ class FakeArchiveRuntime:
             raise RuntimeError("rollout is missing")
 
 
+class ControlledArchiveRuntime:
+    def __init__(self, thread_ids: list[str]) -> None:
+        self.ready = True
+        self.statuses = {thread_id: "idle" for thread_id in thread_ids}
+        self.turn_ids = {thread_id: f"{thread_id}-turn" for thread_id in thread_ids}
+        self.archived: list[str] = []
+        self.archive_attempts: list[str] = []
+        self.failures_remaining: dict[str, int] = {}
+
+    async def read_thread(
+        self, thread_id: str, *, include_turns: bool = True
+    ) -> dict[str, Any]:
+        thread: dict[str, Any] = {
+            "id": thread_id,
+            "status": {"type": self.statuses[thread_id]},
+            "archived": thread_id in self.archived,
+        }
+        if include_turns:
+            thread["turns"] = [
+                {
+                    "id": self.turn_ids[thread_id],
+                    "status": "completed",
+                    "items": [],
+                }
+            ]
+        return thread
+
+    async def archive(self, thread_id: str) -> None:
+        self.archive_attempts.append(thread_id)
+        remaining = self.failures_remaining.get(thread_id, 0)
+        if remaining:
+            self.failures_remaining[thread_id] = remaining - 1
+            raise RuntimeError("archive failed")
+        self.archived.append(thread_id)
+
+
 class FreshConversationRuntime:
     def __init__(self, previous_marker: str) -> None:
         self.ready = True
@@ -2003,14 +2039,14 @@ print(json.dumps({
         current_assignment = self.controller.store.row(
             "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
         )
-        self.assertEqual(runtime.archived, ["executor", "overseer"])
+        self.assertEqual(runtime.archived, [])
         self.assertEqual(
             [(task["state"], task["archived"]) for task in archived_tasks],
-            [("archived", 1), ("archived", 1)],
+            [("retired", 0), ("retired", 0)],
         )
         self.assertEqual(
             [(item["target"], item["state"]) for item in completed_obligations],
-            [("executor", "complete"), ("overseer", "complete")],
+            [("executor", "pending"), ("overseer", "pending")],
         )
         self.assertEqual(current_run["executor_task_id"], retained["executor_task_id"])
         self.assertEqual(current_run["overseer_task_id"], retained["overseer_task_id"])
@@ -2019,6 +2055,189 @@ print(json.dumps({
         )
         self.assertEqual(
             current_assignment["overseer_task_id"], retained["overseer_task_id"]
+        )
+
+    async def test_all_completion_roles_archive_only_after_ten_idle_minutes(
+        self,
+    ) -> None:
+        tasks = [self.executor, self.overseer]
+        for role in ("weaver", "sage", "inquisitor"):
+            tasks.append(
+                self.controller.store.register_task(
+                    native_thread_id=role,
+                    role=role,
+                    description=f"{role} completion",
+                    model="sol",
+                    reasoning_effort="high",
+                    project_id="p",
+                )
+            )
+        created_at = "2026-01-01T00:00:00Z"
+        for task in tasks:
+            self.controller.store.execute(
+                """INSERT INTO obligations(
+                       kind, identity, target, state, created_at, updated_at
+                   ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                (
+                    f"completion:{task['id']}",
+                    task["native_thread_id"],
+                    created_at,
+                    created_at,
+                ),
+            )
+        runtime = ControlledArchiveRuntime(
+            [str(task["native_thread_id"]) for task in tasks]
+        )
+        self.controller.runtime = runtime  # type: ignore[assignment]
+
+        with patch("fulcrum.controller.utc_now", return_value=created_at):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archived, [])
+        self.assertEqual(
+            {
+                row["archive_eligible_at"]
+                for row in self.controller.store.rows(
+                    "SELECT archive_eligible_at FROM tasks WHERE id IN (?, ?, ?, ?, ?)",
+                    tuple(task["id"] for task in tasks),
+                )
+            },
+            {"2026-01-01T00:10:00Z"},
+        )
+
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:09:59Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archived, [])
+
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:10:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertCountEqual(
+            runtime.archived,
+            [str(task["native_thread_id"]) for task in tasks],
+        )
+
+    async def test_archive_idle_interval_restarts_after_activity(self) -> None:
+        created_at = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """INSERT INTO obligations(
+                   kind, identity, target, state, created_at, updated_at
+               ) VALUES ('archive', 'activity', 'executor', 'pending', ?, ?)""",
+            (created_at, created_at),
+        )
+        runtime = ControlledArchiveRuntime(["executor"])
+        self.controller.runtime = runtime  # type: ignore[assignment]
+
+        with patch("fulcrum.controller.utc_now", return_value=created_at):
+            await self.controller._archive_ready_tasks()
+        runtime.statuses["executor"] = "active"
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:05:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT archive_eligible_at FROM tasks WHERE id = ?",
+                (self.executor["id"],),
+            )["archive_eligible_at"]
+        )
+
+        runtime.statuses["executor"] = "idle"
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:07:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT archive_eligible_at FROM tasks WHERE id = ?",
+                (self.executor["id"],),
+            )["archive_eligible_at"],
+            "2026-01-01T00:17:00Z",
+        )
+
+        runtime.turn_ids["executor"] = "executor-later-turn"
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:12:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT archive_eligible_at FROM tasks WHERE id = ?",
+                (self.executor["id"],),
+            )["archive_eligible_at"],
+            "2026-01-01T00:22:00Z",
+        )
+
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:21:59Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archived, [])
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:22:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archived, ["executor"])
+
+    async def test_archive_deadline_survives_restart_and_reconciliation(self) -> None:
+        weaver = self.controller.store.register_task(
+            native_thread_id="weaver-restart",
+            role="weaver",
+            description="Restarted intake",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        created_at = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """INSERT INTO obligations(
+                   kind, identity, target, state, created_at, updated_at
+               ) VALUES ('archive', 'restart', 'weaver-restart', 'pending', ?, ?)""",
+            (created_at, created_at),
+        )
+        runtime = ControlledArchiveRuntime(["weaver-restart"])
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        with patch("fulcrum.controller.utc_now", return_value=created_at):
+            await self.controller._archive_ready_tasks()
+
+        self._restart_controller()
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:10:00Z"):
+            await self.controller.reconcile()
+            await self.controller._archive_ready_tasks()
+
+        self.assertEqual(runtime.archived, ["weaver-restart"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state, archived, archive_eligible_at FROM tasks WHERE id = ?",
+                (weaver["id"],),
+            ),
+            {"state": "archived", "archived": 1, "archive_eligible_at": None},
+        )
+
+    async def test_eligible_archive_failure_retains_retry_behavior(self) -> None:
+        created_at = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """INSERT INTO obligations(
+                   kind, identity, target, state, created_at, updated_at
+               ) VALUES ('archive', 'retry', 'executor', 'pending', ?, ?)""",
+            (created_at, created_at),
+        )
+        runtime = ControlledArchiveRuntime(["executor"])
+        runtime.failures_remaining["executor"] = 1
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        with patch("fulcrum.controller.utc_now", return_value=created_at):
+            await self.controller._archive_ready_tasks()
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:10:00Z"):
+            await self.controller._archive_ready_tasks()
+
+        failed = self.controller.store.row(
+            "SELECT * FROM obligations WHERE identity = 'retry'"
+        )
+        self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["retry_count"], 1)
+        self.assertIsNotNone(failed["next_attempt_at"])
+        self.assertEqual(runtime.archive_attempts, ["executor"])
+
+        with patch(
+            "fulcrum.controller.utc_now", return_value=failed["next_attempt_at"]
+        ):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(runtime.archive_attempts, ["executor", "executor"])
+        self.assertEqual(runtime.archived, ["executor"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM obligations WHERE identity = 'retry'"
+            )["state"],
+            "complete",
         )
 
     async def test_overseer_is_provisioned_only_when_review_starts(self) -> None:
