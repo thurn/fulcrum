@@ -12,12 +12,39 @@ from fulcrum.beads import Beads, BeadsUncertainError, IntakeTask
 from fulcrum.store import Store, StoreError, utc_now
 
 
-def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
+def file_task(
+    store: Store,
+    beads: Beads,
+    task: IntakeTask,
+    *,
+    weaver_task_id: int | None = None,
+) -> dict[str, Any]:
     """Record external intent before native publication and retain retries."""
 
     task.validate()
+    if weaver_task_id is not None:
+        weaver = store.row(
+            "SELECT role, lineage_number FROM tasks WHERE id = ?", (weaver_task_id,)
+        )
+        if (
+            weaver is None
+            or weaver["role"] != "weaver"
+            or weaver["lineage_number"] is None
+        ):
+            raise StoreError("originating Weaver lineage is unavailable")
     existing = store.row("SELECT * FROM beads WHERE intake_key = ?", (task.intake_key,))
     if existing is not None:
+        retained_lineage = store.row(
+            "SELECT weaver_task_id FROM bead_lineages WHERE bead_id = ?",
+            (existing["bead_id"],),
+        )
+        if weaver_task_id is not None and (
+            retained_lineage is None
+            or retained_lineage["weaver_task_id"] != weaver_task_id
+        ):
+            raise StoreError(
+                "intake identity already belongs to another Weaver lineage"
+            )
         if (
             existing["title"] != task.title
             or existing["description"] != task.description
@@ -50,7 +77,11 @@ def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
             "activation": existing["activation"],
             "reused": True,
         }
-    operation = store.create_operation("beads_create", task.intake_key, task.__dict__)
+    operation = store.create_operation(
+        "beads_create",
+        task.intake_key,
+        {**task.__dict__, "weaver_task_id": weaver_task_id},
+    )
     attempt = store.begin_operation_attempt(operation)
     started = time.monotonic()
     try:
@@ -78,6 +109,7 @@ def file_task(store: Store, beads: Beads, task: IntakeTask) -> dict[str, Any]:
         task,
         bead_id,
         operation,
+        weaver_task_id=weaver_task_id,
         attempt=attempt,
         duration_ms=int((time.monotonic() - started) * 1000),
     )
@@ -101,6 +133,7 @@ def _record_published_task(
     bead_id: str,
     operation: int,
     *,
+    weaver_task_id: int | None = None,
     attempt: int | None = None,
     duration_ms: int | None = None,
 ) -> None:
@@ -130,6 +163,41 @@ def _record_published_task(
                 timestamp,
             ),
         )
+        if weaver_task_id is not None:
+            weaver = connection.execute(
+                "SELECT role, lineage_number FROM tasks WHERE id = ?",
+                (weaver_task_id,),
+            ).fetchone()
+            if (
+                weaver is None
+                or weaver["role"] != "weaver"
+                or weaver["lineage_number"] is None
+            ):
+                raise StoreError("originating Weaver lineage is unavailable")
+            connection.execute(
+                """INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number)
+                   VALUES (?, ?, ?)""",
+                (bead_id, weaver_task_id, weaver["lineage_number"]),
+            )
+            connection.execute(
+                """UPDATE obligations SET state = 'canceled',
+                       detail = 'new lineage work arrived before archival', updated_at = ?
+                   WHERE kind = 'archive' AND state IN ('pending','failed')
+                     AND target IN (
+                       SELECT native_thread_id FROM tasks
+                       WHERE lineage_number = ?
+                         AND role IN ('weaver','executor','overseer')
+                     )""",
+                (timestamp, weaver["lineage_number"]),
+            )
+            connection.execute(
+                """UPDATE tasks SET archive_eligible_at = NULL,
+                       archive_idle_turn_id = NULL, updated_at = ?
+                   WHERE lineage_number = ?
+                     AND role IN ('weaver','executor','overseer')
+                     AND state NOT IN ('retired','archived')""",
+                (timestamp, weaver["lineage_number"]),
+            )
         for dependency in task.dependencies:
             connection.execute(
                 "INSERT INTO bead_dependencies(bead_id, dependency_id) VALUES (?, ?)",
@@ -164,6 +232,7 @@ def reconcile_beads_creation(
     store: Store, beads: Beads, operation: dict[str, Any]
 ) -> bool:
     inputs = json.loads(operation["input_json"])
+    weaver_task_id = inputs.pop("weaver_task_id", None)
     task = IntakeTask(
         **{
             **inputs,
@@ -177,7 +246,13 @@ def reconcile_beads_creation(
     bead_id = matches[0].get("id")
     if not isinstance(bead_id, str):
         return False
-    _record_published_task(store, task, bead_id, int(operation["id"]))
+    _record_published_task(
+        store,
+        task,
+        bead_id,
+        int(operation["id"]),
+        weaver_task_id=weaver_task_id,
+    )
     store.execute(
         "UPDATE obligations SET state = 'complete', detail = NULL, updated_at = ? WHERE kind = 'beads_publication' AND identity = ?",
         (utc_now(), task.intake_key),
@@ -224,7 +299,12 @@ def task_from_payload(
 
 
 def file_graph(
-    store: Store, beads: Beads, graph: dict[str, Any], *, group_id: str | None = None
+    store: Store,
+    beads: Beads,
+    graph: dict[str, Any],
+    *,
+    group_id: str | None = None,
+    weaver_task_id: int | None = None,
 ) -> dict[str, Any]:
     """Publish a validated graph while preventing partial dispatch."""
 
@@ -235,9 +315,16 @@ def file_graph(
     existing = store.row("SELECT * FROM intake_groups WHERE id = ?", (identity,))
     if existing is not None and existing["state"] == "complete":
         rows = store.rows(
-            "SELECT bead_id FROM intake_group_beads WHERE group_id = ? ORDER BY bead_id",
+            """SELECT grouped.bead_id, lineage.weaver_task_id
+               FROM intake_group_beads grouped
+               LEFT JOIN bead_lineages lineage ON lineage.bead_id = grouped.bead_id
+               WHERE grouped.group_id = ? ORDER BY grouped.bead_id""",
             (identity,),
         )
+        if weaver_task_id is not None and any(
+            row["weaver_task_id"] != weaver_task_id for row in rows
+        ):
+            raise StoreError("intake graph already belongs to another Weaver lineage")
         return {
             "intake_group": identity,
             "bead_ids": [row["bead_id"] for row in rows],
@@ -282,7 +369,12 @@ def file_graph(
             dependencies = tuple(
                 local_ids.get(item, item) for item in draft.dependencies
             )
-            result = file_task(store, beads, replace(draft, dependencies=dependencies))
+            result = file_task(
+                store,
+                beads,
+                replace(draft, dependencies=dependencies),
+                weaver_task_id=weaver_task_id,
+            )
             bead_id = str(result["bead_id"])
             created.append(bead_id)
             local_ids[draft.intake_key] = bead_id

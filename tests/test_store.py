@@ -492,6 +492,173 @@ class StoreTest(unittest.TestCase):
                 project_id="fulcrum",
             )
 
+    def test_lineage_names_share_the_weaver_number_and_allocate_stable_suffixes(
+        self,
+    ) -> None:
+        weaver = self.store.register_task(
+            native_thread_id="weaver-lineage",
+            role="weaver",
+            description="Lineage",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+        )
+        self.assertEqual(weaver["lineage_number"], weaver["role_number"])
+
+        allocated = []
+        for position in range(2):
+            allocation = self.store.allocate_lineage_name("overseer", 1, "Review")
+            allocated.append(allocation)
+            role_number, suffix, title = allocation
+            self.store.register_task(
+                native_thread_id=f"overseer-lineage-{position}",
+                role="overseer",
+                description="Review",
+                model="sol",
+                reasoning_effort="high",
+                project_id="fulcrum",
+                role_number=role_number,
+                title=title,
+                lineage_number=1,
+                lineage_suffix=suffix,
+            )
+        allocated.append(self.store.allocate_lineage_name("overseer", 1, "Review"))
+        self.assertEqual(
+            [(suffix, title.split("]", 1)[0]) for _, suffix, title in allocated],
+            [
+                ("", "🔎 [OVR0001"),
+                ("B", "🔎 [OVR0001B"),
+                ("C", "🔎 [OVR0001C"),
+            ],
+        )
+
+    def test_lineage_and_unlineaged_names_remain_unique_in_either_order(
+        self,
+    ) -> None:
+        legacy = self.store.register_task(
+            native_thread_id="legacy-executor",
+            role="executor",
+            description="Legacy",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+        )
+        self.assertEqual(legacy["title"], "⚒️ [EXE0001] Legacy")
+        role_number, suffix, title = self.store.allocate_lineage_name(
+            "executor", 1, "Lineage"
+        )
+        self.assertEqual((suffix, title), ("B", "⚒️ [EXE0001B] Lineage"))
+        self.store.register_task(
+            native_thread_id="lineage-executor",
+            role="executor",
+            description="Lineage",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+            role_number=role_number,
+            title=title,
+            lineage_number=1,
+            lineage_suffix=suffix,
+        )
+        self.store.execute(
+            "UPDATE tasks SET state = 'archived', archived = 1 WHERE id = ?",
+            (legacy["id"],),
+        )
+        _, next_suffix, next_title = self.store.allocate_lineage_name(
+            "executor", 1, "More lineage work"
+        )
+        self.assertEqual(next_suffix, "C")
+        self.assertIn("[EXE0001C]", next_title)
+
+        overseer_number, overseer_suffix, overseer_title = (
+            self.store.allocate_lineage_name("overseer", 1, "Lineage first")
+        )
+        self.store.register_task(
+            native_thread_id="lineage-first-overseer",
+            role="overseer",
+            description="Lineage first",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+            role_number=overseer_number,
+            title=overseer_title,
+            lineage_number=1,
+            lineage_suffix=overseer_suffix,
+        )
+        unlineaged = self.store.register_task(
+            native_thread_id="later-unlineaged-overseer",
+            role="overseer",
+            description="Unlineaged later",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+        )
+        self.assertEqual(unlineaged["title"], "🔎 [OVR0002] Unlineaged later")
+        self.assertEqual(
+            len(
+                {
+                    row["title"].split("]", 1)[0]
+                    for row in self.store.rows(
+                        "SELECT title FROM tasks WHERE role IN ('executor','overseer')"
+                    )
+                }
+            ),
+            4,
+        )
+
+    def test_lineage_allocation_ignores_agent_codes_in_descriptions(self) -> None:
+        self.store.register_task(
+            native_thread_id="unrelated-executor",
+            role="executor",
+            description="Discuss [EXE0003] and [EXE0003B] in docs",
+            model="sol",
+            reasoning_effort="high",
+            project_id="fulcrum",
+            role_number=2,
+            title="⚒️ [EXE0002] Discuss [EXE0003] and [EXE0003B] in docs",
+        )
+        self.store.create_operation(
+            "thread_start",
+            "executor",
+            {
+                "title": "⚒️ [EXE0004] Compare [EXE0003C] in docs",
+                "lineage_number": 4,
+                "lineage_suffix": "",
+            },
+        )
+
+        allocated = []
+        for position in range(2):
+            allocation = self.store.allocate_lineage_name(
+                "executor", 3, "Actual lineage"
+            )
+            allocated.append(allocation)
+            role_number, suffix, title = allocation
+            self.store.register_task(
+                native_thread_id=f"actual-lineage-{position}",
+                role="executor",
+                description="Actual lineage",
+                model="sol",
+                reasoning_effort="high",
+                project_id="fulcrum",
+                role_number=role_number,
+                title=title,
+                lineage_number=3,
+                lineage_suffix=suffix,
+            )
+        allocated.append(
+            self.store.allocate_lineage_name("executor", 3, "Actual lineage")
+        )
+
+        self.assertEqual(
+            [(suffix, title.split("]", 1)[0]) for _, suffix, title in allocated],
+            [
+                ("", "⚒️ [EXE0003"),
+                ("B", "⚒️ [EXE0003B"),
+                ("C", "⚒️ [EXE0003C"),
+            ],
+        )
+
     def test_constraints_prevent_two_current_actions_and_pair_reservations(
         self,
     ) -> None:

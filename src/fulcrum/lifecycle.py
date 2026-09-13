@@ -956,13 +956,21 @@ def _exact_source_validation_error(
 
 
 def _archive_obligation(store: Store, task_id: int, timestamp: str) -> None:
-    task = store.row("SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,))
+    task = store.row("SELECT * FROM tasks WHERE id = ?", (task_id,))
     if task is None:
+        return
+    if task["lineage_number"] is not None and _lineage_has_open_work(
+        store.connection, int(task["lineage_number"])
+    ):
         return
     store.execute(
         """INSERT INTO obligations(kind, identity, target, state, created_at, updated_at)
            VALUES ('archive', ?, ?, 'pending', ?, ?)
-           ON CONFLICT(kind, identity, target) DO NOTHING""",
+           ON CONFLICT(kind, identity, target) DO UPDATE SET
+             state = 'pending', detail = NULL, retry_count = 0,
+             next_attempt_at = NULL, operator_hold_id = NULL,
+             updated_at = excluded.updated_at
+           WHERE obligations.state = 'canceled'""",
         (str(task_id), task["native_thread_id"], timestamp, timestamp),
     )
 
@@ -978,25 +986,77 @@ def _resolve_subject(store: Store, subject: str) -> dict[str, Any] | None:
     return store.row("SELECT * FROM tasks WHERE title LIKE ?", (f"%[{code}]%",))
 
 
-def _archive_run_pair(connection: Any, run_id: int, timestamp: str) -> None:
+def _lineage_has_open_work(connection: Any, lineage_number: int) -> bool:
+    return (
+        connection.execute(
+            """SELECT 1 FROM bead_lineages lineage
+               WHERE lineage.lineage_number = ? AND (
+                 NOT EXISTS (
+                   SELECT 1 FROM assignments a WHERE a.bead_id = lineage.bead_id
+                 ) OR EXISTS (
+                   SELECT 1 FROM assignments a WHERE a.bead_id = lineage.bead_id
+                     AND a.stage NOT IN ('completed','canceled')
+                 )
+               ) LIMIT 1""",
+            (lineage_number,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _schedule_archive(
+    connection: Any, task: Any, timestamp: str, *, execute: Any | None = None
+) -> None:
+    writer = execute or connection.execute
+    writer(
+        """INSERT INTO obligations(
+               kind, identity, target, state, created_at, updated_at
+           ) VALUES ('archive', ?, ?, 'pending', ?, ?)
+           ON CONFLICT(kind, identity, target) DO UPDATE SET
+             state = 'pending', detail = NULL, retry_count = 0,
+             next_attempt_at = NULL, operator_hold_id = NULL,
+             updated_at = excluded.updated_at
+           WHERE obligations.state = 'canceled'""",
+        (str(task["id"]), task["native_thread_id"], timestamp, timestamp),
+    )
+
+
+def schedule_run_archival(
+    connection: Any,
+    run_id: int,
+    timestamp: str,
+    *,
+    execute: Any | None = None,
+) -> None:
     run = connection.execute(
-        "SELECT executor_task_id, overseer_task_id FROM runs WHERE id = ?", (run_id,)
+        """SELECT executor_task_id, overseer_task_id, lineage_number
+           FROM runs WHERE id = ?""",
+        (run_id,),
     ).fetchone()
     if run is None:
+        return
+    if run["lineage_number"] is not None:
+        lineage_number = int(run["lineage_number"])
+        if _lineage_has_open_work(connection, lineage_number):
+            return
+        tasks = connection.execute(
+            """SELECT * FROM tasks WHERE lineage_number = ?
+               AND role IN ('weaver','executor','overseer')
+               AND archived = 0 AND state NOT IN ('retired','archived')
+               ORDER BY id""",
+            (lineage_number,),
+        ).fetchall()
+        for task in tasks:
+            _schedule_archive(connection, task, timestamp, execute=execute)
         return
     for task_id in (run["executor_task_id"], run["overseer_task_id"]):
         if task_id is None:
             continue
         task = connection.execute(
-            "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
+            "SELECT id, native_thread_id FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if task is not None:
-            connection.execute(
-                """INSERT OR IGNORE INTO obligations(
-                       kind, identity, target, state, created_at, updated_at
-                   ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
-                (str(task_id), task["native_thread_id"], timestamp, timestamp),
-            )
+            _schedule_archive(connection, task, timestamp, execute=execute)
 
 
 def _required_resolution_text(decision: dict[str, Any], name: str) -> str:
@@ -1238,7 +1298,7 @@ def _resolve_assignment_operation(
             "UPDATE runs SET state = 'completed', updated_at = ? WHERE id = ?",
             (timestamp, assignment["run_id"]),
         )
-        _archive_run_pair(connection, int(assignment["run_id"]), timestamp)
+        schedule_run_archival(connection, int(assignment["run_id"]), timestamp)
 
 
 def _resolve_thread_start(
@@ -1259,8 +1319,8 @@ def _resolve_thread_start(
             cursor = connection.execute(
                 """INSERT INTO tasks(native_thread_id, role, role_number, title,
                    description, project_id, model, reasoning_effort, pair_id, state,
-                   runtime_status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 'unmaterialized', ?, ?)""",
+                   runtime_status, lineage_number, lineage_suffix, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 'unmaterialized', ?, ?, ?, ?)""",
                 (
                     thread_id,
                     inputs["role"],
@@ -1271,6 +1331,8 @@ def _resolve_thread_start(
                     inputs["model"],
                     inputs["effort"],
                     inputs.get("pair_id"),
+                    inputs.get("lineage_number"),
+                    inputs.get("lineage_suffix", ""),
                     timestamp,
                     timestamp,
                 ),
@@ -1623,12 +1685,35 @@ def apply_archon_decisions(
                     raise StoreError(
                         "approved decision requires an enabled project and unique ordered beads"
                     )
+                placeholders = ",".join("?" for _ in beads)
+                lineage_rows = connection.execute(
+                    f"""SELECT bead_id, weaver_task_id, lineage_number
+                        FROM bead_lineages WHERE bead_id IN ({placeholders})""",
+                    tuple(beads),
+                ).fetchall()
+                origins = {
+                    (int(row["weaver_task_id"]), int(row["lineage_number"]))
+                    for row in lineage_rows
+                }
+                if lineage_rows and (
+                    len(lineage_rows) != len(beads) or len(origins) != 1
+                ):
+                    raise StoreError(
+                        "an approved run must contain beads from one Weaver lineage"
+                    )
+                weaver_task_id, lineage_number = (
+                    next(iter(origins)) if origins else (None, None)
+                )
                 cursor = connection.execute(
-                    "INSERT INTO runs(project_id, authority, state, priority, created_at, updated_at) VALUES (?, ?, 'approved', ?, ?, ?)",
+                    """INSERT INTO runs(project_id, authority, state, priority,
+                           weaver_task_id, lineage_number, created_at, updated_at)
+                       VALUES (?, ?, 'approved', ?, ?, ?, ?, ?)""",
                     (
                         project,
                         str(decision.get("authority", "archon")),
                         int(decision.get("priority", 0)),
+                        weaver_task_id,
+                        lineage_number,
                         timestamp,
                         timestamp,
                     ),
@@ -1659,8 +1744,19 @@ def apply_archon_decisions(
                         (run_id, bead_id, position, scope),
                     )
                     connection.execute(
-                        "INSERT INTO assignments(run_id, bead_id, stage, scope_snapshot, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?, ?)",
-                        (run_id, bead_id, scope, timestamp, timestamp),
+                        """INSERT INTO assignments(
+                               run_id, bead_id, stage, scope_snapshot,
+                               weaver_task_id, lineage_number, created_at, updated_at
+                           ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)""",
+                        (
+                            run_id,
+                            bead_id,
+                            scope,
+                            weaver_task_id,
+                            lineage_number,
+                            timestamp,
+                            timestamp,
+                        ),
                     )
                 applied.append({"decision": kind, "run_id": run_id})
                 continue
@@ -1809,7 +1905,7 @@ def apply_archon_decisions(
                     "UPDATE runs SET state = 'canceled', updated_at = ? WHERE id = ?",
                     (timestamp, run_id),
                 )
-                _archive_run_pair(connection, run_id, timestamp)
+                schedule_run_archival(connection, run_id, timestamp)
                 applied.append({"decision": kind, "run_id": run_id})
                 continue
             if kind == "resolve_escalation":
@@ -1892,7 +1988,7 @@ def apply_archon_decisions(
                             "UPDATE runs SET state = 'canceled', updated_at = ? WHERE id = ?",
                             (timestamp, assignment["run_id"]),
                         )
-                        _archive_run_pair(
+                        schedule_run_archival(
                             connection, int(assignment["run_id"]), timestamp
                         )
                 else:

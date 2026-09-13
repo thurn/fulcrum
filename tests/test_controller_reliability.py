@@ -36,6 +36,7 @@ from fulcrum.lifecycle import (
     accept_finish,
     apply_archon_decisions,
     observe_action_terminal,
+    schedule_run_archival,
 )
 from fulcrum.scheduling import ready_assignments
 from fulcrum.runtime import AppServerError, thread_facts
@@ -366,7 +367,7 @@ class FreshConversationRuntime:
     ) -> dict[str, Any]:
         thread: dict[str, Any] = {
             "id": thread_id,
-            "status": {"type": "active"},
+            "status": {"type": "active" if include_turns else "idle"},
         }
         if include_turns:
             thread["turns"] = [{"id": "turn-1", "status": "inProgress", "items": []}]
@@ -501,6 +502,37 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             self.controller.lock_handle.close()
             self.controller.lock_handle = None
         self.controller = Controller(self.paths, self.config)
+
+    def _attach_current_assignment_to_weaver_lineage(self) -> dict[str, Any]:
+        weaver = self.controller.store.register_task(
+            native_thread_id="bound-worker-weaver",
+            role="weaver",
+            description="Bound worker lineage",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        lineage = int(weaver["lineage_number"])
+        self.controller.store.execute(
+            "UPDATE tasks SET lineage_number = ? WHERE id IN (?, ?)",
+            (lineage, self.executor["id"], self.overseer["id"]),
+        )
+        self.controller.store.execute(
+            """INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number)
+               VALUES ('p-1', ?, ?)""",
+            (weaver["id"], lineage),
+        )
+        self.controller.store.execute(
+            """UPDATE runs SET weaver_task_id = ?, lineage_number = ?
+               WHERE id = ?""",
+            (weaver["id"], lineage, self.assignment["run_id"]),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET weaver_task_id = ?, lineage_number = ?
+               WHERE id = ?""",
+            (weaver["id"], lineage, self.assignment["id"]),
+        )
+        return weaver
 
     def _prepare_delivery(self, candidate_id: str = "candidate-1") -> dict[str, Any]:
         self.controller.store.execute(
@@ -2673,10 +2705,30 @@ print(json.dumps({
         self.assertEqual(pending["value"], "0")
         self.assertEqual(os.environ[INHERITED_LOCK_FD_ENV], str(descriptor))
 
-    async def test_new_assignment_replaces_pair_conversations_without_old_history(
+    async def test_sequential_assignments_reuse_lineage_pair_conversations(
         self,
     ) -> None:
         now = "2026-01-01T00:00:00Z"
+        weaver = self.controller.store.register_task(
+            native_thread_id="lineage-weaver",
+            role="weaver",
+            description="Related work",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET lineage_number = ? WHERE id IN (?, ?)",
+            (weaver["role_number"], self.executor["id"], self.overseer["id"]),
+        )
+        self.controller.store.execute(
+            "INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number) VALUES ('p-1', ?, ?)",
+            (weaver["id"], weaver["role_number"]),
+        )
+        self.controller.store.execute(
+            "UPDATE runs SET weaver_task_id = ?, lineage_number = ? WHERE id = ?",
+            (weaver["id"], weaver["role_number"], self.assignment["run_id"]),
+        )
         previous_marker = "FIRST-ASSIGNMENT-RAW-TOOL-OUTPUT-9f3b"
         old_payload = json.dumps({"raw_output": previous_marker})
         implementation = self.controller.store.execute(
@@ -2733,6 +2785,10 @@ print(json.dumps({
                          'sol','high','sol','high','default','complete',?,?)""",
             (now, now),
         )
+        self.controller.store.execute(
+            "INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number) VALUES ('p-2', ?, ?)",
+            (weaver["id"], weaver["role_number"]),
+        )
         position = self.controller.store.execute(
             "INSERT INTO run_beads(run_id, bead_id, position, scope_snapshot) VALUES (?, 'p-2', 1, 'Second scope')",
             (self.assignment["run_id"],),
@@ -2753,29 +2809,13 @@ print(json.dumps({
         runtime = FreshConversationRuntime(previous_marker)
         self.controller.runtime = runtime
 
-        self.controller.store.execute(
-            "UPDATE tasks SET runtime_status = 'active' WHERE id = ?",
-            (self.overseer["id"],),
-        )
-        with self.assertRaisesRegex(StoreError, "cannot replace active overseer"):
-            await self.controller._ensure_pair(assignment)
-        unchanged = self.controller.store.rows(
-            "SELECT state FROM tasks WHERE id IN (?, ?) ORDER BY id",
-            (self.executor["id"], self.overseer["id"]),
-        )
-        self.assertEqual([task["state"] for task in unchanged], ["idle", "idle"])
-        self.assertEqual(runtime.created, [])
-        self.controller.store.execute(
-            "UPDATE tasks SET runtime_status = 'idle' WHERE id = ?",
-            (self.overseer["id"],),
-        )
         await self.controller._ensure_pair(assignment)
         assignment = self.controller.store.row(
             """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
                WHERE a.id = ?""",
             (later.lastrowid,),
         )
-        fresh_executor_id = assignment["executor_task_id"]
+        retained_executor_id = assignment["executor_task_id"]
         current_marker = "CURRENT-ASSIGNMENT-HANDOFF-e7c1"
         implementation = self.controller.store.execute(
             """INSERT INTO actions(
@@ -2784,7 +2824,7 @@ print(json.dumps({
                ) VALUES (?, ?, 'implement', '{}', 'processed',
                          'ready_for_review', ?, ?, ?)""",
             (
-                fresh_executor_id,
+                retained_executor_id,
                 assignment["id"],
                 json.dumps({"evidence": current_marker}),
                 now,
@@ -2813,6 +2853,10 @@ print(json.dumps({
                 "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
             )
         )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'unmaterialized' WHERE id = ?",
+            (self.overseer["id"],),
+        )
 
         await self.controller._start_assignment_action(assignment)
 
@@ -2832,16 +2876,16 @@ print(json.dumps({
                 "SELECT * FROM obligations WHERE kind = 'archive' AND state = 'pending'"
             )
         }
-        self.assertEqual([task["state"] for task in old_tasks], ["retired", "retired"])
-        self.assertEqual(archive_targets, {"executor", "overseer"})
+        self.assertEqual([task["state"] for task in old_tasks], ["idle", "active"])
+        self.assertEqual(archive_targets, set())
         self.assertEqual(first_retained["executor_task_id"], self.executor["id"])
         self.assertEqual(first_retained["overseer_task_id"], self.overseer["id"])
-        self.assertNotEqual(retained["executor_task_id"], self.executor["id"])
-        self.assertNotEqual(retained["overseer_task_id"], self.overseer["id"])
-        self.assertEqual(runtime.created, ["fresh-1", "fresh-2"])
-        self.assertEqual(runtime.started[0][0], "fresh-2")
+        self.assertEqual(retained["executor_task_id"], self.executor["id"])
+        self.assertEqual(retained["overseer_task_id"], self.overseer["id"])
+        self.assertEqual(runtime.created, [])
+        self.assertEqual(runtime.started[0][0], "overseer")
         second_context = runtime.started[0][1]
-        self.assertNotIn(previous_marker, second_context)
+        self.assertIn(previous_marker, second_context)
         self.assertIn("Second scope", second_context)
         self.assertIn(f'run id: {assignment["run_id"]}', second_context)
         self.assertIn("role: overseer", second_context)
@@ -2869,14 +2913,13 @@ print(json.dumps({
             "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
         )
         self.assertEqual(runtime.archived, [])
-        self.assertEqual(
-            [(task["state"], task["archived"]) for task in archived_tasks],
-            [("retired", 0), ("retired", 0)],
+        self.assertTrue(
+            all(
+                task["state"] not in {"retired", "archived"} and task["archived"] == 0
+                for task in archived_tasks
+            )
         )
-        self.assertEqual(
-            [(item["target"], item["state"]) for item in completed_obligations],
-            [("executor", "pending"), ("overseer", "pending")],
-        )
+        self.assertEqual(completed_obligations, [])
         self.assertEqual(current_run["executor_task_id"], retained["executor_task_id"])
         self.assertEqual(current_run["overseer_task_id"], retained["overseer_task_id"])
         self.assertEqual(
@@ -2884,6 +2927,489 @@ print(json.dumps({
         )
         self.assertEqual(
             current_assignment["overseer_task_id"], retained["overseer_task_id"]
+        )
+
+    async def test_restart_rechecks_and_reuses_usable_bound_lineage_worker(
+        self,
+    ) -> None:
+        self._attach_current_assignment_to_weaver_lineage()
+        executor_id = int(self.executor["id"])
+        self._restart_controller()
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "status": {"type": "idle"},
+            "archived": False,
+            "turns": [],
+        }
+        self.controller.runtime = runtime
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+
+        await self.controller._ensure_pair(assignment)
+
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+        )
+        self.assertEqual(retained["executor_task_id"], executor_id)
+        runtime.read_thread.assert_awaited_once_with("executor", include_turns=False)
+        runtime.create_thread.assert_not_awaited()
+
+    async def test_bound_missing_lineage_worker_uses_next_stable_suffix(self) -> None:
+        self._attach_current_assignment_to_weaver_lineage()
+        runtime = AsyncMock()
+        runtime.read_thread.side_effect = AppServerError("thread not found")
+        runtime.create_thread.return_value = {"thread": {"id": "missing-fallback"}}
+        self.controller.runtime = runtime
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+
+        await self.controller._ensure_pair(assignment)
+
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+        )
+        fallback = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?", (retained["executor_task_id"],)
+        )
+        self.assertEqual(fallback["native_thread_id"], "missing-fallback")
+        self.assertIn("[EXE0001B]", fallback["title"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM tasks WHERE id = ?", (self.executor["id"],)
+            )["state"],
+            "retired",
+        )
+
+    async def test_bound_natively_archived_lineage_worker_uses_next_suffix(
+        self,
+    ) -> None:
+        self._attach_current_assignment_to_weaver_lineage()
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "status": {"type": "idle"},
+            "archived": True,
+            "turns": [],
+        }
+        runtime.create_thread.return_value = {"thread": {"id": "archive-fallback"}}
+        self.controller.runtime = runtime
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+
+        await self.controller._ensure_pair(assignment)
+
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+        )
+        fallback = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?", (retained["executor_task_id"],)
+        )
+        self.assertIn("[EXE0001B]", fallback["title"])
+        old = self.controller.store.row(
+            "SELECT state, archived FROM tasks WHERE id = ?", (self.executor["id"],)
+        )
+        self.assertEqual((old["state"], old["archived"]), ("archived", 1))
+
+    async def test_bound_incompatibly_active_lineage_worker_uses_next_suffix(
+        self,
+    ) -> None:
+        self._attach_current_assignment_to_weaver_lineage()
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "status": {"type": "active"},
+            "archived": False,
+            "turns": [],
+        }
+        runtime.create_thread.return_value = {"thread": {"id": "active-fallback"}}
+        self.controller.runtime = runtime
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+
+        await self.controller._ensure_pair(assignment)
+
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+        )
+        fallback = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?", (retained["executor_task_id"],)
+        )
+        self.assertIn("[EXE0001B]", fallback["title"])
+        self.assertEqual(fallback["native_thread_id"], "active-fallback")
+
+    async def test_lineage_overflow_is_stable_and_different_weavers_are_isolated(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        first_weaver = self.controller.store.register_task(
+            native_thread_id="first-weaver",
+            role="weaver",
+            description="First lineage",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        lineage = int(first_weaver["lineage_number"])
+        self.controller.store.execute(
+            "UPDATE tasks SET lineage_number = ? WHERE id IN (?, ?)",
+            (lineage, self.executor["id"], self.overseer["id"]),
+        )
+        self.controller.store.execute(
+            "INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number) VALUES ('p-1', ?, ?)",
+            (first_weaver["id"], lineage),
+        )
+        self.controller.store.execute(
+            "UPDATE runs SET weaver_task_id = ?, lineage_number = ? WHERE id = ?",
+            (first_weaver["id"], lineage, self.assignment["run_id"]),
+        )
+        self.assertIn("[WVR0001]", first_weaver["title"])
+        self.assertIn("[EXE0001]", self.executor["title"])
+        self.assertIn("[OVR0001]", self.overseer["title"])
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        self.controller.store.execute(
+            "UPDATE runs SET state = 'completed' WHERE id = ?",
+            (self.assignment["run_id"],),
+        )
+
+        def approve_lineage_bead(
+            bead_id: str, weaver: dict[str, Any]
+        ) -> dict[str, Any]:
+            self.controller.store.execute(
+                """INSERT INTO beads(
+                       bead_id, intake_key, project_id, title, description, activation,
+                       executor_model, executor_reasoning_effort, overseer_model,
+                       overseer_reasoning_effort, model_provenance, publication_state,
+                       created_at, updated_at
+                   ) VALUES (?, ?, 'p', ?, 'Scope', 'pending', 'sol', 'high',
+                             'sol', 'high', 'default', 'complete', ?, ?)""",
+                (bead_id, f"key-{bead_id}", bead_id, now, now),
+            )
+            self.controller.store.execute(
+                """INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number)
+                   VALUES (?, ?, ?)""",
+                (bead_id, weaver["id"], weaver["lineage_number"]),
+            )
+            run_id = apply_archon_decisions(
+                self.controller.store,
+                {
+                    "decisions": [
+                        {"decision": "approve", "project": "p", "beads": [bead_id]}
+                    ]
+                },
+            )["created_runs"][0]
+            return self.controller.store.row(
+                """SELECT a.*, r.project_id FROM assignments a
+                   JOIN runs r ON r.id = a.run_id WHERE a.run_id = ?""",
+                (run_id,),
+            )
+
+        class MissingPrimaryRuntime(FreshConversationRuntime):
+            async def read_thread(
+                self, thread_id: str, *, include_turns: bool = True
+            ) -> dict[str, Any]:
+                if thread_id == "executor":
+                    raise AppServerError("thread not found")
+                return await super().read_thread(thread_id, include_turns=include_turns)
+
+        runtime = MissingPrimaryRuntime("")
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        second_assignment = approve_lineage_bead("p-overflow-b", first_weaver)
+        await self.controller._ensure_pair(second_assignment)
+        second_assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (second_assignment["id"],)
+        )
+        overflow_b = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?",
+            (second_assignment["executor_task_id"],),
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM tasks WHERE id = ?", (self.executor["id"],)
+            )["state"],
+            "retired",
+        )
+        self.assertIn("[EXE0001B]", overflow_b["title"])
+        self.assertEqual(runtime.created, ["fresh-1"])
+
+        self._restart_controller()
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        second_assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (second_assignment["id"],),
+        )
+        await self.controller._ensure_pair(second_assignment)
+        self.assertEqual(runtime.created, ["fresh-1"])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM tasks WHERE role = 'executor' AND lineage_number = ?",
+                (lineage,),
+            )["count"],
+            2,
+        )
+
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'active' WHERE id = ?",
+            (overflow_b["id"],),
+        )
+        third_assignment = approve_lineage_bead("p-overflow-c", first_weaver)
+        await self.controller._ensure_pair(third_assignment)
+        overflow_c = self.controller.store.row(
+            """SELECT t.* FROM tasks t JOIN assignments a ON a.executor_task_id = t.id
+               WHERE a.id = ?""",
+            (third_assignment["id"],),
+        )
+        self.assertIn("[EXE0001C]", overflow_c["title"])
+
+        second_weaver = self.controller.store.register_task(
+            native_thread_id="second-weaver",
+            role="weaver",
+            description="Second lineage",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        isolated_assignment = approve_lineage_bead("p-isolated", second_weaver)
+        await self.controller._ensure_pair(isolated_assignment, include_overseer=True)
+        isolated = self.controller.store.row(
+            """SELECT t.* FROM tasks t JOIN assignments a ON a.executor_task_id = t.id
+               WHERE a.id = ?""",
+            (isolated_assignment["id"],),
+        )
+        self.assertIn("[EXE0002]", isolated["title"])
+        self.assertEqual(isolated["lineage_number"], second_weaver["lineage_number"])
+        isolated_overseer = self.controller.store.row(
+            """SELECT t.* FROM tasks t JOIN assignments a ON a.overseer_task_id = t.id
+               WHERE a.id = ?""",
+            (isolated_assignment["id"],),
+        )
+        self.assertIn("[OVR0002]", isolated_overseer["title"])
+        self.assertEqual(
+            isolated_overseer["lineage_number"], second_weaver["lineage_number"]
+        )
+        self.assertNotIn(
+            isolated["id"], {self.executor["id"], overflow_b["id"], overflow_c["id"]}
+        )
+
+    async def test_followup_run_reuses_threads_and_cancels_completion_archival(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        weaver = self.controller.store.register_task(
+            native_thread_id="followup-weaver",
+            role="weaver",
+            description="Follow-up lineage",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        lineage = int(weaver["lineage_number"])
+        self.controller.store.execute(
+            "UPDATE tasks SET lineage_number = ? WHERE id IN (?, ?)",
+            (lineage, self.executor["id"], self.overseer["id"]),
+        )
+        self.controller.store.execute(
+            "INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number) VALUES ('p-1', ?, ?)",
+            (weaver["id"], lineage),
+        )
+        old_run = int(self.assignment["run_id"])
+        self.controller.store.execute(
+            "UPDATE runs SET state = 'completed', weaver_task_id = ?, lineage_number = ? WHERE id = ?",
+            (weaver["id"], lineage, old_run),
+        )
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        for task in (self.executor, self.overseer):
+            self.controller.store.execute(
+                """INSERT INTO obligations(
+                       kind, identity, target, state, created_at, updated_at
+                   ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
+                (str(task["id"]), task["native_thread_id"], now, now),
+            )
+        self.controller.store.execute(
+            """INSERT INTO beads(
+                   bead_id, intake_key, project_id, title, description, activation,
+                   executor_model, executor_reasoning_effort, overseer_model,
+                   overseer_reasoning_effort, model_provenance, publication_state,
+                   created_at, updated_at
+               ) VALUES ('p-followup', 'followup-key', 'p', 'Follow up', 'Scope',
+                         'pending', 'sol', 'high', 'sol', 'high', 'default',
+                         'complete', ?, ?)""",
+            (now, now),
+        )
+        self.controller.store.execute(
+            """INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number)
+               VALUES ('p-followup', ?, ?)""",
+            (weaver["id"], lineage),
+        )
+        new_run = apply_archon_decisions(
+            self.controller.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "approve",
+                        "project": "p",
+                        "beads": ["p-followup"],
+                    }
+                ]
+            },
+        )["created_runs"][0]
+        followup = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.run_id = ?""",
+            (new_run,),
+        )
+
+        runtime = FreshConversationRuntime("")
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        await self.controller._ensure_pair(followup, include_overseer=True)
+
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (followup["id"],)
+        )
+        self.assertEqual(retained["executor_task_id"], self.executor["id"])
+        self.assertEqual(retained["overseer_task_id"], self.overseer["id"])
+        self.assertEqual(runtime.created, [])
+        old = self.controller.store.row("SELECT * FROM runs WHERE id = ?", (old_run,))
+        self.assertIsNone(old["executor_task_id"])
+        self.assertIsNone(old["overseer_task_id"])
+        self.assertEqual(
+            {
+                row["state"]
+                for row in self.controller.store.rows(
+                    "SELECT state FROM obligations WHERE kind = 'archive'"
+                )
+            },
+            {"canceled"},
+        )
+        self.assertEqual(invariant_violations(self.controller.store), [])
+
+        self.controller.store.execute(
+            """INSERT INTO beads(
+                   bead_id, intake_key, project_id, title, description, activation,
+                   executor_model, executor_reasoning_effort, overseer_model,
+                   overseer_reasoning_effort, model_provenance, publication_state,
+                   created_at, updated_at
+               ) VALUES ('p-overflow-final', 'overflow-final-key', 'p',
+                         'Concurrent overflow', 'Scope', 'pending', 'sol', 'high',
+                         'sol', 'high', 'default', 'complete', ?, ?)""",
+            (now, now),
+        )
+        self.controller.store.execute(
+            """INSERT INTO bead_lineages(bead_id, weaver_task_id, lineage_number)
+               VALUES ('p-overflow-final', ?, ?)""",
+            (weaver["id"], lineage),
+        )
+        overflow_run = apply_archon_decisions(
+            self.controller.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "approve",
+                        "project": "p",
+                        "beads": ["p-overflow-final"],
+                    }
+                ]
+            },
+        )["created_runs"][0]
+        overflow_assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.run_id = ?""",
+            (overflow_run,),
+        )
+        await self.controller._ensure_pair(overflow_assignment, include_overseer=True)
+        overflow_assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (overflow_assignment["id"],)
+        )
+        overflow_executor = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?",
+            (overflow_assignment["executor_task_id"],),
+        )
+        overflow_overseer = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?",
+            (overflow_assignment["overseer_task_id"],),
+        )
+        self.assertIn("[EXE0001B]", overflow_executor["title"])
+        self.assertIn("[OVR0001B]", overflow_overseer["title"])
+
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (followup["id"],),
+        )
+        self.controller.store.execute(
+            "UPDATE runs SET state = 'completed' WHERE id = ?", (new_run,)
+        )
+        schedule_run_archival(self.controller.store.connection, new_run, now)
+        self.assertEqual(
+            {
+                row["state"]
+                for row in self.controller.store.rows(
+                    "SELECT state FROM obligations WHERE kind = 'archive'"
+                )
+            },
+            {"canceled"},
+        )
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'completed' WHERE id = ?",
+            (overflow_assignment["id"],),
+        )
+        self.controller.store.execute(
+            "UPDATE runs SET state = 'completed' WHERE id = ?", (overflow_run,)
+        )
+        schedule_run_archival(self.controller.store.connection, overflow_run, now)
+        lineage_tasks = self.controller.store.rows(
+            """SELECT * FROM tasks WHERE lineage_number = ?
+               AND role IN ('weaver','executor','overseer')
+               AND state NOT IN ('retired','archived') ORDER BY id""",
+            (lineage,),
+        )
+        self.assertEqual(len(lineage_tasks), 5)
+        self.assertEqual(
+            {
+                row["state"]
+                for row in self.controller.store.rows(
+                    "SELECT state FROM obligations WHERE kind = 'archive'"
+                )
+            },
+            {"pending"},
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM obligations WHERE kind = 'archive'"
+            )["count"],
+            5,
+        )
+
+        archive_runtime = ControlledArchiveRuntime(
+            [str(task["native_thread_id"]) for task in lineage_tasks]
+        )
+        self.controller.runtime = archive_runtime  # type: ignore[assignment]
+        with patch("fulcrum.controller.utc_now", return_value=now):
+            await self.controller._archive_ready_tasks()
+        self.assertEqual(archive_runtime.archived, [])
+        with patch("fulcrum.controller.utc_now", return_value="2026-01-01T00:10:00Z"):
+            await self.controller._archive_ready_tasks()
+        self.assertCountEqual(
+            archive_runtime.archived,
+            [str(task["native_thread_id"]) for task in lineage_tasks],
         )
 
     async def test_all_completion_roles_archive_only_after_ten_idle_minutes(
@@ -3113,6 +3639,14 @@ print(json.dumps({
             project_id="p",
             pair_id=int(run.lastrowid),
         )
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "lazy-executor",
+            "status": {"type": "idle"},
+            "archived": False,
+            "turns": [],
+        }
+        self.controller.runtime = runtime
         provision = AsyncMock(side_effect=[executor, overseer])
         with patch.object(self.controller, "_provision_task", new=provision):
             await self.controller._ensure_pair(assignment)

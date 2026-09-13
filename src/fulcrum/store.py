@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -83,6 +84,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
   archive_eligible_at TEXT,
   archive_idle_turn_id TEXT,
+  lineage_number INTEGER,
+  lineage_suffix TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   UNIQUE(role, role_number),
   CHECK ((role = 'archon' AND role_number IS NULL) OR (role != 'archon' AND role_number IS NOT NULL))
@@ -100,6 +103,11 @@ CREATE TABLE IF NOT EXISTS beads (
   context_json TEXT NOT NULL DEFAULT '[]', publication_state TEXT NOT NULL DEFAULT 'pending'
     CHECK (publication_state IN ('pending','complete','failed')),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bead_lineages (
+  bead_id TEXT PRIMARY KEY REFERENCES beads(bead_id) ON DELETE CASCADE,
+  weaver_task_id INTEGER NOT NULL REFERENCES tasks(id),
+  lineage_number INTEGER NOT NULL CHECK (lineage_number >= 1)
 );
 CREATE TABLE IF NOT EXISTS intake_groups (
   id TEXT PRIMARY KEY,
@@ -127,6 +135,8 @@ CREATE TABLE IF NOT EXISTS runs (
     CHECK (state IN ('approved','active','held','completed','canceled')),
   executor_task_id INTEGER REFERENCES tasks(id),
   overseer_task_id INTEGER REFERENCES tasks(id),
+  weaver_task_id INTEGER REFERENCES tasks(id),
+  lineage_number INTEGER,
   priority INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
@@ -147,6 +157,8 @@ CREATE TABLE IF NOT EXISTS assignments (
   repair_rationale TEXT, repair_evidence TEXT,
   completion_kind TEXT CHECK (completion_kind IN ('non_code')),
   completion_evidence TEXT, condition TEXT,
+  weaver_task_id INTEGER REFERENCES tasks(id),
+  lineage_number INTEGER,
   retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
   next_attempt_at TEXT, operator_hold_id INTEGER REFERENCES holds(id),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -596,6 +608,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _lineage_suffix(index: int) -> str:
+    """Return B, C, ... Z, AA, AB ... for one-based overflow indexes."""
+
+    if index < 1:
+        return ""
+    value = index + 1
+    letters = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def _canonical_lineage_suffix(role: str, title: str, lineage_number: int) -> str | None:
+    code, emoji = ROLE_CODES[role]
+    match = re.match(
+        rf"^{re.escape(emoji)} \[{re.escape(code)}{lineage_number:04d}([A-Z]*)\](?: |$)",
+        title,
+    )
+    return match.group(1) if match is not None else None
+
+
 class Store:
     """Transactional access to the controller's only operational store."""
 
@@ -815,10 +849,14 @@ class Store:
             "tasks": {
                 "archive_eligible_at": "TEXT",
                 "archive_idle_turn_id": "TEXT",
+                "lineage_number": "INTEGER",
+                "lineage_suffix": "TEXT NOT NULL DEFAULT ''",
             },
             "runs": {
                 "executor_task_id": "INTEGER REFERENCES tasks(id)",
                 "overseer_task_id": "INTEGER REFERENCES tasks(id)",
+                "weaver_task_id": "INTEGER REFERENCES tasks(id)",
+                "lineage_number": "INTEGER",
                 "priority": "INTEGER NOT NULL DEFAULT 0",
             },
             "assignments": {
@@ -827,6 +865,8 @@ class Store:
                 "operator_hold_id": "INTEGER REFERENCES holds(id)",
                 "completion_kind": "TEXT CHECK (completion_kind IN ('non_code'))",
                 "completion_evidence": "TEXT",
+                "weaver_task_id": "INTEGER REFERENCES tasks(id)",
+                "lineage_number": "INTEGER",
             },
             "actions": {
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)",
@@ -869,6 +909,15 @@ class Store:
                     self.connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
                     )
+        self.connection.execute(
+            "UPDATE tasks SET lineage_number = role_number "
+            "WHERE role = 'weaver' AND lineage_number IS NULL"
+        )
+        self.connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS one_canonical_lineage_identity
+               ON tasks(role, lineage_number, lineage_suffix)
+               WHERE lineage_number IS NOT NULL"""
+        )
         self.connection.execute(
             "UPDATE external_operations SET correlation_id = 'operation-' || id WHERE correlation_id IS NULL"
         )
@@ -1061,12 +1110,100 @@ class Store:
             if row is None:
                 raise StoreError(f"missing role counter for {role}")
             number = int(row[0])
+            titles = [
+                str(item["title"])
+                for item in connection.execute(
+                    "SELECT title FROM tasks WHERE role = ?", (role,)
+                ).fetchall()
+            ]
+            while connection.execute(
+                "SELECT 1 FROM tasks WHERE role = ? AND role_number = ?",
+                (role, number),
+            ).fetchone() is not None or any(
+                _canonical_lineage_suffix(role, title, number) == "" for title in titles
+            ):
+                number += 1
             connection.execute(
                 "UPDATE role_counters SET next_number = ? WHERE role = ?",
                 (number + 1, role),
             )
         code, emoji = ROLE_CODES[role]
         return number, f"{emoji} [{code}{number:04d}] {summary}"
+
+    def allocate_lineage_name(
+        self, role: str, lineage_number: int, description: str
+    ) -> tuple[int, str, str]:
+        """Allocate the next durable identity within one Weaver lineage."""
+
+        if role not in {"executor", "overseer"}:
+            raise StoreError(
+                "lineage names are only available to executor and overseer"
+            )
+        if lineage_number < 1:
+            raise StoreError("lineage number must be positive")
+        summary = " ".join(description.split()).strip()
+        if not summary:
+            raise StoreError("task description is required")
+        with self.transaction() as connection:
+            used: set[str] = set()
+            for row in connection.execute(
+                "SELECT title FROM tasks WHERE role = ?", (role,)
+            ).fetchall():
+                suffix = _canonical_lineage_suffix(
+                    role, str(row["title"]), lineage_number
+                )
+                if suffix is not None:
+                    used.add(suffix)
+            for row in connection.execute(
+                """SELECT input_json FROM external_operations
+                   WHERE kind = 'thread_start' AND target = ?
+                     AND state IN ('intent','sent','uncertain')""",
+                (role,),
+            ).fetchall():
+                inputs = json.loads(row[0])
+                suffix = _canonical_lineage_suffix(
+                    role, str(inputs.get("title") or ""), lineage_number
+                )
+                if suffix is not None:
+                    used.add(suffix)
+            suffix = ""
+            suffix_index = 1
+            while suffix in used:
+                suffix = _lineage_suffix(suffix_index)
+                suffix_index += 1
+
+            role_number = lineage_number
+            if (
+                connection.execute(
+                    "SELECT 1 FROM tasks WHERE role = ? AND role_number = ?",
+                    (role, role_number),
+                ).fetchone()
+                is not None
+            ):
+                counter = connection.execute(
+                    "SELECT next_number FROM role_counters WHERE role = ?", (role,)
+                ).fetchone()
+                if counter is None:
+                    raise StoreError(f"missing role counter for {role}")
+                role_number = int(counter[0])
+                while (
+                    connection.execute(
+                        "SELECT 1 FROM tasks WHERE role = ? AND role_number = ?",
+                        (role, role_number),
+                    ).fetchone()
+                    is not None
+                ):
+                    role_number += 1
+                connection.execute(
+                    "UPDATE role_counters SET next_number = ? WHERE role = ?",
+                    (role_number + 1, role),
+                )
+        code, emoji = ROLE_CODES[role]
+        return (
+            role_number,
+            suffix,
+            f"{emoji} [{code}{lineage_number:04d}{suffix}] {summary}",
+        )
 
     def register_task(
         self,
@@ -1082,6 +1219,8 @@ class Store:
         now: str | None = None,
         role_number: int | None = None,
         title: str | None = None,
+        lineage_number: int | None = None,
+        lineage_suffix: str = "",
     ) -> dict[str, Any]:
         existing = self.row(
             "SELECT * FROM tasks WHERE native_thread_id = ?", (native_thread_id,)
@@ -1100,10 +1239,12 @@ class Store:
             number, canonical_title = self.allocate_name(role, description)
         else:
             number, canonical_title = role_number, title
+        if role == "weaver" and lineage_number is None:
+            lineage_number = number
         try:
             cursor = self.execute(
-                """INSERT INTO tasks(native_thread_id, role, role_number, title, description, project_id, model, reasoning_effort, pair_id, state, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO tasks(native_thread_id, role, role_number, title, description, project_id, model, reasoning_effort, pair_id, state, lineage_number, lineage_suffix, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     native_thread_id,
                     role,
@@ -1115,6 +1256,8 @@ class Store:
                     reasoning_effort,
                     pair_id,
                     state,
+                    lineage_number,
+                    lineage_suffix,
                     timestamp,
                     timestamp,
                 ),

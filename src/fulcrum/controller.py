@@ -39,6 +39,7 @@ from fulcrum.lifecycle import (
     accept_finish,
     apply_archon_decisions,
     observe_action_terminal,
+    schedule_run_archival,
 )
 from fulcrum.kernel import (
     LeaseRequest,
@@ -1979,36 +1980,26 @@ class Controller:
             if run.get("overseer_task_id")
             else None
         )
-        replacements = [
-            task
-            for task in (executor, overseer)
-            if task is not None
-            and self._task_crossed_assignment_boundary(task, int(assignment["id"]))
-        ]
-        for task in replacements:
-            self._require_replaceable_assignment_conversation(task)
-        for task in replacements:
-            self._retire_assignment_conversation(task, int(assignment["id"]))
-            if task["role"] == "executor":
-                executor = None
-            else:
-                overseer = None
-        executor = executor or await self._provision_task(
+        executor = await self._lineage_task_for_assignment(
+            assignment=assignment,
+            run=run,
+            current=executor,
             role="executor",
             description=bead["title"],
             project=project,
             model=bead["executor_model"],
             effort=bead["executor_reasoning_effort"],
-            pair_id=int(assignment["run_id"]),
         )
-        if include_overseer and overseer is None:
-            overseer = await self._provision_task(
+        if include_overseer:
+            overseer = await self._lineage_task_for_assignment(
+                assignment=assignment,
+                run=run,
+                current=overseer,
                 role="overseer",
                 description=bead["title"],
                 project=project,
                 model=bead["overseer_model"],
                 effort=bead["overseer_reasoning_effort"],
-                pair_id=int(assignment["run_id"]),
             )
         self.store.execute(
             "UPDATE runs SET executor_task_id = ?, overseer_task_id = ?, state = 'active', updated_at = ? WHERE id = ?",
@@ -2032,69 +2023,237 @@ class Controller:
         assignment["executor_task_id"] = executor["id"]
         assignment["overseer_task_id"] = overseer["id"] if overseer else None
 
-    def _task_crossed_assignment_boundary(
-        self, task: dict[str, Any], assignment_id: int
+    async def _lineage_task_for_assignment(
+        self,
+        *,
+        assignment: dict[str, Any],
+        run: dict[str, Any],
+        current: dict[str, Any] | None,
+        role: str,
+        description: str,
+        project: dict[str, Any],
+        model: str,
+        effort: str,
+    ) -> dict[str, Any]:
+        assigned_id = assignment.get(f"{role}_task_id")
+        candidates: list[dict[str, Any]] = []
+        if assigned_id is not None:
+            bound = self.store.row("SELECT * FROM tasks WHERE id = ?", (assigned_id,))
+            if bound is not None:
+                candidates.append(bound)
+        if current is not None:
+            candidates.append(current)
+        lineage_number = run.get("lineage_number")
+        if isinstance(lineage_number, int):
+            candidates.extend(
+                self.store.rows(
+                    """SELECT * FROM tasks
+                       WHERE role = ? AND lineage_number = ?
+                       ORDER BY CASE WHEN lineage_suffix = '' THEN 0 ELSE 1 END,
+                                length(lineage_suffix), lineage_suffix, id""",
+                    (role, lineage_number),
+                )
+            )
+        seen: set[int] = set()
+        for task in candidates:
+            task_id = int(task["id"])
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            compatible_action = self._lineage_task_has_compatible_action(
+                task, int(assignment["id"])
+            )
+            if self._lineage_task_is_usable(
+                task,
+                assignment_id=int(assignment["id"]),
+                project_id=str(project["project_id"]),
+                model=model,
+                effort=effort,
+                compatible_action=compatible_action,
+            ) and await self._lineage_task_is_available(
+                task, allow_active=compatible_action
+            ):
+                self._claim_lineage_task(task, int(assignment["run_id"]), role)
+                task["pair_id"] = int(assignment["run_id"])
+                task["state"] = "idle"
+                return task
+        with self.store.transaction() as connection:
+            column = f"{role}_task_id"
+            connection.execute(
+                f"UPDATE runs SET {column} = NULL, updated_at = ? WHERE id = ?",
+                (utc_now(), assignment["run_id"]),
+            )
+            connection.execute(
+                "UPDATE tasks SET pair_id = NULL WHERE pair_id = ? AND role = ?",
+                (assignment["run_id"], role),
+            )
+        provisioned = await self._provision_task(
+            role=role,
+            description=description,
+            project=project,
+            model=model,
+            effort=effort,
+            pair_id=int(assignment["run_id"]),
+            lineage_number=lineage_number if isinstance(lineage_number, int) else None,
+        )
+        self._claim_lineage_task(provisioned, int(assignment["run_id"]), role)
+        provisioned["pair_id"] = int(assignment["run_id"])
+        return provisioned
+
+    def _lineage_task_is_usable(
+        self,
+        task: dict[str, Any],
+        *,
+        assignment_id: int,
+        project_id: str,
+        model: str,
+        effort: str,
+        compatible_action: bool,
     ) -> bool:
-        return (
+        if (
+            task["state"] in {"retired", "archived", "uncertain"}
+            or task["archived"]
+            or task["project_id"] != project_id
+            or task["model"] != model
+            or task["reasoning_effort"] != effort
+            or (
+                not compatible_action
+                and (
+                    not task["last_turn_terminal"]
+                    or not task["helpers_terminal"]
+                    or task["runtime_status"] == "active"
+                )
+            )
+        ):
+            return False
+        if compatible_action:
+            return True
+        if (
             self.store.row(
                 """SELECT 1 FROM actions WHERE task_id = ?
-                   AND assignment_id IS NOT NULL AND assignment_id != ? LIMIT 1""",
-                (task["id"], assignment_id),
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
+                (task["id"],),
             )
             is not None
+        ):
+            return False
+        column = f"{task['role']}_task_id"
+        return (
+            self.store.row(
+                f"""SELECT 1 FROM assignments WHERE {column} = ? AND id != ?
+                AND stage NOT IN ('completed','canceled') LIMIT 1""",
+                (task["id"], assignment_id),
+            )
+            is None
         )
 
-    def _require_replaceable_assignment_conversation(
-        self, task: dict[str, Any]
-    ) -> None:
-        active = self.store.row(
-            """SELECT id FROM actions WHERE task_id = ?
+    def _lineage_task_has_compatible_action(
+        self, task: dict[str, Any], assignment_id: int
+    ) -> bool:
+        action = self.store.row(
+            """SELECT assignment_id FROM actions WHERE task_id = ?
                AND state IN ('pending','starting','active','terminal','uncertain')""",
             (task["id"],),
         )
-        if (
-            active is not None
-            or not task["last_turn_terminal"]
-            or not task["helpers_terminal"]
-            or task["runtime_status"] == "active"
-        ):
-            raise StoreError(
-                f"cannot replace active {task['role']} conversation at assignment boundary"
-            )
+        return action is not None and action["assignment_id"] == assignment_id
 
-    def _retire_assignment_conversation(
-        self, task: dict[str, Any], next_assignment_id: int
-    ) -> None:
-        timestamp = utc_now()
-        with self.store.transaction() as connection:
-            connection.execute(
-                """UPDATE tasks SET state = CASE WHEN archived = 1 THEN 'archived'
-                       ELSE 'retired' END, archive_eligible_at = NULL,
-                       archive_idle_turn_id = NULL,
-                       updated_at = ? WHERE id = ?""",
+    async def _lineage_task_is_available(
+        self, task: dict[str, Any], *, allow_active: bool = False
+    ) -> bool:
+        try:
+            thread = await self.runtime.read_thread(
+                str(task["native_thread_id"]), include_turns=False
+            )
+        except AppServerError as error:
+            condition = str(error).lower()
+            if not any(
+                marker in condition
+                for marker in (
+                    "not found",
+                    "no thread",
+                    "unknown thread",
+                    "does not exist",
+                )
+            ):
+                raise
+            timestamp = utc_now()
+            self.store.execute(
+                """UPDATE tasks SET state = 'retired', archive_eligible_at = NULL,
+                   archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?""",
                 (timestamp, task["id"]),
             )
-            if not task["archived"]:
-                connection.execute(
-                    """INSERT OR IGNORE INTO obligations(
-                           kind, identity, target, state, created_at, updated_at
-                       ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
-                    (
-                        f"assignment-boundary:{task['id']}",
-                        task["native_thread_id"],
-                        timestamp,
-                        timestamp,
-                    ),
-                )
+            self.store.event(
+                "lineage_conversation_unavailable",
+                f"retired unavailable {task['role']} conversation",
+                entity_type="task",
+                entity_id=task["id"],
+                detail={"condition": str(error)},
+            )
+            return False
+        facts = thread_facts(thread)
+        timestamp = utc_now()
+        if facts["archived"]:
+            self.store.execute(
+                """UPDATE tasks SET state = 'archived', archived = 1,
+                   archive_eligible_at = NULL, archive_idle_turn_id = NULL,
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, task["id"]),
+            )
+            return False
+        safely_idle = bool(
+            allow_active
+            or (
+                facts["runtime_status"] != "active"
+                and facts["last_turn_terminal"]
+                and facts["helpers_terminal"]
+            )
+        )
+        self.store.execute(
+            """UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?,
+               helpers_terminal = ?, updated_at = ? WHERE id = ?""",
+            (
+                facts["runtime_status"],
+                int(facts["last_turn_terminal"]),
+                int(facts["helpers_terminal"]),
+                timestamp,
+                task["id"],
+            ),
+        )
+        return safely_idle
+
+    def _claim_lineage_task(self, task: dict[str, Any], run_id: int, role: str) -> None:
+        timestamp = utc_now()
+        with self.store.transaction() as connection:
+            column = f"{role}_task_id"
+            connection.execute(
+                f"""UPDATE runs SET {column} = NULL, updated_at = ?
+                    WHERE {column} = ? AND id != ?""",
+                (timestamp, task["id"], run_id),
+            )
+            connection.execute(
+                """UPDATE tasks SET pair_id = NULL WHERE pair_id = ? AND role = ?
+                   AND id != ?""",
+                (run_id, role, task["id"]),
+            )
+            connection.execute(
+                """UPDATE tasks SET pair_id = ?, state = 'idle',
+                       archive_eligible_at = NULL, archive_idle_turn_id = NULL,
+                       updated_at = ? WHERE id = ?""",
+                (run_id, timestamp, task["id"]),
+            )
+            connection.execute(
+                """UPDATE obligations SET state = 'canceled',
+                       detail = 'conversation reused by later lineage work', updated_at = ?
+                   WHERE kind = 'archive' AND target = ?
+                     AND state IN ('pending','failed')""",
+                (timestamp, task["native_thread_id"]),
+            )
         self.store.event(
-            "assignment_conversation_retired",
-            f"retired {task['role']} conversation before assignment {next_assignment_id}",
+            "lineage_conversation_reused",
+            f"reused {task['role']} conversation for run {run_id}",
             entity_type="task",
             entity_id=task["id"],
-            detail={
-                "next_assignment_id": next_assignment_id,
-                "pair_id": task["pair_id"],
-            },
+            detail={"run_id": run_id, "lineage_number": task["lineage_number"]},
         )
 
     async def _provision_task(
@@ -2107,6 +2266,7 @@ class Controller:
         effort: str,
         pair_id: int | None = None,
         succession_task_id: int | None = None,
+        lineage_number: int | None = None,
     ) -> dict[str, Any]:
         if role == "archon":
             recovered = await self._recover_archon_thread_start(
@@ -2114,7 +2274,16 @@ class Controller:
             )
             if recovered is not None:
                 return recovered
-        role_number, title = self.store.allocate_name(role, description)
+        if lineage_number is not None and role in {"executor", "overseer"}:
+            recovered = await self._recover_lineage_thread_start(role, lineage_number)
+            if recovered is not None:
+                return recovered
+            role_number, lineage_suffix, title = self.store.allocate_lineage_name(
+                role, lineage_number, description
+            )
+        else:
+            role_number, title = self.store.allocate_name(role, description)
+            lineage_suffix = ""
         inputs = {
             "role": role,
             "description": description,
@@ -2125,6 +2294,8 @@ class Controller:
             "effort": effort,
             "pair_id": pair_id,
             "role_number": role_number,
+            "lineage_number": lineage_number,
+            "lineage_suffix": lineage_suffix,
             "title": title,
             "succession_task_id": succession_task_id,
         }
@@ -2150,6 +2321,8 @@ class Controller:
                 pair_id=pair_id,
                 role_number=role_number,
                 title=title,
+                lineage_number=lineage_number,
+                lineage_suffix=lineage_suffix,
             )
             self.store.finish_operation_attempt(
                 operation,
@@ -2241,6 +2414,58 @@ class Controller:
             )
         return None
 
+    async def _recover_lineage_thread_start(
+        self, role: str, lineage_number: int
+    ) -> dict[str, Any] | None:
+        """Resolve a retained worker creation before allocating another suffix."""
+
+        operation = self.store.row(
+            """SELECT * FROM external_operations
+               WHERE kind = 'thread_start' AND target = ?
+                 AND state IN ('intent','sent','uncertain')
+                 AND json_extract(input_json, '$.lineage_number') = ?
+               ORDER BY id DESC LIMIT 1""",
+            (role, lineage_number),
+        )
+        if operation is None:
+            return None
+        if operation["state"] == "intent":
+            self.store.execute(
+                """UPDATE external_operations SET state = 'canceled',
+                   condition = 'confirmed unsent before lineage provisioning retry',
+                   updated_at = ? WHERE id = ?""",
+                (utc_now(), operation["id"]),
+            )
+            return None
+        if operation["state"] == "sent":
+            self.store.execute(
+                """UPDATE external_operations SET state = 'uncertain',
+                   condition = 'lineage provisioning resumed after dispatch',
+                   updated_at = ? WHERE id = ?""",
+                (utc_now(), operation["id"]),
+            )
+            operation = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+            assert operation is not None
+        if not operation["reconciliation_used"]:
+            await self._reconcile_thread_start(operation)
+        operation = self.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+        )
+        assert operation is not None
+        if operation["state"] == "complete" and operation["native_id"]:
+            return self.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = ?",
+                (operation["native_id"],),
+            )
+        if operation["state"] == "uncertain" and operation["reconciliation_used"]:
+            raise StoreError(
+                f"{role} lineage {lineage_number} thread creation operation "
+                f"{operation['id']} remains uncertain; resolve it before retrying"
+            )
+        return None
+
     async def _register_created_thread(
         self,
         operation: dict[str, Any],
@@ -2267,6 +2492,8 @@ class Controller:
             pair_id=inputs.get("pair_id"),
             role_number=inputs.get("role_number"),
             title=inputs["title"],
+            lineage_number=inputs.get("lineage_number"),
+            lineage_suffix=str(inputs.get("lineage_suffix") or ""),
         )
         await self.runtime.set_name(thread_id, inputs["title"])
         facts = thread_facts(thread)
@@ -3686,29 +3913,12 @@ class Controller:
                 "UPDATE runs SET state = 'completed', updated_at = ? WHERE id = ?",
                 (timestamp, assignment["run_id"]),
             )
-            run = (
-                self.store.row(
-                    "SELECT executor_task_id, overseer_task_id FROM runs WHERE id = ?",
-                    (assignment["run_id"],),
-                )
-                or {}
+            schedule_run_archival(
+                self.store.connection,
+                int(assignment["run_id"]),
+                timestamp,
+                execute=self.store.execute,
             )
-            for key in ("executor_task_id", "overseer_task_id"):
-                task_id = run.get(key)
-                if task_id:
-                    task = self.store.row(
-                        "SELECT native_thread_id FROM tasks WHERE id = ?", (task_id,)
-                    )
-                    if task:
-                        self.store.execute(
-                            "INSERT OR IGNORE INTO obligations(kind, identity, target, state, created_at, updated_at) VALUES ('archive', ?, ?, 'pending', ?, ?)",
-                            (
-                                str(task_id),
-                                task["native_thread_id"],
-                                timestamp,
-                                timestamp,
-                            ),
-                        )
 
     def _reconcile_assignment_completions(self) -> None:
         """Finish any delivery completion whose durable aggregate is incomplete."""
@@ -3789,6 +3999,26 @@ class Controller:
             return f"delivery is blocked by hold {hold['id']}"
         return None
 
+    def _lineage_has_open_work(self, task: dict[str, Any]) -> bool:
+        lineage_number = task.get("lineage_number")
+        if not isinstance(lineage_number, int):
+            return False
+        return (
+            self.store.row(
+                """SELECT 1 FROM bead_lineages lineage
+               WHERE lineage.lineage_number = ? AND (
+                 NOT EXISTS (
+                   SELECT 1 FROM assignments a WHERE a.bead_id = lineage.bead_id
+                 ) OR EXISTS (
+                   SELECT 1 FROM assignments a WHERE a.bead_id = lineage.bead_id
+                     AND a.stage NOT IN ('completed','canceled')
+                 )
+               ) LIMIT 1""",
+                (lineage_number,),
+            )
+            is not None
+        )
+
     async def _archive_ready_tasks(self) -> None:
         now = utc_now()
         for obligation in self.store.rows(
@@ -3803,6 +4033,19 @@ class Controller:
                 (obligation["target"],),
             )
             if task is None:
+                continue
+            if self._lineage_has_open_work(task):
+                self.store.execute(
+                    """UPDATE obligations SET state = 'canceled',
+                       detail = 'lineage has pending or active work', updated_at = ?
+                       WHERE id = ?""",
+                    (now, obligation["id"]),
+                )
+                self.store.execute(
+                    """UPDATE tasks SET archive_eligible_at = NULL,
+                       archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?""",
+                    (now, task["id"]),
+                )
                 continue
             if task["role"] in COMPLETION_ARCHIVE_ROLES:
                 thread = await self.runtime.read_thread(obligation["target"])
@@ -4169,7 +4412,7 @@ class Controller:
             self._update_readiness()
             return result
         if command == "intake":
-            self._require_registered_weaver(request.get("thread_id"))
+            weaver = self._require_registered_weaver(request.get("thread_id"))
             payload = request.get("task")
             if not isinstance(payload, dict):
                 raise StoreError("intake requires a task object")
@@ -4180,13 +4423,14 @@ class Controller:
                 self.store,
                 self.beads,
                 task_from_payload(payload, intake_key=request.get("intake_key")),
+                weaver_task_id=int(weaver["id"]) if weaver else None,
             )
             self._link_weaver_intake_workflow(
                 request.get("thread_id"), [result["bead_id"]]
             )
             return result
         if command == "intake_graph":
-            self._require_registered_weaver(request.get("thread_id"))
+            weaver = self._require_registered_weaver(request.get("thread_id"))
             graph = request.get("graph")
             if not isinstance(graph, dict):
                 raise StoreError("graph intake requires an object")
@@ -4198,6 +4442,7 @@ class Controller:
                 self.beads,
                 graph,
                 group_id=request.get("intake_key"),
+                weaver_task_id=int(weaver["id"]) if weaver else None,
             )
             self._link_weaver_intake_workflow(
                 request.get("thread_id"), list(result.get("bead_ids", []))
@@ -4225,11 +4470,11 @@ class Controller:
             return {"dispatch_enabled": True}
         raise StoreError(f"unknown controller command: {command!r}")
 
-    def _require_registered_weaver(self, thread_id: object) -> None:
+    def _require_registered_weaver(self, thread_id: object) -> dict[str, Any] | None:
         if not isinstance(thread_id, str):
-            return
+            return None
         authorized = self.store.row(
-            """SELECT 1 FROM tasks t JOIN actions a ON a.task_id = t.id
+            """SELECT t.* FROM tasks t JOIN actions a ON a.task_id = t.id
                WHERE t.native_thread_id = ? AND t.role = 'weaver'
                AND a.kind = 'weaver'
                AND a.state IN ('pending','starting','active','terminal','uncertain')""",
@@ -4239,6 +4484,7 @@ class Controller:
             raise StoreError(
                 "Codex task intake requires `fulcrum weaver register` first"
             )
+        return authorized
 
     def _link_weaver_intake_workflow(
         self, thread_id: object, bead_ids: list[str]
@@ -4335,6 +4581,12 @@ class Controller:
         self.store.execute(
             "UPDATE tasks SET state = 'active', archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
             (utc_now(), task["id"]),
+        )
+        self.store.execute(
+            """UPDATE obligations SET state = 'canceled',
+               detail = 'new Weaver turn retained the lineage conversation', updated_at = ?
+               WHERE kind = 'archive' AND target = ? AND state IN ('pending','failed')""",
+            (utc_now(), thread_id),
         )
         return {
             "thread_id": thread_id,

@@ -30,7 +30,7 @@ Fulcrum uses a few terms throughout its status output and conversations:
   workflow changes. It creates and messages managed Codex tasks, records state,
   dispatches work, retries recoverable operations, publishes results, delivers
   code, and archives finished conversations after they have remained idle for 10
-  minutes.
+  minutes and their Weaver lineage has no pending or active work.
 - **Tollgate** is the source-delivery and continuous-integration system. A
   **candidate** is its retained, immutable source submission. Tollgate certifies
   the candidate's checks and **promotes** it into the repository's configured
@@ -53,24 +53,46 @@ Fulcrum uses a few terms throughout its status output and conversations:
    and schedules pending implementation work. Approval creates one or more runs.
 3. **The controller prepares isolated execution.** When an approved run is
    eligible, Python reserves capacity, asks Tollgate for a fresh worktree, and
-   creates the run's managed Executor Codex task. Humans create neither Executor
-   nor Overseer tasks.
+   creates or reuses the Weaver lineage's managed Executor Codex task. Humans
+   create neither Executor nor Overseer tasks.
 4. **Executor implements.** The controller gives Executor the approved scope and
    isolated worktree. Executor investigates, edits, validates, commits, and
    submits evidence. The controller captures the exact commit as an immutable
    Tollgate candidate.
 5. **Overseer reviews independently.** When the retained candidate and evidence
-   are ready for review, the controller creates Overseer and gives it the exact
-   candidate, scope, and evidence. Overseer reads the source without editing the
-   Executor worktree. It approves candidates that may ship unchanged, optionally
+   are ready for review, the controller creates or reuses the lineage's Overseer
+   and gives it the exact candidate, scope, and evidence. Overseer reads the source
+   without editing the Executor worktree. It approves candidates that may ship
+   unchanged, optionally
    records nonblocking minor fixes, requests blocking changes, or identifies missing
    evidence. The controller routes outcomes and any required correction.
 6. **The controller and Tollgate deliver.** After approval, the controller asks
    Tollgate to certify and promote the candidate. Tollgate runs the configured
    checks, integrates the code into the repository's main/integration branch,
    synchronizes it as configured, and cleans up. The controller verifies those
-   results, closes the bead, advances the run, and archives the pair when the run
-   is complete.
+   results, closes the bead, advances the run, and schedules the pair for archival
+   once the whole lineage has no pending or active work.
+
+Each registered Weaver defines a durable numeric lineage. Its primary trio uses
+the same number in canonical names—for example `WVR0032`, `EXE0032`, and
+`OVR0032`. Direct intake and every member of graph intake retain that Weaver
+identity through Archon approval, runs, and assignments. Later assignments and
+follow-up turns reuse the original Executor and Overseer native conversations when
+they remain safely idle and compatible, including after controller restarts and
+prior run completion. New lineage work cancels pending completion archival.
+After the final pending or active lineage assignment closes, Fulcrum re-arms those
+obligations for every eligible conversation in the lineage and applies the normal
+idle delay.
+
+When a same-role conversation cannot safely be reused because it is archived,
+retired, unavailable, active in incompatible work, nonterminal, or configured for
+different project/model authority, Fulcrum creates a stable overflow identity in
+the same lineage: `EXE0032B`, then `EXE0032C` (and likewise for Overseer). The
+unsuffixed primary is never renamed, different Weavers never share workers, and
+persisted provisioning intent makes retries and reconciliation reuse the same
+chosen suffix instead of creating duplicates.
+Existing pre-lineage canonical names, including archived tasks, also reserve their
+visible identity so mixed lineage and unlineaged provisioning remains collision-free.
 
 An Overseer approval is not itself a merge. Code reaches the main/integration
 branch only after Tollgate certifies and promotes the exact approved candidate.
@@ -89,8 +111,8 @@ resulting findings for implementation nor bypasses normal capacity controls.
 | --- | --- | --- | --- |
 | **Archon** | Chooses which pending outcomes to approve, their priority, run grouping, capacity, holds, and responses to unresolved exceptions. | Setup creates the current Archon. The controller wakes it with pending proposals or material updates; a human can locate its long-lived conversation for strategic direction. | Does not implement code, run builds, dispatch agents, or write operational records. |
 | **Weaver** | Clarifies human intent and authors an implementation-ready bead, task graph, or substantial plan. | A human creates a Codex task and registers it as Weaver; the returned instructions guide direct intake or Plan Mode. | Does not approve or schedule the bead, implement it, or manage publication, retries, or archival. |
-| **Executor** | Decides how to implement the exact approved scope, which proportionate checks to run, and how to make bounded in-scope corrections. | The controller creates and starts it when an Archon-approved assignment is eligible. | Does not choose its own scope, create or promote a Tollgate candidate, push its worktree branch, review itself, or write Fulcrum's operational state. |
-| **Overseer** | Independently decides whether the exact candidate satisfies scope; it owns blocking findings, nonblocking minor fixes, approval, and any narrow repair permission. | The controller starts it after Executor finishes and the immutable candidate and evidence are available. | Does not edit source, build in Executor's worktree, contact Executor directly, certify or promote code, or perform delivery. |
+| **Executor** | Decides how to implement the exact approved scope, which proportionate checks to run, and how to make bounded in-scope corrections. | The controller reuses the Weaver lineage's safely idle Executor, or creates its next deterministic overflow identity, when an approved assignment is eligible. | Does not choose its own scope, create or promote a Tollgate candidate, push its worktree branch, review itself, or write Fulcrum's operational state. |
+| **Overseer** | Independently decides whether the exact candidate satisfies scope; it owns blocking findings, nonblocking minor fixes, approval, and any narrow repair permission. | The controller reuses the lineage's safely idle Overseer, or creates its next deterministic overflow identity, after Executor finishes and the immutable candidate and evidence are available. | Does not edit source, build in Executor's worktree, contact Executor directly, certify or promote code, or perform delivery. |
 | **Sage** | Reviews **workflow effectiveness**: failures, wasted effort, handoff friction, and evidence-backed process improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not implement findings, approve them for implementation, set its own cadence, schedule interviews, or publish its own report and issues. |
 | **Inquisitor** | Reviews **project architecture** across the selected codebase and proposes evidence-backed structural improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not edit product source, authorize implementation or promotion, or publish its own report and issues. |
 
@@ -289,11 +311,12 @@ for strategy; optionally request specialist reviews; and inspect or recover the
 system with `status`, `doctor`, and `reboot`.
 
 **Fulcrum does automatically:** publish intake to Beads; notify Archon; start only
-Archon-approved implementation; enforce capacity and holds; create Executor and
-Overseer tasks and isolated worktrees; route implementation, review, and bounded
-repairs; retain and retry external operations; publish specialist reports and
-findings; drive Tollgate delivery; close beads; and archive completed managed
-conversations after 10 continuous minutes of confirmed native-thread idleness.
+Archon-approved implementation; enforce capacity and holds; reuse or provision
+lineage Executor and Overseer tasks and create isolated worktrees; route
+implementation, review, and bounded repairs; retain and retry external operations;
+publish specialist reports and findings; drive Tollgate delivery; close beads; and
+archive completed managed conversations after 10 continuous minutes of confirmed
+native-thread idleness when their lineage has no pending or active work.
 
 Fulcrum does not automatically invent approval. Pending work waits for Archon,
 and a reviewed candidate waits for successful Tollgate certification and
