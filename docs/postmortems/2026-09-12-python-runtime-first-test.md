@@ -81,6 +81,25 @@ The 21 failed shell commands in the implementation transcript should not be equa
 18. The fallback task appears to have died without affecting process health or emitting a durable failure. There was no task-level supervision or stale-reconciliation health check.
 19. Overseer 0002's provisioned thread has an invalid history lineage with a missing source rollout, and Fulcrum has no recovery path for it.
 20. The UI-visible `fulcrum-1` workspace/project cannot be attributed from durable audit data.
+21. A successful same-key intake retry did not resolve or supersede the failed external operation and publication obligation from the first attempt, leaving status permanently failed after recovery.
+22. Brain publication assumed the retained local checkout could fast-forward its remote. Divergent reset-derived and remote history caused a push rejection and left no controller-owned, non-destructive recovery path.
+
+## Beads traceability
+
+The brain contained eight open `project:fulcrum` Beads created during this incident window. Beads records all eight with issue type `task`, so their classification below is based on their stated problem and outcome rather than the native issue type. This is the complete inventory at capture time.
+
+| Bead | Classification | Incident relationship and disposition at capture |
+| --- | --- | --- |
+| `brain-u1y` — Put the Fulcrum CLI on PATH during setup | Incident defect | Captures failure 7. Assignment 0001 produced a corrected Tollgate candidate after Overseer 0001 requested changes, but its second review action remained pending and undispatched. |
+| `brain-ouv` — Give Fulcrum services a complete executable PATH | Incident defect | Captures failure 7 at the launchd boundary. Assignment 0003 was approved and actually promoted, synchronized, and cleaned by Tollgate; Fulcrum misclassified the result as failed and left the assignment in recovery. |
+| `brain-5l2` — Reconcile successful intake retries with failed publication records | Incident defect | Captures failure 21. Assignment 0002 committed and pushed a fix, but the executor did not create a Tollgate candidate. Candidate capture failed, no overseer ran, and the reservation remained active. |
+| `brain-uj7` — Make brain publication safe across divergent local and remote history | Incident defect | Captures failure 22. Weaver encountered the defect while publishing the Vizier plan and used a temporary-worktree/cherry-pick workaround. The Bead was created, but its Archon proposal was left in the frozen batch. |
+| `brain-cn7` — Keep successful intake responses independent of Archon availability | Incident defect | Captures failures 15 and 16. The Bead itself was durably created, but the CLI returned failure when the subsequent Archon delivery tick could not start a turn. Its proposal remained pending for later delivery. |
+| `brain-rl8` — Add the singleton Vizier identity and setup lifecycle | Planned capability, not an incident defect | Part one of the approved Vizier design. It was published after the controller had wedged and remained `activation:pending`; it is evidence of retained work, not a cause counted in this postmortem. |
+| `brain-2tt` — Add Vizier advisory intake, Weaver handoff, and summary memory | Planned capability, not an incident defect | Part two of the approved Vizier design. It remained `activation:pending` and was not dispatched during the incident. |
+| `brain-ue2` — Add the Vizier entrypoint and on-demand global briefing | Planned capability, not an incident defect | Part three of the approved Vizier design. It remained `activation:pending` and was not dispatched during the incident. |
+
+The first three defect Beads became the three executor assignments discussed in the timeline. The other two defect Beads and all three Vizier capability Beads were published later by Weaver but could not progress through Archon after the proposal-delivery path froze. Thus every Fulcrum Bead from the incident is accounted for either as an attempted repair or as queued product work; none establishes that the deadlocked controller recovered.
 
 ## Root cause
 
