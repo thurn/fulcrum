@@ -203,6 +203,7 @@ class CodexRuntime:
         self,
         *,
         cwd: str,
+        workspace_root: str,
         model: str,
         project_id: str | None,
         base_instructions: str,
@@ -213,7 +214,7 @@ class CodexRuntime:
             "model": model,
             "projectId": project_id,
             "baseInstructions": base_instructions,
-            "runtimeWorkspaceRoots": [cwd],
+            "runtimeWorkspaceRoots": [workspace_root],
         }
         if permissions is not None:
             params["permissions"] = permissions
@@ -294,13 +295,20 @@ class CodexRuntime:
         )
 
     async def configure_thread(
-        self, thread_id: str, *, cwd: str, model: str, effort: str
+        self,
+        thread_id: str,
+        *,
+        cwd: str,
+        workspace_root: str,
+        model: str,
+        effort: str,
     ) -> None:
         await self.request(
             "thread/settings/update",
             {
                 "threadId": thread_id,
                 "cwd": cwd,
+                "runtimeWorkspaceRoots": [workspace_root],
                 "model": model,
                 "effort": effort,
                 "summary": "concise",
@@ -321,6 +329,7 @@ class CodexRuntime:
         prompt: str,
         *,
         cwd: str,
+        workspace_root: str,
         model: str,
         effort: str,
         correlation: str | None = None,
@@ -328,6 +337,7 @@ class CodexRuntime:
         await self.configure_thread(
             thread_id,
             cwd=cwd,
+            workspace_root=workspace_root,
             model=model,
             effort=effort,
         )
@@ -337,6 +347,7 @@ class CodexRuntime:
                 "threadId": thread_id,
                 "input": [{"type": "text", "text": prompt}],
                 "cwd": cwd,
+                "runtimeWorkspaceRoots": [workspace_root],
                 "model": model,
                 "effort": effort,
                 "summary": "concise",

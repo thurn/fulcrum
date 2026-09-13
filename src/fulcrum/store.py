@@ -571,6 +571,28 @@ class Store:
         self.connection.execute(
             "UPDATE external_operations SET correlation_id = 'operation-' || id WHERE correlation_id IS NULL"
         )
+        timestamp = utc_now()
+        self.connection.execute(
+            """UPDATE external_operations
+               SET state = 'failed',
+                   condition = 'superseded duplicate candidate operation',
+                   updated_at = ?
+               WHERE kind = 'tollgate_candidate_create'
+                 AND state IN ('intent','sent','uncertain')
+                 AND id NOT IN (
+                   SELECT MAX(id) FROM external_operations
+                   WHERE kind = 'tollgate_candidate_create'
+                     AND state IN ('intent','sent','uncertain')
+                   GROUP BY kind, target
+                 )""",
+            (timestamp,),
+        )
+        self.connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS one_current_tollgate_candidate_operation
+               ON external_operations(kind, target)
+               WHERE kind = 'tollgate_candidate_create'
+                 AND state IN ('intent','sent','uncertain')"""
+        )
         assignment_columns = {
             str(row[1])
             for row in self.connection.execute("PRAGMA table_info(assignments)")

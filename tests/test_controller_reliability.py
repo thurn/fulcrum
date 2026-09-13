@@ -372,6 +372,71 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retained["executor_task_id"], self.executor["id"])
         self.assertEqual(retained["overseer_task_id"], self.overseer["id"])
 
+    async def test_overseer_is_provisioned_only_when_review_starts(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """INSERT INTO beads VALUES (
+                   'p-lazy','lazy','p','Lazy review','Scope','pending',
+                   'sol','high','sol','high','default',NULL,NULL,'[]','complete',?,?
+               )""",
+            (now, now),
+        )
+        run = self.controller.store.execute(
+            """INSERT INTO runs(project_id, authority, state, created_at, updated_at)
+               VALUES ('p','test','approved',?,?)""",
+            (now, now),
+        )
+        assignment_cursor = self.controller.store.execute(
+            """INSERT INTO assignments(
+                   run_id, bead_id, stage, scope_snapshot, worktree_path,
+                   created_at, updated_at
+               ) VALUES (?, 'p-lazy', 'preparing', 'Scope', ?, ?, ?)""",
+            (run.lastrowid, str(self.worktree), now, now),
+        )
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a
+               JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+            (assignment_cursor.lastrowid,),
+        )
+        executor = self.controller.store.register_task(
+            native_thread_id="lazy-executor",
+            role="executor",
+            description="Lazy review",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            pair_id=int(run.lastrowid),
+        )
+        overseer = self.controller.store.register_task(
+            native_thread_id="lazy-overseer",
+            role="overseer",
+            description="Lazy review",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            pair_id=int(run.lastrowid),
+        )
+        provision = AsyncMock(side_effect=[executor, overseer])
+        with patch.object(self.controller, "_provision_task", new=provision):
+            await self.controller._ensure_pair(assignment)
+            retained = self.controller.store.row(
+                "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+            )
+            self.assertEqual(retained["executor_task_id"], executor["id"])
+            self.assertIsNone(retained["overseer_task_id"])
+            provision.assert_awaited_once()
+            self.assertEqual(provision.await_args.kwargs["cwd"], str(self.worktree))
+
+            assignment.update(retained)
+            await self.controller._ensure_pair(assignment, include_overseer=True)
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (assignment["id"],)
+        )
+        self.assertEqual(retained["overseer_task_id"], overseer["id"])
+        self.assertEqual(provision.await_count, 2)
+        self.assertEqual(provision.await_args.kwargs["role"], "overseer")
+        self.assertEqual(provision.await_args.kwargs["cwd"], str(self.worktree))
+
     async def test_refreshed_instructions_retain_scope_candidate_and_handoffs(
         self,
     ) -> None:

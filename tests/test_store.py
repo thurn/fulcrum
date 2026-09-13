@@ -239,6 +239,34 @@ class StoreTest(unittest.TestCase):
         )
         self.assertNotIn("outcome_payload = NEW.content_json", trigger["sql"])
 
+    def test_open_collapses_duplicate_unresolved_candidate_operations(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.store.execute("DROP INDEX one_current_tollgate_candidate_operation")
+        for _ in range(3):
+            self.store.execute(
+                """INSERT INTO external_operations(
+                       kind, target, input_json, state, correlation_id,
+                       created_at, updated_at
+                   ) VALUES ('tollgate_candidate_create', '7', '{}', 'uncertain',
+                             'legacy-' || ?, ?, ?)""",
+                (_, now, now),
+            )
+        self.store.close()
+        self.store = Store(Path(self.temporary.name) / "state.sqlite3")
+        unresolved = self.store.rows("""SELECT * FROM external_operations
+               WHERE kind = 'tollgate_candidate_create'
+                 AND state IN ('intent','sent','uncertain')""")
+        self.assertEqual(len(unresolved), 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.execute(
+                """INSERT INTO external_operations(
+                       kind, target, input_json, state, correlation_id,
+                       created_at, updated_at
+                   ) VALUES ('tollgate_candidate_create', '7', '{}', 'intent',
+                             'new', ?, ?)""",
+                (now, now),
+            )
+
     def test_existing_recovery_without_progress_is_migrated_to_a_hold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy.db"

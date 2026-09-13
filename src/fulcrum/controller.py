@@ -970,11 +970,17 @@ class Controller:
             self.tollgate.status, assignment["tollgate_repo_id"], None
         )
         inputs = json.loads(operation["input_json"])
+        revision = inputs.get("revision")
+        source_oid = (
+            revision
+            if isinstance(revision, str) and revision != "HEAD"
+            else _worktree_head(inputs.get("worktree_path"))
+        )
         candidate = _find_candidate(
             observed,
             inputs.get("worktree_path"),
             exclude_id=inputs.get("predecessor_candidate_id"),
-            source_oid=inputs.get("revision"),
+            source_oid=source_oid,
         )
         if candidate is None or not isinstance(candidate.get("id"), str):
             condition = (
@@ -1289,24 +1295,12 @@ class Controller:
         assignment["stage"] = "implementing"
         await self._start_assignment_action(assignment)
 
-    async def _ensure_pair(self, assignment: dict[str, Any]) -> None:
+    async def _ensure_pair(
+        self, assignment: dict[str, Any], *, include_overseer: bool = False
+    ) -> None:
         run = self.store.row("SELECT * FROM runs WHERE id = ?", (assignment["run_id"],))
         if run is None:
             raise StoreError("assignment run disappeared")
-        if run.get("executor_task_id") and run.get("overseer_task_id"):
-            self.store.execute(
-                """UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ?
-                   WHERE id = ?""",
-                (
-                    run["executor_task_id"],
-                    run["overseer_task_id"],
-                    utc_now(),
-                    assignment["id"],
-                ),
-            )
-            assignment["executor_task_id"] = run["executor_task_id"]
-            assignment["overseer_task_id"] = run["overseer_task_id"]
-            return
         bead = self.store.row(
             "SELECT * FROM beads WHERE bead_id = ?", (assignment["bead_id"],)
         )
@@ -1315,9 +1309,12 @@ class Controller:
         )
         if bead is None or project is None:
             raise StoreError("assignment sources disappeared")
-        executor = self.store.row(
-            "SELECT * FROM tasks WHERE pair_id = ? AND role = 'executor' ORDER BY id DESC LIMIT 1",
-            (assignment["run_id"],),
+        executor = (
+            self.store.row(
+                "SELECT * FROM tasks WHERE id = ?", (run["executor_task_id"],)
+            )
+            if run.get("executor_task_id")
+            else None
         ) or await self._provision_task(
             role="executor",
             description=bead["title"],
@@ -1325,30 +1322,46 @@ class Controller:
             model=bead["executor_model"],
             effort=bead["executor_reasoning_effort"],
             pair_id=int(assignment["run_id"]),
+            cwd=str(assignment["worktree_path"]),
         )
-        overseer = self.store.row(
-            "SELECT * FROM tasks WHERE pair_id = ? AND role = 'overseer' ORDER BY id DESC LIMIT 1",
-            (assignment["run_id"],),
-        ) or await self._provision_task(
-            role="overseer",
-            description=bead["title"],
-            project=project,
-            model=bead["overseer_model"],
-            effort=bead["overseer_reasoning_effort"],
-            pair_id=int(assignment["run_id"]),
+        overseer = (
+            self.store.row(
+                "SELECT * FROM tasks WHERE id = ?", (run["overseer_task_id"],)
+            )
+            if run.get("overseer_task_id")
+            else None
         )
-        with self.store.transaction() as connection:
-            connection.execute(
-                "UPDATE runs SET executor_task_id = ?, overseer_task_id = ?, state = 'active', updated_at = ? WHERE id = ?",
-                (executor["id"], overseer["id"], utc_now(), assignment["run_id"]),
+        if include_overseer and overseer is None:
+            overseer = await self._provision_task(
+                role="overseer",
+                description=bead["title"],
+                project=project,
+                model=bead["overseer_model"],
+                effort=bead["overseer_reasoning_effort"],
+                pair_id=int(assignment["run_id"]),
+                cwd=str(assignment["worktree_path"]),
             )
-            connection.execute(
-                """UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ?
-                   WHERE run_id = ?""",
-                (executor["id"], overseer["id"], utc_now(), assignment["run_id"]),
-            )
+        self.store.execute(
+            "UPDATE runs SET executor_task_id = ?, overseer_task_id = ?, state = 'active', updated_at = ? WHERE id = ?",
+            (
+                executor["id"],
+                overseer["id"] if overseer else None,
+                utc_now(),
+                assignment["run_id"],
+            ),
+        )
+        self.store.execute(
+            """UPDATE assignments SET executor_task_id = ?, overseer_task_id = ?, updated_at = ?
+               WHERE run_id = ?""",
+            (
+                executor["id"],
+                overseer["id"] if overseer else None,
+                utc_now(),
+                assignment["run_id"],
+            ),
+        )
         assignment["executor_task_id"] = executor["id"]
-        assignment["overseer_task_id"] = overseer["id"]
+        assignment["overseer_task_id"] = overseer["id"] if overseer else None
 
     async def _provision_task(
         self,
@@ -1359,6 +1372,7 @@ class Controller:
         model: str,
         effort: str,
         pair_id: int | None = None,
+        cwd: str | None = None,
     ) -> dict[str, Any]:
         role_number, title = self.store.allocate_name(role, description)
         inputs = {
@@ -1366,7 +1380,7 @@ class Controller:
             "description": description,
             "project_id": project["codex_project_id"],
             "local_project_id": project["project_id"],
-            "cwd": project["repo_path"],
+            "cwd": cwd or project["repo_path"],
             "model": model,
             "effort": effort,
             "pair_id": pair_id,
@@ -1378,7 +1392,8 @@ class Controller:
         started = time.monotonic()
         try:
             result = await self.runtime.create_thread(
-                cwd=project["repo_path"],
+                cwd=inputs["cwd"],
+                workspace_root=project["repo_path"],
                 model=model,
                 project_id=project["codex_project_id"],
                 base_instructions=role_instructions(
@@ -1505,6 +1520,8 @@ class Controller:
             if kind in {"implement", "correct"}
             else "overseer_task_id"
         )
+        if kind == "review" and not assignment.get("overseer_task_id"):
+            await self._ensure_pair(assignment, include_overseer=True)
         task = self.store.row(
             "SELECT * FROM tasks WHERE id = ?", (assignment[task_key],)
         )
@@ -1787,15 +1804,15 @@ class Controller:
             facts = await self._refresh_task(task)
         if not facts["can_start"]:
             raise StoreError(f"task {task['title']} is not ready for a new turn")
+        project = self.store.row(
+            "SELECT repo_path FROM projects WHERE project_id = ?",
+            (task["project_id"],),
+        )
+        if project is None:
+            raise StoreError("action project is missing")
         if assignment and action["kind"] in {"implement", "correct"}:
             cwd = assignment["worktree_path"]
         else:
-            project = self.store.row(
-                "SELECT repo_path FROM projects WHERE project_id = ?",
-                (task["project_id"],),
-            )
-            if project is None:
-                raise StoreError("action project is missing")
             cwd = project["repo_path"]
         prompt = action_notice(action)
         operation = self.store.create_operation(
@@ -1818,6 +1835,7 @@ class Controller:
                 task["native_thread_id"],
                 prompt,
                 cwd=cwd,
+                workspace_root=str(project["repo_path"]),
                 model=task["model"],
                 effort=task["reasoning_effort"],
                 correlation=f"fulcrum-operation-{operation}",
@@ -1902,6 +1920,25 @@ class Controller:
             source_oid=source_oid,
         )
         if candidate is None:
+            existing = self.store.row(
+                """SELECT * FROM external_operations
+                   WHERE kind = 'tollgate_candidate_create' AND target = ?
+                     AND state IN ('intent','sent','uncertain')
+                   ORDER BY id DESC LIMIT 1""",
+                (str(assignment_id),),
+            )
+            if existing is not None:
+                if existing["state"] == "uncertain":
+                    await self._reconcile_tollgate_candidate(existing)
+                refreshed = self.store.row(
+                    "SELECT candidate_id, source_oid FROM assignments WHERE id = ?",
+                    (assignment_id,),
+                )
+                return bool(
+                    refreshed
+                    and refreshed["candidate_id"]
+                    and refreshed["source_oid"] == source_oid
+                )
             operation = self.store.create_operation(
                 "tollgate_candidate_create",
                 str(assignment_id),
@@ -2768,6 +2805,7 @@ class Controller:
         try:
             result = await self.runtime.create_thread(
                 cwd=project["repo_path"],
+                workspace_root=project["repo_path"],
                 model=self.config.archon_model or "gpt-5.6-sol",
                 project_id=project["codex_project_id"],
                 base_instructions="Disposable Fulcrum installation visibility check. Do not start work.",
@@ -2782,6 +2820,7 @@ class Controller:
                 thread_id,
                 "Reply with exactly: Fulcrum runtime check passed. Do not use tools or modify files.",
                 cwd=project["repo_path"],
+                workspace_root=project["repo_path"],
                 model=self.config.archon_model or "gpt-5.6-sol",
                 effort=self.config.archon_reasoning_effort or "medium",
                 correlation=f"fulcrum-operation-{operation}",

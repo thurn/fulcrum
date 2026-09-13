@@ -110,11 +110,19 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
             )
             created = await runtime.create_thread(
                 cwd="/tmp",
+                workspace_root="/workspace",
                 model="sol",
                 project_id="project",
                 base_instructions="role",
             )
             self.assertEqual(created["thread"]["id"], "thread-1")
+            create_request = next(
+                item for item in received if item.get("method") == "thread/start"
+            )
+            self.assertEqual(create_request["params"]["projectId"], "project")
+            self.assertEqual(
+                create_request["params"]["runtimeWorkspaceRoots"], ["/workspace"]
+            )
             await runtime.set_name("thread-1", "Canonical")
             self.assertEqual(
                 (await runtime.read_thread("thread-1"))["name"], "Canonical"
@@ -123,6 +131,7 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 "thread-1",
                 "brief",
                 cwd="/tmp",
+                workspace_root="/workspace",
                 model="sol",
                 effort="high",
                 correlation="operation-1",
@@ -138,6 +147,7 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "threadId": "thread-1",
                     "cwd": "/tmp",
+                    "runtimeWorkspaceRoots": ["/workspace"],
                     "model": "sol",
                     "effort": "high",
                     "summary": "concise",
@@ -155,6 +165,9 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 item for item in received if item.get("method") == "turn/start"
             )
             self.assertEqual(turn_request["params"]["summary"], "concise")
+            self.assertEqual(
+                turn_request["params"]["runtimeWorkspaceRoots"], ["/workspace"]
+            )
             self.assertLess(
                 received.index(settings_request), received.index(turn_request)
             )

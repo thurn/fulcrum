@@ -1,5 +1,5 @@
 # Python environments and generated package output
-.venv/
+.venv
 .venv-*/
 build/
 dist/
