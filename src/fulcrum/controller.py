@@ -3039,9 +3039,16 @@ class Controller:
                 entity_id=correlation_id,
                 detail={"correlation_id": correlation_id, "request": payload},
             )
-            async with self.mutation_lock:
+            if payload.get("command") == "status":
+                # Status is a synchronous projection of the authoritative store.
+                # It cannot interleave with another coroutine while its queries
+                # run, and must remain observable while a native effect is
+                # awaiting completion under mutation_lock.
                 result = await self.handle_request(payload)
-            self.advance_requested.set()
+            else:
+                async with self.mutation_lock:
+                    result = await self.handle_request(payload)
+                self.advance_requested.set()
             response = {"ok": True, "data": result}
             self.store.event(
                 "command_succeeded",

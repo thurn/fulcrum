@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -20,6 +22,7 @@ from fulcrum.controller import (
     _find_candidate,
 )
 from fulcrum.kernel import LeaseRequest, acquire_lease, invariant_violations
+from fulcrum.ipc import request
 from fulcrum.lifecycle import (
     accept_finish,
     apply_archon_decisions,
@@ -110,6 +113,28 @@ class FakeSuccessfulTollgate:
                 }
             },
         }
+
+
+class BlockingApprovalTollgate(FakeSuccessfulTollgate):
+    """Approval fake that stays blocked until released by the test.
+
+    The ten-second timeout is only a test deadlock guard. In the successful path,
+    the test observes status and releases the fake while approval is still in
+    flight.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.approval_started = threading.Event()
+        self.release_approval = threading.Event()
+
+    def approve(self, repository: str, candidate: str) -> dict[str, Any]:
+        self.approval_started.set()
+        if not self.release_approval.wait(timeout=10):
+            raise TimeoutError(
+                "test did not release blocked approval within 10 seconds"
+            )
+        return super().approve(repository, candidate)
 
 
 class FakeTerminalTollgate:
@@ -2207,6 +2232,121 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             {"kind": "reconciliation_started", "count": 225},
             evidence["event_counts"],
         )
+
+    async def test_status_remains_available_during_blocked_approval_without_advancing(
+        self,
+    ) -> None:
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'delivering',
+               candidate_id = 'candidate-1', mandate_candidate_id = 'candidate-1',
+               mandate_scope = scope_snapshot WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        self.controller.store.execute(
+            """UPDATE tasks SET runtime_status = 'idle', last_turn_terminal = 1,
+               helpers_terminal = 1 WHERE id IN (?, ?)""",
+            (self.executor["id"], self.overseer["id"]),
+        )
+        tollgate = BlockingApprovalTollgate()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        self.controller.beads = FakeBeads()  # type: ignore[assignment]
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.read_thread.return_value = {
+            "status": {"type": "idle"},
+            "turns": [],
+        }
+        self.controller.runtime = runtime
+
+        advance_count = 0
+        second_advance_completed = asyncio.Event()
+
+        async def deliver_once() -> None:
+            nonlocal advance_count
+            advance_count += 1
+            assignment = self.controller.store.row(
+                """SELECT a.*, r.project_id FROM assignments a
+                   JOIN runs r ON r.id = a.run_id
+                   WHERE a.id = ? AND a.stage = 'delivering'""",
+                (self.assignment["id"],),
+            )
+            if assignment is not None:
+                await self.controller._deliver(assignment)
+            if advance_count == 2:
+                second_advance_completed.set()
+
+        reconcile = AsyncMock()
+        worker = asyncio.create_task(self.controller._advancement_loop())
+        self.paths.socket.unlink(missing_ok=True)
+        server = await asyncio.start_unix_server(
+            self.controller._handle_client,
+            path=self.paths.socket,
+            limit=16 * 1024 * 1024,
+        )
+        try:
+            with (
+                patch.object(self.controller, "reconcile", new=reconcile),
+                patch.object(self.controller, "advance", new=deliver_once),
+            ):
+                self.controller.advance_requested.set()
+                approval_started = await asyncio.to_thread(
+                    tollgate.approval_started.wait, 1
+                )
+                self.assertTrue(approval_started)
+                self.assertTrue(self.controller.mutation_lock.locked())
+                self.assertFalse(self.controller.advance_requested.is_set())
+
+                boundaries_before = self.controller.store.row(
+                    """SELECT COUNT(*) AS count FROM events
+                       WHERE kind IN ('reconciliation_started',
+                                      'reconciliation_completed')"""
+                )["count"]
+                started = time.monotonic()
+                response = await request(
+                    self.paths.socket,
+                    {"command": "status", "events": 20},
+                    timeout=1,
+                )
+                elapsed = time.monotonic() - started
+
+                self.assertLess(elapsed, 1)
+                operations = response["data"]["operations"]
+                self.assertEqual(len(operations), 1)
+                self.assertEqual(operations[0]["kind"], "tollgate_approve")
+                self.assertEqual(operations[0]["state"], "sent")
+                self.assertEqual(operations[0]["attempt_count"], 1)
+                self.assertFalse(self.controller.advance_requested.is_set())
+                boundaries_after = self.controller.store.row(
+                    """SELECT COUNT(*) AS count FROM events
+                       WHERE kind IN ('reconciliation_started',
+                                      'reconciliation_completed')"""
+                )["count"]
+                self.assertEqual(boundaries_after, boundaries_before)
+
+                # Signals coalesce while the claimed attempt is in flight. The
+                # follow-up pass observes completed state instead of approving it
+                # a second time.
+                self.controller.advance_requested.set()
+                self.controller.advance_requested.set()
+                tollgate.release_approval.set()
+                await asyncio.wait_for(second_advance_completed.wait(), timeout=1)
+                self.assertEqual(advance_count, 2)
+                self.assertEqual(tollgate.approved, ["candidate-1"])
+                self.assertEqual(
+                    self.controller.store.row(
+                        """SELECT COUNT(*) AS count FROM operation_attempts oa
+                           JOIN external_operations eo ON eo.id = oa.operation_id
+                           WHERE eo.kind = 'tollgate_approve'"""
+                    )["count"],
+                    1,
+                )
+        finally:
+            tollgate.release_approval.set()
+            server.close()
+            await server.wait_closed()
+            self.paths.socket.unlink(missing_ok=True)
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
     async def test_refresh_repairs_idle_runtime_without_current_action(self) -> None:
         self.controller.store.execute(
