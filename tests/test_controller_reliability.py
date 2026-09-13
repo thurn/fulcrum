@@ -649,6 +649,44 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fulcrum instructions", text)
         self.assertNotIn("Exact approved proposal", text)
 
+    async def test_archived_task_ignores_late_runtime_events(self) -> None:
+        self.controller.store.execute(
+            "UPDATE tasks SET state = 'archived', archived = 1 WHERE id = ?",
+            (self.executor["id"],),
+        )
+
+        await self.controller._handle_runtime_event(
+            "turn/started",
+            {
+                "threadId": "executor",
+                "turn": {"id": "late-turn", "status": "inProgress"},
+            },
+        )
+
+        retained = self.controller.store.row(
+            "SELECT state, archived FROM tasks WHERE id = ?", (self.executor["id"],)
+        )
+        self.assertEqual(retained, {"state": "archived", "archived": 1})
+
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "executor",
+            "name": self.executor["title"],
+            "status": {"type": "notLoaded"},
+            "archived": False,
+            "turns": [],
+        }
+        self.controller.runtime = runtime
+        await self.controller._refresh_task(
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE id = ?", (self.executor["id"],)
+            )
+        )
+        retained = self.controller.store.row(
+            "SELECT state, archived FROM tasks WHERE id = ?", (self.executor["id"],)
+        )
+        self.assertEqual(retained, {"state": "archived", "archived": 1})
+
     async def test_repair_context_exposes_permission_and_retained_diagnosis(
         self,
     ) -> None:

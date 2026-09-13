@@ -312,6 +312,8 @@ class Controller:
         )
         if task is None:
             return
+        if task["archived"] and method not in {"thread/archived", "thread/unarchived"}:
+            return
         timestamp = utc_now()
         if method == "turn/started":
             turn = params.get("turn")
@@ -393,7 +395,7 @@ class Controller:
                 facts["runtime_status"],
                 int(facts["last_turn_terminal"]),
                 int(facts["helpers_terminal"]),
-                int(facts["archived"]),
+                int(bool(task["archived"]) or facts["archived"]),
                 utc_now(),
                 task["id"],
             ),
