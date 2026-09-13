@@ -827,6 +827,19 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(relevant)
 
+    async def test_unchanged_runtime_status_does_not_request_advance(self) -> None:
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'active' WHERE id = ?",
+            (self.executor["id"],),
+        )
+
+        relevant = await self.controller._handle_runtime_event(
+            "thread/status/changed",
+            {"threadId": "executor", "status": {"type": "active"}},
+        )
+
+        self.assertFalse(relevant)
+
     async def test_refresh_repairs_idle_runtime_without_current_action(self) -> None:
         self.controller.store.execute(
             "UPDATE tasks SET state = 'active' WHERE id = ?", (self.executor["id"],)

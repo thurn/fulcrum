@@ -345,6 +345,8 @@ class Controller:
             status = (
                 raw_status.get("type") if isinstance(raw_status, dict) else raw_status
             )
+            if task["runtime_status"] == status:
+                return False
             self.store.execute(
                 "UPDATE tasks SET runtime_status = ?, updated_at = ? WHERE id = ?",
                 (status, timestamp, task["id"]),
