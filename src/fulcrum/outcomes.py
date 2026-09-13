@@ -367,8 +367,10 @@ def finish_examples(action_kind: str) -> dict[str, Any]:
                 "findings": [
                     {
                         "identity": "review-handoff-loses-evidence",
+                        "title": "Focused remediation title",
                         "problem": "demonstrated problem",
                         "evidence": "concrete evidence",
+                        "implementation_scope": "bounded implementation change",
                         "expected_benefit": "specific expected improvement",
                         "project": "project-id",
                         "acceptance_criteria": "testable completion condition",

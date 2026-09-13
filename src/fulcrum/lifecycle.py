@@ -124,6 +124,17 @@ def _review_escalation_synthesis(
     }
 
 
+def _validate_direct_sage_findings(findings: list[dict[str, Any]]) -> None:
+    for finding in findings:
+        for field in ("title", "implementation_scope"):
+            if not isinstance(finding.get(field), str) or not finding[field].strip():
+                raise StoreError(
+                    f"each direct-item Sage finding requires nonempty {field}"
+                )
+        if finding.get("activation", "pending") != "pending":
+            raise StoreError("direct-item Sage findings must use pending activation")
+
+
 def accept_finish(
     store: Store,
     *,
@@ -165,8 +176,24 @@ def accept_finish(
         raise StoreError("this action already has a different accepted outcome")
     if action["state"] in {"failed", "canceled"}:
         raise StoreError(f"cannot finish a {action['state']} action")
+    context = json.loads(action["payload"] or "{}")
+    if (
+        action["role"] == "sage"
+        and context.get("direct_item")
+        and not context.get("continuation")
+        and outcome_kind == "report"
+    ):
+        raise StoreError(
+            "a direct-item Sage must complete its required Executor/Overseer "
+            "interview round before reporting"
+        )
+    if (
+        action["role"] == "sage"
+        and context.get("direct_item")
+        and outcome_kind == "report"
+    ):
+        _validate_direct_sage_findings(payload.get("findings", []))
     if outcome_kind == "evidence_needed":
-        context = json.loads(action["payload"])
         if action["role"] != "sage" or context.get("continuation"):
             raise StoreError("only Sage's initial analysis may request interviews")
         if not payload["requests"]:
@@ -176,6 +203,8 @@ def accept_finish(
             (action["occurrence_id"],),
         ):
             raise StoreError("only one interview round is allowed")
+        if context.get("direct_item"):
+            _validate_direct_sage_requests(store, context, payload["requests"])
     timestamp = utc_now()
     store.execute(
         """UPDATE actions SET outcome_kind = ?, outcome_payload = ?,
@@ -716,6 +745,8 @@ def _apply_outcome(
             if raw_scope and str(raw_scope).startswith("{")
             else {}
         )
+        if scope.get("direct_item"):
+            _validate_direct_sage_findings(payload.get("findings", []))
         allowed_projects = set(scope.get("projects", []))
         identities: set[tuple[str, str]] = set()
         for finding in payload.get("findings", []):
@@ -771,6 +802,9 @@ def _apply_outcome(
             raise StoreError(
                 "a specialist occurrence may request only one interview round"
             )
+        context = json.loads(action["payload"] or "{}")
+        if context.get("direct_item"):
+            _validate_direct_sage_requests(store, context, payload.get("requests", []))
         occurrence = store.row(
             "SELECT deadline_at FROM occurrences WHERE id = ?", (occurrence_id,)
         )
@@ -1215,6 +1249,48 @@ def _resolve_subject(store: Store, subject: str) -> dict[str, Any] | None:
         return exact
     code = subject.strip().upper()
     return store.row("SELECT * FROM tasks WHERE title LIKE ?", (f"%[{code}]%",))
+
+
+def _validate_direct_sage_requests(
+    store: Store, context: dict[str, Any], requests: list[Any]
+) -> None:
+    expected = context.get("required_interviews")
+    if not isinstance(expected, dict):
+        raise StoreError("direct-item Sage has no retained interview pair")
+    if len(requests) != 2:
+        raise StoreError(
+            "direct-item Sage evidence_needed requires exactly two subjects: "
+            "the retained Executor and Overseer"
+        )
+    resolved: list[dict[str, Any]] = []
+    for request in requests:
+        if not isinstance(request, dict):
+            raise StoreError("each direct-item interview request must be an object")
+        subject = request.get("subject")
+        if not isinstance(subject, str):
+            raise StoreError("each direct-item interview requires a subject")
+        task = _resolve_subject(store, subject)
+        if task is None:
+            raise StoreError(f"unknown interview subject {subject!r}")
+        resolved.append(task)
+    expected_ids = {
+        int(expected[role]["task_id"])
+        for role in ("executor", "overseer")
+        if isinstance(expected.get(role), dict)
+        and isinstance(expected[role].get("task_id"), int)
+    }
+    resolved_ids = [int(task["id"]) for task in resolved]
+    if len(expected_ids) != 2 or set(resolved_ids) != expected_ids:
+        raise StoreError(
+            "direct-item interviews must name only the retained Executor and Overseer"
+        )
+    if len(set(resolved_ids)) != 2 or {task["role"] for task in resolved} != {
+        "executor",
+        "overseer",
+    }:
+        raise StoreError(
+            "direct-item interviews require one distinct Executor and one distinct Overseer"
+        )
 
 
 def _lineage_has_open_work(connection: Any, lineage_number: int) -> bool:

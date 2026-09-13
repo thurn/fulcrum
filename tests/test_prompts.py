@@ -428,6 +428,60 @@ class PromptsTest(unittest.TestCase):
         self.assertEqual(args.description, description)
         self.assertTrue(args.plan_mode)
 
+    def test_sage_parser_separates_registration_from_queued_requests(self) -> None:
+        parser = build_parser()
+        registered = parser.parse_args(
+            [
+                "sage",
+                "register",
+                "--item",
+                "p-1",
+                "--description",
+                "Review failed delivery handoff",
+            ]
+        )
+        self.assertEqual(registered.sage_command, "register")
+        self.assertEqual(registered.item, "p-1")
+        requested = parser.parse_args(
+            ["sage", "request", "--project", "p", "--scope", "review retries"]
+        )
+        self.assertEqual(requested.sage_command, "request")
+        self.assertEqual(requested.project, "p")
+        for arguments in (
+            ["sage", "--scope", "old interface"],
+            ["sage", "register", "--item", "p-1", "--description", "too short"],
+            [
+                "sage",
+                "register",
+                "--item",
+                "p-1",
+                "--description",
+                "Review $(touch unsafe) workflow",
+            ],
+            [
+                "sage",
+                "register",
+                "--item",
+                "p-1';touch-bad",
+                "--description",
+                "Review failed delivery handoff",
+            ],
+        ):
+            with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
+                parser.parse_args(arguments)
+
+    def test_direct_sage_prompt_requires_exact_pair_and_causal_evidence(self) -> None:
+        text = role_instructions("specialist", role="sage")
+        for required in (
+            "retained causal workflow",
+            "exactly one interview round",
+            "supplied Executor and Overseer",
+            "unknown or partial",
+            "Do not dump complete databases",
+            "one independent finding",
+        ):
+            self.assertIn(required, text)
+
     def test_role_creation_exposes_optional_context_recovery(self) -> None:
         for action_kind, role in (
             ("archon", "archon"),

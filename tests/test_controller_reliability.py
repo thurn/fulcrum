@@ -2958,6 +2958,475 @@ print(json.dumps({
         self.assertEqual(first["title"], title)
         self.assertEqual(second["title"], title)
 
+    async def test_human_sage_registration_adopts_exact_causal_item_idempotently(
+        self,
+    ) -> None:
+        self.controller.store.link_bead_to_workflow("weaver-action:7", "p-1")
+        historical = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, native_turn_id,
+                   created_at, updated_at
+               ) VALUES (?, ?, 'implement', ?, 'processed', 'executor-turn',
+                         'earlier', 'earlier')""",
+            (self.executor["id"], self.assignment["id"], json.dumps({"scope": "p-1"})),
+        )
+        self.controller.store.link_action_to_workflow(
+            "weaver-action:7", int(historical.lastrowid), causal_role="executor"
+        )
+        self.controller.store.execute(
+            """INSERT INTO action_turn_usage(
+                   native_thread_id, native_turn_id, action_id,
+                   attributed_action_id, is_helper, total_input_tokens,
+                   total_cached_input_tokens, total_cache_write_input_tokens,
+                   total_output_tokens, total_reasoning_output_tokens, total_tokens,
+                   coverage, gap_reason, created_at, updated_at
+               ) VALUES ('executor', 'executor-turn', ?, ?, 0, 80, 20, 0,
+                         20, 5, 100, 'complete', NULL, 'earlier', 'earlier')""",
+            (historical.lastrowid, historical.lastrowid),
+        )
+        self.controller.store.execute(
+            """INSERT INTO action_turn_usage(
+                   native_thread_id, native_turn_id, action_id,
+                   attributed_action_id, is_helper, total_input_tokens,
+                   total_cached_input_tokens, total_cache_write_input_tokens,
+                   total_output_tokens, total_reasoning_output_tokens, total_tokens,
+                   coverage, gap_reason, created_at, updated_at
+               ) VALUES ('helper', 'helper-turn', NULL, ?, 1, 30, 10, 0,
+                         10, 2, 40, 'partial', 'helper terminal event missing',
+                         'earlier', 'earlier')""",
+            (historical.lastrowid,),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET candidate_id = 'candidate-7',
+               source_oid = 'source-7', tested_oid = 'tested-7' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        operation = self.controller.store.create_operation(
+            "tollgate_approve", "candidate-7", {"repository_id": "tg-p"}
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation)
+        self.controller.store.finish_operation_attempt(
+            operation,
+            attempt,
+            state="failed",
+            error="approval timed out",
+            duration_ms=321,
+        )
+        causal_operations = [
+            ("beads_create", "key", "create timed out", 111),
+            ("beads_close", "p-1", "close timed out", 222),
+        ]
+        for kind, operation_target, error, duration_ms in causal_operations:
+            causal_operation = self.controller.store.create_operation(
+                kind, operation_target, {"item": "p-1"}
+            )
+            causal_attempt = self.controller.store.begin_operation_attempt(
+                causal_operation
+            )
+            self.controller.store.finish_operation_attempt(
+                causal_operation,
+                causal_attempt,
+                state="failed",
+                error=error,
+                duration_ms=duration_ms,
+            )
+        unrelated = self.controller.store.create_operation(
+            "brain_report_publish",
+            str(historical.lastrowid),
+            {"item": "unrelated"},
+        )
+        unrelated_attempt = self.controller.store.begin_operation_attempt(unrelated)
+        self.controller.store.finish_operation_attempt(
+            unrelated,
+            unrelated_attempt,
+            state="failed",
+            error="unrelated publication failure",
+            duration_ms=999,
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "human-sage",
+            "name": "temporary",
+            "projectId": "codex-p",
+            "status": {"type": "active"},
+            "turns": [{"id": "sage-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+        request = {
+            "thread_id": "human-sage",
+            "item": "p-1",
+            "description": "Review failed delivery handoff",
+        }
+
+        first = await self.controller._register_sage(request)
+        second = await self.controller._register_sage(
+            {**request, "description": "Review changed retry description"}
+        )
+
+        self.assertEqual(first["title"], "📖 [SAGE0001] Review failed delivery handoff")
+        self.assertEqual(second["title"], first["title"])
+        self.assertEqual(first["role_number"], 1)
+        self.assertEqual(first["target"]["workflow_id"], "weaver-action:7")
+        self.assertEqual(first["target"]["executor"]["task_id"], self.executor["id"])
+        self.assertEqual(first["target"]["overseer"]["task_id"], self.overseer["id"])
+        self.assertIn("# Current action", first["instructions"])
+        self.assertIn("exactly one interview round", first["instructions"])
+        task = self.controller.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = 'human-sage'"
+        )
+        occurrence = self.controller.store.row(
+            """SELECT occurrence.* FROM occurrences occurrence JOIN actions action
+                 ON action.occurrence_id = occurrence.id WHERE action.task_id = ?""",
+            (task["id"],),
+        )
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ?", (task["id"],)
+        )
+        self.assertEqual(occurrence["authority"], "human-skill")
+        self.assertIsNone(occurrence["policy_id"])
+        self.assertEqual(action["native_turn_id"], "sage-turn")
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM actions WHERE task_id = ?", (task["id"],)
+            )["count"],
+            1,
+        )
+        evidence = json.loads(occurrence["evidence_json"])
+        self.assertEqual(evidence["target"]["item"], "p-1")
+        self.assertFalse(evidence["coverage"]["project_time_window_used"])
+        self.assertEqual(
+            [row["id"] for row in evidence["workflow_actions"]],
+            [historical.lastrowid],
+        )
+        self.assertTrue(evidence["coverage"]["unknown_is_not_zero"])
+        action_usage = evidence["token_usage"]["by_action"][0]
+        self.assertEqual(action_usage["direct"]["total_tokens"], 100)
+        self.assertEqual(action_usage["attributed"]["total_tokens"], 140)
+        self.assertEqual(action_usage["helper_turn_count"], 1)
+        role_usage = evidence["token_usage"]["by_role"][0]
+        self.assertEqual(role_usage["attributed"]["total_tokens"], 140)
+        self.assertIn("helper terminal event missing", role_usage["gap_reasons"])
+        self.assertEqual(evidence["candidate_evidence"][0]["tested_oid"], "tested-7")
+        self.assertEqual(evidence["coverage"]["candidate_evidence"]["limit"], 100)
+        self.assertFalse(evidence["coverage"]["candidate_evidence"]["truncated"])
+        self.assertEqual(evidence["coverage"]["operation_attempts"]["limit"], 200)
+        self.assertFalse(evidence["coverage"]["operation_attempts"]["truncated"])
+        operations_by_kind = {
+            row["kind"]: row for row in evidence["external_operations"]
+        }
+        approval = next(
+            row
+            for row in evidence["external_operations"]
+            if row["kind"] == "tollgate_approve"
+        )
+        self.assertEqual(approval["attempts"][0]["duration_ms"], 321)
+        self.assertEqual(approval["attempts"][0]["error"], "approval timed out")
+        self.assertEqual(
+            operations_by_kind["beads_create"]["attempts"][0]["duration_ms"], 111
+        )
+        self.assertEqual(
+            operations_by_kind["beads_create"]["attempts"][0]["error"],
+            "create timed out",
+        )
+        self.assertEqual(
+            operations_by_kind["beads_close"]["attempts"][0]["duration_ms"], 222
+        )
+        self.assertEqual(
+            operations_by_kind["beads_close"]["attempts"][0]["error"],
+            "close timed out",
+        )
+        self.assertNotIn("brain_report_publish", operations_by_kind)
+
+    async def test_human_sage_rejects_missing_pair_before_name_or_counter(self) -> None:
+        self.controller.store.link_bead_to_workflow("weaver-action:8", "p-1")
+        self.controller.store.execute(
+            "UPDATE assignments SET overseer_task_id = NULL WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        runtime = AsyncMock()
+        self.controller.runtime = runtime
+
+        with self.assertRaisesRegex(StoreError, "no retained Overseer relation"):
+            await self.controller._register_sage(
+                {
+                    "thread_id": "rejected-sage",
+                    "item": "p-1",
+                    "description": "Review missing workflow relation",
+                }
+            )
+
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = 'rejected-sage'"
+            )
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT next_number FROM role_counters WHERE role = 'sage'"
+            )["next_number"],
+            1,
+        )
+        runtime.set_name.assert_not_awaited()
+
+    async def test_human_sage_rejects_ambiguous_causal_workflow(self) -> None:
+        self.controller.store.link_bead_to_workflow("weaver-action:8", "p-1")
+        self.controller.store.link_bead_to_workflow("weaver-action:9", "p-1")
+        runtime = AsyncMock()
+        self.controller.runtime = runtime
+
+        with self.assertRaisesRegex(StoreError, "ambiguous.*weaver-action:8"):
+            await self.controller._register_sage(
+                {
+                    "thread_id": "ambiguous-sage",
+                    "item": "p-1",
+                    "description": "Review ambiguous workflow relation",
+                }
+            )
+
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = 'ambiguous-sage'"
+            )
+        )
+        runtime.set_name.assert_not_awaited()
+
+    async def test_unbound_human_sage_adopts_only_its_delayed_current_turn(
+        self,
+    ) -> None:
+        self.controller.store.link_bead_to_workflow("weaver-action:10", "p-1")
+        runtime = DelayedWeaverRuntime("delayed-sage")
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        registered = await self.controller._register_sage(
+            {
+                "thread_id": "delayed-sage",
+                "item": "p-1",
+                "description": "Review delayed registration recovery",
+            }
+        )
+        action = self.controller.store.current_action("delayed-sage")
+        self.assertIsNone(action["native_turn_id"])
+        self.assertTrue(json.loads(action["payload"])["adopt_current_turn"])
+
+        runtime.turn_visible = True
+        adopted = self.controller._adopt_unbound_weaver_turn(
+            int(action["task_id"]),
+            await self.controller._refresh_task(
+                self.controller.store.row(
+                    "SELECT * FROM tasks WHERE native_thread_id = 'delayed-sage'"
+                )
+            ),
+        )
+
+        self.assertEqual(adopted["id"], registered["action_id"])
+        self.assertEqual(adopted["native_turn_id"], runtime.turn_id)
+
+    async def test_direct_sage_enforces_one_exact_interview_pair_and_continuation(
+        self,
+    ) -> None:
+        self.controller.store.link_bead_to_workflow("weaver-action:9", "p-1")
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "interview-sage",
+            "name": "temporary",
+            "projectId": "codex-p",
+            "status": {"type": "active"},
+            "turns": [{"id": "sage-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+        registered = await self.controller._register_sage(
+            {
+                "thread_id": "interview-sage",
+                "item": "p-1",
+                "description": "Review repeated correction workflow",
+            }
+        )
+        with self.assertRaisesRegex(StoreError, "exactly two subjects"):
+            accept_finish(
+                self.controller.store,
+                native_thread_id="interview-sage",
+                outcome_kind="evidence_needed",
+                options={
+                    "input": {
+                        "requests": [
+                            {
+                                "subject": self.executor["title"],
+                                "question": "What caused repeated work?",
+                            }
+                        ]
+                    }
+                },
+            )
+        with self.assertRaisesRegex(StoreError, "only the retained"):
+            accept_finish(
+                self.controller.store,
+                native_thread_id="interview-sage",
+                outcome_kind="evidence_needed",
+                options={
+                    "input": {
+                        "requests": [
+                            {
+                                "subject": self.executor["title"],
+                                "question": "What caused repeated work?",
+                            },
+                            {
+                                "subject": self.executor["title"],
+                                "question": "Which tools failed?",
+                            },
+                        ]
+                    }
+                },
+            )
+        accepted = accept_finish(
+            self.controller.store,
+            native_thread_id="interview-sage",
+            outcome_kind="evidence_needed",
+            options={
+                "input": {
+                    "requests": [
+                        {
+                            "subject": self.executor["title"],
+                            "question": "Which tool or handoff failures caused repeated work and avoidable token use?",
+                        },
+                        {
+                            "subject": self.overseer["title"],
+                            "question": "Which ambiguous instructions caused repeated review work and avoidable token use?",
+                        },
+                    ]
+                }
+            },
+        )
+        self.assertEqual(accepted["action_id"], registered["action_id"])
+        self.controller.store.execute(
+            """UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1,
+               runtime_status = 'idle' WHERE native_thread_id = 'interview-sage'"""
+        )
+        observe_action_terminal(self.controller.store, registered["action_id"])
+        interviews = self.controller.store.rows(
+            """SELECT interview.*, task.role, task.title, task.native_thread_id
+               FROM interviews interview JOIN tasks task
+                 ON task.id = interview.subject_task_id
+               WHERE interview.occurrence_id = ? ORDER BY task.role""",
+            (registered["occurrence_id"],),
+        )
+        self.assertEqual([row["role"] for row in interviews], ["executor", "overseer"])
+        self.controller.store.execute(
+            "UPDATE interviews SET state = 'answered', answer_json = ? WHERE id = ?",
+            (
+                json.dumps({"answer": "Executor evidence", "evidence": ["action 1"]}),
+                interviews[0]["id"],
+            ),
+        )
+        self.controller.store.execute(
+            "UPDATE interviews SET state = 'failed' WHERE id = ?",
+            (interviews[1]["id"],),
+        )
+        refreshed = self.controller.store.rows(
+            """SELECT interview.*, task.role, task.title, task.native_thread_id
+               FROM interviews interview JOIN tasks task
+                 ON task.id = interview.subject_task_id
+               WHERE interview.occurrence_id = ? ORDER BY interview.id""",
+            (registered["occurrence_id"],),
+        )
+        with patch.object(self.controller, "_dispatch_action", new=AsyncMock()):
+            await self.controller._resume_sage_with_interviews(
+                self.controller.store.row(
+                    "SELECT * FROM occurrences WHERE id = ?",
+                    (registered["occurrence_id"],),
+                ),
+                refreshed,
+            )
+        continuation = self.controller.store.current_action("interview-sage")
+        payload = json.loads(continuation["payload"])
+        self.assertTrue(payload["direct_item"])
+        self.assertEqual(payload["answers"][0]["role"], "executor")
+        self.assertEqual(payload["missing_evidence"][0]["state"], "failed")
+        rendered = self.controller._build_action_message(
+            continuation,
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = 'interview-sage'"
+            ),
+            None,
+        )
+        self.assertIn("Executor evidence", rendered)
+        self.assertIn("failed", rendered)
+        self.assertNotIn("workflow_actions", rendered)
+        recovered = self.controller._build_action_message(
+            continuation,
+            self.controller.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = 'interview-sage'"
+            ),
+            None,
+            full_context=True,
+        )
+        self.assertIn("Retained target", recovered)
+        self.assertIn("Retained coverage", recovered)
+        with self.assertRaisesRegex(StoreError, "only Sage's initial analysis"):
+            accept_finish(
+                self.controller.store,
+                native_thread_id="interview-sage",
+                outcome_kind="evidence_needed",
+                options={"input": {"requests": []}},
+            )
+        incomplete_finding = {
+            "summary": "One demonstrated problem",
+            "coverage": ["workflow action 1"],
+            "findings": [
+                {
+                    "identity": "handoff-loses-validation",
+                    "problem": "The handoff omitted exact validation evidence.",
+                    "evidence": "Action 1 did not retain the validation result.",
+                    "expected_benefit": "Review can verify the candidate once.",
+                    "project": "p",
+                    "acceptance_criteria": "A lifecycle test retains the result.",
+                }
+            ],
+        }
+        with self.assertRaisesRegex(StoreError, "requires nonempty title"):
+            accept_finish(
+                self.controller.store,
+                native_thread_id="interview-sage",
+                outcome_kind="report",
+                options={"input": incomplete_finding},
+            )
+        finding = incomplete_finding["findings"][0]
+        finding["title"] = "Retain exact validation evidence"
+        finding["implementation_scope"] = "Retain the validation artifact in handoffs."
+        finding["activation"] = "future"
+        finding["deferral_reason"] = "Defer until a later review."
+        with self.assertRaisesRegex(StoreError, "must use pending activation"):
+            accept_finish(
+                self.controller.store,
+                native_thread_id="interview-sage",
+                outcome_kind="report",
+                options={"input": incomplete_finding},
+            )
+        finding["activation"] = "pending"
+        accepted_report = accept_finish(
+            self.controller.store,
+            native_thread_id="interview-sage",
+            outcome_kind="report",
+            options={"input": incomplete_finding},
+        )
+        self.assertEqual(accepted_report["outcome"], "report")
+        self.controller.store.execute(
+            """UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1,
+               runtime_status = 'idle' WHERE native_thread_id = 'interview-sage'"""
+        )
+        advanced = observe_action_terminal(
+            self.controller.store, accepted_report["action_id"]
+        )
+        self.assertTrue(advanced["advanced"])
+        with (
+            patch.object(
+                self.controller,
+                "_publish_specialist_report",
+                return_value={"local_revision": "direct-sage-report"},
+            ),
+            patch("fulcrum.controller.file_task", return_value={}) as publish,
+        ):
+            await self.controller._publish_occurrences()
+        self.assertEqual(publish.call_args.args[2].activation, "pending")
+
     async def test_project_verification_replaces_a_mismatched_saved_identity(
         self,
     ) -> None:

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import stat
 import sys
 from collections.abc import Sequence
@@ -76,6 +77,26 @@ def _nonempty_description(value: str) -> str:
     if not description:
         raise argparse.ArgumentTypeError("description must not be empty")
     return description
+
+
+def _safe_sage_description(value: str) -> str:
+    description = _nonempty_description(value)
+    if not re.fullmatch(r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*", description):
+        raise argparse.ArgumentTypeError(
+            "description may contain only letters, numbers, spaces, and hyphens"
+        )
+    if not 3 <= len(description.split()) <= 8:
+        raise argparse.ArgumentTypeError("description must contain 3-8 words")
+    return description
+
+
+def _sage_item_id(value: str) -> str:
+    item = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", item):
+        raise argparse.ArgumentTypeError(
+            "item must be an exact Bead ID containing letters, numbers, and hyphens"
+        )
+    return item
 
 
 def _thread_id() -> str | None:
@@ -265,10 +286,25 @@ def build_parser() -> argparse.ArgumentParser:
     deferred.add_argument("--reason", required=True)
     deferred.add_argument("--input", required=True)
     finish_sub.add_parser("intake_complete")
-    for name in ("sage", "inquisitor"):
-        specialist = commands.add_parser(name, help=f"request a one-off {name} run")
-        specialist.add_argument("--project")
-        specialist.add_argument("--scope")
+    sage = commands.add_parser("sage", help="register or request a Sage investigation")
+    sage_sub = sage.add_subparsers(dest="sage_command", required=True)
+    sage_register = sage_sub.add_parser(
+        "register", help="adopt this task for one retained work-item investigation"
+    )
+    sage_register.add_argument("--item", required=True, type=_sage_item_id)
+    sage_register.add_argument(
+        "--description", required=True, type=_safe_sage_description
+    )
+    sage_request = sage_sub.add_parser(
+        "request", help="queue the existing one-off Sage specialist"
+    )
+    sage_request.add_argument("--project")
+    sage_request.add_argument("--scope")
+    inquisitor = commands.add_parser(
+        "inquisitor", help="request a one-off inquisitor run"
+    )
+    inquisitor.add_argument("--project")
+    inquisitor.add_argument("--scope")
     reboot = commands.add_parser("reboot", help="replace the managed fleet")
     reboot_modes = reboot.add_mutually_exclusive_group(required=True)
     reboot_modes.add_argument("--soft", action="store_true")
@@ -585,7 +621,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 paths,
                 {"command": "finish", "outcome": args.outcome, "options": options},
             )
-        elif args.command in {"sage", "inquisitor"}:
+        elif args.command == "sage" and args.sage_command == "register":
+            result = _request(
+                paths,
+                {
+                    "command": "sage_register",
+                    "item": args.item,
+                    "description": args.description,
+                },
+            )
+        elif args.command == "inquisitor" or (
+            args.command == "sage" and args.sage_command == "request"
+        ):
+            kind = args.command
             scope = {
                 "global": args.project is None,
                 "projects": [args.project] if args.project else [],
@@ -594,7 +642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 paths,
                 {
                     "command": "specialist",
-                    "kind": args.command,
+                    "kind": kind,
                     "scope": json.dumps(scope),
                     "prompt": args.scope,
                 },

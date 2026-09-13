@@ -101,11 +101,12 @@ real fix rather than blindly rerunning the same source.
 
 ## Who has authority
 
-The human-facing entry points are **Weaver** for submitting work and **Archon**
-for strategic coordination. Archon is the only role that approves, prioritizes,
-or schedules pending implementation work. An explicit human Sage or Inquisitor
-command separately authorizes one analysis run, but it neither approves the
-resulting findings for implementation nor bypasses normal capacity controls.
+The human-facing entry points are **Weaver** for submitting work, **Sage** for a
+read-only investigation of one retained work item, and **Archon** for strategic
+coordination. Archon is the only role that approves, prioritizes, or schedules
+pending implementation work. A queued Sage or Inquisitor request separately
+authorizes one analysis run, but it neither approves the resulting findings for
+implementation nor bypasses normal capacity controls.
 
 | Role | Judgment it owns | How it is invoked | What it does not do |
 | --- | --- | --- | --- |
@@ -113,7 +114,7 @@ resulting findings for implementation nor bypasses normal capacity controls.
 | **Weaver** | Clarifies human intent and authors an implementation-ready bead, task graph, or substantial plan. | A human creates a Codex task and registers it as Weaver; the returned instructions guide direct intake or Plan Mode. | Does not approve or schedule the bead, implement it, or manage publication, retries, or archival. |
 | **Executor** | Decides how to implement the exact approved scope, which proportionate checks to run, and how to make bounded in-scope corrections. | The controller reuses the Weaver lineage's safely idle Executor, or creates its next deterministic overflow identity, when an approved assignment is eligible. | Does not choose its own scope, create or promote a Tollgate candidate, push its worktree branch, review itself, or write Fulcrum's operational state. |
 | **Overseer** | Independently decides whether the exact candidate satisfies scope; it owns blocking findings, nonblocking minor fixes, approval, and any narrow repair permission. | The controller reuses the lineage's safely idle Overseer, or creates its next deterministic overflow identity, after Executor finishes and the immutable candidate and evidence are available. | Does not edit source, build in Executor's worktree, contact Executor directly, certify or promote code, or perform delivery. |
-| **Sage** | Reviews **workflow effectiveness**: failures, wasted effort, handoff friction, and evidence-backed process improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not implement findings, approve them for implementation, set its own cadence, schedule interviews, or publish its own report and issues. |
+| **Sage** | Reviews **workflow effectiveness**: failures, wasted effort, handoff friction, and evidence-backed process improvements. | A human can invoke `$sage` for one retained work item; the controller also runs queued and recurring reviews. | Does not implement findings, approve them for implementation, set its own cadence, schedule interviews, or publish its own report and issues. |
 | **Inquisitor** | Reviews **project architecture** across the selected codebase and proposes evidence-backed structural improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not edit product source, authorize implementation or promotion, or publish its own report and issues. |
 
 The controller, not an agent, owns SQLite state, Beads publication, dispatch,
@@ -239,17 +240,21 @@ manual dispatch.
 ### Request a workflow or architecture review
 
 ```sh
-fulcrum sage --scope "Investigate why recent review handoffs have been slow"
+fulcrum sage register --item brain-123 --description 'Review failed handoff workflow'
+fulcrum sage request --scope "Investigate why recent review handoffs have been slow"
 fulcrum inquisitor --project fulcrum --scope "Review the indexing architecture"
 ```
 
-`sage` reviews fleet workflow by default. `inquisitor` reviews all enabled
-projects by default. `--project <id>` limits either request to one project, and
-`--scope <prompt>` supplies a focus. The command queues one managed analysis run
-and returns its request ID; it does not wait for the report. New findings default
-to pending work for Archon's consideration; an explicitly deferred finding may be
-future work, and a match may update an existing bead instead of creating one.
-Requesting or completing the analysis does not authorize implementation.
+`sage register` is the command used by the installed `$sage` skill. It adopts the
+calling task and returns the complete instructions and exact causal evidence for
+the named retained item. `sage request` retains the existing queued fleet or
+project review behavior. `inquisitor` reviews all enabled projects by default.
+`--project <id>` limits a queued request, and `--scope <prompt>` supplies a focus.
+A queued command returns its request ID without waiting for the report. Direct-item
+Sage findings are always pending work for Archon's consideration. A queued
+specialist may explicitly defer a finding as future work, and a match may update an
+existing bead instead of creating one. No analysis command authorizes
+implementation.
 
 ### Inspect work and health
 

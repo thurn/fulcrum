@@ -28,11 +28,11 @@ HUMAN_SKILLS = (
     "fulcrum-weaver",
     "fulcrum-bead",
     "fulcrum-archon",
+    "fulcrum-sage",
 )
 REMOVED_SKILLS = (
     "fulcrum-executor",
     "fulcrum-overseer",
-    "fulcrum-sage",
     "fulcrum-inquisitor",
     "fulcrum-night-watchman",
     "fulcrum-shared",

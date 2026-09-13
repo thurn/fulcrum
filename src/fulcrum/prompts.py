@@ -715,15 +715,32 @@ def action_message(
                 lines.append("Missing responses: " + _text(payload["missing_evidence"]))
             if full_context:
                 evidence = payload.get("retained_evidence") or {}
-                for key in (
-                    "window",
-                    "captured_at",
-                    "projects",
-                    "coverage",
-                    "assignments",
-                    "recent_events",
-                    "prior_reports",
-                ):
+                keys = (
+                    (
+                        "target",
+                        "captured_at",
+                        "coverage",
+                        "workflow_actions",
+                        "handoffs",
+                        "external_operations",
+                        "controller_events",
+                        "candidate_evidence",
+                        "token_usage",
+                        "frozen_accounting",
+                        "existing_beads",
+                    )
+                    if payload.get("direct_item")
+                    else (
+                        "window",
+                        "captured_at",
+                        "projects",
+                        "coverage",
+                        "assignments",
+                        "recent_events",
+                        "prior_reports",
+                    )
+                )
+                for key in keys:
                     if evidence.get(key):
                         lines.append(
                             "Retained "
@@ -733,15 +750,32 @@ def action_message(
                         )
         else:
             evidence = payload.get("retained_evidence") or {}
-            for key in (
-                "window",
-                "captured_at",
-                "projects",
-                "coverage",
-                "assignments",
-                "recent_events",
-                "prior_reports",
-            ):
+            keys = (
+                (
+                    "target",
+                    "captured_at",
+                    "coverage",
+                    "workflow_actions",
+                    "handoffs",
+                    "external_operations",
+                    "controller_events",
+                    "candidate_evidence",
+                    "token_usage",
+                    "frozen_accounting",
+                    "existing_beads",
+                )
+                if payload.get("direct_item")
+                else (
+                    "window",
+                    "captured_at",
+                    "projects",
+                    "coverage",
+                    "assignments",
+                    "recent_events",
+                    "prior_reports",
+                )
+            )
+            for key in keys:
                 if evidence.get(key):
                     lines.append(
                         key.replace("_", " ").capitalize() + ": " + _text(evidence[key])
@@ -943,5 +977,17 @@ def weaver_instructions(*, plan_mode: bool, project: str) -> str:
             "`fulcrum context`; otherwise continue from retained conversation context.",
             finish_contract("weaver"),
             finish_syntax("weaver"),
+        ]
+    )
+
+
+def direct_sage_instructions(action: dict[str, Any]) -> str:
+    """Return the full controller-owned manual for a human-adopted Sage."""
+
+    return "\n\n".join(
+        [
+            role_instructions("specialist", role="sage"),
+            "# Current action",
+            action_message(action=action),
         ]
     )

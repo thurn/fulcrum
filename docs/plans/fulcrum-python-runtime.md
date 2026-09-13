@@ -1342,27 +1342,34 @@ Provide these Python entry points; they create managed specialist tasks using
 the same packaged prompts and controller lifecycle as scheduled occurrences:
 
 ```sh
-fulcrum sage
-fulcrum sage --scope "Investigate why recent review handoffs have been slow"
+fulcrum sage request
+fulcrum sage request --scope "Investigate why recent review handoffs have been slow"
 fulcrum inquisitor
 fulcrum inquisitor --project fulcrum --scope "Review the indexing architecture"
 ```
 
-Both commands accept optional `--project <id>` and `--scope <prompt>`. Without a
-project, Sage assesses fleet workflow and Inquisitor reviews all currently enabled
-projects. With a project, either role is limited to that project. A scope prompt
-focuses the role's analysis; without it, use its normal broad workflow or
-architecture review. Resolve the project set when accepting the request and
-retain it with the exact prompt; later project enrollment does not expand it.
-Python uses the project selector to bind scope and capacity, rather than trying
-to infer a project list from arbitrary prose.
+`sage request` and `inquisitor` accept optional `--project <id>` and
+`--scope <prompt>`. Without a project, Sage assesses fleet workflow and Inquisitor
+reviews all currently enabled projects. With a project, either role is limited to
+that project. A scope prompt focuses the role's analysis; without it, use its
+normal broad workflow or architecture review. Resolve the project set when
+accepting the request and retain it with the exact prompt; later project enrollment
+does not expand it. Python uses the project selector to bind scope and capacity,
+rather than trying to infer a project list from arbitrary prose.
 
-A direct human CLI request authorizes that one analysis run. Return a retained
+A queued human CLI request authorizes that one analysis run. Return a retained
 request ID and queued/running status promptly, without waiting for Archon,
 analysis, or publication. Archon may also request a one-off run in its structured
 decisions. Other agents can propose a run for Archon's approval; they cannot
 grant themselves this authority. A one-off request does not require a new Bead,
-installed specialist skill, or standing recurring policy.
+standing recurring policy.
+
+The installed `$sage` entry skill instead adopts its calling native task for one
+exact retained work item through `fulcrum sage register --item <bead-id>
+--description '<safe description>'`. The controller resolves the item's causal
+workflow and Executor/Overseer pair before registration, adopts the current turn,
+and returns the complete direct-item instructions and bounded evidence. This human
+entry path creates neither a cadence nor an implementation assignment.
 
 Queue the request under existing priorities, limits, holds, and project health
 checks; it does not interrupt active work or bypass capacity. Start a fresh
@@ -1415,11 +1422,12 @@ Preserve configured anchors across restart.
   requires nonempty problem and evidence fields for submitted findings and
   publishes that explicit list; it does not classify prose, extract tasks from
   report observations, or invoke an additional evidence-review agent.
-- Publish those findings as pending unless explicitly deferred. Archon still
-  approves execution. Findings default to Sol/high for both Executor and Overseer
-  unless their approved policy or one-off request selects other supported models;
-  persist both effective role settings on resulting beads under the model policy
-  above and permit normal Archon revision.
+- Publish direct-item Sage findings as pending. Queued or recurring specialists
+  may explicitly defer a finding as future work. Archon still approves execution.
+  Findings default to Sol/high for both Executor and Overseer unless their approved
+  policy or one-off request selects other supported models; persist both effective
+  role settings on resulting beads under the model policy above and permit normal
+  Archon revision.
 - Retain reports, including explicit empty findings. Publication retries reuse
   the report and occurrence without repeating model analysis.
 
@@ -1637,8 +1645,10 @@ are explicitly resolved by an operator.
   hook instructions, and dashboard read contracts with the new ownership model. No
   dual-write system, backward-compatibility layer, or versioned record format is
   required. Retain an inert historical export for diagnosis.
-- Remove the Executor, Overseer, Sage, and Inquisitor skill directories and their
-  installed links after migrating their judgment guidance to packaged prompts.
+- Remove the Executor, Overseer, and Inquisitor skill directories and their
+  installed links after migrating their judgment guidance to packaged prompts;
+  retain the tiny human-entry Sage registration skill without duplicating its
+  packaged prompt.
   Remove Watchman's skill and the superseded shared instruction bundle as well.
   Update `install.py` and `doctor.py` to require the retained human entry points
   and packaged prompt resources; removed role skills must not remain readiness

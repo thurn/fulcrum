@@ -20,6 +20,8 @@ from fulcrum.config import (
 from fulcrum.install import (
     APP_SERVER_LABEL,
     CONTROLLER_LABEL,
+    HUMAN_SKILLS,
+    REMOVED_SKILLS,
     _package_contents,
     _service_observation_from_result,
     control_plane_source,
@@ -34,6 +36,12 @@ from fulcrum.setup import _wait_for_archon_readiness
 
 
 class ConfigInstallTest(unittest.TestCase):
+    def test_sage_is_installed_as_a_human_entry_skill(self) -> None:
+        self.assertIn("fulcrum-sage", HUMAN_SKILLS)
+        self.assertNotIn("fulcrum-sage", REMOVED_SKILLS)
+        skill = Path(__file__).resolve().parents[1] / "skills/fulcrum-sage/SKILL.md"
+        self.assertIn("name: sage", skill.read_text(encoding="utf-8"))
+
     def _launcher_environment(self, **overrides: str) -> dict[str, str]:
         environment = dict(os.environ)
         environment.pop("FULCRUM_CONFIG", None)

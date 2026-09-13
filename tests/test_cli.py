@@ -260,6 +260,56 @@ class CliTest(unittest.TestCase):
             {"source_action_id": 17, "source_bead_id": "p-1"},
         )
 
+    def test_sage_subcommands_send_distinct_controller_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = RuntimePaths(root, root, root / "config.json", root / "control")
+            with (
+                patch("fulcrum.cli.resolve_paths", return_value=paths),
+                patch("fulcrum.cli._thread_id", return_value="sage-thread"),
+                patch(
+                    "fulcrum.cli.request_sync", return_value={"data": {"ok": True}}
+                ) as request,
+                patch("sys.stdout", new=io.StringIO()),
+            ):
+                self.assertEqual(
+                    main(
+                        [
+                            "sage",
+                            "register",
+                            "--item",
+                            "p-1",
+                            "--description",
+                            "Review failed delivery handoff",
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    main(["sage", "request", "--project", "p", "--scope", "focus"]),
+                    0,
+                )
+
+            self.assertEqual(
+                request.call_args_list[0].args[1],
+                {
+                    "command": "sage_register",
+                    "item": "p-1",
+                    "description": "Review failed delivery handoff",
+                    "thread_id": "sage-thread",
+                },
+            )
+            self.assertEqual(
+                request.call_args_list[1].args[1],
+                {
+                    "command": "specialist",
+                    "kind": "sage",
+                    "scope": json.dumps({"global": False, "projects": ["p"]}),
+                    "prompt": "focus",
+                    "thread_id": "sage-thread",
+                },
+            )
+
     def test_context_uses_only_the_calling_thread_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

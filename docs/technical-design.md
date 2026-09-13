@@ -128,3 +128,12 @@ identify only the current failing review as unresolved, label older findings as
 history without inferring their resolution, and carry bounded candidate revision,
 intervening change evidence, and current reviewer recommendation. Complete evidence
 stays in handoffs.
+
+The installed `$sage` human entry skill registers the current native task against
+one exact retained Bead. Registration resolves that Bead's single causal workflow
+and most recent applicable Executor/Overseer assignment before retaining or
+renaming anything. The controller then adopts the current turn as one
+`human-skill` Sage occurrence, freezes a bounded causal evidence snapshot, and
+requires exactly one interview round with that assignment's Executor and
+Overseer. Queued reviews remain available separately as `fulcrum sage request`;
+direct registration creates no policy or cadence.

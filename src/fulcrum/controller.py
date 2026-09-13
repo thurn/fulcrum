@@ -7,6 +7,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -76,6 +77,7 @@ from fulcrum.prompts import (
     MAX_ARCHON_MESSAGE_CHARS,
     action_message,
     archon_action_fits,
+    direct_sage_instructions,
     operative_instructions,
     role_instructions,
     weaver_instructions,
@@ -958,10 +960,12 @@ class Controller:
         *,
         event_turn_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Bind the turn that was already running when a Weaver registered."""
+        """Bind the turn already running when a human entry skill registered."""
 
+        task = self.store.row("SELECT role FROM tasks WHERE id = ?", (task_id,))
+        kind = "specialist" if task and task["role"] == "sage" else "weaver"
         return self._adopt_unbound_human_turn(
-            task_id, facts, kind="weaver", event_turn_id=event_turn_id
+            task_id, facts, kind=kind, event_turn_id=event_turn_id
         )
 
     def _adopt_unbound_operative_turn(
@@ -1042,8 +1046,12 @@ class Controller:
         self.store.bind_action_turn(
             int(action["id"]), task["native_thread_id"], turn_id
         )
+        event_kind = {
+            "weaver": "weaver_turn_adopted",
+            "specialist": "human_sage_turn_adopted",
+        }.get(kind, f"{kind}_turn_adopted")
         self.store.event(
-            f"{kind}_turn_adopted",
+            event_kind,
             f"adopted native turn {turn_id}",
             entity_type="action",
             entity_id=action["id"],
@@ -1055,7 +1063,8 @@ class Controller:
         """Pin an unmaterialized completion event for later confirmation."""
 
         action = self.store.row(
-            """SELECT * FROM actions WHERE task_id = ? AND kind = 'weaver'
+            """SELECT * FROM actions WHERE task_id = ?
+               AND kind IN ('weaver','specialist')
                AND state = 'active' AND native_turn_id IS NULL""",
             (task_id,),
         )
@@ -1083,8 +1092,13 @@ class Controller:
         )
         if cursor.rowcount != 1:
             return False
+        event_kind = (
+            "weaver_completion_retained"
+            if action["kind"] == "weaver"
+            else "human_sage_completion_retained"
+        )
         self.store.event(
-            "weaver_completion_retained",
+            event_kind,
             f"retained unmaterialized native turn {turn_id}",
             entity_type="action",
             entity_id=action["id"],
@@ -3493,6 +3507,13 @@ class Controller:
         if task["archived"]:
             await self.runtime.unarchive(task["native_thread_id"])
             await self.runtime.resume_thread(task["native_thread_id"])
+            self.store.execute(
+                """UPDATE tasks SET archived = 0, state = 'idle',
+                   archive_eligible_at = NULL, archive_idle_turn_id = NULL,
+                   updated_at = ? WHERE id = ?""",
+                (utc_now(), task["id"]),
+            )
+            task = {**task, "archived": 0, "state": "idle"}
         facts = (
             {
                 "last_turn_id": None,
@@ -5524,6 +5545,8 @@ class Controller:
             return result
         if command == "weaver_register":
             return await self._register_weaver(request)
+        if command == "sage_register":
+            return await self._register_sage(request)
         if command == "operative_register":
             return await self._register_operative(request)
         if command == "operative_status":
@@ -7435,6 +7458,766 @@ class Controller:
         self.store.mirror_operative_journal(acquiring)
         return await self._resume_operative_acquisition(request)
 
+    def _resolve_direct_sage_target(self, item_id: str) -> dict[str, Any]:
+        bead = self.store.row("SELECT * FROM beads WHERE bead_id = ?", (item_id,))
+        if bead is None:
+            raise StoreError(
+                f"Sage target {item_id!r} is not a retained Bead; pass the exact "
+                "work-item ID shown by Fulcrum"
+            )
+        workflows = self.store.rows(
+            """SELECT boundary.* FROM workflow_cost_beads bead
+               JOIN workflow_cost_boundaries boundary
+                 ON boundary.workflow_id = bead.workflow_id
+               WHERE bead.bead_id = ? ORDER BY boundary.workflow_id""",
+            (item_id,),
+        )
+        if not workflows:
+            raise StoreError(
+                f"Sage target {item_id!r} has no retained causal workflow; "
+                "the Bead must be linked from its Weaver intake before investigation"
+            )
+        if len(workflows) != 1:
+            identities = ", ".join(str(row["workflow_id"]) for row in workflows)
+            raise StoreError(
+                f"Sage target {item_id!r} is ambiguous across retained causal "
+                f"workflows: {identities}; repair the workflow relation first"
+            )
+        assignment = self.store.row(
+            """SELECT assignment.*, run.project_id, run.state AS run_state
+               FROM assignments assignment JOIN runs run ON run.id = assignment.run_id
+               WHERE assignment.bead_id = ?
+               ORDER BY CASE
+                   WHEN assignment.stage = 'completed' THEN 0
+                   WHEN assignment.stage != 'canceled' THEN 1
+                   ELSE 2 END,
+                   assignment.id DESC LIMIT 1""",
+            (item_id,),
+        )
+        if assignment is None:
+            raise StoreError(
+                f"Sage target {item_id!r} has no retained Executor/Overseer "
+                "assignment relation"
+            )
+        pair: dict[str, dict[str, Any]] = {}
+        for role, column in (
+            ("executor", "executor_task_id"),
+            ("overseer", "overseer_task_id"),
+        ):
+            task_id = assignment.get(column)
+            if task_id is None:
+                raise StoreError(
+                    f"Sage target {item_id!r} assignment {assignment['id']} "
+                    f"has no retained {role.title()} relation"
+                )
+            task = self.store.row("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            if task is None or task["role"] != role:
+                raise StoreError(
+                    f"Sage target {item_id!r} assignment {assignment['id']} "
+                    f"has an invalid {role.title()} relation"
+                )
+            if task["pair_id"] != assignment["run_id"]:
+                raise StoreError(
+                    f"Sage target {item_id!r} assignment {assignment['id']} "
+                    f"has a mismatched {role.title()} workflow relation"
+                )
+            pair[role] = task
+        return {
+            "bead": bead,
+            "workflow": workflows[0],
+            "assignment": assignment,
+            **pair,
+        }
+
+    def _direct_sage_evidence(self, target: dict[str, Any]) -> dict[str, Any]:
+        """Freeze a bounded snapshot selected only by retained causal joins."""
+
+        item_id = str(target["bead"]["bead_id"])
+        workflow_id = str(target["workflow"]["workflow_id"])
+        action_rows = self.store.rows(
+            """SELECT action.*, task.role, task.title, task.native_thread_id,
+                      task.role_number, task.project_id, task.model,
+                      task.reasoning_effort, causal.causal_role,
+                      causal.include_cost, causal.exclusion_reason
+               FROM workflow_cost_actions causal
+               JOIN actions action ON action.id = causal.action_id
+               JOIN tasks task ON task.id = action.task_id
+               WHERE causal.workflow_id = ? ORDER BY action.id LIMIT 201""",
+            (workflow_id,),
+        )
+        selected_actions = action_rows[:200]
+        action_ids = [int(row["id"]) for row in selected_actions]
+        action_records: list[dict[str, Any]] = []
+        all_turns: dict[tuple[str, str], dict[str, Any]] = {}
+        usage_by_action: list[dict[str, Any]] = []
+        for row in selected_actions:
+            dispatch = self.store.row(
+                """SELECT id, input_json, state, condition, attempt_count,
+                          created_at, completed_at
+                   FROM external_operations WHERE kind = 'turn_start' AND target = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (str(row["id"]),),
+            )
+            dispatched_prompt = None
+            if dispatch is not None:
+                inputs = _json_object(dispatch.get("input_json"))
+                prompt = inputs.get("prompt")
+                if isinstance(prompt, str):
+                    dispatched_prompt = {
+                        "source": "retained historical turn_start prompt",
+                        **_bounded_excerpt(prompt, 6000),
+                    }
+            action_records.append(
+                {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "role": row["role"],
+                    "causal_role": row["causal_role"],
+                    "task": row["title"],
+                    "assignment_id": row["assignment_id"],
+                    "occurrence_id": row["occurrence_id"],
+                    "state": row["state"],
+                    "native_turn_id": row["native_turn_id"],
+                    "outcome_kind": row["outcome_kind"],
+                    "payload": _bounded_json(row["payload"], 4000),
+                    "outcome": _bounded_json(row["outcome_payload"], 4000),
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "cost_included": bool(row["include_cost"]),
+                    "cost_exclusion": row["exclusion_reason"],
+                    "dispatched_prompt": dispatched_prompt,
+                }
+            )
+            report = self.store.usage_report(
+                action_id=int(row["id"]), group_by="action"
+            )
+            summary = (
+                report["groups"][0]
+                if report["groups"]
+                else {
+                    "group": row["id"],
+                    "action_ids": [row["id"]],
+                    "direct": _empty_token_totals(),
+                    "attributed": _empty_token_totals(),
+                    "coverage": "unknown",
+                    "direct_turn_count": 0,
+                    "attributed_turn_count": 0,
+                    "helper_turn_count": 0,
+                    "unobserved_helper_count": 0,
+                }
+            )
+            summary = {
+                **summary,
+                "gap_reasons": sorted(
+                    {
+                        str(turn["gap_reason"])
+                        for turn in report["turns"]
+                        if turn.get("gap_reason")
+                    }
+                ),
+            }
+            usage_by_action.append(summary)
+            for turn in report["turns"]:
+                all_turns[(turn["native_thread_id"], turn["native_turn_id"])] = turn
+
+        workflow_beads = self.store.rows(
+            """SELECT bead.bead_id, bead.intake_key, bead.title, bead.project_id,
+                      bead.activation, bead.publication_state
+               FROM workflow_cost_beads causal JOIN beads bead
+                 ON bead.bead_id = causal.bead_id
+               WHERE causal.workflow_id = ? ORDER BY bead.bead_id LIMIT 101""",
+            (workflow_id,),
+        )
+        assignment_rows = self.store.rows(
+            """SELECT assignment.*, run.project_id, run.state AS run_state
+               FROM assignments assignment JOIN runs run ON run.id = assignment.run_id
+               JOIN workflow_cost_beads causal ON causal.bead_id = assignment.bead_id
+               WHERE causal.workflow_id = ? ORDER BY assignment.id LIMIT 101""",
+            (workflow_id,),
+        )
+        assignment_ids = sorted(
+            {int(row["id"]) for row in assignment_rows[:100]}
+            | {int(target["assignment"]["id"])}
+        )
+        handoffs: list[dict[str, Any]] = []
+        handoff_row_count = 0
+        if assignment_ids:
+            marks = ",".join("?" for _ in assignment_ids)
+            retained = self.store.rows(
+                f"""SELECT * FROM handoffs WHERE assignment_id IN ({marks})
+                    ORDER BY id LIMIT 101""",
+                assignment_ids,
+            )
+            handoff_row_count = len(retained)
+            handoffs = [
+                {
+                    **{
+                        key: row[key]
+                        for key in (
+                            "id",
+                            "assignment_id",
+                            "source_action_id",
+                            "kind",
+                            "created_at",
+                        )
+                    },
+                    "content": _bounded_json(row["content_json"], 4000),
+                }
+                for row in retained[:100]
+            ]
+
+        selected_beads = workflow_beads[:100]
+        if not any(row["bead_id"] == item_id for row in selected_beads):
+            selected_beads = [
+                *workflow_beads[:99],
+                {
+                    key: target["bead"].get(key)
+                    for key in (
+                        "bead_id",
+                        "intake_key",
+                        "title",
+                        "project_id",
+                        "activation",
+                        "publication_state",
+                    )
+                },
+            ]
+        selected_assignments = assignment_rows[:100]
+        target_assignment_id = int(target["assignment"]["id"])
+        if not any(
+            int(row["id"]) == target_assignment_id for row in selected_assignments
+        ):
+            selected_assignments = [*assignment_rows[:99], target["assignment"]]
+        candidate_ids = sorted(
+            {
+                str(row["candidate_id"])
+                for row in selected_assignments
+                if row.get("candidate_id")
+            }
+        )
+        task_thread_ids = sorted(
+            {
+                str(value)
+                for value in (
+                    *[row.get("native_thread_id") for row in selected_actions],
+                    target["executor"].get("native_thread_id"),
+                    target["overseer"].get("native_thread_id"),
+                )
+                if value
+            }
+        )
+        operation_targets_by_kind = {
+            "beads_close": sorted({str(row["bead_id"]) for row in selected_beads}),
+            "beads_create": sorted({str(row["intake_key"]) for row in selected_beads}),
+            "tollgate_approve": candidate_ids,
+            "tollgate_candidate_create": [str(value) for value in assignment_ids],
+            "tollgate_worktree_create": [str(value) for value in assignment_ids],
+            "thread_archive": task_thread_ids,
+            "turn_start": [str(value) for value in action_ids],
+        }
+        operation_clauses: list[str] = []
+        operation_values: list[Any] = []
+        for kind, targets in operation_targets_by_kind.items():
+            if not targets:
+                continue
+            marks = ",".join("?" for _ in targets)
+            operation_clauses.append(f"(kind = ? AND target IN ({marks}))")
+            operation_values.extend([kind, *targets])
+        if task_thread_ids:
+            marks = ",".join("?" for _ in task_thread_ids)
+            operation_clauses.append(
+                f"(kind = 'thread_start' AND native_id IN ({marks}))"
+            )
+            operation_values.extend(task_thread_ids)
+        operations = (
+            self.store.rows(
+                f"""SELECT * FROM external_operations
+                    WHERE {' OR '.join(operation_clauses)} ORDER BY id LIMIT 101""",
+                operation_values,
+            )
+            if operation_clauses
+            else []
+        )
+        selected_operations = operations[:100]
+        operation_ids = [int(row["id"]) for row in selected_operations]
+        attempts: dict[int, list[dict[str, Any]]] = {}
+        attempt_rows: list[dict[str, Any]] = []
+        if operation_ids:
+            marks = ",".join("?" for _ in operation_ids)
+            attempt_rows = self.store.rows(
+                f"""SELECT * FROM operation_attempts
+                    WHERE operation_id IN ({marks}) ORDER BY id LIMIT 201""",
+                operation_ids,
+            )
+            for row in attempt_rows[:200]:
+                attempts.setdefault(int(row["operation_id"]), []).append(
+                    {
+                        "attempt": row["attempt"],
+                        "state": row["state"],
+                        "duration_ms": row["duration_ms"],
+                        "error": _bounded_plain(row["error"], 1000),
+                        "started_at": row["started_at"],
+                        "finished_at": row["finished_at"],
+                    }
+                )
+        operation_records = [
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "target": row["target"],
+                "state": row["state"],
+                "condition": _bounded_plain(row["condition"], 1000),
+                "attempt_count": row["attempt_count"],
+                "native_id": row["native_id"],
+                "created_at": row["created_at"],
+                "completed_at": row["completed_at"],
+                "attempts": attempts.get(int(row["id"]), []),
+            }
+            for row in selected_operations
+        ]
+
+        events = self._direct_sage_events(
+            item_id=item_id,
+            workflow_id=workflow_id,
+            action_ids=action_ids,
+            assignment_ids=assignment_ids,
+            task_ids=sorted({int(row["task_id"]) for row in selected_actions}),
+            run_ids=sorted({int(row["run_id"]) for row in selected_assignments}),
+            operation_ids=operation_ids,
+        )
+        turns = list(all_turns.values())
+        action_roles = {int(row["id"]): str(row["role"]) for row in selected_actions}
+        usage_by_role = []
+        for role in sorted(set(action_roles.values())):
+            role_action_ids = {
+                action_id for action_id, owner in action_roles.items() if owner == role
+            }
+            direct = [row for row in turns if row.get("action_id") in role_action_ids]
+            attributed = [
+                row
+                for row in turns
+                if row.get("attributed_action_id") in role_action_ids
+            ]
+            usage_by_role.append(
+                {
+                    "role": role,
+                    "action_ids": sorted(role_action_ids),
+                    "direct": _raw_token_totals(direct),
+                    "attributed": _raw_token_totals(attributed),
+                    "direct_turn_count": len(direct),
+                    "attributed_turn_count": len(attributed),
+                    "helper_turn_count": sum(
+                        int(row["is_helper"]) for row in attributed
+                    ),
+                    "coverage": _raw_usage_coverage(attributed or direct),
+                    "gap_reasons": sorted(
+                        {
+                            str(row["gap_reason"])
+                            for row in attributed or direct
+                            if row.get("gap_reason")
+                        }
+                    ),
+                }
+            )
+        turn_records = [
+            {
+                key: row.get(key)
+                for key in (
+                    "native_thread_id",
+                    "native_turn_id",
+                    "action_id",
+                    "attributed_action_id",
+                    "is_helper",
+                    "model",
+                    "reasoning_effort",
+                    "total_input_tokens",
+                    "total_cached_input_tokens",
+                    "total_cache_write_input_tokens",
+                    "total_output_tokens",
+                    "total_reasoning_output_tokens",
+                    "total_tokens",
+                    "coverage",
+                    "gap_reason",
+                    "terminal_at",
+                )
+            }
+            for row in turns[:200]
+        ]
+        existing_beads = self.store.rows(
+            """SELECT bead_id, title, description, activation, publication_state
+               FROM beads WHERE project_id = ? ORDER BY updated_at DESC LIMIT 51""",
+            (target["bead"]["project_id"],),
+        )
+        existing_bead_records = [
+            {
+                "bead_id": row["bead_id"],
+                "title": row["title"],
+                "description": _bounded_plain(row["description"], 1000),
+                "activation": row["activation"],
+                "publication_state": row["publication_state"],
+            }
+            for row in existing_beads[:50]
+        ]
+        frozen = self.store.cost_report(workflow_id=workflow_id, group_by="workflow")
+        return {
+            "target": {
+                "item": item_id,
+                "title": target["bead"]["title"],
+                "project": target["bead"]["project_id"],
+                "workflow_id": workflow_id,
+                "workflow_state": target["workflow"]["state"],
+                "assignment_id": target["assignment"]["id"],
+                "assignment_stage": target["assignment"]["stage"],
+                "run_id": target["assignment"]["run_id"],
+                "run_state": target["assignment"]["run_state"],
+                "executor": _task_identity(target["executor"]),
+                "overseer": _task_identity(target["overseer"]),
+            },
+            "captured_at": utc_now(),
+            "coverage": {
+                "selection": "exact workflow_cost_beads/workflow_cost_actions causal joins",
+                "project_time_window_used": False,
+                "workflow_beads": {
+                    "count": len(workflow_beads[:100]),
+                    "limit": 100,
+                    "truncated": len(workflow_beads) > 100,
+                },
+                "actions": {
+                    "count": len(selected_actions),
+                    "limit": 200,
+                    "truncated": len(action_rows) > 200,
+                },
+                "handoffs": {
+                    "limit": 100,
+                    "truncated": handoff_row_count > 100,
+                },
+                "external_operations": {
+                    "count": len(selected_operations),
+                    "limit": 100,
+                    "truncated": len(operations) > 100,
+                    "selection": "operation-kind-specific retained causal identities",
+                },
+                "operation_attempts": {
+                    "count": len(attempt_rows[:200]),
+                    "limit": 200,
+                    "truncated": len(attempt_rows) > 200,
+                },
+                "candidate_evidence": {
+                    "count": len(selected_assignments),
+                    "limit": 100,
+                    "truncated": len(assignment_rows) > 100,
+                    "selection": "assignments joined through causal workflow Beads",
+                },
+                "controller_events": {
+                    "limit": 200,
+                    "truncated": len(events) > 200,
+                },
+                "token_turns": {
+                    "count": len(turn_records),
+                    "limit": 200,
+                    "truncated": len(turns) > 200,
+                },
+                "existing_beads": {
+                    "limit": 50,
+                    "truncated": len(existing_beads) > 50,
+                    "selection": "same affected project, newest retained first",
+                },
+                "native_history": (
+                    "only retained historical dispatch prompts are included; full native "
+                    "task histories are unavailable unless separately supplied"
+                ),
+                "current_prompt": (
+                    "the invoking human prompt may supplement evidence only when labelled current"
+                ),
+                "unknown_is_not_zero": True,
+            },
+            "workflow_beads": selected_beads,
+            "workflow_actions": action_records,
+            "handoffs": handoffs,
+            "external_operations": operation_records,
+            "controller_events": events[:200],
+            "candidate_evidence": [
+                {
+                    key: row.get(key)
+                    for key in (
+                        "id",
+                        "run_id",
+                        "bead_id",
+                        "stage",
+                        "prior_stage",
+                        "candidate_id",
+                        "source_oid",
+                        "tested_oid",
+                        "review_failures",
+                        "retry_count",
+                        "completion_kind",
+                        "completion_evidence",
+                        "condition",
+                        "created_at",
+                        "updated_at",
+                    )
+                }
+                for row in selected_assignments
+            ],
+            "token_usage": {
+                "by_action": usage_by_action,
+                "by_role": usage_by_role,
+                "contributing_turns": turn_records,
+            },
+            "frozen_accounting": {
+                "boundary": {
+                    key: target["workflow"].get(key)
+                    for key in (
+                        "workflow_id",
+                        "state",
+                        "origin_action_id",
+                        "frozen_amount",
+                        "currency",
+                        "frozen_summary",
+                        "coverage",
+                        "assumptions",
+                        "exclusions",
+                        "closed_at",
+                    )
+                },
+                "cost_report": frozen,
+            },
+            "existing_beads": existing_bead_records,
+        }
+
+    def _direct_sage_events(
+        self,
+        *,
+        item_id: str,
+        workflow_id: str,
+        action_ids: list[int],
+        assignment_ids: list[int],
+        task_ids: list[int],
+        run_ids: list[int],
+        operation_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        relations: list[str] = []
+        values: list[Any] = []
+        for entity_type, identifiers in (
+            ("action", action_ids),
+            ("assignment", assignment_ids),
+            ("task", task_ids),
+            ("run", run_ids),
+            ("operation", operation_ids),
+        ):
+            if not identifiers:
+                continue
+            marks = ",".join("?" for _ in identifiers)
+            relations.append(f"(entity_type = ? AND entity_id IN ({marks}))")
+            values.extend([entity_type, *(str(value) for value in identifiers)])
+        relations.extend(
+            [
+                "(entity_type = 'workflow' AND entity_id = ?)",
+                "detail_json LIKE ?",
+                "detail_json LIKE ?",
+            ]
+        )
+        values.extend([workflow_id, f"%{item_id}%", f"%{workflow_id}%"])
+        rows = self.store.rows(
+            f"""SELECT id, kind, entity_type, entity_id, message, detail_json,
+                       created_at FROM events WHERE {' OR '.join(relations)}
+                ORDER BY id LIMIT 201""",
+            values,
+        )
+        return [
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "entity_type": row["entity_type"],
+                "entity_id": row["entity_id"],
+                "message": _bounded_plain(row["message"], 1000),
+                "detail": _bounded_json(row["detail_json"], 2000),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    async def _register_sage(self, request: dict[str, Any]) -> dict[str, Any]:
+        thread_id = _thread_identity(request)
+        raw_item = request.get("item")
+        if not isinstance(raw_item, str) or not raw_item.strip():
+            raise StoreError("Sage registration requires an exact nonempty --item")
+        item_id = raw_item.strip()
+        if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", item_id):
+            raise StoreError(
+                "Sage registration --item must be an exact Bead ID containing "
+                "letters, numbers, and hyphens"
+            )
+        raw_description = request.get("description")
+        if not isinstance(raw_description, str):
+            raise StoreError("Sage registration requires a safe 3-8 word description")
+        description = " ".join(raw_description.split())
+        if not (
+            3 <= len(description.split()) <= 8
+            and re.fullmatch(r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*", description)
+        ):
+            raise StoreError(
+                "Sage registration description must be 3-8 words using only "
+                "letters, numbers, spaces, and hyphens"
+            )
+
+        existing_task = self.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        )
+        if existing_task is not None and existing_task["role"] != "sage":
+            raise StoreError("thread is already bound with different authority")
+        existing_occurrence = None
+        if existing_task is not None:
+            existing_occurrence = self.store.row(
+                """SELECT occurrence.* FROM occurrences occurrence
+                   JOIN actions action ON action.occurrence_id = occurrence.id
+                   WHERE action.task_id = ? AND occurrence.authority = 'human-skill'
+                   ORDER BY occurrence.id LIMIT 1""",
+                (existing_task["id"],),
+            )
+            if existing_occurrence is not None:
+                retained_scope = _occurrence_scope(existing_occurrence["scope"])
+                if retained_scope.get("item") != item_id:
+                    raise StoreError(
+                        "this native task is already registered to Sage target "
+                        f"{retained_scope.get('item')!r}"
+                    )
+
+        # Resolve every required relationship before task allocation or native rename.
+        target = self._resolve_direct_sage_target(item_id)
+        project_id = str(target["bead"]["project_id"])
+        task = self.store.register_task(
+            native_thread_id=thread_id,
+            role="sage",
+            description=description,
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            project_id=project_id,
+            state="provisioning",
+        )
+        await self.runtime.set_name(thread_id, task["title"])
+        facts = await self._refresh_task(task)
+        evidence = self._direct_sage_evidence(target)
+        occurrence = existing_occurrence
+        action = None
+        if occurrence is not None:
+            action = self.store.row(
+                """SELECT * FROM actions WHERE occurrence_id = ?
+                   AND kind = 'specialist' ORDER BY id LIMIT 1""",
+                (occurrence["id"],),
+            )
+        if occurrence is None or action is None:
+            timestamp = utc_now()
+            scope = {
+                "global": False,
+                "projects": [project_id],
+                "direct_item": True,
+                "item": item_id,
+                "workflow_id": target["workflow"]["workflow_id"],
+                "assignment_id": target["assignment"]["id"],
+                "executor_task_id": target["executor"]["id"],
+                "overseer_task_id": target["overseer"]["id"],
+            }
+            with self.store.transaction() as connection:
+                if occurrence is None:
+                    cursor = connection.execute(
+                        """INSERT INTO occurrences(
+                               kind, scope, authority, prompt, state, evidence_json,
+                               created_at, updated_at
+                           ) VALUES ('sage', ?, 'human-skill', ?, 'active', ?, ?, ?)""",
+                        (
+                            json.dumps(scope, sort_keys=True),
+                            f"Investigate retained work item {item_id}: {description}",
+                            json.dumps(evidence, sort_keys=True),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    occurrence = connection.execute(
+                        "SELECT * FROM occurrences WHERE id = ?",
+                        (cursor.lastrowid,),
+                    ).fetchone()
+                assert occurrence is not None
+                if action is None:
+                    payload = {
+                        "direct_item": True,
+                        "scope": scope,
+                        "prompt": (
+                            f"Investigate only {item_id} and its exact retained causal "
+                            "workflow. The invoking human request is current context, "
+                            "not historical evidence."
+                        ),
+                        "retained_evidence": evidence,
+                        "required_interviews": {
+                            "executor": _task_identity(target["executor"]),
+                            "overseer": _task_identity(target["overseer"]),
+                        },
+                        "adopt_current_turn": bool(
+                            facts["runtime_status"] == "active"
+                            and facts["last_turn_id"] is None
+                        ),
+                    }
+                    cursor = connection.execute(
+                        """INSERT INTO actions(
+                               task_id, occurrence_id, kind, payload, state,
+                               native_turn_id, created_at, updated_at
+                           ) VALUES (?, ?, 'specialist', ?, 'active', ?, ?, ?)""",
+                        (
+                            task["id"],
+                            occurrence["id"],
+                            json.dumps(payload, sort_keys=True),
+                            facts["last_turn_id"],
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    action = connection.execute(
+                        "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
+                    ).fetchone()
+        occurrence = self.store.row(
+            "SELECT * FROM occurrences WHERE id = ?", (occurrence["id"],)
+        )
+        action = self.store.row("SELECT * FROM actions WHERE id = ?", (action["id"],))
+        assert occurrence is not None and action is not None
+        if isinstance(facts["last_turn_id"], str) and action["native_turn_id"] is None:
+            self._adopt_unbound_weaver_turn(int(task["id"]), facts)
+            action = self.store.row(
+                "SELECT * FROM actions WHERE id = ?", (action["id"],)
+            )
+            if action is None:
+                raise StoreError("human Sage action disappeared during turn adoption")
+        if isinstance(action["native_turn_id"], str):
+            self.store.bind_action_turn(
+                int(action["id"]), thread_id, str(action["native_turn_id"])
+            )
+        self.store.link_action_to_workflow(
+            f"specialist:{occurrence['id']}",
+            int(action["id"]),
+            causal_role="sage",
+            origin_action_id=int(action["id"]),
+        )
+        self.store.execute(
+            """UPDATE tasks SET state = 'active', archive_eligible_at = NULL,
+               archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?""",
+            (utc_now(), task["id"]),
+        )
+        return {
+            "thread_id": thread_id,
+            "title": task["title"],
+            "role_number": task["role_number"],
+            "target": {
+                "item": item_id,
+                "project": project_id,
+                "workflow_id": target["workflow"]["workflow_id"],
+                "assignment_id": target["assignment"]["id"],
+                "executor": _task_identity(target["executor"]),
+                "overseer": _task_identity(target["overseer"]),
+            },
+            "occurrence_id": occurrence["id"],
+            "action_id": action["id"],
+            "instructions": direct_sage_instructions(action),
+        }
+
     async def _request_specialist(self, request: dict[str, Any]) -> dict[str, Any]:
         kind = request.get("kind")
         if kind not in {"sage", "inquisitor"}:
@@ -8561,7 +9344,9 @@ class Controller:
             "SELECT * FROM occurrences WHERE kind = 'sage' AND state = 'collecting' ORDER BY id"
         ):
             interviews = self.store.rows(
-                "SELECT i.*, t.title FROM interviews i JOIN tasks t ON t.id = i.subject_task_id WHERE i.occurrence_id = ? ORDER BY i.id",
+                """SELECT i.*, t.title, t.role, t.native_thread_id
+                   FROM interviews i JOIN tasks t ON t.id = i.subject_task_id
+                   WHERE i.occurrence_id = ? ORDER BY i.id""",
                 (occurrence["id"],),
             )
             deadline_passed = bool(
@@ -8673,12 +9458,17 @@ class Controller:
         answers = [
             {
                 "subject": row["title"],
+                "role": row["role"],
                 "answer": json.loads(row["answer_json"]),
             }
             for row in interviews
             if row["state"] == "answered" and row["answer_json"]
         ]
-        missing = [row["title"] for row in interviews if row["state"] != "answered"]
+        missing = [
+            {"subject": row["title"], "role": row["role"], "state": row["state"]}
+            for row in interviews
+            if row["state"] != "answered"
+        ]
         timestamp = utc_now()
         cursor = self.store.execute(
             "INSERT INTO actions(task_id, occurrence_id, kind, payload, state, check_after, created_at, updated_at) VALUES (?, ?, 'specialist', ?, 'pending', ?, ?, ?)",
@@ -8688,6 +9478,7 @@ class Controller:
                 json.dumps(
                     {
                         "continuation": "final report after the single interview round",
+                        "direct_item": bool(scope.get("direct_item")),
                         "scope": scope,
                         "prompt": occurrence["prompt"],
                         "retained_evidence": json.loads(
@@ -9021,7 +9812,17 @@ class Controller:
                         "activation": finding.get("activation", "pending"),
                         "title": finding.get("title")
                         or finding["problem"].splitlines()[0][:100],
-                        "description": f"{finding['problem']}\n\nEvidence: {finding['evidence']}\n\nExpected benefit: {finding['expected_benefit']}\n\nAcceptance criteria: {finding['acceptance_criteria']}",
+                        "description": (
+                            f"{finding['problem']}\n\n"
+                            + (
+                                f"Implementation scope: {finding['implementation_scope']}\n\n"
+                                if finding.get("implementation_scope")
+                                else ""
+                            )
+                            + f"Evidence: {finding['evidence']}\n\n"
+                            + f"Expected benefit: {finding['expected_benefit']}\n\n"
+                            + f"Acceptance criteria: {finding['acceptance_criteria']}"
+                        ),
                     }
                     filed = await asyncio.to_thread(
                         file_task,
@@ -10080,6 +10881,102 @@ def _contains_id(value: Any, identifier: str) -> bool:
 
 def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _task_identity(task: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task_id": int(task["id"]),
+        "thread_id": str(task["native_thread_id"]),
+        "title": str(task["title"]),
+        "role": str(task["role"]),
+    }
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _bounded_excerpt(value: str, limit: int) -> dict[str, Any]:
+    if len(value) <= limit:
+        return {"text": value, "truncated": False, "original_characters": len(value)}
+    return {
+        "text": value[:limit],
+        "truncated": True,
+        "original_characters": len(value),
+        "omitted_characters": len(value) - limit,
+    }
+
+
+def _bounded_plain(value: Any, limit: int) -> Any:
+    if not isinstance(value, str):
+        return value
+    return _bounded_excerpt(value, limit) if len(value) > limit else value
+
+
+def _bounded_json(value: Any, limit: int) -> Any:
+    if value is None:
+        return None
+    decoded: Any = value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = value
+    rendered = json.dumps(decoded, ensure_ascii=False, sort_keys=True)
+    if len(rendered) <= limit:
+        return decoded
+    return {
+        "excerpt": rendered[:limit],
+        "truncated": True,
+        "original_characters": len(rendered),
+        "omitted_characters": len(rendered) - limit,
+    }
+
+
+_RAW_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
+
+
+def _empty_token_totals() -> dict[str, None]:
+    return {field: None for field in _RAW_TOKEN_FIELDS}
+
+
+def _raw_token_totals(rows: list[dict[str, Any]]) -> dict[str, int | None]:
+    totals: dict[str, int | None] = {}
+    for field in _RAW_TOKEN_FIELDS:
+        column = "total_tokens" if field == "total_tokens" else f"total_{field}"
+        known = [int(row[column]) for row in rows if row.get(column) is not None]
+        totals[field] = sum(known) if known else None
+    return totals
+
+
+def _raw_usage_coverage(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "unknown"
+    states = {str(row.get("coverage") or "unknown") for row in rows}
+    if states == {"complete"}:
+        return "complete"
+    if states == {"observed"}:
+        return "observed"
+    if states == {"unavailable"}:
+        return "unavailable"
+    if states == {"unknown"}:
+        return "unknown"
+    return "partial"
 
 
 async def run_controller(paths: RuntimePaths, config: InstallationConfig) -> None:
