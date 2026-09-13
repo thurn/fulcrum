@@ -12,6 +12,23 @@ from typing import Any
 from fulcrum.outcomes import validate_outcome
 from fulcrum.store import Store, StoreError, utc_now
 
+OPERATOR_RESOLVABLE_OPERATION_KINDS = {
+    "beads_close",
+    "beads_create",
+    "setup_runtime_smoke",
+    "thread_start",
+    "tollgate_approve",
+    "tollgate_candidate_create",
+    "tollgate_worktree_create",
+    "turn_start",
+}
+
+OPERATOR_OPERATION_RESOLUTIONS = {
+    "observed_success",
+    "observed_failure",
+    "confirmed_unsent",
+}
+
 
 def accept_finish(
     store: Store,
@@ -630,6 +647,7 @@ def _apply_outcome(
         }
     if kind == "archon" and outcome == "decisions":
         batch = store.row("SELECT id FROM batches WHERE action_id = ?", (action["id"],))
+        required_operation_ids: set[int] = set()
         if batch is not None:
             expected = {
                 int(row["update_id"])
@@ -644,7 +662,60 @@ def _apply_outcome(
                     "Archon must handle every frozen update exactly; "
                     f"expected={sorted(expected)} handled={sorted(handled)}"
                 )
+            for row in store.rows(
+                """SELECT u.content FROM updates u JOIN batch_updates bu
+                   ON bu.update_id = u.id WHERE bu.batch_id = ?""",
+                (batch["id"],),
+            ):
+                content = json.loads(row["content"])
+                if content.get("kind") != "operation_resolution":
+                    continue
+                operation_id = content.get("operation_id")
+                if not isinstance(operation_id, int):
+                    raise StoreError(
+                        "operation-resolution update has no integer operation_id"
+                    )
+                operation = store.row(
+                    "SELECT state, reconciliation_used FROM external_operations WHERE id = ?",
+                    (operation_id,),
+                )
+                if (
+                    operation is not None
+                    and operation["state"] == "uncertain"
+                    and operation["reconciliation_used"]
+                ):
+                    required_operation_ids.add(operation_id)
+            supplied_operation_ids = [
+                decision.get("operation_id")
+                for decision in payload.get("decisions", [])
+                if decision.get("decision") == "resolve_operation"
+            ]
+            missing = required_operation_ids - set(supplied_operation_ids)
+            duplicates = sorted(
+                operation_id
+                for operation_id in required_operation_ids
+                if supplied_operation_ids.count(operation_id) != 1
+            )
+            if missing or duplicates:
+                raise StoreError(
+                    "every unresolved operation-resolution update requires exactly "
+                    "one matching resolve_operation decision; "
+                    f"missing={sorted(missing)} duplicates={duplicates}"
+                )
         result = apply_archon_decisions(store, payload, connection=connection)
+        unresolved = [
+            operation_id
+            for operation_id in required_operation_ids
+            if store.row(
+                "SELECT 1 FROM external_operations WHERE id = ? AND state = 'uncertain'",
+                (operation_id,),
+            )
+            is not None
+        ]
+        if unresolved:
+            raise StoreError(
+                f"operation resolution did not transition operations {unresolved}"
+            )
         succession = store.row(
             "SELECT value FROM meta WHERE key = 'archon_succession_request'"
         )
@@ -808,6 +879,476 @@ def _archive_run_pair(connection: Any, run_id: int, timestamp: str) -> None:
                    ) VALUES ('archive', ?, ?, 'pending', ?, ?)""",
                 (str(task_id), task["native_thread_id"], timestamp, timestamp),
             )
+
+
+def _required_resolution_text(decision: dict[str, Any], name: str) -> str:
+    value = decision.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise StoreError(f"resolve_operation requires nonempty {name}")
+    return value.strip()
+
+
+def _restore_assignment_after_operation(
+    connection: Any,
+    assignment: Any,
+    *,
+    stage: str | None,
+    condition: str | None,
+    timestamp: str,
+) -> None:
+    target_stage = stage or str(assignment["prior_stage"] or "queued")
+    connection.execute(
+        """UPDATE assignments SET stage = ?, prior_stage = NULL,
+           operator_hold_id = NULL, next_attempt_at = NULL, condition = ?, updated_at = ?
+           WHERE id = ?""",
+        (target_stage, condition, timestamp, assignment["id"]),
+    )
+
+
+def _resolve_turn_start(
+    connection: Any,
+    operation: Any,
+    decision: dict[str, Any],
+    resolution: str,
+    condition: str,
+    timestamp: str,
+) -> None:
+    action = connection.execute(
+        "SELECT * FROM actions WHERE id = ?", (int(operation["target"]),)
+    ).fetchone()
+    if action is None or action["operator_hold_id"] != operation["operator_hold_id"]:
+        raise StoreError("uncertain turn start is not attached to its held action")
+    if resolution == "observed_success":
+        turn_id = _required_resolution_text(decision, "native_id")
+        connection.execute(
+            """UPDATE actions SET state = 'active', native_turn_id = ?,
+               operator_hold_id = NULL, next_attempt_at = NULL, condition = NULL,
+               updated_at = ? WHERE id = ?""",
+            (turn_id, timestamp, action["id"]),
+        )
+        connection.execute(
+            "UPDATE reservations SET state = 'active' WHERE action_id = ?",
+            (action["id"],),
+        )
+        connection.execute(
+            """UPDATE tasks SET state = 'active', runtime_status = 'active',
+               last_turn_terminal = 0, updated_at = ? WHERE id = ?""",
+            (timestamp, action["task_id"]),
+        )
+        return
+    connection.execute(
+        """UPDATE actions SET state = 'pending', native_turn_id = NULL,
+           operator_hold_id = NULL, next_attempt_at = ?, condition = ?, updated_at = ?
+           WHERE id = ?""",
+        (timestamp, condition, timestamp, action["id"]),
+    )
+    connection.execute(
+        "UPDATE reservations SET state = 'reserved' WHERE action_id = ?",
+        (action["id"],),
+    )
+
+
+def _resolve_worktree_create(
+    connection: Any,
+    operation: Any,
+    decision: dict[str, Any],
+    resolution: str,
+    condition: str,
+    timestamp: str,
+) -> None:
+    assignment = connection.execute(
+        "SELECT * FROM assignments WHERE id = ?", (int(operation["target"]),)
+    ).fetchone()
+    if (
+        assignment is None
+        or assignment["operator_hold_id"] != operation["operator_hold_id"]
+    ):
+        raise StoreError(
+            "uncertain worktree creation is not attached to its assignment"
+        )
+    if resolution == "observed_success":
+        result = decision.get("result")
+        if not isinstance(result, dict):
+            raise StoreError("observed worktree success requires a result object")
+        path = result.get("worktree_path")
+        if not isinstance(path, str) or not path.strip():
+            raise StoreError("observed worktree success requires result.worktree_path")
+        connection.execute(
+            """UPDATE assignments SET worktree_path = ?, stage = 'preparing',
+               prior_stage = NULL, operator_hold_id = NULL, next_attempt_at = NULL,
+               condition = NULL, updated_at = ? WHERE id = ?""",
+            (path.strip(), timestamp, assignment["id"]),
+        )
+        return
+    connection.execute(
+        """UPDATE assignments SET worktree_path = NULL, stage = 'queued',
+           prior_stage = NULL, operator_hold_id = NULL, next_attempt_at = NULL,
+           condition = ?, updated_at = ? WHERE id = ?""",
+        (condition, timestamp, assignment["id"]),
+    )
+
+
+def _resolve_candidate_create(
+    connection: Any,
+    operation: Any,
+    decision: dict[str, Any],
+    resolution: str,
+    condition: str,
+    timestamp: str,
+) -> None:
+    assignment = connection.execute(
+        "SELECT * FROM assignments WHERE id = ?", (int(operation["target"]),)
+    ).fetchone()
+    if (
+        assignment is None
+        or assignment["operator_hold_id"] != operation["operator_hold_id"]
+    ):
+        raise StoreError(
+            "uncertain candidate creation is not attached to its assignment"
+        )
+    if resolution == "observed_success":
+        candidate_id = _required_resolution_text(decision, "native_id")
+        result = decision.get("result")
+        if result is not None and not isinstance(result, dict):
+            raise StoreError("observed candidate success result must be an object")
+        inputs = json.loads(operation["input_json"])
+        source_oid = (result or {}).get("source_oid") or inputs.get("revision")
+        if (
+            not isinstance(source_oid, str)
+            or not source_oid.strip()
+            or source_oid == "HEAD"
+        ):
+            raise StoreError(
+                "observed candidate success requires an immutable result.source_oid"
+            )
+        _restore_assignment_after_operation(
+            connection,
+            assignment,
+            stage=None,
+            condition=None,
+            timestamp=timestamp,
+        )
+        connection.execute(
+            """UPDATE assignments SET candidate_id = ?, source_oid = ?, tested_oid = ?,
+               updated_at = ? WHERE id = ?""",
+            (
+                candidate_id,
+                source_oid.strip(),
+                (result or {}).get("tested_oid"),
+                timestamp,
+                assignment["id"],
+            ),
+        )
+        return
+    connection.execute(
+        "UPDATE assignments SET candidate_id = NULL, source_oid = NULL, tested_oid = NULL WHERE id = ?",
+        (assignment["id"],),
+    )
+    _restore_assignment_after_operation(
+        connection,
+        assignment,
+        stage=None,
+        condition=condition,
+        timestamp=timestamp,
+    )
+
+
+def _resolve_assignment_operation(
+    connection: Any,
+    operation: Any,
+    resolution: str,
+    condition: str,
+    timestamp: str,
+) -> None:
+    assignment = connection.execute(
+        """SELECT * FROM assignments WHERE candidate_id = ?
+           AND stage NOT IN ('completed','canceled')""",
+        (operation["target"],),
+    ).fetchone()
+    if operation["kind"] == "beads_close":
+        assignment = connection.execute(
+            """SELECT * FROM assignments WHERE bead_id = ?
+               AND stage NOT IN ('completed','canceled')""",
+            (operation["target"],),
+        ).fetchone()
+    if (
+        assignment is None
+        or assignment["operator_hold_id"] != operation["operator_hold_id"]
+    ):
+        raise StoreError(
+            f"uncertain {operation['kind']} is not attached to its assignment"
+        )
+    if operation["kind"] == "tollgate_approve":
+        stage = (
+            "delivering"
+            if resolution in {"observed_success", "confirmed_unsent"}
+            else "correcting"
+        )
+        _restore_assignment_after_operation(
+            connection,
+            assignment,
+            stage=stage,
+            condition=None if resolution == "observed_success" else condition,
+            timestamp=timestamp,
+        )
+        return
+    if resolution != "observed_success":
+        _restore_assignment_after_operation(
+            connection,
+            assignment,
+            stage="delivering",
+            condition=condition,
+            timestamp=timestamp,
+        )
+        return
+    _restore_assignment_after_operation(
+        connection,
+        assignment,
+        stage="completed",
+        condition=None,
+        timestamp=timestamp,
+    )
+    remaining = connection.execute(
+        """SELECT 1 FROM assignments WHERE run_id = ?
+           AND stage NOT IN ('completed','canceled') LIMIT 1""",
+        (assignment["run_id"],),
+    ).fetchone()
+    if remaining is None:
+        connection.execute(
+            "UPDATE runs SET state = 'completed', updated_at = ? WHERE id = ?",
+            (timestamp, assignment["run_id"]),
+        )
+        _archive_run_pair(connection, int(assignment["run_id"]), timestamp)
+
+
+def _resolve_thread_start(
+    connection: Any,
+    operation: Any,
+    decision: dict[str, Any],
+    resolution: str,
+    condition: str,
+    timestamp: str,
+) -> None:
+    inputs = json.loads(operation["input_json"])
+    if resolution == "observed_success":
+        thread_id = _required_resolution_text(decision, "native_id")
+        task = connection.execute(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        ).fetchone()
+        if task is None:
+            cursor = connection.execute(
+                """INSERT INTO tasks(native_thread_id, role, role_number, title,
+                   description, project_id, model, reasoning_effort, pair_id, state,
+                   runtime_status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 'unmaterialized', ?, ?)""",
+                (
+                    thread_id,
+                    inputs["role"],
+                    inputs.get("role_number"),
+                    inputs["title"],
+                    inputs["description"],
+                    inputs.get("local_project_id"),
+                    inputs["model"],
+                    inputs["effort"],
+                    inputs.get("pair_id"),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            task_id = int(cursor.lastrowid)
+        else:
+            expected = (inputs["role"], inputs.get("pair_id"))
+            if (task["role"], task["pair_id"]) != expected:
+                raise StoreError("observed thread is already bound to another role")
+            task_id = int(task["id"])
+        pair_id = inputs.get("pair_id")
+        if isinstance(pair_id, int) and inputs["role"] in {"executor", "overseer"}:
+            column = f"{inputs['role']}_task_id"
+            connection.execute(
+                f"UPDATE runs SET {column} = ?, updated_at = ? WHERE id = ?",
+                (task_id, timestamp, pair_id),
+            )
+    pair_id = inputs.get("pair_id")
+    if isinstance(pair_id, int):
+        assignment = connection.execute(
+            """SELECT * FROM assignments WHERE run_id = ?
+               AND stage NOT IN ('completed','canceled') ORDER BY id LIMIT 1""",
+            (pair_id,),
+        ).fetchone()
+        if (
+            assignment is not None
+            and assignment["operator_hold_id"] == operation["operator_hold_id"]
+        ):
+            _restore_assignment_after_operation(
+                connection,
+                assignment,
+                stage=None,
+                condition=None if resolution == "observed_success" else condition,
+                timestamp=timestamp,
+            )
+
+
+def _resolve_obligation_operation(
+    connection: Any,
+    operation: Any,
+    decision: dict[str, Any],
+    resolution: str,
+    condition: str,
+    timestamp: str,
+) -> None:
+    obligation = connection.execute(
+        """SELECT * FROM obligations WHERE kind = 'beads_publication' AND identity = ?
+           AND state NOT IN ('complete','canceled') ORDER BY id LIMIT 1""",
+        (operation["target"],),
+    ).fetchone()
+    if resolution == "observed_success":
+        bead_id = _required_resolution_text(decision, "native_id")
+        inputs = json.loads(operation["input_json"])
+        connection.execute(
+            """INSERT INTO beads(bead_id, intake_key, project_id, title, description,
+               activation, executor_model, executor_reasoning_effort, overseer_model,
+               overseer_reasoning_effort, model_provenance, plan_id, plan_commit,
+               context_json, publication_state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', ?, ?)""",
+            (
+                bead_id,
+                inputs["intake_key"],
+                inputs["project"],
+                inputs["title"],
+                inputs["description"],
+                inputs.get("activation", "pending"),
+                inputs.get("executor_model", "gpt-5.6-sol"),
+                inputs.get("executor_reasoning_effort", "high"),
+                inputs.get("overseer_model", "gpt-5.6-sol"),
+                inputs.get("overseer_reasoning_effort", "high"),
+                inputs.get("model_provenance", "default"),
+                inputs.get("plan_id"),
+                inputs.get("plan_commit"),
+                json.dumps(inputs.get("context", [])),
+                timestamp,
+                timestamp,
+            ),
+        )
+        for dependency in inputs.get("dependencies", []):
+            connection.execute(
+                "INSERT INTO bead_dependencies(bead_id, dependency_id) VALUES (?, ?)",
+                (bead_id, dependency),
+            )
+    if obligation is None:
+        return
+    if obligation["operator_hold_id"] != operation["operator_hold_id"]:
+        raise StoreError(
+            f"uncertain {operation['kind']} is not attached to its obligation"
+        )
+    connection.execute(
+        """UPDATE obligations SET state = ?, operator_hold_id = NULL,
+           next_attempt_at = ?, detail = ?, updated_at = ? WHERE id = ?""",
+        (
+            "complete" if resolution == "observed_success" else "failed",
+            None if resolution == "observed_success" else timestamp,
+            None if resolution == "observed_success" else condition,
+            timestamp,
+            obligation["id"],
+        ),
+    )
+
+
+def _resolve_uncertain_operation(
+    connection: Any, operation: Any, decision: dict[str, Any], timestamp: str
+) -> dict[str, Any]:
+    resolution = decision.get("resolution")
+    if resolution not in OPERATOR_OPERATION_RESOLUTIONS:
+        raise StoreError(
+            "resolve_operation requires observed_success, observed_failure, or confirmed_unsent"
+        )
+    if operation["kind"] not in OPERATOR_RESOLVABLE_OPERATION_KINDS:
+        raise StoreError(
+            f"operation kind {operation['kind']!r} has no supported resolution"
+        )
+    evidence = _required_resolution_text(decision, "evidence")
+    retained_result = {
+        "operator_resolution": resolution,
+        "evidence": evidence,
+    }
+    if decision.get("native_id") is not None:
+        retained_result["native_id"] = decision["native_id"]
+    if decision.get("result") is not None:
+        retained_result["result"] = decision["result"]
+    state = {
+        "observed_success": "complete",
+        "observed_failure": "failed",
+        "confirmed_unsent": "canceled",
+    }[resolution]
+    if operation["state"] != "uncertain" or not operation["reconciliation_used"]:
+        retained = json.loads(operation["result_json"] or "{}")
+        if operation["state"] == state and retained == retained_result:
+            return {"reused": True}
+        raise StoreError(
+            f"operation {operation['id']} is not uncertain after targeted observation"
+        )
+    if operation["operator_hold_id"] is None:
+        raise StoreError(f"operation {operation['id']} has no retained resolution hold")
+    condition = f"operator {resolution.replace('_', ' ')}: {evidence}"
+    if operation["kind"] == "turn_start":
+        _resolve_turn_start(
+            connection, operation, decision, resolution, condition, timestamp
+        )
+    elif operation["kind"] == "tollgate_worktree_create":
+        _resolve_worktree_create(
+            connection, operation, decision, resolution, condition, timestamp
+        )
+    elif operation["kind"] == "tollgate_candidate_create":
+        _resolve_candidate_create(
+            connection, operation, decision, resolution, condition, timestamp
+        )
+    elif operation["kind"] in {"tollgate_approve", "beads_close"}:
+        _resolve_assignment_operation(
+            connection, operation, resolution, condition, timestamp
+        )
+    elif operation["kind"] == "thread_start":
+        _resolve_thread_start(
+            connection, operation, decision, resolution, condition, timestamp
+        )
+    elif operation["kind"] == "beads_create":
+        _resolve_obligation_operation(
+            connection, operation, decision, resolution, condition, timestamp
+        )
+    elif (
+        operation["kind"] == "setup_runtime_smoke" and resolution == "observed_success"
+    ):
+        connection.execute(
+            "INSERT INTO meta(key, value) VALUES ('desktop_smoke_check', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (timestamp,),
+        )
+    hold_id = int(operation["operator_hold_id"])
+    dangling = []
+    for table in ("assignments", "actions", "obligations"):
+        if connection.execute(
+            f"SELECT 1 FROM {table} WHERE operator_hold_id = ? LIMIT 1", (hold_id,)
+        ).fetchone():
+            dangling.append(table)
+    if dangling:
+        raise StoreError(
+            f"operation resolution did not transition held target in {', '.join(dangling)}"
+        )
+    connection.execute(
+        "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
+        (timestamp, hold_id),
+    )
+    connection.execute(
+        """UPDATE external_operations SET state = ?, result_json = ?, native_id = COALESCE(?, native_id),
+           condition = ?, completed_at = ?, updated_at = ? WHERE id = ?""",
+        (
+            state,
+            json.dumps(retained_result, sort_keys=True),
+            decision.get("native_id"),
+            None if state == "complete" else condition,
+            timestamp if state == "complete" else None,
+            timestamp,
+            operation["id"],
+        ),
+    )
+    return {"reused": False, "state": state}
 
 
 def apply_archon_decisions(
@@ -1064,6 +1605,17 @@ def apply_archon_decisions(
                         {"decision": kind, "hold_id": hold_id, "reused": True}
                     )
                     continue
+                unresolved_operation = connection.execute(
+                    """SELECT id FROM external_operations
+                       WHERE operator_hold_id = ? AND state = 'uncertain'
+                         AND reconciliation_used = 1""",
+                    (hold_id,),
+                ).fetchone()
+                if unresolved_operation is not None:
+                    raise StoreError(
+                        f"hold {hold_id} protects unresolved external operation "
+                        f"{unresolved_operation['id']}; use resolve_operation"
+                    )
                 changed = connection.execute(
                     "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
                     (timestamp, hold_id),
@@ -1084,6 +1636,27 @@ def apply_archon_decisions(
                     (timestamp, timestamp, hold_id),
                 )
                 applied.append({"decision": kind, "hold_id": hold_id})
+                continue
+            if kind == "resolve_operation":
+                operation_id = decision.get("operation_id")
+                if not isinstance(operation_id, int) or isinstance(operation_id, bool):
+                    raise StoreError("resolve_operation requires integer operation_id")
+                operation = connection.execute(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+                ).fetchone()
+                if operation is None:
+                    raise StoreError(f"operation {operation_id} does not exist")
+                resolved = _resolve_uncertain_operation(
+                    connection, operation, decision, timestamp
+                )
+                applied.append(
+                    {
+                        "decision": kind,
+                        "operation_id": operation_id,
+                        "resolution": decision.get("resolution"),
+                        **resolved,
+                    }
+                )
                 continue
             if kind == "cancel_run":
                 run_id = decision.get("run_id")

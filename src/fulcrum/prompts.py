@@ -192,6 +192,21 @@ def _archon_message(payload: dict[str, Any]) -> str:
                     }
                 )
             )
+        for operation in snapshot.get("uncertain_operations", []):
+            lines.append(
+                f"External operation {operation['id']} requires explicit resolution: "
+                + _facts(
+                    {
+                        key: operation.get(key)
+                        for key in (
+                            "kind",
+                            "target",
+                            "condition",
+                            "operator_hold_id",
+                        )
+                    }
+                )
+            )
     if not items:
         lines.insert(
             0,

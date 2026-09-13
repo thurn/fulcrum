@@ -32,6 +32,7 @@ ARCHON_DECISIONS = {
     "approve",
     "hold",
     "release_hold",
+    "resolve_operation",
     "cancel_run",
     "resolve_escalation",
     "set_priority",
@@ -276,6 +277,12 @@ def finish_examples(action_kind: str) -> dict[str, Any]:
                     "release_condition": "exact condition",
                 },
                 {"decision": "release_hold", "hold_id": 1},
+                {
+                    "decision": "resolve_operation",
+                    "operation_id": 1,
+                    "resolution": "confirmed_unsent",
+                    "evidence": "how the external result was established",
+                },
                 {"decision": "cancel_run", "run_id": 1, "reason": "why"},
                 {
                     "decision": "resolve_escalation",
@@ -377,6 +384,9 @@ def finish_contract(action_kind: str, *, interviews_allowed: bool = True) -> str
             "unless changing them. Approvals require exact stored scope. Holds accept "
             "global, project, run, or assignment scope; target is required except for "
             "global. Escalation resolution is retry, rescope (with scope), or cancel. "
+            "An exhausted external operation must use resolve_operation with "
+            "observed_success, observed_failure, or confirmed_unsent and concrete "
+            "evidence; observed success also requires the kind-specific result identity. "
             "Specialist kind is sage or inquisitor. Deferral needs one concrete trigger: "
             '{"capacity": true}, {"dependency": "bead-id"}, {"hold": 1}, '
             '{"operator_change": true}, or {"next_check_at": "2026-10-01T12:00:00Z"}.'

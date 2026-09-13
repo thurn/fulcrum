@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS external_operations (
   result_json TEXT, native_id TEXT, reconciliation_used INTEGER NOT NULL DEFAULT 0 CHECK (reconciliation_used IN (0, 1)),
   condition TEXT, correlation_id TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   next_attempt_at TEXT, last_attempt_at TEXT, completed_at TEXT,
+  operator_hold_id INTEGER REFERENCES holds(id),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS operation_attempts (
@@ -547,6 +548,7 @@ class Store:
                 "next_attempt_at": "TEXT",
                 "last_attempt_at": "TEXT",
                 "completed_at": "TEXT",
+                "operator_hold_id": "INTEGER REFERENCES holds(id)",
             },
             "obligations": {
                 "retry_count": "INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0)",

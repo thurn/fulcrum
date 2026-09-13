@@ -52,6 +52,21 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--capabilities", action="store_true")
     status.add_argument("--run", type=int)
     commands.add_parser("archon", help="locate the current Archon task")
+    resolve_operation = commands.add_parser(
+        "resolve-operation",
+        help="resolve an exhausted external operation without an Archon turn",
+    )
+    resolve_operation.add_argument("--operation-id", type=int, required=True)
+    resolve_operation.add_argument(
+        "--resolution",
+        choices=("observed_success", "observed_failure", "confirmed_unsent"),
+        required=True,
+    )
+    resolve_operation.add_argument("--evidence", required=True)
+    resolve_operation.add_argument("--native-id")
+    resolve_operation.add_argument(
+        "--result", help="path to a JSON object with kind-specific observed results"
+    )
     weaver = commands.add_parser("weaver", help="register a human-created Weaver task")
     weaver_sub = weaver.add_subparsers(dest="weaver_command", required=True)
     register = weaver_sub.add_parser("register")
@@ -196,6 +211,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "archon":
             result = _request(paths, {"command": "archon"})
+        elif args.command == "resolve-operation":
+            decision: dict[str, Any] = {
+                "operation_id": args.operation_id,
+                "resolution": args.resolution,
+                "evidence": args.evidence,
+            }
+            if args.native_id:
+                decision["native_id"] = args.native_id
+            if args.result:
+                observed_result = json.loads(
+                    Path(args.result).read_text(encoding="utf-8")
+                )
+                if not isinstance(observed_result, dict):
+                    raise ValueError("--result must contain a JSON object")
+                decision["result"] = observed_result
+            result = _request(
+                paths, {"command": "resolve_operation", "decision": decision}
+            )
         elif args.command == "weaver":
             result = _request(
                 paths,

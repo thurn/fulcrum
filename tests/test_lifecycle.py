@@ -11,6 +11,7 @@ from fulcrum.lifecycle import (
     apply_archon_decisions,
     observe_action_terminal,
 )
+from fulcrum.kernel import invariant_violations
 from fulcrum.store import Store, StoreError
 
 
@@ -505,6 +506,672 @@ class LifecycleTest(unittest.TestCase):
                         }
                     ]
                 },
+            )
+
+    def _held_worktree_operation(self) -> tuple[int, int]:
+        timestamp = "2026-01-01T00:00:00Z"
+        self.store.execute(
+            "UPDATE assignments SET stage = 'preparing', worktree_path = NULL WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        operation_id = self.store.create_operation(
+            "tollgate_worktree_create",
+            str(self.assignment["id"]),
+            {"repository_id": "repository", "name": "fulcrum-1"},
+        )
+        attempt = self.store.begin_operation_attempt(operation_id)
+        self.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="transport ended after dispatch",
+        )
+        hold = self.store.execute(
+            """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+               VALUES ('operation', ?, 'ambiguous worktree creation', 1,
+                       'operator resolves ambiguous external effect', ?)""",
+            (str(operation_id), timestamp),
+        )
+        hold_id = int(hold.lastrowid)
+        self.store.execute(
+            """UPDATE external_operations SET reconciliation_used = 1,
+               operator_hold_id = ?, condition = 'targeted inventory remained ambiguous'
+               WHERE id = ?""",
+            (hold_id, operation_id),
+        )
+        self.store.execute(
+            """UPDATE assignments SET prior_stage = stage, stage = 'recovering',
+               operator_hold_id = ?, next_attempt_at = NULL,
+               condition = 'targeted inventory remained ambiguous' WHERE id = ?""",
+            (hold_id, self.assignment["id"]),
+        )
+        return operation_id, hold_id
+
+    def test_bare_release_cannot_bypass_exhausted_operation_hold(self) -> None:
+        operation_id, hold_id = self._held_worktree_operation()
+        before_operation = self.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        before_assignment = self.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+
+        with self.assertRaisesRegex(StoreError, "use resolve_operation"):
+            apply_archon_decisions(
+                self.store,
+                {"decisions": [{"decision": "release_hold", "hold_id": hold_id}]},
+            )
+
+        self.assertEqual(
+            self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+            ),
+            before_operation,
+        )
+        self.assertEqual(
+            self.store.row(
+                "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+            ),
+            before_assignment,
+        )
+        self.assertIsNone(
+            self.store.row("SELECT released_at FROM holds WHERE id = ?", (hold_id,))[
+                "released_at"
+            ]
+        )
+
+    def test_operation_resolutions_are_atomic_and_restore_dispatchable_state(
+        self,
+    ) -> None:
+        cases = [
+            (
+                "observed_success",
+                "complete",
+                "preparing",
+                {"worktree_path": "/tmp/recovered"},
+            ),
+            ("observed_failure", "failed", "queued", None),
+            ("confirmed_unsent", "canceled", "queued", None),
+        ]
+        for resolution, operation_state, assignment_stage, result in cases:
+            with self.subTest(resolution=resolution):
+                operation_id, hold_id = self._held_worktree_operation()
+                decision = {
+                    "decision": "resolve_operation",
+                    "operation_id": operation_id,
+                    "resolution": resolution,
+                    "evidence": f"operator evidence for {resolution}",
+                }
+                if result is not None:
+                    decision["result"] = result
+
+                apply_archon_decisions(self.store, {"decisions": [decision]})
+
+                operation = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+                )
+                assignment = self.store.row(
+                    "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+                )
+                self.assertEqual(operation["state"], operation_state)
+                self.assertEqual(assignment["stage"], assignment_stage)
+                self.assertIsNone(assignment["operator_hold_id"])
+                self.assertIsNotNone(
+                    self.store.row(
+                        "SELECT released_at FROM holds WHERE id = ?", (hold_id,)
+                    )["released_at"]
+                )
+                self.assertEqual(invariant_violations(self.store), [])
+                if resolution != cases[-1][0]:
+                    # Reuse the fixture's one assignment for the next terminal case.
+                    self.store.execute(
+                        "UPDATE assignments SET stage = 'implementing', worktree_path = '/tmp/p' WHERE id = ?",
+                        (self.assignment["id"],),
+                    )
+
+    def test_operation_resolution_survives_restart_only_before_or_after_commit(
+        self,
+    ) -> None:
+        operation_id, hold_id = self._held_worktree_operation()
+        database = self.store.path
+        self.store.close()
+        self.store = Store(database)
+        self.assertEqual(
+            self.store.row(
+                "SELECT state, operator_hold_id FROM external_operations WHERE id = ?",
+                (operation_id,),
+            ),
+            {"state": "uncertain", "operator_hold_id": hold_id},
+        )
+        self.assertEqual(
+            self.store.row(
+                "SELECT stage, operator_hold_id FROM assignments WHERE id = ?",
+                (self.assignment["id"],),
+            ),
+            {"stage": "recovering", "operator_hold_id": hold_id},
+        )
+
+        apply_archon_decisions(
+            self.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "resolve_operation",
+                        "operation_id": operation_id,
+                        "resolution": "observed_success",
+                        "evidence": "exact worktree inventory and path",
+                        "result": {"worktree_path": "/tmp/recovered"},
+                    }
+                ]
+            },
+        )
+        self.store.close()
+        self.store = Store(database)
+
+        self.assertEqual(
+            self.store.row(
+                "SELECT state, operator_hold_id FROM external_operations WHERE id = ?",
+                (operation_id,),
+            ),
+            {"state": "complete", "operator_hold_id": hold_id},
+        )
+        self.assertEqual(
+            self.store.row(
+                "SELECT stage, operator_hold_id, worktree_path FROM assignments WHERE id = ?",
+                (self.assignment["id"],),
+            ),
+            {
+                "stage": "preparing",
+                "operator_hold_id": None,
+                "worktree_path": "/tmp/recovered",
+            },
+        )
+        self.assertIsNotNone(
+            self.store.row("SELECT released_at FROM holds WHERE id = ?", (hold_id,))[
+                "released_at"
+            ]
+        )
+        self.assertEqual(invariant_violations(self.store), [])
+
+    def test_every_operation_resolution_uses_archon_finish_and_is_restart_atomic(
+        self,
+    ) -> None:
+        kinds = [
+            "turn_start",
+            "thread_start",
+            "tollgate_worktree_create",
+            "tollgate_candidate_create",
+            "tollgate_approve",
+            "beads_create",
+            "beads_close",
+            "setup_runtime_smoke",
+        ]
+        resolutions = [
+            "observed_success",
+            "observed_failure",
+            "confirmed_unsent",
+        ]
+        for kind in kinds:
+            for resolution in resolutions:
+                with self.subTest(kind=kind, resolution=resolution):
+                    self._assert_operation_resolution_case(kind, resolution)
+
+    def test_recovery_batch_rejects_missing_and_partial_operation_decisions(
+        self,
+    ) -> None:
+        for supplied_count in (0, 1):
+            with self.subTest(supplied_count=supplied_count):
+                with tempfile.TemporaryDirectory() as directory:
+                    store = Store(Path(directory) / "missing-decisions.db")
+                    assignment = self._seed_resolution_store(store)
+                    operation_ids = [
+                        self._hold_operation_for_matrix(
+                            store, assignment, "setup_runtime_smoke"
+                        )[0]
+                        for _ in range(2)
+                    ]
+                    decisions = [
+                        self._resolution_decision(
+                            "setup_runtime_smoke",
+                            operation_id,
+                            "confirmed_unsent",
+                        )
+                        for operation_id in operation_ids[:supplied_count]
+                    ]
+
+                    result = self._archon_resolution_outcome(
+                        store, Path(directory), operation_ids, decisions
+                    )
+
+                    self.assertFalse(result["advanced"])
+                    self.assertIn(
+                        "every unresolved operation-resolution update",
+                        result["condition"],
+                    )
+                    for operation_id in operation_ids:
+                        operation = store.row(
+                            "SELECT * FROM external_operations WHERE id = ?",
+                            (operation_id,),
+                        )
+                        self.assertEqual(operation["state"], "uncertain")
+                        self.assertEqual(operation["reconciliation_used"], 1)
+                    self.assertEqual(
+                        {
+                            row["state"]
+                            for row in store.rows("SELECT state FROM updates")
+                        },
+                        {"retained"},
+                    )
+                    self.assertEqual(
+                        store.row("SELECT state FROM batches")["state"], "failed"
+                    )
+                    store.close()
+
+    def _assert_operation_resolution_case(self, kind: str, resolution: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "matrix.db"
+            store = Store(database)
+            assignment = self._seed_resolution_store(store)
+            operation_id, hold_id = self._hold_operation_for_matrix(
+                store, assignment, kind
+            )
+            before = {
+                "operation": store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+                ),
+                "hold": store.row("SELECT * FROM holds WHERE id = ?", (hold_id,)),
+                "targets": store.rows(
+                    "SELECT id, stage, operator_hold_id FROM assignments ORDER BY id"
+                )
+                + store.rows(
+                    "SELECT id, state, operator_hold_id FROM actions ORDER BY id"
+                )
+                + store.rows(
+                    "SELECT id, state, operator_hold_id FROM obligations ORDER BY id"
+                ),
+            }
+            with self.assertRaisesRegex(StoreError, "use resolve_operation"):
+                apply_archon_decisions(
+                    store,
+                    {"decisions": [{"decision": "release_hold", "hold_id": hold_id}]},
+                )
+            self.assertEqual(
+                store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+                ),
+                before["operation"],
+            )
+            self.assertEqual(
+                store.row("SELECT * FROM holds WHERE id = ?", (hold_id,)),
+                before["hold"],
+            )
+            self.assertEqual(
+                store.rows(
+                    "SELECT id, stage, operator_hold_id FROM assignments ORDER BY id"
+                )
+                + store.rows(
+                    "SELECT id, state, operator_hold_id FROM actions ORDER BY id"
+                )
+                + store.rows(
+                    "SELECT id, state, operator_hold_id FROM obligations ORDER BY id"
+                ),
+                before["targets"],
+            )
+
+            # A restart before the one resolution transaction exposes the complete
+            # old state: uncertain operation, unreleased hold, and held target.
+            store.close()
+            store = Store(database)
+            self.assertEqual(
+                store.row(
+                    "SELECT state, reconciliation_used, operator_hold_id FROM external_operations WHERE id = ?",
+                    (operation_id,),
+                ),
+                {
+                    "state": "uncertain",
+                    "reconciliation_used": 1,
+                    "operator_hold_id": hold_id,
+                },
+            )
+            self.assertIsNone(
+                store.row("SELECT released_at FROM holds WHERE id = ?", (hold_id,))[
+                    "released_at"
+                ]
+            )
+
+            decision = self._resolution_decision(kind, operation_id, resolution)
+            self._resolve_through_archon_finish(store, Path(directory), decision)
+            store.close()
+            store = Store(database)
+
+            expected_state = {
+                "observed_success": "complete",
+                "observed_failure": "failed",
+                "confirmed_unsent": "canceled",
+            }[resolution]
+            operation = store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+            )
+            self.assertEqual(operation["state"], expected_state)
+            self.assertIsNotNone(
+                store.row("SELECT released_at FROM holds WHERE id = ?", (hold_id,))[
+                    "released_at"
+                ]
+            )
+            self.assertIsNone(
+                store.row(
+                    "SELECT 1 FROM assignments WHERE operator_hold_id = ? UNION ALL SELECT 1 FROM actions WHERE operator_hold_id = ? UNION ALL SELECT 1 FROM obligations WHERE operator_hold_id = ?",
+                    (hold_id, hold_id, hold_id),
+                )
+            )
+            self.assertEqual(invariant_violations(store), [])
+            self._assert_resolved_target(store, assignment, kind, resolution)
+            store.close()
+
+    def _seed_resolution_store(self, store: Store) -> dict[str, object]:
+        now = "2026-01-01T00:00:00Z"
+        store.execute(
+            "INSERT INTO projects(project_id, repo_path) VALUES ('p', '/tmp/p')"
+        )
+        store.execute(
+            "INSERT INTO beads VALUES ('p-1','key','p','Title','Scope','pending','sol','high','sol','high','default',NULL,NULL,'[]','complete',?,?)",
+            (now, now),
+        )
+        run_id = apply_archon_decisions(
+            store,
+            {
+                "global_limit": 2,
+                "project_limits": {"p": 1},
+                "decisions": [
+                    {"decision": "approve", "project": "p", "beads": ["p-1"]}
+                ],
+            },
+        )["created_runs"][0]
+        assignment = store.row("SELECT * FROM assignments WHERE run_id = ?", (run_id,))
+        assert assignment is not None
+        return assignment
+
+    def _hold_operation_for_matrix(
+        self, store: Store, assignment: dict[str, object], kind: str
+    ) -> tuple[int, int]:
+        now = "2026-01-01T00:00:00Z"
+        assignment_id = int(assignment["id"])
+        run_id = int(assignment["run_id"])
+        target: str
+        inputs: dict[str, object]
+        held_table: str | None = None
+        held_id: int | None = None
+        if kind == "turn_start":
+            worker = store.register_task(
+                native_thread_id="turn-worker",
+                role="executor",
+                description="turn",
+                model="sol",
+                reasoning_effort="high",
+                project_id="p",
+            )
+            action = store.execute(
+                "INSERT INTO actions(task_id, assignment_id, kind, payload, state, created_at, updated_at) VALUES (?, ?, 'implement', '{}', 'uncertain', ?, ?)",
+                (worker["id"], assignment_id, now, now),
+            )
+            store.execute(
+                "INSERT INTO reservations(action_id, pair_id, state, created_at) VALUES (?, ?, 'uncertain', ?)",
+                (action.lastrowid, run_id, now),
+            )
+            target = str(action.lastrowid)
+            inputs = {"thread_id": "turn-worker", "prompt": "resume"}
+            held_table, held_id = "actions", int(action.lastrowid)
+        elif kind == "thread_start":
+            target = "executor"
+            inputs = {
+                "role": "executor",
+                "role_number": 9,
+                "title": "Executor 9: recovered",
+                "description": "recovered",
+                "project_id": "codex-p",
+                "local_project_id": "p",
+                "cwd": "/tmp/p",
+                "model": "sol",
+                "effort": "high",
+                "pair_id": run_id,
+            }
+            held_table, held_id = "assignments", assignment_id
+        elif kind == "tollgate_worktree_create":
+            target = str(assignment_id)
+            inputs = {"repository_id": "repository", "name": "fulcrum-1"}
+            store.execute(
+                "UPDATE assignments SET stage = 'preparing' WHERE id = ?",
+                (assignment_id,),
+            )
+            held_table, held_id = "assignments", assignment_id
+        elif kind == "tollgate_candidate_create":
+            target = str(assignment_id)
+            inputs = {"repository_id": "repository", "revision": "source-oid"}
+            store.execute(
+                "UPDATE assignments SET stage = 'review_pending' WHERE id = ?",
+                (assignment_id,),
+            )
+            held_table, held_id = "assignments", assignment_id
+        elif kind == "tollgate_approve":
+            target = "candidate-1"
+            inputs = {"repository_id": "repository", "candidate_id": target}
+            store.execute(
+                "UPDATE assignments SET stage = 'delivering', candidate_id = ? WHERE id = ?",
+                (target, assignment_id),
+            )
+            held_table, held_id = "assignments", assignment_id
+        elif kind == "beads_create":
+            target = "intake-new"
+            inputs = {
+                "intake_key": target,
+                "project": "p",
+                "title": "Recovered bead",
+                "description": "Recovered scope",
+            }
+            obligation = store.execute(
+                "INSERT INTO obligations(kind, identity, target, state, created_at, updated_at) VALUES ('beads_publication', ?, 'p', 'uncertain', ?, ?)",
+                (target, now, now),
+            )
+            held_table, held_id = "obligations", int(obligation.lastrowid)
+        elif kind == "beads_close":
+            target = "p-1"
+            inputs = {"reason": "delivered"}
+            store.execute(
+                "UPDATE assignments SET stage = 'delivering' WHERE id = ?",
+                (assignment_id,),
+            )
+            held_table, held_id = "assignments", assignment_id
+        else:
+            target = "p"
+            inputs = {"cwd": "/tmp/p", "project_id": "codex-p"}
+
+        operation_id = store.create_operation(kind, target, inputs)
+        attempt = store.begin_operation_attempt(operation_id)
+        store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="targeted observer remained ambiguous",
+        )
+        hold = store.execute(
+            "INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at) VALUES ('operation', ?, 'ambiguous effect', 1, 'operator resolves ambiguous external effect', ?)",
+            (str(operation_id), now),
+        )
+        hold_id = int(hold.lastrowid)
+        store.execute(
+            "UPDATE external_operations SET reconciliation_used = 1, operator_hold_id = ? WHERE id = ?",
+            (hold_id, operation_id),
+        )
+        if held_table == "assignments":
+            store.execute(
+                "UPDATE assignments SET prior_stage = stage, stage = 'recovering', operator_hold_id = ? WHERE id = ?",
+                (hold_id, held_id),
+            )
+        elif held_table == "actions":
+            store.execute(
+                "UPDATE actions SET operator_hold_id = ? WHERE id = ?",
+                (hold_id, held_id),
+            )
+        elif held_table == "obligations":
+            store.execute(
+                "UPDATE obligations SET operator_hold_id = ? WHERE id = ?",
+                (hold_id, held_id),
+            )
+        return operation_id, hold_id
+
+    def _resolution_decision(
+        self, kind: str, operation_id: int, resolution: str
+    ) -> dict[str, object]:
+        decision: dict[str, object] = {
+            "decision": "resolve_operation",
+            "operation_id": operation_id,
+            "resolution": resolution,
+            "evidence": f"exact external inspection established {resolution}",
+        }
+        if resolution == "observed_success":
+            if kind in {
+                "turn_start",
+                "thread_start",
+                "tollgate_candidate_create",
+                "beads_create",
+            }:
+                decision["native_id"] = f"observed-{kind}"
+            if kind == "tollgate_worktree_create":
+                decision["result"] = {"worktree_path": "/tmp/recovered"}
+        return decision
+
+    def _resolve_through_archon_finish(
+        self, store: Store, directory: Path, decision: dict[str, object]
+    ) -> None:
+        result = self._archon_resolution_outcome(
+            store,
+            directory,
+            [int(decision["operation_id"])],
+            [decision],
+        )
+        self.assertTrue(result["advanced"])
+        self.assertEqual(store.row("SELECT state FROM batches")["state"], "processed")
+
+    def _archon_resolution_outcome(
+        self,
+        store: Store,
+        directory: Path,
+        operation_ids: list[int],
+        decisions: list[dict[str, object]],
+    ) -> dict[str, object]:
+        now = "2026-01-01T00:00:00Z"
+        archon = store.register_task(
+            native_thread_id="matrix-archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        update_ids = []
+        for operation_id in operation_ids:
+            update = store.execute(
+                "INSERT INTO updates(recipient_task_id, identity, content, actionable, state, created_at, updated_at) VALUES (?, ?, ?, 1, 'batched', ?, ?)",
+                (
+                    archon["id"],
+                    f"operation-resolution:{operation_id}",
+                    json.dumps(
+                        {
+                            "kind": "operation_resolution",
+                            "operation_id": operation_id,
+                        }
+                    ),
+                    now,
+                    now,
+                ),
+            )
+            update_ids.append(int(update.lastrowid))
+        action = store.execute(
+            "INSERT INTO actions(task_id, kind, payload, state, native_turn_id, created_at, updated_at) VALUES (?, 'archon', '{}', 'active', 'matrix-turn', ?, ?)",
+            (archon["id"], now, now),
+        )
+        batch = store.execute(
+            "INSERT INTO batches(recipient_task_id, action_id, state, created_at, updated_at) VALUES (?, ?, 'frozen', ?, ?)",
+            (archon["id"], action.lastrowid, now, now),
+        )
+        for update_id in update_ids:
+            store.execute(
+                "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+                (batch.lastrowid, update_id),
+            )
+        decision_file = directory / "decision.json"
+        decision_file.write_text(
+            json.dumps(
+                {
+                    "decisions": decisions,
+                    "handled_update_ids": update_ids,
+                }
+            ),
+            encoding="utf-8",
+        )
+        accept_finish(
+            store,
+            native_thread_id="matrix-archon",
+            outcome_kind="decisions",
+            options={"input": str(decision_file)},
+        )
+        return observe_action_terminal(store, int(action.lastrowid))
+
+    def _assert_resolved_target(
+        self,
+        store: Store,
+        assignment: dict[str, object],
+        kind: str,
+        resolution: str,
+    ) -> None:
+        assignment_id = int(assignment["id"])
+        current = store.row("SELECT * FROM assignments WHERE id = ?", (assignment_id,))
+        success = resolution == "observed_success"
+        if kind == "turn_start":
+            action = store.row(
+                "SELECT * FROM actions WHERE kind = 'implement' ORDER BY id LIMIT 1"
+            )
+            self.assertEqual(action["state"], "active" if success else "pending")
+            self.assertEqual(bool(action["native_turn_id"]), success)
+        elif kind == "thread_start":
+            task = store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = 'observed-thread_start'"
+            )
+            self.assertEqual(task is not None, success)
+            self.assertEqual(current["stage"], "queued")
+        elif kind == "tollgate_worktree_create":
+            self.assertEqual(current["stage"], "preparing" if success else "queued")
+            self.assertEqual(
+                current["worktree_path"], "/tmp/recovered" if success else None
+            )
+        elif kind == "tollgate_candidate_create":
+            self.assertEqual(current["stage"], "review_pending")
+            self.assertEqual(
+                current["candidate_id"],
+                "observed-tollgate_candidate_create" if success else None,
+            )
+        elif kind == "tollgate_approve":
+            self.assertEqual(
+                current["stage"],
+                "correcting" if resolution == "observed_failure" else "delivering",
+            )
+        elif kind == "beads_create":
+            obligation = store.row(
+                "SELECT * FROM obligations WHERE identity = 'intake-new'"
+            )
+            self.assertEqual(obligation["state"], "complete" if success else "failed")
+            self.assertEqual(
+                store.row("SELECT 1 FROM beads WHERE bead_id = 'observed-beads_create'")
+                is not None,
+                success,
+            )
+        elif kind == "beads_close":
+            self.assertEqual(current["stage"], "completed" if success else "delivering")
+        elif kind == "setup_runtime_smoke":
+            self.assertEqual(
+                store.row("SELECT 1 FROM meta WHERE key = 'desktop_smoke_check'")
+                is not None,
+                success,
             )
 
     def test_approval_and_covered_repair_retain_exact_mandate_linkage(self) -> None:

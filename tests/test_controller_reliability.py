@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -18,13 +19,15 @@ from fulcrum.controller import (
     _candidate_definitively_failed,
     _find_candidate,
 )
-from fulcrum.kernel import LeaseRequest, acquire_lease
+from fulcrum.kernel import LeaseRequest, acquire_lease, invariant_violations
 from fulcrum.lifecycle import (
     accept_finish,
     apply_archon_decisions,
     observe_action_terminal,
 )
-from fulcrum.store import StoreError
+from fulcrum.scheduling import ready_assignments
+from fulcrum.runtime import AppServerError
+from fulcrum.store import Store, StoreError, utc_now
 from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 
@@ -311,6 +314,600 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(retained["state"], "failed")
 
+    async def test_exhausted_worktree_observer_requires_explicit_resolution(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'idle' WHERE id = ?", (archon["id"],)
+        )
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "recurring_policies": [
+                    {"kind": "sage", "scope": None},
+                    {"kind": "inquisitor", "scope": "p"},
+                ]
+            },
+        )
+        for worker in self.controller.critical_workers:
+            self.controller.store.heartbeat(worker)
+        self.controller.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('last_reconciliation', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (
+                self.controller.store.row(
+                    "SELECT updated_at FROM assignments WHERE id = ?",
+                    (self.assignment["id"],),
+                )["updated_at"],
+            ),
+        )
+        self.controller.runtime.ready = True
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'preparing', worktree_path = NULL
+               WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        operation_id = self.controller.store.create_operation(
+            "tollgate_worktree_create",
+            str(self.assignment["id"]),
+            {"repository_id": "tg-p", "name": "not-present"},
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="worktree response was lost",
+        )
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+
+        self.controller._reconcile_worktree_create(operation)
+
+        exhausted = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        held = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(exhausted["state"], "uncertain")
+        self.assertEqual(exhausted["reconciliation_used"], 1)
+        self.assertEqual(held["stage"], "recovering")
+        self.assertEqual(held["operator_hold_id"], exhausted["operator_hold_id"])
+        self.assertEqual(
+            invariant_violations(self.controller.store),
+            [
+                f"external operation {operation_id} is uncertain after targeted observation"
+            ],
+        )
+        self.controller._update_readiness()
+        self.assertFalse(self.controller.starts_enabled)
+
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "decisions": [
+                    {
+                        "decision": "resolve_operation",
+                        "operation_id": operation_id,
+                        "resolution": "confirmed_unsent",
+                        "evidence": "operator inspected the exact Git worktree inventory",
+                    }
+                ]
+            },
+        )
+
+        recovered = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(recovered["stage"], "queued")
+        self.assertIsNone(recovered["operator_hold_id"])
+        self.assertEqual(invariant_violations(self.controller.store), [])
+        self.controller.store.execute(
+            "UPDATE meta SET value = datetime('now') || 'Z' WHERE key = 'last_reconciliation'"
+        )
+        self.controller._update_readiness()
+        self.assertTrue(self.controller.starts_enabled)
+
+    async def test_reconcile_delivers_public_archon_operation_recovery_while_stopped(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-recovery",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'idle' WHERE id = ?", (archon["id"],)
+        )
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "recurring_policies": [
+                    {"kind": "sage", "scope": None},
+                    {"kind": "inquisitor", "scope": "p"},
+                ]
+            },
+        )
+        for worker in self.controller.critical_workers:
+            self.controller.store.heartbeat(worker)
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'preparing', worktree_path = NULL WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        operation_id = self.controller.store.create_operation(
+            "tollgate_worktree_create",
+            str(self.assignment["id"]),
+            {"repository_id": "tg-p", "name": "not-present"},
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="response ended after dispatch",
+        )
+
+        database = self.controller.store.path
+        event_log = self.controller.store.event_log
+        self.controller.store.close()
+        self.controller.store = Store(database, event_log=event_log)
+        self.controller.runtime.ready = True
+        await self.controller.reconcile()
+
+        held = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        self.assertEqual(held["reconciliation_used"], 1)
+        self.assertFalse(self.controller.starts_enabled)
+        recovery_update = self.controller.store.row(
+            "SELECT * FROM updates WHERE identity = ?",
+            (f"operation-resolution:{operation_id}",),
+        )
+        self.assertIsNotNone(recovery_update)
+        self.controller._queue_archon_update(
+            "unrelated-while-stopped",
+            {"kind": "proposal", "scope": "must remain frozen"},
+            actionable=True,
+        )
+
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="recovery-turn"),
+            ),
+        ):
+            await self.controller.advance()
+
+        recovery_action = self.controller.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'
+               ORDER BY id DESC LIMIT 1""",
+            (archon["id"],),
+        )
+        self.assertEqual(recovery_action["state"], "active")
+        batch = self.controller.store.row(
+            "SELECT id FROM batches WHERE action_id = ?", (recovery_action["id"],)
+        )
+        handled = [
+            row["update_id"]
+            for row in self.controller.store.rows(
+                "SELECT update_id FROM batch_updates WHERE batch_id = ? ORDER BY update_id",
+                (batch["id"],),
+            )
+        ]
+        self.assertEqual(handled, [recovery_update["id"]])
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE identity = 'unrelated-while-stopped'"
+            )["state"],
+            "retained",
+        )
+        deferral_file = Path(self.temporary.name) / "recovery-deferral.json"
+        deferral_file.write_text(
+            json.dumps({"next_check_at": "2020-01-01T00:00:00Z"}),
+            encoding="utf-8",
+        )
+        await self.controller.handle_request(
+            {
+                "command": "finish",
+                "thread_id": "archon-recovery",
+                "outcome": "deferred",
+                "options": {
+                    "reason": "collect exact external evidence",
+                    "input": str(deferral_file),
+                },
+            }
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?",
+            (archon["id"],),
+        )
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "last_turn_id": recovery_action["native_turn_id"],
+                    "last_turn_status": "completed",
+                    "last_turn_terminal": True,
+                    "helpers_terminal": True,
+                }
+            ),
+        ):
+            deferred = await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "archon-recovery",
+                    "turn": {
+                        "id": recovery_action["native_turn_id"],
+                        "status": "completed",
+                    },
+                },
+            )
+        self.assertTrue(deferred)
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM external_operations WHERE id = ?", (operation_id,)
+            )["state"],
+            "uncertain",
+        )
+        self.assertFalse(self.controller.starts_enabled)
+
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": recovery_action["native_turn_id"],
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="recovery-turn-redelivered"),
+            ),
+        ):
+            await self.controller.advance()
+
+        recovery_action = self.controller.store.row(
+            """SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'
+               ORDER BY id DESC LIMIT 1""",
+            (archon["id"],),
+        )
+        self.assertEqual(recovery_action["native_turn_id"], "recovery-turn-redelivered")
+        batch = self.controller.store.row(
+            "SELECT id FROM batches WHERE action_id = ?", (recovery_action["id"],)
+        )
+        handled = [
+            row["update_id"]
+            for row in self.controller.store.rows(
+                "SELECT update_id FROM batch_updates WHERE batch_id = ? ORDER BY update_id",
+                (batch["id"],),
+            )
+        ]
+        self.assertEqual(handled, [recovery_update["id"]])
+        decision_file = Path(self.temporary.name) / "recovery-decision.json"
+        decision_file.write_text(
+            json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "decision": "resolve_operation",
+                            "operation_id": operation_id,
+                            "resolution": "confirmed_unsent",
+                            "evidence": "exact Git inventory contains no matching worktree",
+                        }
+                    ],
+                    "handled_update_ids": handled,
+                }
+            ),
+            encoding="utf-8",
+        )
+        await self.controller.handle_request(
+            {
+                "command": "finish",
+                "thread_id": "archon-recovery",
+                "outcome": "decisions",
+                "options": {"input": str(decision_file)},
+            }
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?",
+            (archon["id"],),
+        )
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "last_turn_id": recovery_action["native_turn_id"],
+                    "last_turn_status": "completed",
+                    "last_turn_terminal": True,
+                    "helpers_terminal": True,
+                }
+            ),
+        ):
+            processed = await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "archon-recovery",
+                    "turn": {
+                        "id": recovery_action["native_turn_id"],
+                        "status": "completed",
+                    },
+                },
+            )
+        self.assertTrue(processed)
+
+        self.controller.store.close()
+        self.controller.store = Store(database, event_log=event_log)
+        resolved = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        self.assertEqual(resolved["state"], "canceled")
+        self.assertEqual(assignment["stage"], "queued")
+        self.assertIsNone(assignment["operator_hold_id"])
+        self.assertEqual(invariant_violations(self.controller.store), [])
+        self.controller.store.execute(
+            "UPDATE tasks SET state = 'idle', runtime_status = 'idle' WHERE id = ?",
+            (archon["id"],),
+        )
+        self.controller.store.execute(
+            "UPDATE meta SET value = ? WHERE key = 'last_reconciliation'", (utc_now(),)
+        )
+        self.controller._update_readiness()
+        self.assertTrue(self.controller.starts_enabled)
+        self.assertEqual(
+            [row["id"] for row in ready_assignments(self.controller.store)],
+            [self.assignment["id"]],
+        )
+
+    async def test_each_ambiguous_observer_kind_has_supported_resolution(
+        self,
+    ) -> None:
+        class AmbiguousRuntime:
+            ready = True
+
+            async def read_thread(
+                self, _thread_id: str, *, include_turns: bool = True
+            ) -> dict[str, Any]:
+                return {"id": "runtime-thread", "turns": [] if include_turns else []}
+
+            async def list_threads(self, **_kwargs: Any) -> list[dict[str, Any]]:
+                return []
+
+        class AmbiguousTollgate:
+            def status(
+                self, _repository: str, candidate: str | None = None
+            ) -> dict[str, Any]:
+                if candidate is None:
+                    return {"queue": []}
+                return {
+                    "configuration": {"remote_enabled": True},
+                    "candidate": {"item": {"id": candidate, "state": "queued"}},
+                }
+
+        class AmbiguousBeads:
+            def find_intake(self, _intake_key: str) -> list[dict[str, Any]]:
+                return []
+
+            def show(self, _bead_id: str) -> None:
+                return None
+
+        self.controller.runtime = AmbiguousRuntime()  # type: ignore[assignment]
+        self.controller.tollgate = AmbiguousTollgate()  # type: ignore[assignment]
+        self.controller.beads = AmbiguousBeads()  # type: ignore[assignment]
+        now = "2026-01-01T00:00:00Z"
+
+        def uncertain_operation(
+            kind: str, target: str, inputs: dict[str, Any]
+        ) -> dict[str, Any]:
+            operation_id = self.controller.store.create_operation(kind, target, inputs)
+            attempt = self.controller.store.begin_operation_attempt(operation_id)
+            self.controller.store.finish_operation_attempt(
+                operation_id,
+                attempt,
+                state="uncertain",
+                error="external response was ambiguous",
+            )
+            operation = self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+            )
+            assert operation is not None
+            return operation
+
+        def resolve(operation: dict[str, Any]) -> None:
+            self.assertEqual(operation["state"], "uncertain")
+            operation_id = int(operation["id"])
+            apply_archon_decisions(
+                self.controller.store,
+                {
+                    "decisions": [
+                        {
+                            "decision": "resolve_operation",
+                            "operation_id": operation_id,
+                            "resolution": "confirmed_unsent",
+                            "evidence": "operator checked the exact external identity",
+                        }
+                    ]
+                },
+            )
+            retained = self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+            )
+            self.assertEqual(retained["state"], "canceled")
+            self.assertIsNotNone(
+                self.controller.store.row(
+                    "SELECT released_at FROM holds WHERE id = ?",
+                    (operation["operator_hold_id"],),
+                )["released_at"]
+            )
+            self.assertEqual(invariant_violations(self.controller.store), [])
+
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'preparing', worktree_path = NULL WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        operation = uncertain_operation(
+            "tollgate_worktree_create",
+            str(self.assignment["id"]),
+            {"repository_id": "tg-p", "name": "not-present"},
+        )
+        self.controller._reconcile_worktree_create(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'implementing', worktree_path = ? WHERE id = ?",
+            (str(self.worktree), self.assignment["id"]),
+        )
+        operation = uncertain_operation(
+            "tollgate_candidate_create",
+            str(self.assignment["id"]),
+            {
+                "repository_id": "tg-p",
+                "worktree_path": str(self.worktree),
+                "revision": "source-1",
+            },
+        )
+        await self.controller._reconcile_tollgate_candidate(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
+        self.controller.store.execute(
+            "UPDATE assignments SET stage = 'delivering', candidate_id = 'candidate-x' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        operation = uncertain_operation("tollgate_approve", "candidate-x", {})
+        await self.controller._reconcile_tollgate_approve(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
+        operation = uncertain_operation("beads_close", "p-1", {})
+        self.controller._reconcile_beads_close(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
+        action = self.controller.store.execute(
+            """INSERT INTO actions(task_id, assignment_id, kind, payload, state,
+               created_at, updated_at) VALUES (?, ?, 'implement', '{}', 'uncertain', ?, ?)""",
+            (self.executor["id"], self.assignment["id"], now, now),
+        )
+        self.controller.store.execute(
+            """INSERT INTO reservations(action_id, pair_id, state, created_at)
+               VALUES (?, ?, 'uncertain', ?)""",
+            (action.lastrowid, self.assignment["run_id"], now),
+        )
+        operation = uncertain_operation(
+            "turn_start", str(action.lastrowid), {"thread_id": "executor"}
+        )
+        await self.controller._reconcile_turn_start(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+        self.controller.store.execute(
+            "UPDATE actions SET state = 'canceled' WHERE id = ?", (action.lastrowid,)
+        )
+
+        operation = uncertain_operation(
+            "thread_start",
+            "executor",
+            {
+                "role": "executor",
+                "description": "replacement",
+                "project_id": "codex-p",
+                "local_project_id": "p",
+                "cwd": str(self.worktree),
+                "model": "sol",
+                "effort": "high",
+                "pair_id": self.assignment["run_id"],
+                "role_number": 99,
+                "title": "replacement",
+            },
+        )
+        await self.controller._reconcile_thread_start(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
+        self.controller.store.execute(
+            """INSERT INTO obligations(kind, identity, target, state, created_at, updated_at)
+               VALUES ('beads_publication', 'new-intake', 'p', 'uncertain', ?, ?)""",
+            (now, now),
+        )
+        operation = uncertain_operation(
+            "beads_create",
+            "new-intake",
+            {
+                "intake_key": "new-intake",
+                "project": "p",
+                "title": "New",
+                "description": "New scope",
+                "activation": "pending",
+                "dependencies": [],
+                "context": [],
+            },
+        )
+        self.controller._reconcile_beads_create(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
+        operation = uncertain_operation("setup_runtime_smoke", "p", {})
+        await self.controller._reconcile_setup_runtime_smoke(operation)
+        resolve(
+            self.controller.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+        )
+
     def test_codex_intake_requires_an_active_registered_weaver(self) -> None:
         self.controller._require_registered_weaver(None)
         with self.assertRaisesRegex(StoreError, "weaver register"):
@@ -399,6 +996,292 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(action)
         self.assertEqual(json.loads(action["payload"])["purpose"], "materialize_archon")
         dispatch.assert_awaited_once()
+
+    async def test_setup_provisions_recovery_archon_before_retrying_ambiguous_smoke(
+        self,
+    ) -> None:
+        self.controller.config = replace(
+            self.controller.config,
+            archon_model="sol",
+            archon_reasoning_effort="high",
+        )
+        operation_id = self.controller.store.create_operation(
+            "setup_runtime_smoke",
+            "p",
+            {"cwd": self.config.source_root, "project_id": "codex-p"},
+        )
+        attempt = self.controller.store.begin_operation_attempt(operation_id)
+        self.controller.store.finish_operation_attempt(
+            operation_id,
+            attempt,
+            state="uncertain",
+            error="runtime response ended after thread creation",
+        )
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        self.controller._retain_uncertain_condition(
+            operation,
+            "setup runtime smoke remains ambiguous after targeted observation",
+        )
+
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.list_models.return_value = [
+            {
+                "model": "sol",
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+            }
+        ]
+        runtime.create_thread.return_value = {"thread": {"id": "setup-archon"}}
+        runtime.read_thread.return_value = {
+            "id": "setup-archon",
+            "name": "Archon",
+            "status": {"type": "idle"},
+            "turns": [],
+        }
+        runtime.start_turn.return_value = "recovery-turn"
+        self.controller.runtime = runtime
+
+        with patch.object(self.controller, "_verify_projects", new=AsyncMock()):
+            first = await self.controller._setup_initialize()
+            second = await self.controller._setup_initialize()
+
+        self.assertFalse(first["ready"])
+        self.assertEqual(first["archon"], "setup-archon")
+        self.assertIn(f"operation {operation_id} remains uncertain", first["condition"])
+        self.assertEqual(second["condition"], first["condition"])
+        runtime.create_thread.assert_awaited_once()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT COUNT(*) AS count FROM external_operations WHERE kind = 'setup_runtime_smoke'"
+            )["count"],
+            1,
+        )
+        retained = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation_id,)
+        )
+        self.assertEqual(retained["state"], "uncertain")
+        self.assertEqual(retained["reconciliation_used"], 1)
+        self.assertIsNotNone(retained["operator_hold_id"])
+        update = self.controller.store.row(
+            "SELECT * FROM updates WHERE identity = ?",
+            (f"operation-resolution:{operation_id}",),
+        )
+        self.assertIsNotNone(update)
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = (SELECT id FROM tasks WHERE role = 'archon')"
+        )
+        self.assertEqual(action["kind"], "archon")
+        self.assertEqual(action["state"], "active")
+        self.assertIn(
+            f'"operation_id": {operation_id}', json.dumps(json.loads(action["payload"]))
+        )
+
+    async def test_setup_does_not_repeat_ambiguous_initial_archon_creation(
+        self,
+    ) -> None:
+        self.controller.config = replace(
+            self.controller.config,
+            archon_model="sol",
+            archon_reasoning_effort="high",
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.list_models.return_value = [
+            {
+                "model": "sol",
+                "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+            }
+        ]
+        runtime.create_thread.side_effect = AppServerError(
+            "connection ended after create dispatch"
+        )
+        runtime.list_threads.return_value = []
+        self.controller.runtime = runtime
+
+        with (
+            patch.object(self.controller, "_verify_projects", new=AsyncMock()),
+            patch.object(self.controller, "_setup_smoke_check", new=AsyncMock()),
+        ):
+            with self.assertRaises(AppServerError):
+                await self.controller._setup_initialize()
+
+            database = self.controller.store.path
+            event_log = self.controller.store.event_log
+            self.controller.store.close()
+            self.controller.store = Store(database, event_log=event_log)
+            with self.assertRaisesRegex(
+                StoreError, "resolve it with `fulcrum resolve-operation`"
+            ):
+                await self.controller._setup_initialize()
+
+            operation = self.controller.store.row(
+                "SELECT * FROM external_operations WHERE kind = 'thread_start' AND target = 'archon'"
+            )
+            self.assertEqual(operation["state"], "uncertain")
+            self.assertEqual(operation["reconciliation_used"], 1)
+            self.assertIsNotNone(operation["operator_hold_id"])
+            runtime.create_thread.assert_awaited_once()
+
+            resolved = await self.controller.handle_request(
+                {
+                    "command": "resolve_operation",
+                    "decision": {
+                        "operation_id": operation["id"],
+                        "resolution": "confirmed_unsent",
+                        "evidence": "filtered runtime inventory contains no thread",
+                    },
+                }
+            )
+            self.assertEqual(resolved["applied_decisions"][0]["state"], "canceled")
+
+            runtime.create_thread.side_effect = None
+            runtime.create_thread.return_value = {
+                "thread": {"id": "recovered-bootstrap-archon"}
+            }
+            runtime.read_thread.return_value = {
+                "id": "recovered-bootstrap-archon",
+                "name": "Archon",
+                "status": {"type": "idle"},
+                "turns": [],
+            }
+            runtime.start_turn.return_value = "initial-policy-turn"
+            result = await self.controller._setup_initialize()
+
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["archon"], "recovered-bootstrap-archon")
+        self.assertEqual(runtime.create_thread.await_count, 2)
+        self.assertEqual(invariant_violations(self.controller.store), [])
+
+    async def test_direct_resolution_recovers_ambiguous_archon_recovery_turn(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="self-recovery-archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        primary_id = self.controller.store.create_operation(
+            "setup_runtime_smoke", "p", {"cwd": "/tmp/p", "project_id": "codex-p"}
+        )
+        attempt = self.controller.store.begin_operation_attempt(primary_id)
+        self.controller.store.finish_operation_attempt(
+            primary_id,
+            attempt,
+            state="uncertain",
+            error="smoke response was lost",
+        )
+        primary = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (primary_id,)
+        )
+        self.controller._retain_uncertain_condition(
+            primary, "setup smoke remained ambiguous after targeted observation"
+        )
+        self.controller.runtime.ready = True
+        self.controller._update_readiness()
+        self.assertFalse(self.controller.starts_enabled)
+        self.controller.runtime.read_thread = AsyncMock(
+            return_value={
+                "id": "self-recovery-archon",
+                "name": archon["title"],
+                "status": {"type": "idle"},
+                "turns": [],
+            }
+        )
+
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(side_effect=AppServerError("turn response lost")),
+            ),
+        ):
+            await self.controller.advance()
+
+        turn_operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE kind = 'turn_start' ORDER BY id DESC LIMIT 1"
+        )
+        recovery_action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (archon["id"],),
+        )
+        self.assertEqual(turn_operation["state"], "uncertain")
+        self.assertEqual(turn_operation["reconciliation_used"], 1)
+        self.assertEqual(recovery_action["state"], "uncertain")
+        self.assertEqual(
+            recovery_action["operator_hold_id"], turn_operation["operator_hold_id"]
+        )
+
+        database = self.controller.store.path
+        event_log = self.controller.store.event_log
+        self.controller.store.close()
+        self.controller.store = Store(database, event_log=event_log)
+        await self.controller.handle_request(
+            {
+                "command": "resolve_operation",
+                "decision": {
+                    "operation_id": turn_operation["id"],
+                    "resolution": "confirmed_unsent",
+                    "evidence": "exact Archon history contains no correlated turn",
+                },
+            }
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM actions WHERE id = ?", (recovery_action["id"],)
+            )["state"],
+            "pending",
+        )
+        self.assertFalse(self.controller.starts_enabled)
+
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="safe-recovery-retry"),
+            ) as retry,
+        ):
+            await self.controller.advance()
+
+        retry.assert_awaited_once()
+        recovered_action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (recovery_action["id"],)
+        )
+        self.assertEqual(recovered_action["state"], "active")
+        self.assertEqual(recovered_action["native_turn_id"], "safe-recovery-retry")
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM external_operations WHERE id = ?",
+                (turn_operation["id"],),
+            )["state"],
+            "canceled",
+        )
 
     async def test_weaver_registration_binds_the_current_native_turn(self) -> None:
         runtime = AsyncMock()
@@ -1671,6 +2554,13 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
                 (batch.lastrowid,),
             )
         )
+        self.controller._reactivate_deferred_batches(recovery_only=True)
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (update.lastrowid,)
+            )["state"],
+            "batched",
+        )
         self.controller._reactivate_deferred_batches()
         self.assertEqual(
             self.controller.store.row(
@@ -1810,6 +2700,134 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
                 "SELECT * FROM meta WHERE key = 'archon_succession_request'"
             )
         )
+
+    async def test_archon_succession_adopts_target_observed_thread_after_restart(
+        self,
+    ) -> None:
+        old = self.controller.store.register_task(
+            native_thread_id="observed-old-archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET state = 'archived', archived = 1 WHERE id = ?",
+            (old["id"],),
+        )
+        self.controller.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('archon_succession_request', ?)",
+            (
+                json.dumps(
+                    {
+                        "task_id": old["id"],
+                        "successor_model": "sol",
+                        "successor_reasoning_effort": "high",
+                        "reason": "restart observation",
+                    }
+                ),
+            ),
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.create_thread.side_effect = AppServerError(
+            "connection ended after successor creation"
+        )
+        self.controller.runtime = runtime
+
+        with self.assertRaises(AppServerError):
+            await self.controller._process_archon_succession()
+        operation = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE kind = 'thread_start' AND target = 'archon'"
+        )
+        inputs = json.loads(operation["input_json"])
+        self.assertEqual(inputs["succession_task_id"], old["id"])
+
+        database = self.controller.store.path
+        event_log = self.controller.store.event_log
+        self.controller.store.close()
+        self.controller.store = Store(database, event_log=event_log)
+        created_at = datetime.fromisoformat(
+            operation["created_at"].replace("Z", "+00:00")
+        )
+        runtime.list_threads.return_value = [
+            {
+                "id": "target-observed-successor",
+                "model": "sol",
+                "createdAt": int(created_at.timestamp()),
+                "turns": [],
+            }
+        ]
+        runtime.set_name.return_value = None
+
+        await self.controller.reconcile()
+        completed = self.controller.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+        )
+        successor = self.controller.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = 'target-observed-successor'"
+        )
+        self.assertEqual(completed["state"], "complete")
+        self.assertEqual(completed["reconciliation_used"], 1)
+        self.assertNotIn("operator_resolution", json.loads(completed["result_json"]))
+
+        await self.controller.advance()
+
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT * FROM meta WHERE key = 'archon_succession_request'"
+            )
+        )
+        completion = self.controller.store.row(
+            "SELECT * FROM updates WHERE identity = ?",
+            (f"succession:{old['id']}:{successor['id']}",),
+        )
+        self.assertIsNotNone(completion)
+        self.assertEqual(completion["state"], "retained")
+        self.assertEqual(
+            json.loads(completion["content"])["successor_task_id"], successor["id"]
+        )
+
+    async def test_archon_succession_still_rejects_unrelated_current_archon(
+        self,
+    ) -> None:
+        old = self.controller.store.register_task(
+            native_thread_id="unrelated-old-archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET state = 'archived', archived = 1 WHERE id = ?",
+            (old["id"],),
+        )
+        self.controller.store.register_task(
+            native_thread_id="unrelated-current-archon",
+            role="archon",
+            description="Unrelated",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('archon_succession_request', ?)",
+            (
+                json.dumps(
+                    {
+                        "task_id": old["id"],
+                        "successor_model": "sol",
+                        "successor_reasoning_effort": "high",
+                        "reason": "must remain exact",
+                    }
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(StoreError, "unexpected current Archon"):
+            await self.controller._process_archon_succession()
 
     async def test_controller_creates_and_captures_candidate_after_executor(
         self,

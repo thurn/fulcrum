@@ -30,7 +30,11 @@ from fulcrum.intake import (
 )
 from fulcrum.install import controller_program_arguments, install_control_plane
 from fulcrum.ipc import MAX_MESSAGE_BYTES
-from fulcrum.lifecycle import accept_finish, observe_action_terminal
+from fulcrum.lifecycle import (
+    accept_finish,
+    apply_archon_decisions,
+    observe_action_terminal,
+)
 from fulcrum.kernel import (
     LeaseRequest,
     acquire_lease,
@@ -1190,16 +1194,7 @@ class Controller:
     def _retain_uncertain_condition(
         self, operation: dict[str, Any], condition: str
     ) -> None:
-        self.store.execute(
-            "UPDATE external_operations SET reconciliation_used = 1, condition = ?, updated_at = ? WHERE id = ?",
-            (condition, utc_now(), operation["id"]),
-        )
-        self.store.event(
-            "operator_attention",
-            condition,
-            entity_type="operation",
-            entity_id=operation["id"],
-        )
+        timestamp = utc_now()
         target_id: int | None = None
         target_type: str | None = None
         if operation["kind"] == "turn_start" and str(operation["target"]).isdigit():
@@ -1215,37 +1210,126 @@ class Controller:
         ):
             target_id = int(operation["target"])
             target_type = "assignment"
-        if target_id is None or target_type is None:
-            return
-        existing = self.store.row(
-            "SELECT id FROM holds WHERE scope = ? AND target = ? AND released_at IS NULL",
-            (target_type, str(target_id)),
-        )
-        if existing is None:
-            cursor = self.store.execute(
-                """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
-                   VALUES (?, ?, ?, 1, 'operator resolves ambiguous external effect', ?)""",
-                (target_type, str(target_id), condition, utc_now()),
-            )
-            hold_id = int(cursor.lastrowid)
-        else:
-            hold_id = int(existing["id"])
-        if target_type == "action":
-            self.store.execute(
-                "UPDATE actions SET operator_hold_id = ?, condition = ?, updated_at = ? WHERE id = ?",
-                (hold_id, condition, utc_now(), target_id),
-            )
-        else:
+        elif operation["kind"] == "tollgate_approve":
             assignment = self.store.row(
-                "SELECT stage FROM assignments WHERE id = ?", (target_id,)
+                "SELECT id FROM assignments WHERE candidate_id = ? AND stage NOT IN ('completed','canceled')",
+                (operation["target"],),
             )
             if assignment is not None:
-                self.store.execute(
+                target_id = int(assignment["id"])
+                target_type = "assignment"
+        elif operation["kind"] == "beads_close":
+            assignment = self.store.row(
+                "SELECT id FROM assignments WHERE bead_id = ? AND stage NOT IN ('completed','canceled')",
+                (operation["target"],),
+            )
+            if assignment is not None:
+                target_id = int(assignment["id"])
+                target_type = "assignment"
+        elif operation["kind"] == "thread_start":
+            inputs = json.loads(operation["input_json"])
+            pair_id = inputs.get("pair_id")
+            if isinstance(pair_id, int):
+                assignment = self.store.row(
+                    "SELECT id FROM assignments WHERE run_id = ? AND stage NOT IN ('completed','canceled') ORDER BY id LIMIT 1",
+                    (pair_id,),
+                )
+                if assignment is not None:
+                    target_id = int(assignment["id"])
+                    target_type = "assignment"
+        elif operation["kind"] == "beads_create":
+            obligation = self.store.row(
+                "SELECT id FROM obligations WHERE kind = 'beads_publication' AND identity = ? AND state NOT IN ('complete','canceled') ORDER BY id LIMIT 1",
+                (operation["target"],),
+            )
+            if obligation is not None:
+                target_id = int(obligation["id"])
+                target_type = "obligation"
+        with self.store.transaction() as connection:
+            retained = connection.execute(
+                "SELECT operator_hold_id FROM external_operations WHERE id = ?",
+                (operation["id"],),
+            ).fetchone()
+            hold_id = retained["operator_hold_id"] if retained else None
+            if hold_id is None:
+                cursor = connection.execute(
+                    """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                       VALUES ('operation', ?, ?, 1, 'operator resolves ambiguous external effect', ?)""",
+                    (str(operation["id"]), condition, timestamp),
+                )
+                hold_id = int(cursor.lastrowid)
+            connection.execute(
+                """UPDATE external_operations SET reconciliation_used = 1,
+                   operator_hold_id = ?, condition = ?, updated_at = ? WHERE id = ?""",
+                (hold_id, condition, timestamp, operation["id"]),
+            )
+            if target_type == "action":
+                connection.execute(
+                    "UPDATE actions SET operator_hold_id = ?, condition = ?, updated_at = ? WHERE id = ?",
+                    (hold_id, condition, timestamp, target_id),
+                )
+            elif target_type == "assignment":
+                connection.execute(
                     """UPDATE assignments SET prior_stage = CASE WHEN stage = 'recovering' THEN prior_stage ELSE stage END,
                        stage = 'recovering', operator_hold_id = ?, next_attempt_at = NULL,
                        condition = ?, updated_at = ? WHERE id = ?""",
-                    (hold_id, condition, utc_now(), target_id),
+                    (hold_id, condition, timestamp, target_id),
                 )
+            elif target_type == "obligation":
+                connection.execute(
+                    """UPDATE obligations SET state = 'uncertain', operator_hold_id = ?,
+                       next_attempt_at = NULL, detail = ?, updated_at = ? WHERE id = ?""",
+                    (hold_id, condition, timestamp, target_id),
+                )
+        self.store.event(
+            "operator_attention",
+            condition,
+            entity_type="operation",
+            entity_id=operation["id"],
+        )
+        self._queue_operation_resolution(
+            operation,
+            hold_id=int(hold_id),
+            condition=condition,
+            target_type=target_type,
+            target_id=target_id,
+        )
+
+    def _queue_operation_resolution(
+        self,
+        operation: dict[str, Any],
+        *,
+        hold_id: int,
+        condition: str,
+        target_type: str | None = None,
+        target_id: int | None = None,
+    ) -> None:
+        affected_archon = False
+        if target_type == "action" and target_id is not None:
+            owner = self.store.row(
+                """SELECT tasks.role FROM actions JOIN tasks ON tasks.id = actions.task_id
+                   WHERE actions.id = ?""",
+                (target_id,),
+            )
+            affected_archon = owner is not None and owner["role"] == "archon"
+        if not affected_archon:
+            self._queue_archon_update(
+                f"operation-resolution:{operation['id']}",
+                {
+                    "kind": "operation_resolution",
+                    "operation_id": operation["id"],
+                    "operation_kind": operation["kind"],
+                    "target": operation["target"],
+                    "condition": condition,
+                    "hold_id": hold_id,
+                    "required_decision": "resolve_operation",
+                    "resolutions": [
+                        "observed_success",
+                        "observed_failure",
+                        "confirmed_unsent",
+                    ],
+                },
+            )
 
     async def advance(self) -> None:
         await self._run_advancement_step(
@@ -1260,7 +1344,17 @@ class Controller:
                 "archon-succession", self._process_archon_succession
             )
         self._update_readiness()
-        if not self.starts_enabled or not self.runtime.ready:
+        if not self.runtime.ready:
+            return
+        if not self.starts_enabled:
+            # Exhausted mutations intentionally disable ordinary dispatch, but the
+            # dedicated Archon action that can resolve them must remain reachable.
+            # This path batches only operation-resolution updates and acquires no
+            # assignment/capacity lease.
+            await self._run_advancement_step(
+                "operation-recovery-delivery",
+                lambda: self._deliver_update_batch(recovery_only=True),
+            )
             return
         # Admission is deliberately one-at-a-time. Each started action commits a
         # lease before the next capacity snapshot is calculated.
@@ -1555,7 +1649,14 @@ class Controller:
         effort: str,
         pair_id: int | None = None,
         cwd: str | None = None,
+        succession_task_id: int | None = None,
     ) -> dict[str, Any]:
+        if role == "archon":
+            recovered = await self._recover_archon_thread_start(
+                succession_task_id=succession_task_id
+            )
+            if recovered is not None:
+                return recovered
         role_number, title = self.store.allocate_name(role, description)
         inputs = {
             "role": role,
@@ -1568,6 +1669,7 @@ class Controller:
             "pair_id": pair_id,
             "role_number": role_number,
             "title": title,
+            "succession_task_id": succession_task_id,
         }
         operation = self.store.create_operation("thread_start", role, inputs)
         attempt = self.store.begin_operation_attempt(operation)
@@ -1643,6 +1745,60 @@ class Controller:
                     mutation=True,
                 )
             raise
+
+    async def _recover_archon_thread_start(
+        self, *, succession_task_id: int | None
+    ) -> dict[str, Any] | None:
+        """Adopt or hold a prior bootstrap mutation before creating another."""
+
+        operation = self.store.row(
+            """SELECT * FROM external_operations
+               WHERE kind = 'thread_start' AND target = 'archon'
+                 AND state IN ('intent','sent','uncertain')
+                 AND json_extract(input_json, '$.succession_task_id') IS ?
+               ORDER BY id DESC LIMIT 1""",
+            (succession_task_id,),
+        )
+        if operation is None:
+            return None
+        if operation["state"] == "intent":
+            self.store.execute(
+                """UPDATE external_operations SET state = 'canceled',
+                   condition = 'confirmed unsent before Archon provisioning retry',
+                   updated_at = ? WHERE id = ?""",
+                (utc_now(), operation["id"]),
+            )
+            return None
+        if operation["state"] == "sent":
+            self.store.execute(
+                """UPDATE external_operations SET state = 'uncertain',
+                   condition = 'Archon provisioning resumed after dispatch',
+                   updated_at = ? WHERE id = ?""",
+                (utc_now(), operation["id"]),
+            )
+            operation = self.store.row(
+                "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+            )
+            assert operation is not None
+        if not operation["reconciliation_used"]:
+            await self._reconcile_thread_start(operation)
+        operation = self.store.row(
+            "SELECT * FROM external_operations WHERE id = ?", (operation["id"],)
+        )
+        assert operation is not None
+        if operation["state"] == "complete" and operation["native_id"]:
+            task = self.store.row(
+                "SELECT * FROM tasks WHERE native_thread_id = ?",
+                (operation["native_id"],),
+            )
+            if task is not None:
+                return task
+        if operation["state"] == "uncertain" and operation["reconciliation_used"]:
+            raise StoreError(
+                f"Archon thread creation operation {operation['id']} remains uncertain; "
+                "resolve it with `fulcrum resolve-operation` before setup or succession retries"
+            )
+        return None
 
     async def _register_created_thread(
         self,
@@ -2905,6 +3061,18 @@ class Controller:
                     else {}
                 ),
             )
+        if command == "resolve_operation":
+            decision = request.get("decision")
+            if not isinstance(decision, dict):
+                raise StoreError("resolve_operation requires a decision object")
+            decision = dict(decision)
+            decision["decision"] = "resolve_operation"
+            result = apply_archon_decisions(
+                self.store,
+                {"decisions": [decision]},
+            )
+            self._update_readiness()
+            return result
         if command == "intake":
             self._require_registered_weaver(request.get("thread_id"))
             payload = request.get("task")
@@ -3098,7 +3266,6 @@ class Controller:
                 f"configured Archon effort {self.config.archon_reasoning_effort!r} is unsupported"
             )
         await self._verify_projects()
-        await self._setup_smoke_check()
         archon = self.store.row(
             "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
         )
@@ -3115,6 +3282,15 @@ class Controller:
                 model=str(self.config.archon_model),
                 effort=str(self.config.archon_reasoning_effort),
             )
+        try:
+            await self._setup_smoke_check()
+        except StoreError as error:
+            await self._deliver_update_batch(recovery_only=True)
+            return {
+                "ready": False,
+                "archon": archon["native_thread_id"],
+                "condition": str(error),
+            }
         thread = await self.runtime.read_thread(archon["native_thread_id"])
         turns = thread.get("turns")
         materialized = isinstance(turns, list) and bool(turns)
@@ -3191,6 +3367,66 @@ class Controller:
     async def _setup_smoke_check(self) -> None:
         if self.store.row("SELECT value FROM meta WHERE key = 'desktop_smoke_check'"):
             return
+        previous = self.store.row("""SELECT * FROM external_operations
+               WHERE kind = 'setup_runtime_smoke' ORDER BY id DESC LIMIT 1""")
+        if previous is not None and previous["state"] == "complete":
+            self.store.execute(
+                "INSERT INTO meta(key, value) VALUES ('desktop_smoke_check', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (previous["completed_at"] or previous["updated_at"],),
+            )
+            return
+        if previous is not None and previous["state"] in {
+            "intent",
+            "sent",
+            "uncertain",
+        }:
+            if previous["state"] == "intent":
+                self.store.execute(
+                    """UPDATE external_operations SET state = 'canceled',
+                       condition = 'confirmed unsent before setup smoke retry', updated_at = ?
+                       WHERE id = ?""",
+                    (utc_now(), previous["id"]),
+                )
+            else:
+                if previous["state"] == "sent":
+                    self.store.execute(
+                        """UPDATE external_operations SET state = 'uncertain',
+                           condition = 'setup resumed after dispatch; effect requires observation',
+                           updated_at = ? WHERE id = ?""",
+                        (utc_now(), previous["id"]),
+                    )
+                retained = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (previous["id"],)
+                )
+                assert retained is not None
+                if not retained["reconciliation_used"]:
+                    try:
+                        await self._reconcile_setup_runtime_smoke(retained)
+                    except AppServerError:
+                        pass
+                retained = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (previous["id"],)
+                )
+                assert retained is not None
+                if retained["state"] == "complete":
+                    self.store.execute(
+                        "INSERT INTO meta(key, value) VALUES ('desktop_smoke_check', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (retained["completed_at"] or retained["updated_at"],),
+                    )
+                    return
+                if retained["reconciliation_used"] and retained["operator_hold_id"]:
+                    self._queue_operation_resolution(
+                        retained,
+                        hold_id=int(retained["operator_hold_id"]),
+                        condition=str(
+                            retained["condition"]
+                            or "setup runtime smoke remains ambiguous"
+                        ),
+                    )
+                raise StoreError(
+                    f"setup runtime smoke operation {retained['id']} remains uncertain; "
+                    "resolve it before another smoke mutation"
+                )
         project = self.store.row(
             "SELECT * FROM projects WHERE enabled = 1 ORDER BY project_id LIMIT 1"
         )
@@ -3282,6 +3518,14 @@ class Controller:
                     started=started,
                     mutation=True,
                 )
+                retained = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation,)
+                )
+                if retained is not None and retained["state"] == "uncertain":
+                    try:
+                        await self._reconcile_setup_runtime_smoke(retained)
+                    except AppServerError:
+                        pass
             raise StoreError(
                 f"shared runtime visibility smoke check failed: {error}"
             ) from error
@@ -3408,22 +3652,34 @@ class Controller:
             )
             return
         current = self.store.row(
-            "SELECT 1 FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
+            "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"
         )
         if current is not None:
-            raise StoreError("Archon succession found an unexpected current Archon")
-        context = self.store.row(
-            "SELECT * FROM projects WHERE enabled = 1 ORDER BY project_id LIMIT 1"
-        )
-        if context is None:
-            raise StoreError("Archon succession has no enabled project context")
-        successor = await self._provision_task(
-            role="archon",
-            description="",
-            project=context,
-            model=str(request["successor_model"]),
-            effort=str(request["successor_reasoning_effort"]),
-        )
+            recovered = self.store.row(
+                """SELECT 1 FROM external_operations
+                   WHERE kind = 'thread_start' AND target = 'archon'
+                     AND state = 'complete' AND native_id = ?
+                     AND json_extract(input_json, '$.succession_task_id') = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (current["native_thread_id"], old_task_id),
+            )
+            if recovered is None:
+                raise StoreError("Archon succession found an unexpected current Archon")
+            successor = current
+        else:
+            context = self.store.row(
+                "SELECT * FROM projects WHERE enabled = 1 ORDER BY project_id LIMIT 1"
+            )
+            if context is None:
+                raise StoreError("Archon succession has no enabled project context")
+            successor = await self._provision_task(
+                role="archon",
+                description="",
+                project=context,
+                model=str(request["successor_model"]),
+                effort=str(request["successor_reasoning_effort"]),
+                succession_task_id=old_task_id,
+            )
         self.store.execute("DELETE FROM meta WHERE key = 'archon_succession_request'")
         self._queue_archon_update(
             f"succession:{old_task_id}:{successor['id']}",
@@ -3498,23 +3754,47 @@ class Controller:
                 ),
             )
 
-    async def _deliver_update_batch(self) -> None:
-        self._reactivate_deferred_batches()
+    async def _deliver_update_batch(self, *, recovery_only: bool = False) -> None:
+        self._reactivate_deferred_batches(recovery_only=recovery_only)
         archon = self.store.row(
             "SELECT * FROM tasks WHERE role = 'archon' AND state = 'idle'"
         )
         if archon is None:
             return
         current = self.store.row(
-            """SELECT 1 FROM actions WHERE task_id = ?
+            """SELECT * FROM actions WHERE task_id = ?
                AND state IN ('pending','starting','active','terminal','uncertain')""",
             (archon["id"],),
         )
         if current is not None:
+            if (
+                recovery_only
+                and current["state"] == "pending"
+                and self.store.row(
+                    """SELECT 1 FROM batches b JOIN batch_updates bu ON bu.batch_id = b.id
+                       JOIN updates u ON u.id = bu.update_id
+                       WHERE b.action_id = ?
+                         AND json_extract(u.content, '$.kind') = 'operation_resolution'
+                         AND NOT EXISTS (
+                           SELECT 1 FROM batch_updates other_bu
+                           JOIN updates other_u ON other_u.id = other_bu.update_id
+                           WHERE other_bu.batch_id = b.id
+                             AND (json_extract(other_u.content, '$.kind') IS NULL
+                               OR json_extract(other_u.content, '$.kind') != 'operation_resolution')
+                         )
+                       LIMIT 1""",
+                    (current["id"],),
+                )
+                is not None
+            ):
+                await self._dispatch_action(current, task=archon)
             return
         updates = self.store.rows(
-            "SELECT * FROM updates WHERE recipient_task_id = ? AND state = 'retained' AND actionable = 1 ORDER BY id",
-            (archon["id"],),
+            """SELECT * FROM updates WHERE recipient_task_id = ?
+               AND state = 'retained' AND actionable = 1
+               AND (? = 0 OR json_extract(content, '$.kind') = 'operation_resolution')
+               ORDER BY id""",
+            (archon["id"], int(recovery_only)),
         )
         if not updates:
             return
@@ -3577,16 +3857,34 @@ class Controller:
             "holds": self.store.rows(
                 "SELECT id, scope, target, reason, urgent, release_condition FROM holds WHERE released_at IS NULL ORDER BY urgent DESC, id"
             ),
+            "uncertain_operations": self.store.rows(
+                """SELECT id, kind, target, condition, operator_hold_id
+                   FROM external_operations WHERE state = 'uncertain'
+                     AND reconciliation_used = 1 ORDER BY id"""
+            ),
             "policies": self.store.rows(
                 "SELECT id, kind, scope, cadence_seconds, next_due_at, active FROM policies ORDER BY id"
             ),
         }
 
-    def _reactivate_deferred_batches(self) -> None:
+    def _reactivate_deferred_batches(self, *, recovery_only: bool = False) -> None:
         now = utc_now()
         for deferred in self.store.rows(
             "SELECT * FROM deferred_batches ORDER BY batch_id"
         ):
+            if (
+                recovery_only
+                and self.store.row(
+                    """SELECT 1 FROM batch_updates bu JOIN updates u ON u.id = bu.update_id
+                   WHERE bu.batch_id = ?
+                     AND (json_extract(u.content, '$.kind') IS NULL
+                       OR json_extract(u.content, '$.kind') != 'operation_resolution')
+                   LIMIT 1""",
+                    (deferred["batch_id"],),
+                )
+                is not None
+            ):
+                continue
             condition = json.loads(deferred["reactivation_json"])
             ready = bool(deferred["next_check_at"] and deferred["next_check_at"] <= now)
             dependency = condition.get("dependency")

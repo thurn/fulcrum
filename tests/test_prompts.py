@@ -241,6 +241,22 @@ class PromptsTest(unittest.TestCase):
     def test_cli_has_no_instruction_fetch_interface(self) -> None:
         self.assertNotIn("instructions", build_parser().format_help())
 
+    def test_cli_exposes_bootstrap_operation_resolution(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "resolve-operation",
+                "--operation-id",
+                "17",
+                "--resolution",
+                "confirmed_unsent",
+                "--evidence",
+                "exact runtime inventory is empty",
+            ]
+        )
+        self.assertEqual(args.command, "resolve-operation")
+        self.assertEqual(args.operation_id, 17)
+        self.assertEqual(args.resolution, "confirmed_unsent")
+
     def test_creation_supplies_role_and_command_reference_without_fetches(self) -> None:
         text = role_instructions("archon", role="archon")
         self.assertIn("You are Archon", text)
