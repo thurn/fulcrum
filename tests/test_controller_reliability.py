@@ -453,7 +453,7 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provision.await_args.kwargs["role"], "overseer")
         self.assertEqual(provision.await_args.kwargs["cwd"], str(self.worktree))
 
-    async def test_refreshed_instructions_retain_scope_candidate_and_handoffs(
+    async def test_dispatch_sends_scope_candidate_and_evidence_inline(
         self,
     ) -> None:
         now = "2026-01-01T00:00:00Z"
@@ -494,17 +494,87 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
                 now,
             ),
         )
-        result = await self.controller.handle_request(
-            {"command": "instructions", "thread_id": "overseer"}
+        retained = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action.lastrowid,)
         )
-        prompt = result["instructions"]
-        self.assertIn("Approved scope:\n\nScope", prompt)
-        self.assertNotIn("commit abc; tests passed", prompt)
-        result = await self.controller.handle_request(
-            {"command": "instructions", "thread_id": "overseer", "section": "evidence"}
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="review-turn"),
+            ) as start,
+        ):
+            await self.controller._dispatch_action(retained)
+        prompt = start.call_args.args[1]
+        self.assertIn("Approved scope:\nScope", prompt)
+        self.assertIn("candidate-1", prompt)
+        self.assertIn("commit abc; tests passed", prompt)
+        self.assertNotIn("fulcrum instructions", prompt)
+        self.assertNotIn("You are Overseer", prompt)
+        self.assertNotIn("--section", prompt)
+
+    async def test_archon_batch_dispatch_contains_actual_proposal(self) -> None:
+        self.controller.store.register_task(
+            native_thread_id="archon-inline",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
         )
-        self.assertIn("implementation_evidence", result["instructions"])
-        self.assertIn("commit abc; tests passed", result["instructions"])
+        self.controller._queue_archon_update(
+            "proposal:p-2",
+            {
+                "kind": "proposal",
+                "bead_id": "p-2",
+                "project": "p",
+                "title": "Fix empty results",
+                "scope": "Show an empty state for zero matches; verify matching results remain correct.",
+            },
+        )
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="archon-turn"),
+            ) as start,
+        ):
+            await self.controller._deliver_update_batch()
+        text = start.call_args.args[1]
+        self.assertIn("Approve or defer p-2 (p): Fix empty results", text)
+        self.assertIn(
+            "Show an empty state for zero matches; verify matching results remain correct.",
+            text,
+        )
+        self.assertIn("Capacity used:", text)
+        self.assertIn("Existing p-1", text)
+        self.assertNotIn("fulcrum instructions", text)
+        self.assertNotIn("You are Archon", text)
+        self.assertNotIn("Exact JSON", text)
+        self.assertLess(len(text.split()), 100)
 
     async def test_missing_finish_notice_preserves_original_batch(self) -> None:
         archon = self.controller.store.register_task(
@@ -547,10 +617,10 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(retained["payload"]), original)
         self.assertEqual(retained["reminder_sent"], 1)
         self.assertEqual(dispatch.call_args.args[0]["reminder_sent"], 1)
-        result = await self.controller.handle_request(
-            {"command": "instructions", "thread_id": "archon-notice"}
-        )
-        self.assertIn("Exact approved proposal", result["instructions"])
+        text = self.controller._build_action_message(retained, archon, None)
+        self.assertIn("outstanding result", text)
+        self.assertNotIn("fulcrum instructions", text)
+        self.assertNotIn("Exact approved proposal", text)
 
     async def test_repair_context_exposes_permission_and_retained_diagnosis(
         self,
@@ -570,16 +640,15 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "INSERT INTO actions(task_id, assignment_id, kind, payload, state, created_at, updated_at) VALUES (?, ?, 'correct', '{}', 'active', 'now', 'now')",
             (self.executor["id"], self.assignment["id"]),
         )
-        context = await self.controller.handle_request(
-            {"command": "instructions", "thread_id": "executor"}
+        action = self.controller.store.current_action("executor")
+        assignment = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
         )
-        evidence = await self.controller.handle_request(
-            {"command": "instructions", "thread_id": "executor", "section": "evidence"}
-        )
-        self.assertIn("bounded_in_scope_ci_fix", context["instructions"])
-        self.assertIn("CI failed", context["instructions"])
-        self.assertNotIn("actual failed check log", context["instructions"])
-        self.assertIn("actual failed check log", evidence["instructions"])
+        text = self.controller._build_action_message(action, self.executor, assignment)
+        self.assertIn("bounded_in_scope_ci_fix", text)
+        self.assertIn("CI failed", text)
+        self.assertIn("actual failed check log", text)
+        self.assertNotIn("fulcrum instructions", text)
 
     def test_specialist_evidence_reports_interval_scope_and_truncation(self) -> None:
         scope = json.dumps({"global": False, "projects": ["p"]})

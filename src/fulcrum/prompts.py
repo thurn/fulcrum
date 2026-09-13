@@ -43,22 +43,21 @@ def load_template(action_kind: str, *, role: str | None = None) -> str:
 
 
 def role_instructions(action_kind: str, *, role: str | None = None) -> str:
-    return (
-        load_template(action_kind, role=role)
-        + "\n\n"
-        + (
-            "Each message identifies your current action. Read `fulcrum instructions` "
-            "for its exact scope and current decision data before acting. Read "
-            "`fulcrum instructions --section evidence` for retained evidence, and "
-            "`fulcrum instructions --section finish` for commands and exact file examples "
-            "when needed. `--section role` restores this guidance. Do not rediscover "
-            "fleet state or manage other conversations. An interview action temporarily "
-            "replaces your normal role duties. Finish the current action once through "
-            "`fulcrum finish`, then end; the controller binds identity and routes the result. "
-            "If a finish call fails, inspect the error and correct it without inventing "
-            "success. Native helpers must finish before you submit. Plan-mode Weaver "
-            "has no finish obligation.\n"
-        )
+    """Onboarding and command reference, supplied once at task creation."""
+    finish_kind = "correct" if action_kind == "implement" else action_kind
+    interviews_allowed = role == "sage"
+    return "\n\n".join(
+        [
+            load_template(action_kind, role=role),
+            "Subsequent messages contain the actual request and necessary facts. Use them "
+            "directly. Do not manage other conversations. An interview temporarily replaces "
+            "your normal duties. Finish the current action once through `fulcrum finish`, "
+            "then end; the controller binds identity and routes the result. Wait for native "
+            "helpers before submitting. If finish fails, correct the reported error. "
+            "Planning Weaver has no finish obligation.",
+            finish_syntax(finish_kind, interviews_allowed=interviews_allowed),
+            finish_contract(finish_kind, interviews_allowed=interviews_allowed),
+        ]
     )
 
 
@@ -71,186 +70,312 @@ def action_payload(action: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def action_notice(action: dict[str, Any]) -> str:
-    """A small wake message; never repeat the role manual or evidence history."""
-    if action.get("reminder_sent"):
-        return (
-            "Your previous turn ended without a finish outcome. Submit only the "
-            "outstanding result; do not repeat the work. The original action remains "
-            "available through `fulcrum instructions`; use `--section finish` for syntax."
-        )
-    payload = action_payload(action)
-    kind = action["kind"]
-    if kind == "archon":
-        count = len(payload.get("batch_items", []))
-        lead = (
-            f"{count} updates need your scheduling decision."
-            if count
-            else (
-                "Confirm the retained fleet configuration and initialize this coordinator."
-                if payload.get("purpose") == "materialize_archon"
-                else "Set the initial fleet capacity and recurring policies."
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+
+def _facts(values: dict[str, Any]) -> str:
+    return "; ".join(
+        f"{key.replace('_', ' ')}: {_text(value)}"
+        for key, value in values.items()
+        if value is not None and value != [] and value != {}
+    )
+
+
+def _archon_message(payload: dict[str, Any]) -> str:
+    """Render the pending decisions, not the entire fleet record or role manual."""
+    items = payload.get("batch_items", [])
+    lines: list[str] = []
+    projects: set[str] = set()
+    for item in items:
+        content = item["content"]
+        prefix = f"Update {item['update_id']}: "
+        if not isinstance(content, dict):
+            lines.append(prefix + _text(content))
+            continue
+        project = content.get("project") or content.get("project_id")
+        if project:
+            projects.add(str(project))
+        kind = content.get("kind")
+        if kind == "proposal":
+            lines.append(
+                prefix
+                + f"Approve or defer {content['bead_id']} ({project}): {content['title']}.\nScope: {content['scope']}"
             )
+            details = {key: content.get(key) for key in ("dependencies", "context")}
+            plan = content.get("plan") or {}
+            if plan.get("id"):
+                details["plan"] = plan
+            models = content.get("models") or {}
+            if models.get("provenance") not in {None, "default"}:
+                details["models"] = models
+            if _facts(details):
+                lines.append(_facts(details))
+        elif kind == "assignment_completed":
+            lines.append(
+                prefix
+                + f"{content['bead_id']} completed (assignment {content['assignment_id']}, run {content['run_id']})."
+            )
+        elif kind == "assignment_recovery":
+            lines.append(
+                prefix
+                + f"Assignment {content['assignment_id']} ({content['bead_id']}, run {content['run_id']}) needs recovery: {content['condition']}. "
+                + _facts(
+                    {
+                        "attempt": content.get("attempt"),
+                        "next_attempt_at": content.get("next_attempt_at"),
+                    }
+                )
+            )
+        elif kind == "specialist_completed":
+            lines.append(
+                prefix
+                + f"{content['specialist']} report {content['occurrence_id']}: {content['summary']} ({content['finding_count']} findings). "
+                + _facts({"scope": content.get("scope")})
+            )
+        else:
+            # Unknown exceptions retain their actual decision data instead of
+            # silently becoming an uninformative notification count.
+            lines.append(prefix + _facts(content))
+    snapshot = payload.get("fleet_snapshot") or {}
+    capacity = snapshot.get("capacity") or {}
+    if capacity:
+        limits = capacity.get("project_limits") or {}
+        usage = capacity.get("project_usage") or {}
+        if not items:
+            projects.update(limits)
+        line = f"Capacity used: global {capacity.get('global_usage', 0)}/{capacity.get('global_limit', 'unset')}"
+        for project in sorted(projects):
+            line += (
+                f"; {project} {usage.get(project, 0)}/{limits.get(project, 'unset')}"
+            )
+        lines.append(line + ".")
+    # Active work is pertinent when approving overlapping work. Completion-only
+    # notifications need neither the whole project backlog nor unchanged policies.
+    scheduling = not items or any(
+        isinstance(item["content"], dict)
+        and item["content"].get("kind")
+        in {"proposal", "assignment_recovery", "archon_succession_completed"}
+        for item in items
+    )
+    if scheduling:
+        active = snapshot.get("unfinished_assignments", [])
+        for row in active:
+            if projects and row.get("project_id") not in projects:
+                continue
+            lines.append(
+                f"Existing {row['bead_id']} ({row.get('project_id')}, run {row['run_id']}, assignment {row['id']}): {row['stage']}"
+                + (f" — {row['condition']}" if row.get("condition") else "")
+                + f"; priority {row.get('priority', 0)}."
+            )
+        for hold in snapshot.get("holds", []):
+            # Run and assignment holds are retained: their scope may be relevant
+            # even when the update does not include a project binding.
+            if (
+                hold.get("scope") == "project"
+                and projects
+                and str(hold.get("target")) not in projects
+            ):
+                continue
+            lines.append(
+                f"Hold {hold['id']}: "
+                + _facts(
+                    {
+                        key: hold.get(key)
+                        for key in (
+                            "scope",
+                            "target",
+                            "reason",
+                            "urgent",
+                            "release_condition",
+                        )
+                    }
+                )
+            )
+    if not items:
+        lines.insert(
+            0,
+            str(
+                payload.get("required")
+                or "Set the initial fleet capacity and recurring policies."
+            ),
         )
-    elif kind == "implement":
-        lead = f"Implement bead {payload.get('bead_id', 'in the current assignment')}."
-    elif kind == "correct":
-        lead = (
-            "Address the current correction request; check retained repair permissions."
+        if payload.get("projects"):
+            lines.append("Projects: " + ", ".join(payload["projects"]) + ".")
+        for policy in snapshot.get("policies", []):
+            lines.append("Policy: " + _facts(policy))
+    return "\n".join(lines)
+
+
+def _handoff_text(content: Any) -> str:
+    if isinstance(content, dict) and content.get("evidence_content"):
+        # Show retained authored evidence once, not the same evidence as path,
+        # raw JSON, and copied text. Other fields may include validation gaps.
+        return str(content["evidence_content"]) + (
+            "\n"
+            + _facts(
+                {
+                    key: value
+                    for key, value in content.items()
+                    if key not in {"evidence_content", "evidence", "evidence_path"}
+                }
+            )
+            if any(
+                key not in {"evidence_content", "evidence", "evidence_path"}
+                for key in content
+            )
+            else ""
         )
-    elif kind == "review":
-        candidate = payload.get("candidate") or {}
-        lead = f"Review candidate {candidate.get('id', 'in the current assignment')} independently."
-    elif kind == "specialist":
-        lead = (
-            "Interview collection is complete. Use the answers and gaps to finish your report."
-            if payload.get("continuation")
-            else "Perform the requested analysis within the retained project scope."
-        )
-    elif kind == "interview":
-        lead = "Answer the assigned debrief question only; do not resume prior work."
-    else:
-        lead = "Complete the current authoring action."
-    return (
-        lead
-        + " Read `fulcrum instructions` for details, then submit the appropriate finish outcome."
-    )
+    return _facts(content) if isinstance(content, dict) else _text(content)
 
 
-def compaction_reminder(task: dict[str, Any], action: dict[str, Any]) -> str:
-    obligation = (
-        "Only submit the outstanding finish result; do not repeat completed work."
-        if action.get("reminder_sent")
-        else "Continue this action and submit its finish outcome when done."
-    )
-    boundary = (
-        "This is debrief only; prior implementation and review authority do not apply."
-        if action["kind"] == "interview"
-        else "The controller owns dispatch and delivery."
-    )
-    return (
-        f"Fulcrum role: {task['role']}. Current action: {action['kind']}. {obligation} "
-        f"{boundary} If context was lost, read `fulcrum instructions` for the authoritative "
-        "scope and current request; `--section evidence`, `--section role`, and "
-        "`--section finish` retrieve only the reference you need."
-    )
-
-
-def build_context(
+def action_message(
     *,
-    task: dict[str, Any],
     action: dict[str, Any],
     assignment: dict[str, Any] | None = None,
     constraints: list[str] | None = None,
-    section: str = "context",
 ) -> str:
-    """Return selected durable facts without repeating onboarding on every read."""
+    """Deliver the actual action inline, with no prerequisite instruction read."""
     kind = action["kind"]
-    payload = dict(action_payload(action))
-    if section == "role":
-        return role_instructions(kind, role=str(task.get("role") or ""))
-    if section == "finish":
-        interviews_allowed = task.get("role") == "sage" and not payload.get(
-            "continuation"
-        )
+    payload = action_payload(action)
+    if action.get("reminder_sent"):
+        return "Your previous turn ended without a finish outcome. Submit the outstanding result for that action; do not repeat completed work."
+    if kind == "archon":
+        return _archon_message(payload)
+    if kind == "interview":
         return (
-            finish_syntax(kind, interviews_allowed=interviews_allowed)
-            + "\n\n"
-            + finish_contract(kind, interviews_allowed=interviews_allowed)
+            "Workflow debrief only; do not resume prior work.\n"
+            + str(payload["question"])
+            + '\nSubmit `fulcrum finish interview_answer --input "/absolute/answer.json"` '
+            + 'with {"answer":"your answer","evidence":["reference"]}.'
         )
-    if section == "evidence":
-        evidence = {
-            key: payload[key]
-            for key in (
-                "handoffs",
-                "retained_evidence",
-                "answers",
-                "missing_evidence",
-                "delivery_evidence",
-            )
-            if key in payload
-        }
-        return (
-            json.dumps(evidence, indent=2, sort_keys=True)
-            if evidence
-            else "No retained evidence for this action."
-        )
-    if section != "context":
-        raise PromptError(f"unknown instruction section: {section}")
-    lines = [f"Current action: {kind}."]
-    if assignment is not None:
-        lines += [
-            f"Bead: {assignment['bead_id']}; assignment: {assignment['id']}.",
-            "Approved scope:\n\n" + assignment["scope_snapshot"],
-            f"Worktree: {assignment.get('worktree_path') or 'unavailable'}.",
+    if kind == "specialist":
+        scope = payload.get("scope") or {}
+        lines = [
+            str(
+                payload.get("prompt")
+                or "Review the selected projects using your role's normal scope."
+            ),
+            "Projects: " + ", ".join(scope.get("projects", [])) + ".",
         ]
-        if kind == "correct":
+        if payload.get("continuation"):
             lines.append(
-                "Repair authority:\n"
-                + json.dumps(
-                    {
-                        "approved_candidate": assignment.get("mandate_candidate_id"),
-                        "approved_scope": assignment.get("mandate_scope"),
-                        "allowed_categories": json.loads(
-                            assignment.get("repair_permissions") or "[]"
-                        ),
-                        "condition": assignment.get("condition"),
-                    },
-                    indent=2,
-                )
+                "Interview collection is complete. Finish the report; no further interview round."
             )
-    handoffs = payload.pop("handoffs", [])
-    if handoffs:
-        # History remains available in evidence; only the most recent review
-        # request belongs in the current correction brief.
-        current = next(
+            for answer in payload.get("answers", []):
+                lines.append(_facts(answer))
+            if payload.get("missing_evidence"):
+                lines.append("Missing responses: " + _text(payload["missing_evidence"]))
+        else:
+            evidence = payload.get("retained_evidence") or {}
+            for key in (
+                "window",
+                "captured_at",
+                "projects",
+                "coverage",
+                "assignments",
+                "recent_events",
+                "prior_reports",
+            ):
+                if evidence.get(key):
+                    lines.append(
+                        key.replace("_", " ").capitalize() + ": " + _text(evidence[key])
+                    )
+        return "\n".join(lines)
+    if kind == "weaver":
+        return "Complete the requested authoring work. " + _facts(payload)
+    if assignment is None:
+        raise PromptError(f"{kind} action requires its assignment")
+    lead = {"implement": "Implement", "correct": "Correct", "review": "Review"}[kind]
+    lines = [
+        f"{lead} {assignment['bead_id']}. Approved scope:\n{assignment['scope_snapshot']}",
+        f"Worktree: {assignment.get('worktree_path') or 'unavailable'}.",
+    ]
+    candidate = payload.get("candidate") or {}
+    if candidate.get("id") or assignment.get("candidate_id"):
+        lines.append(
+            "Candidate: "
+            + _facts(
+                {
+                    "id": candidate.get("id") or assignment.get("candidate_id"),
+                    "source": candidate.get("source_revision")
+                    or assignment.get("source_oid"),
+                    "tested": candidate.get("tested_revision")
+                    or assignment.get("tested_oid"),
+                }
+            )
+        )
+    if constraints:
+        lines.append("Constraints:\n" + "\n".join(constraints))
+    handoffs = payload.get("handoffs", [])
+    if kind in {"review", "correct"}:
+        latest = next(
             (
                 item
                 for item in reversed(handoffs)
-                if item.get("kind") in {"review_findings", "missing_evidence"}
+                if item.get("kind")
+                == (
+                    "implementation_evidence" if kind == "review" else "review_findings"
+                )
+                or (kind == "correct" and item.get("kind") == "missing_evidence")
             ),
             None,
         )
-        if kind == "correct" and current is not None:
-            payload["current_correction"] = current
-        lines.append(
-            "Implementation evidence and review history: `fulcrum instructions --section evidence`."
-        )
-    if payload.pop("delivery_evidence", None) is not None:
-        lines.append(
-            "Retained delivery diagnosis: `fulcrum instructions --section evidence`."
-        )
-    retained = payload.pop("retained_evidence", None)
-    if retained is not None:
-        payload["evidence_summary"] = {
-            key: retained[key]
-            for key in ("captured_at", "window", "projects", "coverage")
-            if key in retained
-        }
-        lines.append(
-            "Source records and prior reports: `fulcrum instructions --section evidence`."
-        )
-    if "answers" in payload:
-        payload["answer_count"] = len(payload.pop("answers"))
-        lines.append("Interview answers: `fulcrum instructions --section evidence`.")
-    lines.append(json.dumps(payload, indent=2, sort_keys=True))
-    if constraints:
-        lines.append(
-            "Current constraints:\n" + "\n".join(f"- {item}" for item in constraints)
-        )
-    if action.get("reminder_sent"):
-        lines.append(
-            "Only the outstanding finish result is requested; do not repeat completed work."
-        )
+        if latest:
+            lines.append(
+                (
+                    "Implementation evidence:\n"
+                    if kind == "review"
+                    else "Current correction:\n"
+                )
+                + _handoff_text(latest["content"])
+            )
+    if kind == "correct":
+        if assignment.get("mandate_candidate_id"):
+            lines.append(
+                "Repair permission: "
+                + _facts(
+                    {
+                        "approved_candidate": assignment["mandate_candidate_id"],
+                        "scope": assignment.get("mandate_scope"),
+                        "allowed_categories": json.loads(
+                            assignment.get("repair_permissions") or "[]"
+                        ),
+                    }
+                )
+            )
+        failure = payload.get("delivery_failure") or assignment.get("condition")
+        if failure:
+            lines.append("Delivery failure: " + str(failure))
+        evidence = payload.get("delivery_evidence") or {}
+        if evidence:
+            lines.append("Diagnosis: " + _text(evidence.get("diagnosis") or evidence))
     return "\n\n".join(lines) + "\n"
 
 
-def weaver_instructions(*, plan_mode: bool, project: str) -> str:
-    mode = (
-        "Planning turn: inspect and propose; do not publish or call finish."
-        if plan_mode
-        else "Writable authoring turn: use small intake, approved-plan publication, or refinement as requested. Finish after filing."
+def compaction_reminder(task: dict[str, Any], action: dict[str, Any]) -> str:
+    payload = action_payload(action)
+    target = f" for {payload['bead_id']}" if payload.get("bead_id") else ""
+    obligation = (
+        "Submit only the outstanding finish result; do not repeat completed work."
+        if action.get("reminder_sent")
+        else "Continue from the conversation summary and finish when done."
     )
-    return f"Project: {project}. {mode}\n\n" + role_instructions(
-        "weaver", role="weaver"
+    boundary = (
+        "Debrief only; do not resume prior work."
+        if action["kind"] == "interview"
+        else "The controller handles dispatch and delivery."
+    )
+    return f"You are {task['role']}; current action: {action['kind']}{target}. {obligation} {boundary}"
+
+
+def weaver_instructions(*, plan_mode: bool, project: str) -> str:
+    if plan_mode:
+        return (
+            f"Project: {project}. Planning turn: inspect and propose; do not publish or call finish.\n\n"
+            + load_template("weaver", role="weaver")
+        )
+    return (
+        f"Project: {project}. Complete the requested writable authoring work.\n\n"
+        + role_instructions("weaver", role="weaver")
     )

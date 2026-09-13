@@ -23,7 +23,7 @@ Plan mode permits inspection, discussion, and a proposed plan only. Do not write
 files or publish issues, and do not call finish for a planning turn. After human
 approval in writable mode, register again to establish the authoring action, save
 the approved document in the brain, retain its commit, and publish the complete
-task graph with `fulcrum intake --input tasks.json`. Use `fulcrum instructions --section finish` for a complete graph example. Preserve conversational model preferences; both roles default to Sol/high.
+task graph with `fulcrum intake --input tasks.json`. The initial writable instructions include a complete graph example. Preserve conversational model preferences; both roles default to Sol/high.
 
 For refinement, edit the same plan, reconcile existing beads and stable intake
 keys, and add only new work. Record removed requirements and affected assignments;

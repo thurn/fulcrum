@@ -38,8 +38,7 @@ from fulcrum.kernel import (
     schedule_action_retry,
 )
 from fulcrum.prompts import (
-    action_notice,
-    build_context,
+    action_message,
     role_instructions,
     weaver_instructions,
 )
@@ -1625,15 +1624,13 @@ class Controller:
                     keys.add(raw.strip())
         return tuple(sorted(keys))
 
-    def _build_action_context(
+    def _build_action_message(
         self,
         action: dict[str, Any],
         task: dict[str, Any],
         assignment: dict[str, Any] | None,
-        *,
-        section: str = "context",
     ) -> str:
-        """Read the current action facts separately from notices and role guidance."""
+        """Compose only the facts needed for this action, delivered directly in its turn."""
 
         constraints: list[str] = []
         if assignment is not None:
@@ -1687,12 +1684,8 @@ class Controller:
                         operation["result_json"] or "{}"
                     )
             action = {**action, "payload": payload}
-        return build_context(
-            task=task,
-            action=action,
-            assignment=assignment,
-            constraints=constraints,
-            section=section,
+        return action_message(
+            action=action, assignment=assignment, constraints=constraints
         )
 
     def _ensure_worktree_environment(self, worktree: Path) -> None:
@@ -1815,7 +1808,7 @@ class Controller:
             cwd = assignment["worktree_path"]
         else:
             cwd = project["repo_path"]
-        prompt = action_notice(action)
+        prompt = self._build_action_message(action, task, assignment)
         operation = self.store.create_operation(
             "turn_start",
             str(action["id"]),
@@ -2540,29 +2533,6 @@ class Controller:
             )
         if command == "weaver_register":
             return await self._register_weaver(request)
-        if command == "instructions":
-            thread = _thread_identity(request)
-            action = self.store.current_action(thread)
-            task = self.store.row(
-                "SELECT * FROM tasks WHERE id = ?", (action["task_id"],)
-            )
-            if task is None:
-                raise StoreError("action task is missing")
-            assignment = None
-            if action.get("assignment_id") is not None:
-                assignment = self.store.row(
-                    """SELECT a.*, r.project_id FROM assignments a
-                       JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
-                    (action["assignment_id"],),
-                )
-            return {
-                "instructions": self._build_action_context(
-                    action,
-                    task,
-                    assignment,
-                    section=str(request.get("section", "context")),
-                )
-            }
         if command == "archon":
             task = self.store.row(
                 "SELECT * FROM tasks WHERE role = 'archon' AND state NOT IN ('retired','archived')"

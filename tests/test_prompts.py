@@ -6,12 +6,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fulcrum.cli import build_parser
 from fulcrum.config import RuntimePaths
 from fulcrum.hook import handle_event
 from fulcrum.outcomes import ALLOWED, finish_examples, finish_syntax, validate_outcome
 from fulcrum.prompts import (
-    action_notice,
-    build_context,
+    action_message,
     compaction_reminder,
     role_instructions,
     weaver_instructions,
@@ -36,52 +36,169 @@ class PromptsTest(unittest.TestCase):
             "repair_permissions": '["ordinary_merge_conflict"]',
         }
 
-    def test_notices_stay_short_even_with_large_action_records(self) -> None:
-        payload = {
-            "batch_items": [{"content": "large evidence " * 10000}],
-            "retained_evidence": {"history": "record " * 10000},
-        }
-        for kind in ALLOWED:
-            action = {"kind": kind, "payload": payload}
-            with self.subTest(kind=kind):
-                self.assertLess(len(action_notice(action).split()), 60)
-                self.assertLess(
-                    len(compaction_reminder(self.task, action).split()), 100
-                )
-                self.assertNotIn("large evidence", action_notice(action))
-                self.assertNotIn(
-                    "large evidence", compaction_reminder(self.task, action)
-                )
-
-    def test_context_preserves_scope_and_current_repair_without_repeating_history(
+    def test_archon_message_contains_the_decision_without_fetching_context(
         self,
     ) -> None:
+        action = {
+            "kind": "archon",
+            "payload": {
+                "batch_items": [
+                    {
+                        "update_id": 17,
+                        "content": {
+                            "kind": "proposal",
+                            "bead_id": "p-1",
+                            "project": "p",
+                            "title": "Fix empty results",
+                            "scope": "Show an empty state when search returns no matches; test both paths.",
+                        },
+                    }
+                ],
+                "fleet_snapshot": {
+                    "capacity": {
+                        "global_usage": 1,
+                        "global_limit": 4,
+                        "project_usage": {"p": 0},
+                        "project_limits": {"p": 2},
+                    },
+                    "policies": [{"unchanged": "policy " * 10000}],
+                },
+            },
+        }
+        text = action_message(action=action)
+        self.assertIn("Approve or defer p-1 (p)", text)
+        self.assertIn("Update 17", text)
+        self.assertIn(
+            "Show an empty state when search returns no matches; test both paths.", text
+        )
+        self.assertIn("p 0/2", text)
+        self.assertLess(len(text.split()), 65)
+        self.assertNotIn("unchanged", text)
+        self.assertNotIn("fulcrum instructions", text)
+        self.assertNotIn("--input", text)
+        self.assertNotIn("1 updates", text)
+
+    def test_archon_preserves_relevant_conflicts_holds_and_unknown_exceptions(
+        self,
+    ) -> None:
+        action = {
+            "kind": "archon",
+            "payload": {
+                "batch_items": [
+                    {
+                        "update_id": 2,
+                        "content": {
+                            "kind": "proposal",
+                            "bead_id": "p-2",
+                            "project": "p",
+                            "title": "Repair",
+                            "scope": "exact scope " * 1000,
+                        },
+                    },
+                    {
+                        "update_id": 3,
+                        "content": {
+                            "kind": "new_exception",
+                            "reason": "unknown delivery outcome",
+                            "decision_needed": "attach observed candidate",
+                        },
+                    },
+                ],
+                "fleet_snapshot": {
+                    "unfinished_assignments": [
+                        {
+                            "id": 1,
+                            "bead_id": "p-1",
+                            "run_id": 1,
+                            "project_id": "p",
+                            "stage": "implementing",
+                            "condition": "overlapping source",
+                        }
+                    ],
+                    "holds": [
+                        {
+                            "id": 4,
+                            "scope": "project",
+                            "target": "p",
+                            "reason": "benchmark",
+                            "release_condition": "measurement complete",
+                        }
+                    ],
+                },
+            },
+        }
+        text = action_message(action=action)
+        for required in (
+            "exact scope " * 1000,
+            "overlapping source",
+            "measurement complete",
+            "unknown delivery outcome",
+            "attach observed candidate",
+            "Update 3",
+        ):
+            self.assertIn(required, text)
+
+    def test_compaction_is_a_reminder_not_a_replay_or_required_read(self) -> None:
+        for kind in ALLOWED:
+            action = {"kind": kind, "payload": {"large": "history " * 10000}}
+            text = compaction_reminder(self.task, action)
+            self.assertLess(len(text.split()), 55)
+            self.assertNotIn("history", text)
+            self.assertNotIn("fulcrum instructions", text)
+            self.assertNotIn("--section", text)
+
+    def test_correction_inlines_current_finding_and_permission_only(self) -> None:
         action = {
             "kind": "correct",
             "payload": {
                 "handoffs": [
-                    {"kind": "implementation_evidence", "content": "long test output"},
+                    {"kind": "implementation_evidence", "content": "old test output"},
                     {"kind": "review_findings", "content": "previous resolved defect"},
                     {"kind": "review_findings", "content": "current defect"},
                 ]
             },
         }
-        context = build_context(
-            task=self.task, action=action, assignment=self.assignment
-        )
-        self.assertIn("Full approved scope", context)
-        self.assertIn("ordinary_merge_conflict", context)
-        self.assertIn("c-1", context)
-        self.assertIn("current defect", context)
-        self.assertNotIn("previous resolved defect", context)
-        self.assertNotIn("long test output", context)
-        evidence = build_context(task=self.task, action=action, section="evidence")
-        self.assertIn("previous resolved defect", evidence)
-        self.assertEqual(evidence.count("long test output"), 1)
-        self.assertNotIn("You are Overseer", context)
-        self.assertNotIn("--allow-repair", context)
+        text = action_message(action=action, assignment=self.assignment)
+        for required in (
+            "Full approved scope",
+            "ordinary_merge_conflict",
+            "c-1",
+            "current defect",
+        ):
+            self.assertIn(required, text)
+        for obsolete in (
+            "previous resolved defect",
+            "old test output",
+            "--section",
+            "You are Executor",
+        ):
+            self.assertNotIn(obsolete, text)
 
-    def test_specialist_continuation_retains_scope_but_exposes_no_second_interview(
+    def test_review_contains_latest_authored_evidence_once(self) -> None:
+        action = {
+            "kind": "review",
+            "payload": {
+                "handoffs": [
+                    {
+                        "kind": "implementation_evidence",
+                        "content": {"evidence_content": "obsolete output"},
+                    },
+                    {
+                        "kind": "implementation_evidence",
+                        "content": {
+                            "evidence": "/tmp/evidence.md",
+                            "evidence_content": "commit abc: check passed",
+                        },
+                    },
+                ]
+            },
+        }
+        text = action_message(action=action, assignment=self.assignment)
+        self.assertEqual(text.count("commit abc: check passed"), 1)
+        self.assertNotIn("obsolete output", text)
+        self.assertNotIn("--section", text)
+
+    def test_specialist_followup_supplies_answers_without_replaying_initial_evidence(
         self,
     ) -> None:
         action = {
@@ -90,30 +207,45 @@ class PromptsTest(unittest.TestCase):
                 "scope": {"projects": ["p"]},
                 "prompt": "inspect scheduling",
                 "continuation": "final report",
-                "answers": [{"answer": "large answer"}],
-                "retained_evidence": {
-                    "projects": [{"project_id": "p"}],
-                    "coverage": {"truncated": True},
-                    "recent_events": ["long log"],
-                },
+                "answers": [
+                    {"subject": "executor", "answer": "the handoff lost my evidence"}
+                ],
+                "missing_evidence": ["overseer"],
+                "retained_evidence": {"recent_events": ["old log " * 1000]},
             },
         }
-        task = {**self.task, "role": "sage"}
-        context = build_context(task=task, action=action)
-        self.assertIn("inspect scheduling", context)
-        self.assertIn('"truncated": true', context)
-        self.assertNotIn("large answer", context)
-        self.assertIn(
-            "large answer", build_context(task=task, action=action, section="evidence")
+        text = action_message(action=action)
+        for required in (
+            "inspect scheduling",
+            "Projects: p",
+            "the handoff lost my evidence",
+            "overseer",
+            "no further interview round",
+        ):
+            self.assertIn(required, text)
+        self.assertNotIn("old log", text)
+        self.assertNotIn("fulcrum instructions", text)
+
+    def test_interview_contains_the_question_and_finish_shape(self) -> None:
+        text = action_message(
+            action={
+                "kind": "interview",
+                "payload": {"question": "Why did review need three turns?"},
+            }
         )
-        self.assertNotIn(
-            "evidence_needed", build_context(task=task, action=action, section="finish")
-        )
-        task["role"] = "inquisitor"
-        action["payload"].pop("continuation")
-        self.assertNotIn(
-            "evidence_needed", build_context(task=task, action=action, section="finish")
-        )
+        self.assertIn("Why did review need three turns?", text)
+        self.assertIn("fulcrum finish interview_answer", text)
+        self.assertIn('"answer"', text)
+
+    def test_cli_has_no_instruction_fetch_interface(self) -> None:
+        self.assertNotIn("instructions", build_parser().format_help())
+
+    def test_creation_supplies_role_and_command_reference_without_fetches(self) -> None:
+        text = role_instructions("archon", role="archon")
+        self.assertIn("You are Archon", text)
+        self.assertIn("fulcrum finish decisions", text)
+        self.assertIn('"handled_update_ids"', text)
+        self.assertNotIn("fulcrum instructions", text)
 
     def test_every_file_example_is_accepted_without_an_outcome_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -13,7 +13,7 @@ without a plan or helper reviews. Substantial plans require separate cold-reader
 and requirements-verifier helpers as described in the returned guidance. Resolve
 model preferences conversationally; both implementation roles default to Sol/high.
 
-Use `fulcrum instructions` for writable action context and `--section finish` for
-exact completion commands and intake examples. Python owns registration, issue
+The registration response supplies authoring guidance, exact completion commands,
+and intake examples directly. Python owns registration, issue
 publication, retries, scheduling, and archival. Finish after authored intake is
 retained, without waiting for Archon or remote synchronization.

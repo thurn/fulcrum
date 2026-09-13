@@ -60,14 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--model", default="gpt-5.6-sol")
     register.add_argument("--effort", default="high")
     register.add_argument("--plan-mode", action="store_true")
-    instructions = commands.add_parser(
-        "instructions", help="read current action context or a selected reference"
-    )
-    instructions.add_argument(
-        "--section",
-        choices=("context", "evidence", "role", "finish"),
-        default="context",
-    )
     intake = commands.add_parser(
         "intake", help="file one task or a complete task graph"
     )
@@ -211,10 +203,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "effort": args.effort,
                     "writable": not args.plan_mode,
                 },
-            )
-        elif args.command == "instructions":
-            result = _request(
-                paths, {"command": "instructions", "section": args.section}
             )
         elif args.command == "intake":
             payload = _intake_payload(args)

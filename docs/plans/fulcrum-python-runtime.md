@@ -655,7 +655,6 @@ the current installation:
 
 ```sh
 fulcrum weaver register
-fulcrum instructions
 fulcrum intake --title "Fix empty search results" \
   --description "Show an empty-state message when search returns no matches; preserve matching results. Verify both cases."
 fulcrum finish intake_complete
@@ -746,7 +745,7 @@ to both roles' effective defaults before storing the bead:
 
 ### Python-produced prompts
 
-Python supplies canonical role instructions at task creation, a short notice for
+Python supplies canonical role instructions at task creation, a substantive message for
 each action, and a brief recovery reminder after compaction. Executor, Overseer, Sage,
 and Inquisitor have no installed skills or direct skill activation path. Python
 creates their tasks and supplies their instructions. Human-facing skills such
@@ -774,37 +773,42 @@ prompt. Helpers continue to receive prompts crafted by their parent agent.
 
 Separate three instruction surfaces:
 
-- Creation supplies role purpose, judgment guidance, relevant boundaries, and how
-  to retrieve context and finish an action. Do not repeat this manual in turn input.
-- Each action notice is normally one to three sentences: what needs attention and
-  what decision or result is requested. A missing-finish reminder requests only
-  the outstanding result and never replaces the original action payload.
-- Compaction supplies a brief role/action reminder and recovery references, normally
-  50–100 words. Do not replay role instructions, action JSON, history, or schemas.
+- Creation supplies role purpose, judgment guidance, boundaries, and the applicable
+  finish commands with valid input examples once. Do not repeat this manual in
+  subsequent messages.
+- Each message supplies the actual request and decision-relevant facts inline.
+  An Archon proposal includes the bead, exact proposed scope, dependencies or
+  conflicts, and relevant capacity. A completion update can be one sentence.
+  Do not send a count of updates followed by a required tool read. Do not repeat
+  the full fleet snapshot, unchanged policies, or all prior handoffs.
+- Compaction supplies only a brief role/current-action reminder, normally under
+  50 words. Continue from the conversation summary. Do not replay the manual,
+  action payload, history, or schemas, or instruct a routine context fetch.
   Unrelated, retired, and actionless tasks (including planning Weaver) receive nothing.
 
-`fulcrum instructions` retrieves current decision data and full approved scope.
-`--section evidence` retrieves retained handoffs, diagnosis, reports, and interview
-answers. `--section role` retrieves current role guidance; `--section finish` gives
-complete commands with exact top-level JSON file examples and selection rules.
-The default context view contains no operating manual or full command catalog.
-Detailed reads must not silently truncate approved requirements. Short notices
-must refer to this real read interface, not invented attachments. Scope and result
-identity remain controller-bound; recovery does not depend on remembering a prior
-message. Retain exact dispatched input for uncertain-operation reconciliation.
+There is no instruction-fetching CLI or sectioned context interface. Keep short
+messages substantive; never hide the same prompt behind a mandatory read. Preserve
+exact approved requirements even when they need more space than a routine update.
+Existing source/log/artifact references are appropriate for bulky evidence, but
+include the current findings and decisions themselves in the message. Retain exact
+dispatched input and original action payload for uncertain-operation reconciliation.
+A missing-finish reminder requests only the outstanding result without replaying
+work or replacing the original payload.
 
-Correction context includes the original approval, allowed repair categories,
-current findings, and retained delivery diagnosis. Evidence appears once in its
-own view; older review findings are history, not automatically current requests.
-Specialist context retains the requested project set and focus across continuation,
-reports actual evidence intervals and sampling limits, and distinguishes captured
-HEAD from certified source. Do not claim complete coverage from bounded samples.
+Executor receives approved scope and worktree. Overseer receives the candidate,
+source/tested identities and latest implementation evidence once. Corrections
+include current findings, original approval and allowed repair categories, and
+retained delivery diagnosis. Old handoffs are not repeated as current requests.
+Initial specialist actions supply the requested scope and available evidence with
+explicit coverage limits. Continuations supply the answers and missing responses,
+without replaying initial event history. Interviews include the actual question.
 
-Routine notice example:
+Routine proposal example:
 
 ```text
-Two updates need your scheduling decision. Read `fulcrum instructions` for details,
-then submit the appropriate finish outcome.
+Update 17: Approve or defer fc-31 (fulcrum): Fix empty search results.
+Scope: Show an empty state for zero matches; test matching and empty results.
+Capacity used: global 1/4; fulcrum 0/2.
 ```
 
 Archon receives compact proposals and exceptions. Python persists any briefing,
@@ -1842,7 +1846,7 @@ exercise native boundaries with isolated disposable state and retained evidence.
 | Three substantive review failures, missing evidence, or covered repair | Only new substantive source rejections count; Archon decides after three; permitted repair records rationale/linkage without another Overseer turn |
 | Flaky/failed CI or a later unexplained green result | Diagnosis and concrete repair; no Fulcrum CI retry or automatic diagnostic replay; native certification after repair |
 | Source push, cleanup, or brain publication fails | Reuse retained candidate/report/intake; Python owns the remaining obligation; no duplicate implementation or analysis |
-| Follow-up, compaction, or missing template | Short notices and compaction reminders; full scope and relevant evidence remain retrievable separately; finish needs no turn/dispatch ID; actionless tasks receive no hook text |
+| Follow-up, compaction, or missing template | Short notices and compaction reminders; necessary scope and current evidence are delivered inline; finish needs no turn/dispatch ID; actionless tasks receive no hook text |
 | Partial/duplicate intake, dependency cycle, scope edit, or unsupported model | No partial graph dispatch or silent scope/model change; preserve native Beads identities and explicit future exclusion |
 | Specialist overdue after downtime, duplicate finding, or speculative observation | One occurrence; reuse known findings; only evidence-backed submitted findings produce pending beads; zero findings is valid |
 | Busy/archived/unavailable interview subject and collection timeout | One request per subject; correct restoration; expire unstarted requests; reconcile uncertain starts; one Sage continuation with explicit missing evidence |
@@ -1879,7 +1883,7 @@ to the already verified shared runtime without disrupting existing conversations
    without waiting for Archon acknowledgment or Python-owned remote push work.
 3. Verify the bead stays pending until Archon approves its exact scope. Start
    Executor in the Python-created Tollgate worktree with the correct model and
-   a short notice and retrievable complete action context, without an Overseer preparation turn. Measure filing
+   a substantive action message with inline scope and relevant evidence, without an Overseer preparation turn. Measure filing
    to Archon dispatch, Archon decision time, Python bookkeeping, native preparation,
    and runtime/model startup separately; verify no deliberate batching delay.
 4. Submit the candidate and call the generated finish command. Delay parent or
