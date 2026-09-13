@@ -278,22 +278,28 @@ The rule is: if an operation affects scheduling, ownership, delivery, archival, 
 
 ### Separate the control plane from managed source
 
-The controller must not execute from a checkout that its own fleet edits and promotes into. Use a dedicated control-plane installation or checkout. Apply controller source changes only through an explicit quiescent sequence: pause dispatch, finish or durably suspend in-flight mutations, refresh the installation, restart the controller, reconcile, then re-enable dispatch. Do not use automatic source hot reload for the transaction coordinator.
+The controller must not execute from a checkout that its own fleet edits and promotes into. Use a dedicated control-plane installation or checkout. Preserve automatic uptake of source changes through an external service supervisor: record that a refresh is requested, pause dispatch, finish or durably suspend in-flight mutations, refresh the installation, restart the controller, reconcile, then re-enable dispatch. File watching may request that sequence, but it must not re-exec the transaction coordinator directly from inside an active delivery operation.
 
 The service manager should independently own installation and controller replacement. A controller should not have to remain healthy while replacing its own executable source and service definitions.
 
-### Establish serial correctness before concurrency
+### Preserve the feature set through layered orchestration
 
-The next implementation milestone should deliberately support only:
+Fulcrum can retain parallel assignments, multiple projects, persistent advisory roles, scheduled specialists, interviews, automatic source uptake, and bounded repair. Those features should sit above the workflow kernel rather than each implementing its own lifecycle and recovery behavior.
 
-- one enrolled project;
-- one active assignment;
-- one executor followed by an overseer created only when a candidate exists;
-- controller-owned candidate creation and delivery;
-- explicit operator reconciliation; and
-- repeatable, idempotent reset.
+Use four explicit layers:
 
-Defer parallel assignments, multi-project scheduling, scheduled specialists, interviews, Vizier, automatic reload, and generalized repair permissions until this kernel survives injected failures. When concurrency returns, slot acquisition must be an atomic database operation performed once per assignment, followed by a capacity recheck. Scope-conflict detection should prevent adjacent setup/control-plane work from running concurrently even when numerical capacity exists.
+1. The workflow kernel owns durable intents, leases, deadlines, retries, reconciliation, and idempotent external operations.
+2. Adapters translate desired postconditions into Codex, Tollgate, Beads, Git, filesystem, and launchd operations. They never make scheduling decisions and always expose confirmed/failed/uncertain results.
+3. Coordination policy owns capacity, priorities, dependencies, scope conflicts, recurring schedules, and Archon decisions. It creates kernel work but does not perform external effects.
+4. Agent roles provide judgment and artifacts through capability-bound actions. They cannot mutate unrelated workflow state or bypass controller-owned delivery.
+
+Multi-project concurrency should use transactional leases. A global scheduler atomically acquires global and per-project capacity for one assignment, commits it, then evaluates the next assignment against fresh usage. Projects retain independent queues and conditions so a blocked project or corrupt task cannot stop unrelated projects. In addition to numerical limits, assignments should declare conflict keys for shared resources such as setup, service definitions, schema, release integration, or brain publication; conflicting work cannot run concurrently even when slots are available.
+
+Role lifecycle should use the same explicit states for Archon, Weaver, Vizier, Executor, Overseer, Sage, and Inquisitor: requested, provisioning, materializing, ready, active, terminal, archive pending, and archived or quarantined. Persistent roles keep their identity and briefing behavior, while every turn remains a separate durable action with its own authority and deadline. Provision an Executor/Overseer pair as required by the product, but do not treat successful thread creation as proof of materialization or readiness.
+
+Scheduled Sage and Inquisitor work should be durable occurrences with unique identities, due times, leases, and independent retry state. A failed occurrence must not block assignment dispatch or the next occurrence. Interviews should be child workflows with one durable request per subject, independent restoration/archive obligations, and a collection deadline that can complete with explicitly missing evidence.
+
+Vizier and Weaver publication should use a transactional outbox: their accepted artifact and publication intent commit together, while Git and Beads synchronization proceed asynchronously and idempotently. Archon decisions should similarly compile into validated scheduling intents before any capacity or task mutation occurs. Repair permissions should be typed capabilities attached to one failed operation and candidate, rather than general prompt authority.
 
 ### Decouple commands from background advancement
 
@@ -321,4 +327,4 @@ The kernel should continuously prove these properties:
 - one corrupt task cannot block cleanup of independent tasks; and
 - restart never duplicates an external mutation.
 
-Only after those properties hold under serial execution should Fulcrum restore the broader role and scheduling design. This preserves the product vision while making the orchestration core small enough to reason about, test exhaustively, and trust during failure.
+The deterministic simulator should exercise these properties with the complete feature matrix: multiple projects, conflicting and independent assignments, every role, recurring occurrences, interviews, publication retries, automatic controller refresh, repair actions, and fleet reset. Exhaustive small-state exploration can cover interleavings that are impractical to reproduce with live agents. This preserves the existing product vision while making every feature use the same small set of testable orchestration primitives.
