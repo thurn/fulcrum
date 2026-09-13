@@ -20,10 +20,11 @@ On macOS, retain this Git checkout and run:
 
 The guided first run installs the checkout's Python environment, saves ordinary
 configuration, prepares or restores the private brain, enrolls selected projects,
-links the human entry skills and context hook, installs separate LaunchAgents for
-Codex app-server and `fulcrum serve`, and creates a desktop launch wrapper. It
-then creates Archon and remains incomplete until Archon records capacity and
-recurring policies. Re-running the command inspects and reuses prior work.
+links the human entry skills and context hook, and creates a desktop launch
+wrapper. Setup starts and manages the Codex app-server and Fulcrum controller as
+background services; do not launch the app-server manually. Setup succeeds only
+after Archon has completed a turn and is visible through the shared runtime.
+Re-running the command inspects and reuses prior work.
 
 For unattended setup:
 
