@@ -2550,6 +2550,7 @@ class Controller:
                 ),
             )
         if command == "intake":
+            self._require_registered_weaver(request.get("thread_id"))
             payload = request.get("task")
             if not isinstance(payload, dict):
                 raise StoreError("intake requires a task object")
@@ -2562,6 +2563,7 @@ class Controller:
                 task_from_payload(payload, intake_key=request.get("intake_key")),
             )
         if command == "intake_graph":
+            self._require_registered_weaver(request.get("thread_id"))
             graph = request.get("graph")
             if not isinstance(graph, dict):
                 raise StoreError("graph intake requires an object")
@@ -2595,6 +2597,21 @@ class Controller:
             )
             return {"dispatch_enabled": True}
         raise StoreError(f"unknown controller command: {command!r}")
+
+    def _require_registered_weaver(self, thread_id: object) -> None:
+        if not isinstance(thread_id, str):
+            return
+        authorized = self.store.row(
+            """SELECT 1 FROM tasks t JOIN actions a ON a.task_id = t.id
+               WHERE t.native_thread_id = ? AND t.role = 'weaver'
+               AND a.kind = 'weaver'
+               AND a.state IN ('pending','starting','active','terminal','uncertain')""",
+            (thread_id,),
+        )
+        if authorized is None:
+            raise StoreError(
+                "Codex task intake requires `fulcrum weaver register` first"
+            )
 
     def _infer_project(self, thread_id: object) -> str:
         if isinstance(thread_id, str):

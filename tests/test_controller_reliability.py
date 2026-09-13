@@ -226,6 +226,26 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(retained["state"], "failed")
 
+    def test_codex_intake_requires_an_active_registered_weaver(self) -> None:
+        self.controller._require_registered_weaver(None)
+        with self.assertRaisesRegex(StoreError, "weaver register"):
+            self.controller._require_registered_weaver("unregistered")
+
+        weaver = self.controller.store.register_task(
+            native_thread_id="registered-weaver",
+            role="weaver",
+            description="Intake",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at)
+               VALUES (?, 'weaver', '{}', 'active', 'now', 'now')""",
+            (weaver["id"],),
+        )
+        self.controller._require_registered_weaver("registered-weaver")
+
     def test_reexec_adopts_inherited_lock_without_permitting_a_contender(self) -> None:
         inherited = os.dup(self.controller.lock_handle.fileno())
         os.set_inheritable(inherited, True)
