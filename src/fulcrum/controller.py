@@ -1688,22 +1688,6 @@ class Controller:
                 workspace_root=project["repo_path"],
                 model=model,
                 project_id=project["codex_project_id"],
-                base_instructions=role_instructions(
-                    (
-                        "implement"
-                        if role == "executor"
-                        else (
-                            "review"
-                            if role == "overseer"
-                            else (
-                                "specialist"
-                                if role in {"sage", "inquisitor"}
-                                else "archon"
-                            )
-                        )
-                    ),
-                    role=role,
-                ),
             )
             thread = result["thread"]
             task = self.store.register_task(
@@ -2184,6 +2168,27 @@ class Controller:
         else:
             cwd = project["repo_path"]
         prompt = self._build_action_message(action, task, assignment)
+        if facts["last_turn_id"] is None:
+            instruction_kind = (
+                "implement"
+                if task["role"] == "executor"
+                else (
+                    "review"
+                    if task["role"] == "overseer"
+                    else (
+                        "specialist"
+                        if task["role"] in {"sage", "inquisitor"}
+                        else "archon"
+                    )
+                )
+            )
+            prompt = "\n\n".join(
+                [
+                    role_instructions(instruction_kind, role=task["role"]),
+                    "# Current action",
+                    prompt,
+                ]
+            )
         operation = self.store.create_operation(
             "turn_start",
             str(action["id"]),
@@ -3605,7 +3610,6 @@ class Controller:
                 workspace_root=project["repo_path"],
                 model=self.config.archon_model or "gpt-5.6-sol",
                 project_id=project["codex_project_id"],
-                base_instructions="Disposable Fulcrum installation visibility check. Do not start work.",
             )
             thread_id = result["thread"]["id"]
             self.store.execute(
@@ -3615,6 +3619,7 @@ class Controller:
             await self.runtime.set_name(thread_id, "Fulcrum setup visibility check")
             turn_id = await self.runtime.start_turn(
                 thread_id,
+                "Disposable Fulcrum installation visibility check. Do not start work.\n\n"
                 "Reply with exactly: Fulcrum runtime check passed. Do not use tools or modify files.",
                 cwd=project["repo_path"],
                 workspace_root=project["repo_path"],

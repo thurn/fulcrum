@@ -129,15 +129,19 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 workspace_root="/workspace",
                 model="sol",
                 project_id="project",
-                base_instructions="role",
             )
             self.assertEqual(created["thread"]["id"], "thread-1")
             create_request = next(
                 item for item in received if item.get("method") == "thread/start"
             )
-            self.assertEqual(create_request["params"]["projectId"], "project")
             self.assertEqual(
-                create_request["params"]["runtimeWorkspaceRoots"], ["/workspace"]
+                create_request["params"],
+                {
+                    "cwd": "/tmp",
+                    "model": "sol",
+                    "projectId": "project",
+                    "runtimeWorkspaceRoots": ["/workspace"],
+                },
             )
             await runtime.set_name("thread-1", "Canonical")
             self.assertEqual(

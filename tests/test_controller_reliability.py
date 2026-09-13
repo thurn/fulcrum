@@ -2024,7 +2024,8 @@ print(json.dumps({
         self.assertIn("candidate-1", prompt)
         self.assertIn("commit abc; tests passed", prompt)
         self.assertNotIn("fulcrum instructions", prompt)
-        self.assertNotIn("You are Overseer", prompt)
+        self.assertIn("You are Overseer", prompt)
+        self.assertIn("# Current action", prompt)
         self.assertNotIn("--section", prompt)
 
     async def test_archon_batch_dispatch_contains_actual_proposal(self) -> None:
@@ -2075,9 +2076,10 @@ print(json.dumps({
         self.assertIn("Capacity used:", text)
         self.assertIn("Existing p-1", text)
         self.assertNotIn("fulcrum instructions", text)
-        self.assertNotIn("You are Archon", text)
+        self.assertIn("You are Archon", text)
+        self.assertIn("# Current action", text)
         self.assertNotIn("Exact JSON", text)
-        self.assertLess(len(text.split()), 150)
+        self.assertLess(len(text.split()), 380)
 
     async def test_third_review_failure_reaches_archon_and_cancel_resolves_hold(
         self,

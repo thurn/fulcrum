@@ -206,14 +206,12 @@ class CodexRuntime:
         workspace_root: str,
         model: str,
         project_id: str | None,
-        base_instructions: str,
         permissions: str | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "cwd": cwd,
             "model": model,
             "projectId": project_id,
-            "baseInstructions": base_instructions,
             "runtimeWorkspaceRoots": [workspace_root],
         }
         if permissions is not None:

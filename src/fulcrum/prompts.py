@@ -43,7 +43,7 @@ def load_template(action_kind: str, *, role: str | None = None) -> str:
 
 
 def role_instructions(action_kind: str, *, role: str | None = None) -> str:
-    """Onboarding and command reference, supplied once at task creation."""
+    """Onboarding and command reference, supplied in the first action prompt."""
     context_hint = (
         "If exact current-action facts are missing after compaction, run "
         "`fulcrum context`; otherwise continue from retained conversation context."

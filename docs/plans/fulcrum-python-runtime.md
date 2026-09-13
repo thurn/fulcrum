@@ -745,11 +745,12 @@ to both roles' effective defaults before storing the bead:
 
 ### Python-produced prompts
 
-Python supplies canonical role instructions at task creation, a substantive message for
-each action, and a brief recovery reminder after compaction. Executor, Overseer, Sage,
-and Inquisitor have no installed skills or direct skill activation path. Python
-creates their tasks and supplies their instructions. Human-facing skills such
-as Weaver and setup remain thin entry points.
+Python supplies canonical role instructions in the first action prompt, a
+substantive message for each action, and a brief recovery reminder after
+compaction. Executor, Overseer, Sage, and Inquisitor have no installed skills or
+direct skill activation path. Python creates their tasks and supplies their
+instructions. Human-facing skills such as Weaver and setup remain thin entry
+points.
 
 Store action-specific text templates in `src/fulcrum/prompts/` as package data,
 loaded afresh with `importlib.resources` from the editable checkout for each
