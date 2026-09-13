@@ -464,6 +464,11 @@ class LifecycleTest(unittest.TestCase):
                 "released_at"
             ]
         )
+        reused = apply_archon_decisions(
+            self.store,
+            {"decisions": [{"decision": "release_hold", "hold_id": hold_id}]},
+        )
+        self.assertTrue(reused["applied_decisions"][0]["reused"])
         with self.assertRaisesRegex(StoreError, "enabled project scope"):
             apply_archon_decisions(
                 self.store,

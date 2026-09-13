@@ -979,15 +979,22 @@ def apply_archon_decisions(
                 if not isinstance(hold_id, int) or isinstance(hold_id, bool):
                     raise StoreError("release_hold requires hold_id")
                 retained_hold = connection.execute(
-                    "SELECT scope, target FROM holds WHERE id = ? AND released_at IS NULL",
+                    "SELECT scope, target, released_at FROM holds WHERE id = ?",
                     (hold_id,),
                 ).fetchone()
+                if retained_hold is None:
+                    raise StoreError(f"hold {hold_id} does not exist")
+                if retained_hold["released_at"] is not None:
+                    applied.append(
+                        {"decision": kind, "hold_id": hold_id, "reused": True}
+                    )
+                    continue
                 changed = connection.execute(
                     "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
                     (timestamp, hold_id),
                 ).rowcount
                 if changed != 1:
-                    raise StoreError(f"hold {hold_id} is missing or already released")
+                    raise StoreError(f"hold {hold_id} changed concurrently")
                 if retained_hold is not None and retained_hold["scope"] == "run":
                     connection.execute(
                         """UPDATE runs SET state = CASE WHEN executor_task_id IS NULL
