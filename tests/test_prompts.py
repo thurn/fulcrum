@@ -564,28 +564,31 @@ class PromptsTest(unittest.TestCase):
         with patch("sys.stdin", io.StringIO('{"title":"Use `code` safely"}')):
             self.assertEqual(_intake_payload(args)["title"], "Use `code` safely")
 
-    def test_writable_weaver_investigates_then_files_the_fix(self) -> None:
+    def test_writable_weaver_questions_require_a_later_filing_turn(self) -> None:
         text = weaver_instructions(plan_mode=False, project="p")
 
         for required in (
-            '"please investigate and\nfix this bug," treat it as two stages',
-            "perform a read-only investigation",
-            "gather observed evidence",
-            "identify its root cause",
-            "file an implementation-ready Bead",
-            "bounded implementation instructions",
-            "observable validation and\ncompletion checks",
-            "so the Executor does not need this conversation",
+            "Any human prompt phrased as a question or containing a question",
+            "This rule takes precedence over action wording",
+            'neither "What causes this bug?" nor "What causes this\nbug, and please file a task to fix it" authorizes intake',
+            "Do not run `fulcrum intake` or otherwise\nfile a task or Bead during that turn",
+            "only after a subsequent human message explicitly instructs Weaver\nto file or create the task or Bead",
+            "merely answers Weaver's clarifying\nquestion is not filing authorization",
         ):
             self.assertIn(required, text)
-        self.assertIn(
-            "do not\nedit source files or implement the fix",
-            text,
-        )
-        self.assertIn(
-            "Imperative wording does\nnot authorize you to edit source files",
-            text,
-        )
+
+        skill = (
+            Path(__file__).parents[1] / "skills" / "fulcrum-weaver" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "Any human prompt phrased as a question or containing a question",
+            "even when the same prompt also requests action",
+            'neither "What causes this bug?" nor "What causes this bug,\nand please file a task to fix it" authorizes `fulcrum intake`',
+            "must not file a task or Bead during that turn",
+            "only after a subsequent human message explicitly instructs Weaver to file or create\nthe task or Bead",
+            "merely answering a clarifying question is not authorization",
+        ):
+            self.assertIn(required, skill)
 
     def test_correction_prompt_requires_one_release_based_commit(self) -> None:
         text = action_message(

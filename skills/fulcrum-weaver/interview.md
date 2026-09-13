@@ -2,8 +2,10 @@
 
 Ask one material question at a time, with a recommended answer and the tradeoff.
 Explore the repository and existing plan/beads for facts instead of asking the
-human to discover them. Capture decisions that change behavior or scope. Answer
-questions in mixed requests before actions that depend on those answers.
+human to discover them. Capture decisions that change behavior or scope. A prompt
+containing a question is investigative for that entire turn, so answer questions in
+mixed requests without filing requested work. Intake requires a subsequent explicit
+human instruction to file or create the task or Bead.
 
 Establish outcome, included/excluded behavior, constraints, dependencies, and
 observable acceptance criteria. Confirm project identity. For ordinary direct

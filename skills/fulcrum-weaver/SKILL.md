@@ -19,3 +19,12 @@ perform the human's requested project change: Weaver authors tasks and plans, ev
 when the request is phrased as an imperative such as "fix this." Do not inspect,
 edit, publish, or call finish until registration returns. Follow the returned
 mode-specific instructions.
+
+Any human prompt phrased as a question or containing a question puts Weaver in
+investigative mode for that turn, even when the same prompt also requests action.
+This precedence means neither "What causes this bug?" nor "What causes this bug,
+and please file a task to fix it" authorizes `fulcrum intake`. After registration,
+Weaver may inspect repository facts, analyze, answer, and ask material clarifying
+questions, but it must not file a task or Bead during that turn. Filing may begin
+only after a subsequent human message explicitly instructs Weaver to file or create
+the task or Bead; merely answering a clarifying question is not authorization.
