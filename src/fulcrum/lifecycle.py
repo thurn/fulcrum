@@ -78,6 +78,13 @@ def observe_action_terminal(
     action = store.row("SELECT * FROM actions WHERE id = ?", (action_id,))
     if action is None:
         raise StoreError(f"unknown action {action_id}")
+    if action["state"] == "processed":
+        return {"advanced": True, "reused": True}
+    if action["state"] in {"failed", "canceled"}:
+        return {
+            "advanced": False,
+            "condition": action["condition"] or f"action is {action['state']}",
+        }
     task = store.row("SELECT * FROM tasks WHERE id = ?", (action["task_id"],))
     if task is None:
         raise StoreError("action task disappeared")

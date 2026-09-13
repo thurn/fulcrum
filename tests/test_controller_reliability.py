@@ -290,6 +290,33 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(action["payload"])["purpose"], "materialize_archon")
         dispatch.assert_awaited_once()
 
+    async def test_weaver_registration_binds_the_current_native_turn(self) -> None:
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "weaver-thread",
+            "name": "temporary",
+            "status": {"type": "active"},
+            "turns": [{"id": "weaver-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+
+        result = await self.controller._register_weaver(
+            {
+                "thread_id": "weaver-thread",
+                "project": "p",
+                "description": "File a task",
+                "writable": True,
+            }
+        )
+
+        action = self.controller.store.row(
+            """SELECT * FROM actions WHERE task_id =
+                   (SELECT id FROM tasks WHERE native_thread_id = ?)""",
+            ("weaver-thread",),
+        )
+        self.assertEqual(action["native_turn_id"], "weaver-turn")
+        self.assertEqual(result["thread_id"], "weaver-thread")
+
     async def test_dispatch_resumes_a_not_loaded_thread_before_starting(self) -> None:
         self.controller.store.execute(
             "UPDATE tasks SET runtime_status = 'notLoaded' WHERE id = ?",

@@ -345,7 +345,8 @@ class Controller:
             )
             action = (
                 self.store.row(
-                    "SELECT * FROM actions WHERE task_id = ? AND native_turn_id = ?",
+                    """SELECT * FROM actions WHERE task_id = ? AND native_turn_id = ?
+                       AND state IN ('active','terminal')""",
                     (task["id"], turn_id),
                 )
                 if turn_id
@@ -2578,6 +2579,7 @@ class Controller:
             state="provisioning",
         )
         await self.runtime.set_name(thread_id, task["title"])
+        facts = await self._refresh_task(task)
         existing: dict[str, Any] | None = None
         if request.get("writable", True):
             existing = self.store.row(
@@ -2588,16 +2590,25 @@ class Controller:
             if existing is None:
                 timestamp = utc_now()
                 cursor = self.store.execute(
-                    "INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at) VALUES (?, 'weaver', ?, 'active', ?, ?)",
+                    """INSERT INTO actions(
+                           task_id, kind, payload, state, native_turn_id,
+                           created_at, updated_at
+                       ) VALUES (?, 'weaver', ?, 'active', ?, ?, ?)""",
                     (
                         task["id"],
                         json.dumps({"mode": "intake", "project": project_id}),
+                        facts["last_turn_id"],
                         timestamp,
                         timestamp,
                     ),
                 )
                 existing = self.store.row(
                     "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
+                )
+            elif existing["native_turn_id"] is None and facts["last_turn_id"]:
+                self.store.execute(
+                    "UPDATE actions SET native_turn_id = ?, updated_at = ? WHERE id = ?",
+                    (facts["last_turn_id"], utc_now(), existing["id"]),
                 )
         self.store.execute(
             "UPDATE tasks SET state = 'active', updated_at = ? WHERE id = ?",

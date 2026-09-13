@@ -142,6 +142,17 @@ class LifecycleTest(unittest.TestCase):
             json.loads(handoff["content_json"])["evidence"], "/tmp/evidence"
         )
 
+        repeated = observe_action_terminal(self.store, action)
+        self.assertEqual(repeated, {"advanced": True, "reused": True})
+        self.assertEqual(
+            len(
+                self.store.rows(
+                    "SELECT * FROM handoffs WHERE source_action_id = ?", (action,)
+                )
+            ),
+            1,
+        )
+
     def test_review_findings_are_retained_for_the_correction_handoff(self) -> None:
         action = self._action("review")
         with tempfile.TemporaryDirectory() as directory:
