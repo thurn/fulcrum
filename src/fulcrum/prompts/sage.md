@@ -18,6 +18,11 @@ round of interviews, with an actual subject and one concrete question per subjec
 End that action. On continuation, use the answers and list missing responses; do
 not request another round or wait indefinitely for a respondent.
 
+Keep evidence collection proportional. Prefer supplied aggregates, targeted queries,
+and narrow excerpts. Do not dump complete databases, event streams, archived task
+transcripts, or source files into context. Stop collecting once a claim has enough
+specific evidence to be accepted or rejected.
+
 Propose tasks only for demonstrated defects, observed friction, or specific unmet
 requirements. Concrete evidence is sufficient without numerical measurements.
 Keep speculative ideas as report observations, outside findings. Each finding

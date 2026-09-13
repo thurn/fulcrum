@@ -919,6 +919,11 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             (scope,),
         )
         self.controller.store.event("old", "old event", now="2025-12-01T00:00:00Z")
+        self.controller.store.event(
+            "reconciliation_started",
+            "housekeeping noise",
+            now="2026-02-01T00:00:00Z",
+        )
         for n in range(205):
             self.controller.store.event(
                 "sample",
@@ -944,6 +949,11 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["window"]["after"], "2026-01-01T00:00:00Z")
         self.assertTrue(evidence["coverage"]["events"]["truncated"])
         self.assertEqual(len(evidence["recent_events"]), 200)
+        self.assertIn(
+            {"kind": "reconciliation_started", "count": 1},
+            evidence["event_counts"],
+        )
+        self.assertNotIn("housekeeping noise", json.dumps(evidence["recent_events"]))
         self.assertNotIn("old event", json.dumps(evidence))
         self.assertNotIn("outside project", json.dumps(evidence))
 

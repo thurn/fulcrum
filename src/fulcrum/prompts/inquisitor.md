@@ -14,6 +14,10 @@ responsibilities, duplicated decisions, brittle boundaries, inconsistent ownersh
 and demonstrated change coupling. File size or naming alone is not a refactor case.
 Consider opportunities to delete unnecessary complexity. Do not manufacture findings.
 
+Build the map progressively from file names, symbols, and targeted call paths. Do not
+dump every source file or whole large modules into context. Use narrow excerpts around
+relevant definitions and stop tracing a concern once its evidence is conclusive.
+
 Read source without product edits. Use a bounded disposable copy for necessary
 experiments, respecting repository validation policies. Never build in Executor's
 tree. If essential evidence is unavailable, report the specific blocker; do not

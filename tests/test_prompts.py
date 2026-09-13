@@ -282,6 +282,11 @@ class PromptsTest(unittest.TestCase):
         self.assertIn(
             "whole-codebase", role_instructions("specialist", role="inquisitor")
         )
+        self.assertIn("Do not dump", role_instructions("specialist", role="sage"))
+        self.assertIn(
+            "Do not\ndump every source file",
+            role_instructions("specialist", role="inquisitor"),
+        )
 
     def test_writable_weaver_uses_stdin_json_for_shell_safe_intake(self) -> None:
         text = weaver_instructions(plan_mode=False, project="p")

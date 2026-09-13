@@ -3762,12 +3762,20 @@ class Controller:
                 LEFT JOIN assignments a ON e.entity_type = 'assignment' AND e.entity_id = CAST(a.id AS TEXT)
                 LEFT JOIN runs ar ON ar.id = a.run_id
                 WHERE e.created_at <= ? AND (? IS NULL OR e.created_at > ?)
+                  AND e.kind NOT IN ('reconciliation_started', 'reconciliation_completed',
+                                     'command_received', 'command_succeeded')
                   AND (COALESCE(t.project_id, r.project_id, ar.project_id,
                          CASE WHEN e.entity_type = 'project' THEN e.entity_id END) IS NULL
                        OR COALESCE(t.project_id, r.project_id, ar.project_id,
                          CASE WHEN e.entity_type = 'project' THEN e.entity_id END) IN ({placeholders}))
                 ORDER BY e.id DESC LIMIT 201""",
             (cutoff, start, start, *project_ids),
+        )
+        event_counts = self.store.rows(
+            """SELECT kind, COUNT(*) AS count FROM events
+               WHERE created_at <= ? AND (? IS NULL OR created_at > ?)
+               GROUP BY kind ORDER BY count DESC, kind LIMIT 50""",
+            (cutoff, start, start),
         )
         reports = self.store.rows(
             """SELECT id, kind, scope, publication_revision, report_json, created_at
@@ -3812,6 +3820,7 @@ class Controller:
                 "missing": "Native Codex histories, complete Tollgate logs, token/latency telemetry and existing Beads are not automatically included; inspect relevant durable sources or report gaps.",
             },
             "assignments": assignments[:100],
+            "event_counts": event_counts,
             "recent_events": events[:200],
             "prior_reports": reports[:20],
         }
