@@ -1,7 +1,7 @@
 # Validation
 
 `scripts/check` creates an isolated environment, installs the pinned dependency
-set and editable package, then runs formatting, type checks, and unit/integration
+set and editable package, then runs formatting, type checks, and unit and integration
 tests. Tests use controlled adapters and injected time for state transitions,
 capacity, conflict leases, event ordering, uncertain operations, crash adoption,
 message batching, cadence, outcomes, worker health, source isolation, and
