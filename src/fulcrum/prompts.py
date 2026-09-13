@@ -46,15 +46,22 @@ def role_instructions(action_kind: str, *, role: str | None = None) -> str:
     """Onboarding and command reference, supplied once at task creation."""
     finish_kind = "correct" if action_kind == "implement" else action_kind
     interviews_allowed = role == "sage"
+    lifecycle = (
+        "Finish this action exactly once, then end. The controller binds and routes "
+        "the result. If finish fails, correct the reported error and retry. An action "
+        "labeled `Workflow debrief only` replaces the assignment instructions; follow "
+        "its finish command without resuming implementation."
+        if role == "executor"
+        else "Subsequent messages contain the actual request and necessary facts. Use them "
+        "directly. Do not manage other conversations. An interview temporarily replaces "
+        "your normal duties. Finish the current action once through `fulcrum finish`, "
+        "then end; the controller binds identity and routes the result. Wait for native "
+        "helpers before submitting. If finish fails, correct the reported error."
+    )
     return "\n\n".join(
         [
             load_template(action_kind, role=role),
-            "Subsequent messages contain the actual request and necessary facts. Use them "
-            "directly. Do not manage other conversations. An interview temporarily replaces "
-            "your normal duties. Finish the current action once through `fulcrum finish`, "
-            "then end; the controller binds identity and routes the result. Wait for native "
-            "helpers before submitting. If finish fails, correct the reported error. "
-            "Planning Weaver has no finish obligation.",
+            lifecycle,
             finish_syntax(finish_kind, interviews_allowed=interviews_allowed),
             finish_contract(finish_kind, interviews_allowed=interviews_allowed),
         ]

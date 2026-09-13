@@ -267,6 +267,34 @@ class PromptsTest(unittest.TestCase):
         self.assertIn("separate runs", text)
         self.assertIn("Do not serialize", text)
 
+    def test_executor_creation_instructions_are_concise_and_action_specific(
+        self,
+    ) -> None:
+        text = role_instructions("implement", role="executor")
+        for required in (
+            "You are Executor",
+            "# Required result",
+            "# Ownership boundaries",
+            "# Corrections only",
+            "# Finish",
+            "Edit only the assigned worktree",
+            "If Repair permission is unclear",
+            "Workflow debrief only",
+            "fulcrum finish ready_for_review",
+            "fulcrum finish permitted_repair_complete",
+            "fulcrum finish checkpointed",
+            "fulcrum finish blocked",
+        ):
+            self.assertIn(required, text)
+        for irrelevant in (
+            "Planning Weaver",
+            "An interview temporarily replaces",
+            "Do not manage other conversations",
+        ):
+            self.assertNotIn(irrelevant, text)
+        self.assertEqual(text.count("wait for helper agents"), 1)
+        self.assertLess(len(text.split()), 380)
+
     def test_every_file_example_is_accepted_without_an_outcome_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.json"

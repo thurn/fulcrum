@@ -498,6 +498,23 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
                 'needed"`',
             ]
         )
+    if action_kind == "correct":
+        return "\n\n".join(
+            [
+                "# Finish\n\nRun exactly one:",
+                "Needs independent review:\n"
+                '`fulcrum finish ready_for_review --evidence "/absolute/evidence.md"`',
+                "Correction only, when the change clearly fits Repair permission:\n"
+                '`fulcrum finish permitted_repair_complete --repair-category "allowed_category" '
+                '--repair-rationale "Why the concrete repair qualifies" --evidence '
+                '"/absolute/evidence.md"`',
+                "Intentionally paused with unfinished work identified:\n"
+                '`fulcrum finish checkpointed --evidence "/absolute/evidence.md"`',
+                "Blocked on a scope or authority decision:\n"
+                '`fulcrum finish blocked --reason "Observed blocker and decision needed"`',
+                "If Repair permission is unclear, use `ready_for_review`.",
+            ]
+        )
     rows = []
     for outcome, (arguments, purpose) in commands.items():
         if outcome not in ALLOWED[action_kind] or (
