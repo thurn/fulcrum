@@ -1200,6 +1200,16 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM events WHERE kind = 'reset_archive_exceptions'"
         )
         self.assertIsNotNone(event)
+        workers = {
+            row["worker_name"]: row["state"]
+            for row in self.controller.store.rows(
+                "SELECT worker_name, state FROM worker_heartbeats"
+            )
+        }
+        self.assertEqual(
+            workers,
+            {name: "running" for name in self.controller.critical_workers},
+        )
 
     async def test_restart_adopts_sent_effects_and_replays_only_confirmed_unsent(
         self,

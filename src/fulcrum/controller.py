@@ -4131,7 +4131,11 @@ class Controller:
             ):
                 await self._ensure_pair(assignment)
         self.paths.reboot_record.unlink(missing_ok=True)
-        self.starts_enabled = True
+        self.store.execute(
+            """INSERT INTO meta(key, value) VALUES ('controller_state', 'ready')
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value"""
+        )
+        self._update_readiness()
         return {
             "complete": True,
             "mode": mode,
@@ -4273,6 +4277,8 @@ class Controller:
             self.paths.database, event_log=self.paths.logs_root / "workflow.jsonl"
         )
         self._initialize_configuration()
+        for worker_name in self.critical_workers:
+            self.store.heartbeat(worker_name)
         if archive_exceptions:
             self.store.event(
                 "reset_archive_exceptions",
