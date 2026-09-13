@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -80,25 +81,51 @@ def control_plane_source(paths: RuntimePaths) -> Path:
     return paths.control_root / "runtime" / "current" / "fulcrum"
 
 
+def _package_contents(package: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(package): path.read_bytes()
+        for path in package.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
 def install_control_plane(config: InstallationConfig, paths: RuntimePaths) -> Path:
     """Atomically install an immutable controller snapshot outside managed source."""
 
     source = Path(config.source_root).resolve(strict=True) / "src" / "fulcrum"
     runtime_root = paths.control_root / "runtime"
     runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    deployment = runtime_root / f"deployment-{os.getpid()}"
-    if deployment.exists():
-        shutil.rmtree(deployment)
-    shutil.copytree(
-        source.parent, deployment, ignore=shutil.ignore_patterns("__pycache__")
-    )
+    deployment: Path | None = None
+    for _attempt in range(3):
+        before = _package_contents(source)
+        candidate = runtime_root / f"deployment-{os.getpid()}-{uuid.uuid4().hex}"
+        try:
+            shutil.copytree(
+                source.parent,
+                candidate,
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+            after = _package_contents(source)
+            copied = _package_contents(candidate / "fulcrum")
+        except Exception:
+            shutil.rmtree(candidate, ignore_errors=True)
+            raise
+        if before == after == copied and before:
+            deployment = candidate
+            break
+        shutil.rmtree(candidate, ignore_errors=True)
+    if deployment is None:
+        raise InstallationError(
+            "controller source changed throughout snapshot installation; retry when stable"
+        )
     current = runtime_root / "current"
     temporary = runtime_root / f".current.{os.getpid()}.tmp"
     temporary.unlink(missing_ok=True)
     temporary.symlink_to(deployment.name, target_is_directory=True)
     os.replace(temporary, current)
+    active = current.resolve(strict=True)
     for child in runtime_root.glob("deployment-*"):
-        if child != deployment and child.is_dir():
+        if child.resolve(strict=False) != active and child.is_dir():
             shutil.rmtree(child)
     return current / "fulcrum"
 

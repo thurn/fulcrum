@@ -18,11 +18,12 @@ from fulcrum.config import (
 from fulcrum.install import (
     APP_SERVER_LABEL,
     CONTROLLER_LABEL,
+    _package_contents,
+    _service_observation_from_result,
     control_plane_source,
     install_control_plane,
     install_hook_config,
     install_services,
-    _service_observation_from_result,
     service_definitions,
     service_executable_path,
     start_services,
@@ -273,13 +274,56 @@ class ConfigInstallTest(unittest.TestCase):
                 desktop_executable="/Applications/ChatGPT.app/ChatGPT",
             )
             first = install_control_plane(config, paths)
+            first_deployment = first.parent.resolve()
             self.assertEqual(first, control_plane_source(paths))
             self.assertEqual((first / "__init__.py").read_text(), "VALUE = 1\n")
             (package / "__init__.py").write_text("VALUE = 2\n")
             second = install_control_plane(config, paths)
+            second_deployment = second.parent.resolve()
             self.assertEqual(second, first)
             self.assertEqual((second / "__init__.py").read_text(), "VALUE = 2\n")
             self.assertFalse(second.is_relative_to(source))
+            self.assertNotEqual(first_deployment, second_deployment)
+            self.assertFalse(first_deployment.exists())
+
+    def test_control_plane_retries_if_source_changes_during_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            package = source / "src" / "fulcrum"
+            package.mkdir(parents=True)
+            module = package / "__init__.py"
+            module.write_text("VALUE = 1\n")
+            paths = resolve_paths(
+                state_override=root / "state",
+                environ={"FULCRUM_CONFIG": str(root / "config.json")},
+                user_home=root / "home",
+            )
+            config = InstallationConfig(
+                source_root=str(source),
+                brain_root=str(root / "brain"),
+                state_root=str(paths.state_root),
+                codex_bin="/bin/codex",
+                desktop_executable="/Applications/ChatGPT.app/ChatGPT",
+            )
+            source_reads = 0
+
+            def changing_contents(target: Path) -> dict[Path, bytes]:
+                nonlocal source_reads
+                is_source = target.resolve() == package.resolve()
+                if is_source:
+                    source_reads += 1
+                if is_source and source_reads == 2:
+                    module.write_text("VALUE = 2\n")
+                return _package_contents(target)
+
+            with patch(
+                "fulcrum.install._package_contents", side_effect=changing_contents
+            ):
+                deployed = install_control_plane(config, paths)
+
+            self.assertEqual(source_reads, 4)
+            self.assertEqual((deployed / "__init__.py").read_text(), "VALUE = 2\n")
 
     def test_transient_bootstrap_failure_is_observed_then_retried(self) -> None:
         definitions = {
