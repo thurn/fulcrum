@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import plistlib
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fulcrum.config import (
     InstallationConfig,
@@ -13,7 +15,15 @@ from fulcrum.config import (
     resolve_paths,
     save_installation,
 )
-from fulcrum.install import CONTROLLER_LABEL, install_hook_config, service_definitions
+from fulcrum.install import (
+    APP_SERVER_LABEL,
+    CONTROLLER_LABEL,
+    install_hook_config,
+    install_services,
+    service_definitions,
+    service_executable_path,
+    start_services,
+)
 from fulcrum.setup import _dispatch_is_ready
 
 
@@ -98,10 +108,129 @@ class ConfigInstallTest(unittest.TestCase):
                 environ={"FULCRUM_CONFIG": str(root / "config.json")},
                 user_home=root,
             )
-            definitions = service_definitions(config, paths)
+            home = (root / "home").resolve()
+            definitions = service_definitions(config, paths, user_home=home)
             controller = definitions[CONTROLLER_LABEL]["ProgramArguments"]
             self.assertIn("fulcrum.cli", controller)
             self.assertNotIn("app-server", controller)
+            expected_path = service_executable_path(user_home=home)
+            self.assertEqual(
+                definitions[CONTROLLER_LABEL]["EnvironmentVariables"]["PATH"],
+                expected_path,
+            )
+            self.assertEqual(
+                definitions[APP_SERVER_LABEL]["EnvironmentVariables"]["PATH"],
+                expected_path,
+            )
+            self.assertTrue(expected_path.startswith(f"{home}/.local/bin:{home}/bin:"))
+            self.assertIn("/usr/bin:/bin:/usr/sbin:/sbin", expected_path)
+
+    def test_service_install_rerun_reports_only_repaired_plists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = InstallationConfig(
+                source_root=str(root),
+                brain_root=str(root / "brain"),
+                state_root=str(root / "state"),
+                codex_bin="/bin/codex",
+                desktop_executable="/Applications/ChatGPT.app/ChatGPT",
+            )
+            paths = resolve_paths(
+                state_override=root / "state",
+                environ={"FULCRUM_CONFIG": str(root / "config.json")},
+                user_home=root / "home",
+            )
+            agents = root / "LaunchAgents"
+            installed, updated = install_services(
+                config, paths, launch_agents=agents, user_home=root / "home"
+            )
+            self.assertEqual(updated, {APP_SERVER_LABEL, CONTROLLER_LABEL})
+            with Path(installed[CONTROLLER_LABEL]).open("rb") as handle:
+                controller = plistlib.load(handle)
+            self.assertEqual(
+                controller["EnvironmentVariables"]["PATH"],
+                service_executable_path(user_home=root / "home"),
+            )
+
+            repeated, repeated_updates = install_services(
+                config, paths, launch_agents=agents, user_home=root / "home"
+            )
+            self.assertEqual(repeated, installed)
+            self.assertEqual(repeated_updates, frozenset())
+
+            controller_file = Path(installed[CONTROLLER_LABEL])
+            stale = controller.copy()
+            stale["EnvironmentVariables"].pop("PATH")
+            with controller_file.open("wb") as handle:
+                plistlib.dump(stale, handle)
+            _, repaired = install_services(
+                config, paths, launch_agents=agents, user_home=root / "home"
+            )
+            self.assertEqual(repaired, {CONTROLLER_LABEL})
+
+    def test_start_services_reloads_only_updated_loaded_definitions(self) -> None:
+        definitions = {
+            APP_SERVER_LABEL: "/tmp/app-server.plist",
+            CONTROLLER_LABEL: "/tmp/controller.plist",
+        }
+
+        def completed(
+            command: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with (
+            patch("fulcrum.install.os.getuid", return_value=501),
+            patch("fulcrum.install.subprocess.run", side_effect=completed) as run,
+        ):
+            start_services(definitions, updated=frozenset({CONTROLLER_LABEL}))
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn(
+            ["launchctl", "kickstart", f"gui/501/{APP_SERVER_LABEL}"], commands
+        )
+        self.assertIn(["launchctl", "bootout", f"gui/501/{CONTROLLER_LABEL}"], commands)
+        self.assertIn(
+            ["launchctl", "bootstrap", "gui/501", "/tmp/controller.plist"],
+            commands,
+        )
+        self.assertNotIn(
+            ["launchctl", "kickstart", f"gui/501/{CONTROLLER_LABEL}"], commands
+        )
+
+    def test_start_services_repairs_a_loaded_job_after_a_partial_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            definition = root / "controller.plist"
+            with definition.open("wb") as handle:
+                plistlib.dump(
+                    {"EnvironmentVariables": {"PATH": "/expected/bin:/usr/bin"}},
+                    handle,
+                )
+            definitions = {
+                APP_SERVER_LABEL: str(root / "missing-app-server.plist"),
+                CONTROLLER_LABEL: str(definition),
+            }
+
+            def completed(
+                command: list[str], **_kwargs: object
+            ) -> subprocess.CompletedProcess:
+                output = "environment = {\n\tPATH => /stale/bin:/usr/bin\n}\n"
+                return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+            with (
+                patch("fulcrum.install.os.getuid", return_value=501),
+                patch("fulcrum.install.subprocess.run", side_effect=completed) as run,
+            ):
+                start_services(definitions, updated=frozenset())
+
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn(
+                ["launchctl", "bootout", f"gui/501/{CONTROLLER_LABEL}"], commands
+            )
+            self.assertIn(
+                ["launchctl", "bootstrap", "gui/501", str(definition)], commands
+            )
 
 
 if __name__ == "__main__":

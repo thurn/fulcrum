@@ -29,6 +29,26 @@ REMOVED_SKILLS = (
 )
 APP_SERVER_LABEL = "dev.fulcrum.codex-app-server"
 CONTROLLER_LABEL = "dev.fulcrum.controller"
+SYSTEM_EXECUTABLE_PATHS = (
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
+USER_EXECUTABLE_PATHS = (".local/bin", "bin")
+
+
+def service_executable_path(*, user_home: Path | None = None) -> str:
+    """Return a deterministic PATH suitable for processes started by launchd."""
+
+    home = (user_home or Path.home()).resolve(strict=False)
+    entries = [str(home / relative) for relative in USER_EXECUTABLE_PATHS]
+    entries.extend(SYSTEM_EXECUTABLE_PATHS)
+    return os.pathsep.join(entries)
 
 
 def package_root() -> Path:
@@ -175,11 +195,15 @@ def install_hook_config(path: Path, hook_command: Path) -> None:
 
 
 def service_definitions(
-    config: InstallationConfig, paths: RuntimePaths
+    config: InstallationConfig,
+    paths: RuntimePaths,
+    *,
+    user_home: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     source = Path(config.source_root)
     python = source / ".venv" / "bin" / "python"
     logs = paths.logs_root
+    executable_path = service_executable_path(user_home=user_home)
     return {
         APP_SERVER_LABEL: {
             "Label": APP_SERVER_LABEL,
@@ -193,6 +217,7 @@ def service_definitions(
             "KeepAlive": True,
             "StandardOutPath": str(logs / "app-server.log"),
             "StandardErrorPath": str(logs / "app-server-error.log"),
+            "EnvironmentVariables": {"PATH": executable_path},
         },
         CONTROLLER_LABEL: {
             "Label": CONTROLLER_LABEL,
@@ -202,7 +227,10 @@ def service_definitions(
             "KeepAlive": True,
             "StandardOutPath": str(logs / "controller.log"),
             "StandardErrorPath": str(logs / "controller-error.log"),
-            "EnvironmentVariables": {"FULCRUM_CONFIG": str(paths.config_file)},
+            "EnvironmentVariables": {
+                "FULCRUM_CONFIG": str(paths.config_file),
+                "PATH": executable_path,
+            },
         },
     }
 
@@ -212,18 +240,23 @@ def install_services(
     paths: RuntimePaths,
     *,
     launch_agents: Path | None = None,
-) -> dict[str, str]:
+    user_home: Path | None = None,
+) -> tuple[dict[str, str], frozenset[str]]:
     target_root = launch_agents or Path.home() / "Library" / "LaunchAgents"
     target_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     paths.logs_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     installed: dict[str, str] = {}
-    for label, definition in service_definitions(config, paths).items():
+    updated: set[str] = set()
+    for label, definition in service_definitions(
+        config, paths, user_home=user_home
+    ).items():
         target = target_root / f"{label}.plist"
         encoded = plistlib.dumps(definition, fmt=plistlib.FMT_XML, sort_keys=True)
         if not target.is_file() or target.read_bytes() != encoded:
             temporary = target.with_name(f".{target.name}.{os.getpid()}")
             temporary.write_bytes(encoded)
             os.replace(temporary, target)
+            updated.add(label)
         installed[label] = str(target)
     wrapper = paths.control_root / "open-codex-with-fulcrum"
     wrapper.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -234,11 +267,40 @@ def install_services(
         os.chmod(temporary, 0o700)
         os.replace(temporary, wrapper)
     installed["desktop_wrapper"] = str(wrapper)
-    return installed
+    return installed, frozenset(updated)
+
+
+def _installed_service_path(definition: str) -> str | None:
+    try:
+        with Path(definition).open("rb") as handle:
+            service = plistlib.load(handle)
+        value = service.get("EnvironmentVariables", {}).get("PATH")
+        return value if isinstance(value, str) else None
+    except (OSError, plistlib.InvalidFileException, AttributeError):
+        return None
+
+
+def _loaded_service_path(output: bytes | str | None) -> str | None:
+    text = (
+        output.decode(errors="replace") if isinstance(output, bytes) else output or ""
+    )
+    in_environment = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "environment = {":
+            in_environment = True
+        elif in_environment and stripped == "}":
+            return None
+        elif in_environment and stripped.startswith("PATH => "):
+            return stripped.removeprefix("PATH => ")
+    return None
 
 
 def start_services(
-    definitions: dict[str, str], *, app_server_endpoint: str | None = None
+    definitions: dict[str, str],
+    *,
+    updated: frozenset[str],
+    app_server_endpoint: str | None = None,
 ) -> None:
     domain = f"gui/{os.getuid()}"
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
@@ -247,9 +309,30 @@ def start_services(
             capture_output=True,
             check=False,
         )
-        if check.returncode != 0:
+        loaded = check.returncode == 0
+        expected_path = _installed_service_path(definitions[label])
+        loaded_path = _loaded_service_path(check.stdout) if loaded else None
+        reloading = loaded and (
+            label in updated
+            or (expected_path is not None and loaded_path != expected_path)
+        )
+        if reloading:
+            result = subprocess.run(
+                ["launchctl", "bootout", f"{domain}/{label}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise InstallationError(
+                    f"could not unload stale {label}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+            loaded = False
+        if not loaded:
             if (
-                label == APP_SERVER_LABEL
+                not reloading
+                and label == APP_SERVER_LABEL
                 and app_server_endpoint
                 and _app_server_ready(app_server_endpoint)
             ):
@@ -265,11 +348,17 @@ def start_services(
                     f"could not start {label}: {result.stderr.strip() or result.stdout.strip()}"
                 )
         else:
-            subprocess.run(
+            result = subprocess.run(
                 ["launchctl", "kickstart", f"{domain}/{label}"],
                 capture_output=True,
+                text=True,
                 check=False,
             )
+            if result.returncode != 0:
+                raise InstallationError(
+                    f"could not kickstart {label}: "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
 
 
 def _app_server_ready(endpoint: str) -> bool:

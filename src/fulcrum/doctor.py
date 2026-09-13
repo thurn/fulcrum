@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import urllib.request
@@ -18,6 +19,7 @@ from fulcrum.install import (
     HUMAN_SKILLS,
     REMOVED_SKILLS,
     package_root,
+    service_definitions,
 )
 from fulcrum.prompts import TEMPLATES, load_template
 from fulcrum.readiness import state_readiness
@@ -123,12 +125,28 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
         str(cli_target),
     )
     agents = Path.home() / "Library" / "LaunchAgents"
+    expected_services = service_definitions(config, paths)
     for label in (APP_SERVER_LABEL, CONTROLLER_LABEL):
+        service_file = agents / f"{label}.plist"
         check(
             f"service:{label}",
-            (agents / f"{label}.plist").is_file(),
-            str(agents / f"{label}.plist"),
+            service_file.is_file(),
+            str(service_file),
         )
+        try:
+            with service_file.open("rb") as handle:
+                installed_service = plistlib.load(handle)
+            installed_path = installed_service.get("EnvironmentVariables", {}).get(
+                "PATH"
+            )
+            expected_path = expected_services[label]["EnvironmentVariables"]["PATH"]
+            check(
+                f"service_path:{label}",
+                installed_path == expected_path,
+                str(installed_path or "missing; rerun ./scripts/setup"),
+            )
+        except (OSError, plistlib.InvalidFileException, AttributeError) as error:
+            check(f"service_path:{label}", False, str(error))
     endpoint = (
         config.app_server_endpoint.replace("ws://", "http://", 1)
         .replace("wss://", "https://", 1)
