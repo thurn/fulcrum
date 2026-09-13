@@ -250,3 +250,75 @@ No new Sage interview was started for this postmortem. The scheduled Sage run co
 This was not fifteen independent unlucky bugs. It was one insufficiently tested orchestration system encountering normal boundary failures—missing executables, real response shapes, transient runtime readiness, concurrent changes, malformed output after a successful mutation—and lacking the atomicity, reconciliation, supervision, and evidence needed to contain them. Each failure left durable residue for the next one. Once the fallback loop stopped, nothing remained to make progress, yet the process-level health signal stayed green.
 
 The next test should be considered safe only when Fulcrum can prove both halves of its job: it can perform a workflow transition, and it can recover the truth when any boundary returns an ambiguous or incomplete result.
+
+## Higher-level architectural fixes
+
+The individual defects should be repaired, but doing so without changing the execution model would leave Fulcrum vulnerable to the next combination of partial external effects. Fulcrum coordinates SQLite, Codex threads, Tollgate, Beads, Git, the filesystem, and launchd. Those systems cannot participate in one transaction. The architecture must therefore assume that every boundary can succeed while its response is lost, fail after making partial progress, or disagree temporarily with Fulcrum's stored view.
+
+### Use one desired-state workflow kernel
+
+Fulcrum's database should record intent and observations, not claim unquestioned authority over external state. Every transition should use one durable sequence:
+
+1. In one SQLite transaction, record the desired transition and an external-operation intent.
+2. Let a supervised worker perform that exact operation.
+3. Persist the bounded raw result and native identifiers.
+4. Observe the authoritative external object.
+5. Commit `confirmed success`, `confirmed failure`, or `uncertain`.
+6. Reconcile every nonterminal record until it reaches its desired state or an explicit operator hold.
+
+No required operation should exist only on a Python call stack. Restarting the controller should resume recorded intents rather than reconstructing what it may have been doing. Every nonterminal assignment, action, obligation, and operation must have either a runnable next step, a future retry deadline, or a visible operator hold. A generic `recovering` state without one of those is an invalid invariant.
+
+Operations should express desired postconditions: `ensure_thread_archived`, `ensure_candidate_canceled`, `ensure_worktree_absent`, `ensure_service_loaded`, and `ensure_bead_published`. An already-achieved postcondition is success. A missing reply after a mutation causes observation, never an immediate deterministic failure or blind replay.
+
+### Make Python own mechanics and agents own judgment
+
+Agent prompts should not carry protocol steps whose omission can deadlock the system. Executors should report a completed implementation, source revision, and evidence; Python should create and capture the Tollgate candidate. Overseers should report review judgment; Python should approve, reconcile, deliver, and archive. Weaver and specialists should provide scoped content and findings; Python should own publication, retries, and lifecycle transitions.
+
+The rule is: if an operation affects scheduling, ownership, delivery, archival, or recovery, it belongs to the controller. Agents may propose those operations but should not be responsible for performing or remembering them.
+
+### Separate the control plane from managed source
+
+The controller must not execute from a checkout that its own fleet edits and promotes into. Use a dedicated control-plane installation or checkout. Apply controller source changes only through an explicit quiescent sequence: pause dispatch, finish or durably suspend in-flight mutations, refresh the installation, restart the controller, reconcile, then re-enable dispatch. Do not use automatic source hot reload for the transaction coordinator.
+
+The service manager should independently own installation and controller replacement. A controller should not have to remain healthy while replacing its own executable source and service definitions.
+
+### Establish serial correctness before concurrency
+
+The next implementation milestone should deliberately support only:
+
+- one enrolled project;
+- one active assignment;
+- one executor followed by an overseer created only when a candidate exists;
+- controller-owned candidate creation and delivery;
+- explicit operator reconciliation; and
+- repeatable, idempotent reset.
+
+Defer parallel assignments, multi-project scheduling, scheduled specialists, interviews, Vizier, automatic reload, and generalized repair permissions until this kernel survives injected failures. When concurrency returns, slot acquisition must be an atomic database operation performed once per assignment, followed by a capacity recheck. Scope-conflict detection should prevent adjacent setup/control-plane work from running concurrently even when numerical capacity exists.
+
+### Decouple commands from background advancement
+
+A client command should commit and return its own result. Intake success must not depend on whether an immediately following Archon delivery or fleet tick succeeds. Committed work should produce a durable queued action, and supervised workers should advance it asynchronously. Later scheduling failures should appear as separate conditions without rewriting the command's outcome.
+
+Similarly, task creation should not imply that the thread is already materialized. Provisioning, materialization, turn start, completion, and archival are separate observable states with their own reconciliation.
+
+### Define health in terms of progress
+
+Process existence and socket responsiveness are necessary but insufficient. Readiness must fail when a critical worker is absent, reconciliation age exceeds its bound, a pending action misses its retry deadline, a reservation lacks a runnable owner, installed services differ from configuration, or authoritative external state contradicts Fulcrum. An unexpected background-task exit should durably record its stack, mark the controller degraded, and disable new dispatch.
+
+Status should answer three questions for every nonterminal entity: what is it waiting for, what will try next, and when will that happen? If it cannot answer them, the workflow is already deadlocked even if every process is alive.
+
+### Validate recovery with a deterministic simulator
+
+Controller testing should focus on interruption points, not only successful function calls. Inject failure before an external mutation, after the mutation but before its reply, after the reply but before the SQLite commit, between every reset step, during controller restart, and during capacity allocation. Use real captured adapter response shapes in integration tests.
+
+The kernel should continuously prove these properties:
+
+- configured capacity is never exceeded;
+- a successful external mutation is never recorded as definitively failed without observation;
+- every nonterminal record has a next step, retry deadline, or operator hold;
+- repeated reconciliation converges without duplicating effects;
+- repeated reset converges to the same empty state;
+- one corrupt task cannot block cleanup of independent tasks; and
+- restart never duplicates an external mutation.
+
+Only after those properties hold under serial execution should Fulcrum restore the broader role and scheduling design. This preserves the product vision while making the orchestration core small enough to reason about, test exhaustively, and trust during failure.
