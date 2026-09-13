@@ -542,6 +542,29 @@ class PromptsTest(unittest.TestCase):
         with patch("sys.stdin", io.StringIO('{"title":"Use `code` safely"}')):
             self.assertEqual(_intake_payload(args)["title"], "Use `code` safely")
 
+    def test_writable_weaver_investigates_then_files_the_fix(self) -> None:
+        text = weaver_instructions(plan_mode=False, project="p")
+
+        for required in (
+            '"please investigate and\nfix this bug," treat it as two stages',
+            "perform a read-only investigation",
+            "gather observed evidence",
+            "identify its root cause",
+            "file an implementation-ready Bead",
+            "bounded implementation instructions",
+            "observable validation and\ncompletion checks",
+            "so the Executor does not need this conversation",
+        ):
+            self.assertIn(required, text)
+        self.assertIn(
+            "do not\nedit source files or implement the fix",
+            text,
+        )
+        self.assertIn(
+            "Imperative wording does\nnot authorize you to edit source files",
+            text,
+        )
+
     def test_correction_prompt_requires_one_release_based_commit(self) -> None:
         text = action_message(
             action={
