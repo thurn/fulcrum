@@ -282,9 +282,6 @@ class Controller:
             except TimeoutError:
                 pass
             self.advance_requested.clear()
-            if self.mutation_lock.locked():
-                self.advance_requested.set()
-                continue
             async with self.mutation_lock:
                 if not self.runtime.ready:
                     await self._connect_runtime()
