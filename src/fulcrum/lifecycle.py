@@ -831,7 +831,14 @@ def apply_archon_decisions(
             ):
                 raise StoreError("recurring policy cadence must be positive")
             cadence = supplied_cadence
-            anchor = str(policy.get("anchor_at") or timestamp)
+            supplied_anchor = policy.get("anchor_at")
+            anchor = (
+                str(supplied_anchor)
+                if supplied_anchor
+                else (datetime.now(timezone.utc) + timedelta(seconds=cadence))
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
             try:
                 parsed_anchor = datetime.fromisoformat(anchor.replace("Z", "+00:00"))
             except ValueError as error:

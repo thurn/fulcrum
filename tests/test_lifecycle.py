@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fulcrum.lifecycle import (
@@ -290,6 +291,21 @@ class LifecycleTest(unittest.TestCase):
             [(row["kind"], row["scope"]) for row in policies],
             [("inquisitor", "p"), ("sage", None)],
         )
+
+    def test_policy_without_anchor_first_runs_after_one_cadence(self) -> None:
+        before = datetime.now(timezone.utc)
+        apply_archon_decisions(
+            self.store,
+            {
+                "recurring_policies": [
+                    {"kind": "sage", "scope": None, "cadence_seconds": 3600}
+                ]
+            },
+        )
+
+        policy = self.store.row("SELECT * FROM policies WHERE kind = 'sage'")
+        anchor = datetime.fromisoformat(policy["anchor_at"].replace("Z", "+00:00"))
+        self.assertGreaterEqual(anchor, before + timedelta(minutes=59))
 
     def test_unknown_archon_decision_rolls_back_the_entire_payload(self) -> None:
         before = len(self.store.rows("SELECT * FROM runs"))
