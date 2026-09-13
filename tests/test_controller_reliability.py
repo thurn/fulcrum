@@ -1408,6 +1408,62 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempt["state"], "uncertain")
         self.assertEqual(attempt["stdout"], "promoted but not json")
 
+    async def test_active_pair_delays_delivery_without_operator_hold(self) -> None:
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'delivering', candidate_id = 'candidate-1',
+               mandate_candidate_id = 'candidate-1', mandate_scope = scope_snapshot
+               WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'active' WHERE id = ?",
+            (self.overseer["id"],),
+        )
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+        self.controller.tollgate = AsyncMock()
+
+        await self.controller._deliver(assignment)
+
+        retained = self.controller.store.row(
+            "SELECT stage, operator_hold_id FROM assignments WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(retained, {"stage": "delivering", "operator_hold_id": None})
+        self.controller.tollgate.approve.assert_not_called()
+
+    async def test_reconcile_releases_stale_delivery_boundary_hold(self) -> None:
+        hold = self.controller.store.execute(
+            """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+               VALUES ('assignment', ?, 'pair is not confirmed inactive at the delivery boundary',
+                       1, 'operator supplies a specific recovery decision', 'now')""",
+            (str(self.assignment["id"]),),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET prior_stage = 'delivering', stage = 'recovering',
+               condition = 'pair is not confirmed inactive at the delivery boundary',
+               operator_hold_id = ? WHERE id = ?""",
+            (hold.lastrowid, self.assignment["id"]),
+        )
+
+        await self.controller._reconcile_delivery_boundary_holds()
+
+        retained = self.controller.store.row(
+            "SELECT stage, operator_hold_id, condition FROM assignments WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        self.assertEqual(
+            retained,
+            {"stage": "delivering", "operator_hold_id": None, "condition": None},
+        )
+        released = self.controller.store.row(
+            "SELECT released_at FROM holds WHERE id = ?", (hold.lastrowid,)
+        )
+        self.assertIsNotNone(released["released_at"])
+
     async def test_losing_controller_does_not_emit_a_startup_event(self) -> None:
         before = len(self.controller.store.rows("SELECT * FROM events"))
         with self.assertRaises(StoreError):

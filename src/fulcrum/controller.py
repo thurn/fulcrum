@@ -467,6 +467,7 @@ class Controller:
             return
         self._adopt_stranded_operations()
         await self._reconcile_uncertain_operations()
+        await self._reconcile_delivery_boundary_holds()
         self._retry_recovering_assignments()
         await self._retry_pending_actions()
         task_ids = self.store.rows("""SELECT DISTINCT task_id FROM actions
@@ -2135,8 +2136,14 @@ class Controller:
                     (failure, utc_now(), assignment["id"]),
                 )
             return
+        await self._refresh_delivery_pair(assignment)
         authority_error = self._delivery_authority_error(assignment)
         if authority_error:
+            if (
+                authority_error
+                == "pair is not confirmed inactive at the delivery boundary"
+            ):
+                return
             self._hold_assignment(assignment, authority_error)
             return
         operation = self.store.create_operation(
@@ -2210,6 +2217,43 @@ class Controller:
             )
             if retained is not None:
                 await self._reconcile_tollgate_approve(retained)
+
+    async def _refresh_delivery_pair(self, assignment: dict[str, Any]) -> None:
+        if not self.runtime.ready:
+            return
+        for task_id in (
+            assignment["executor_task_id"],
+            assignment["overseer_task_id"],
+        ):
+            if task_id is None:
+                continue
+            task = self.store.row("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            if task is not None:
+                await self._refresh_task(task)
+
+    async def _reconcile_delivery_boundary_holds(self) -> None:
+        assignments = self.store.rows(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.stage = 'recovering'
+               AND a.condition = 'pair is not confirmed inactive at the delivery boundary'
+               AND a.operator_hold_id IS NOT NULL"""
+        )
+        for assignment in assignments:
+            await self._refresh_delivery_pair(assignment)
+            if self._delivery_authority_error(assignment) == assignment["condition"]:
+                continue
+            timestamp = utc_now()
+            with self.store.transaction() as connection:
+                connection.execute(
+                    "UPDATE holds SET released_at = ? WHERE id = ? AND released_at IS NULL",
+                    (timestamp, assignment["operator_hold_id"]),
+                )
+                connection.execute(
+                    """UPDATE assignments SET stage = 'delivering', prior_stage = NULL,
+                       operator_hold_id = NULL, condition = NULL, next_attempt_at = NULL,
+                       updated_at = ? WHERE id = ?""",
+                    (timestamp, assignment["id"]),
+                )
 
     async def _close_delivered_assignment(self, assignment: dict[str, Any]) -> None:
         previous = self.store.row(
