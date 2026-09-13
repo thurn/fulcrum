@@ -3,8 +3,10 @@
 `scripts/check` creates an isolated environment, installs the pinned dependency
 set and editable package, then runs formatting, type checks, and unit/integration
 tests. Tests use controlled adapters and injected time for state transitions,
-capacity, event ordering, uncertain operations, message batching, cadence,
-outcomes, and reset safety.
+capacity, conflict leases, event ordering, uncertain operations, crash adoption,
+message batching, cadence, outcomes, worker health, source isolation, and
+checkpointed reset safety. SQLite-trigger tests prove that direct writes cannot
+bypass core capacity, lease-release, or recovery-progress invariants.
 
 Claims about the shared desktop runtime, automatic Weaver activation, native
 helpers, interruption, Tollgate worktrees/candidates, Beads/Dolt restoration, and

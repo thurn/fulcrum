@@ -6,16 +6,25 @@ foreign keys, full synchronous commits, explicit transactions, and database
 constraints for unique ownership and reservations. Transactions never cover
 Codex, Tollgate, Git, or Beads waits.
 
-The controller records external intent before every mutation. A lost response is
-uncertain, retains its reservation, and receives one bounded reconciliation pass;
-it is never blindly repeated. Runtime starts require a terminal last turn, idle
-thread state, terminal native helpers, and no unresolved start intent.
+The controller records external intent and an attempt before every mutation. A
+lost response is uncertain and is resolved by an exact native-object observation;
+it is never interpreted as deterministic failure or blindly repeated. Runtime
+starts require a terminal last turn, idle thread state, terminal native helpers,
+and no unresolved start intent. Confirmed-unsent starts and due pending actions are
+retried with bounded backoff; exhausted retries become explicit holds.
 
 Relevant events advance work immediately. Due timers cover recurring specialists,
 interviews, liveness checks, and retryable Python operations. A non-overlapping
-fallback reconciliation runs every 30 seconds. Agent turns are inspected after
+fallback reconciliation runs every 30 seconds alongside a supervised advancement
+worker. Agent turns are inspected after
 the configured 1,800 seconds by default; the threshold creates one evidence-backed
 possible-stall condition and never interrupts automatically.
+
+Command responses are isolated from later advancement. A successful intake returns
+after its own mutation commits; an unrelated Archon dispatch failure is reported as
+a later workflow condition. Structured records are retained in SQLite and appended
+to `logs/workflow.jsonl` with correlation IDs, durations, redaction, operation
+attempts, before/after transitions, worker failures, and reconciliation boundaries.
 
 Use `fulcrum status --json` for tasks, assignments, stages, runtime activity,
 capacity, holds, queues, operations, obligations, occurrences, and concise recent
@@ -25,9 +34,13 @@ Fleet replacement is explicit:
 
 - `reboot --soft` drains active managed turns before replacing conversations.
 - `reboot --hard` interrupts and confirms managed turn/helper inactivity first.
-- `reboot --reset` additionally discards verified owned worktrees and operational
-  state while preserving source repositories, service definitions, endpoint, and
-  model configuration.
+- `reboot --reset` checkpoint-cancels active candidates, confirms owned worktrees
+  absent, archives independent threads, and then discards operational state while
+  preserving source repositories, service definitions, endpoint, and model
+  configuration. Archive exceptions are quarantined and reported separately from
+  destructive completion and replacement readiness.
 
 Reboots never stop the shared app-server or desktop. A recovery record beside
-configuration survives reset until the operation completes.
+configuration survives reset until the operation completes. The controller runs
+from an atomic snapshot under the control root, not from the checkout its fleet
+edits; source changes request a refresh at a recorded quiescent boundary.

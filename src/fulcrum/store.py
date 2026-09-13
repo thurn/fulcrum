@@ -206,6 +206,121 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
+INVARIANT_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS reservation_requires_runnable_action
+BEFORE INSERT ON reservations
+WHEN NOT EXISTS (
+  SELECT 1 FROM actions WHERE id = NEW.action_id
+  AND state IN ('pending','starting','active','terminal','uncertain')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'reservation requires a runnable action');
+END;
+CREATE TRIGGER IF NOT EXISTS reservation_respects_global_capacity
+BEFORE INSERT ON reservations
+WHEN (
+  SELECT COALESCE(SUM(global_slots), 0) + NEW.global_slots FROM reservations
+) > COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'global_limit'), 0)
+BEGIN
+  SELECT RAISE(ABORT, 'reservation exceeds global capacity');
+END;
+CREATE TRIGGER IF NOT EXISTS reservation_respects_project_capacity
+BEFORE INSERT ON reservations
+WHEN EXISTS (
+  SELECT 1 FROM json_each(NEW.project_ids) requested
+  LEFT JOIN json_each(COALESCE((SELECT value FROM meta WHERE key = 'project_limits'), '{}')) limits
+    ON limits.key = requested.value
+  WHERE limits.value IS NULL OR CAST(limits.value AS INTEGER) <= (
+    SELECT COUNT(*) FROM reservations existing
+    WHERE EXISTS (
+      SELECT 1 FROM json_each(existing.project_ids) used
+      WHERE used.value = requested.value
+    )
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'reservation exceeds project capacity');
+END;
+CREATE TRIGGER IF NOT EXISTS reservation_respects_conflict_keys
+BEFORE INSERT ON reservations
+WHEN EXISTS (
+  SELECT 1 FROM json_each(NEW.conflict_keys) requested
+  JOIN reservations existing
+  JOIN json_each(existing.conflict_keys) active ON active.value = requested.value
+)
+BEGIN
+  SELECT RAISE(ABORT, 'reservation conflicts with an active resource lease');
+END;
+CREATE TRIGGER IF NOT EXISTS terminal_action_releases_reservation
+AFTER UPDATE OF state ON actions
+WHEN NEW.state IN ('processed','failed','canceled')
+BEGIN
+  DELETE FROM reservations WHERE action_id = NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS recovering_assignment_requires_progress
+BEFORE UPDATE ON assignments
+WHEN NEW.stage = 'recovering'
+ AND NEW.next_attempt_at IS NULL
+ AND NEW.operator_hold_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'recovering assignment requires retry deadline or operator hold');
+END;
+CREATE TRIGGER IF NOT EXISTS audit_task_state
+AFTER UPDATE OF state ON tasks WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('task', NEW.id, 'state', OLD.state, NEW.state, 'controller transition', NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_action_state
+AFTER UPDATE OF state ON actions WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('action', NEW.id, 'state', OLD.state, NEW.state, COALESCE(NEW.condition, 'controller transition'), NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_assignment_stage
+AFTER UPDATE OF stage ON assignments WHEN OLD.stage IS NOT NEW.stage
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('assignment', NEW.id, 'stage', OLD.stage, NEW.stage, COALESCE(NEW.condition, 'controller transition'), NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_operation_state
+AFTER UPDATE OF state ON external_operations WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, correlation_id, created_at)
+  VALUES ('operation', NEW.id, 'state', OLD.state, NEW.state, COALESCE(NEW.condition, 'controller transition'), NEW.correlation_id, NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_occurrence_state
+AFTER UPDATE OF state ON occurrences WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('occurrence', NEW.id, 'state', OLD.state, NEW.state, 'controller transition', NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_interview_state
+AFTER UPDATE OF state ON interviews WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('interview', NEW.id, 'state', OLD.state, NEW.state, 'controller transition', NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_obligation_state
+AFTER UPDATE OF state ON obligations WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('obligation', NEW.id, 'state', OLD.state, NEW.state, COALESCE(NEW.detail, 'controller transition'), NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_batch_state
+AFTER UPDATE OF state ON batches WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('batch', NEW.id, 'state', OLD.state, NEW.state, 'controller transition', NEW.updated_at);
+END;
+CREATE TRIGGER IF NOT EXISTS audit_run_state
+AFTER UPDATE OF state ON runs WHEN OLD.state IS NOT NEW.state
+BEGIN
+  INSERT INTO state_transitions(entity_type, entity_id, field_name, from_state, to_state, reason, created_at)
+  VALUES ('run', NEW.id, 'state', OLD.state, NEW.state, 'controller transition', NEW.updated_at);
+END;
+"""
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -244,6 +359,7 @@ class Store:
             self.connection.execute("PRAGMA synchronous = FULL")
             self.connection.executescript(SCHEMA)
             self._migrate_existing_database()
+            self.connection.executescript(INVARIANT_TRIGGERS)
             for role in ROLE_CODES:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO role_counters(role, next_number) VALUES (?, 1)",
@@ -293,6 +409,24 @@ class Store:
         self.connection.execute(
             "UPDATE external_operations SET correlation_id = 'operation-' || id WHERE correlation_id IS NULL"
         )
+        for assignment in self.rows(
+            """SELECT id FROM assignments WHERE stage = 'recovering'
+               AND next_attempt_at IS NULL AND operator_hold_id IS NULL"""
+        ):
+            timestamp = utc_now()
+            hold = self.connection.execute(
+                """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
+                   VALUES ('assignment', ?, 'legacy recovery had no runnable next step', 1,
+                   'operator chooses an exact recovery transition', ?)""",
+                (str(assignment["id"]), timestamp),
+            )
+            self.connection.execute(
+                "UPDATE assignments SET operator_hold_id = ? WHERE id = ?",
+                (hold.lastrowid, assignment["id"]),
+            )
+        self.connection.execute("""DELETE FROM reservations WHERE action_id IN (
+                 SELECT id FROM actions WHERE state IN ('processed','failed','canceled')
+               )""")
         self.connection.execute("DROP INDEX IF EXISTS one_current_action_per_thread")
         self.connection.execute(
             """CREATE UNIQUE INDEX one_current_action_per_thread ON actions(task_id)
@@ -340,7 +474,8 @@ class Store:
         now: str | None = None,
     ) -> int:
         timestamp = now or utc_now()
-        encoded_detail = json.dumps(detail or {}, sort_keys=True)
+        safe_detail = _redact(detail or {})
+        encoded_detail = json.dumps(safe_detail, sort_keys=True)
         cursor = self.execute(
             "INSERT INTO events(kind, entity_type, entity_id, message, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -360,7 +495,7 @@ class Store:
                     "entity_type": entity_type,
                     "entity_id": None if entity_id is None else str(entity_id),
                     "message": message,
-                    "detail": _redact(detail or {}),
+                    "detail": safe_detail,
                     "created_at": timestamp,
                 }
             )
@@ -485,6 +620,7 @@ class Store:
         correlation_id: str | None = None,
     ) -> int:
         timestamp = utc_now()
+        encoded_inputs = json.dumps(_redact(inputs), sort_keys=True)
         with self.transaction() as connection:
             cursor = connection.execute(
                 """INSERT INTO external_operations(
@@ -493,7 +629,7 @@ class Store:
                 (
                     kind,
                     target,
-                    json.dumps(inputs, sort_keys=True),
+                    encoded_inputs,
                     timestamp,
                     timestamp,
                 ),
@@ -662,19 +798,20 @@ class Store:
                 (*updates.values(), entity_id),
             )
             connection.execute(
-                """INSERT INTO state_transitions(
-                       entity_type, entity_id, field_name, from_state, to_state,
-                       reason, correlation_id, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                """UPDATE state_transitions SET reason = ?, correlation_id = ?
+                   WHERE id = (
+                     SELECT MAX(id) FROM state_transitions
+                     WHERE entity_type = ? AND entity_id = ? AND field_name = ?
+                       AND from_state IS ? AND to_state = ?
+                   )""",
                 (
+                    reason,
+                    correlation_id,
                     entity_type,
                     str(entity_id),
                     field,
                     row[field],
                     to_state,
-                    reason,
-                    correlation_id,
-                    timestamp,
                 ),
             )
 

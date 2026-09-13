@@ -144,6 +144,39 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(facts["helpers_terminal"])
         self.assertFalse(facts["can_start"])
 
+    async def test_connection_close_is_reported_and_allows_reconnect(self) -> None:
+        disconnected: asyncio.Future[tuple[str, dict[str, Any]]] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+        async def event_handler(method: str, params: dict[str, Any]) -> None:
+            if method == "fulcrum/runtime/disconnected" and not disconnected.done():
+                disconnected.set_result((method, params))
+
+        async def handler(connection: Any) -> None:
+            async for raw in connection:
+                message = json.loads(raw)
+                if message.get("method") == "initialize":
+                    await connection.send(
+                        json.dumps({"id": message["id"], "result": {}})
+                    )
+                elif message.get("method") == "initialized":
+                    await connection.close()
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            runtime = CodexRuntime(
+                f"ws://127.0.0.1:{port}", event_handler=event_handler
+            )
+            await runtime.connect()
+            method, params = await asyncio.wait_for(disconnected, 1)
+            self.assertEqual(method, "fulcrum/runtime/disconnected")
+            self.assertIn("closed", params["error"])
+            self.assertFalse(runtime.ready)
+            self.assertIsNone(runtime.websocket)
+            await runtime.connect()
+            await runtime.close()
+
 
 if __name__ == "__main__":
     unittest.main()

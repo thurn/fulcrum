@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -72,6 +73,20 @@ class KernelTest(unittest.TestCase):
         self.assertIn("project capacity is full for p", second.blockers)
         self.assertEqual(len(self.store.rows("SELECT * FROM reservations")), 1)
 
+    def test_database_rejects_capacity_bypass(self) -> None:
+        acquire_lease(self.store, self._request(self.first["id"], pair_id=1))
+        now = "2026-01-01T00:00:00Z"
+        action = self.store.execute(
+            "INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at) VALUES (?, 'implement', '{}', 'pending', ?, ?)",
+            (self.second["id"], now, now),
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "project capacity"):
+            self.store.execute(
+                """INSERT INTO reservations(action_id, pair_id, project_ids, state, created_at)
+                   VALUES (?, 2, '[\"p\"]', 'reserved', ?)""",
+                (action.lastrowid, now),
+            )
+
     def test_conflict_keys_block_even_when_capacity_remains(self) -> None:
         self.store.execute(
             "UPDATE meta SET value = ? WHERE key = 'project_limits'",
@@ -126,6 +141,7 @@ class KernelTest(unittest.TestCase):
             stdout="done",
             duration_ms=12,
         )
+        self.store.event("secret_test", "redacted", detail={"token": "do-not-log"})
         row = self.store.row(
             "SELECT * FROM operation_attempts WHERE operation_id = ?", (operation,)
         )
@@ -133,6 +149,12 @@ class KernelTest(unittest.TestCase):
         self.assertEqual(row["duration_ms"], 12)
         records = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertTrue(any(item["kind"] == "operation_complete" for item in records))
+        secret = next(item for item in records if item["kind"] == "secret_test")
+        self.assertEqual(secret["detail"]["token"], "<redacted>")
+        durable = self.store.row(
+            "SELECT detail_json FROM events WHERE kind = 'secret_test'"
+        )
+        self.assertNotIn("do-not-log", durable["detail_json"])
 
     def test_health_detects_stale_reconciliation_and_dead_worker(self) -> None:
         old = (
@@ -149,17 +171,19 @@ class KernelTest(unittest.TestCase):
         self.assertTrue(any("stale" in reason for reason in reasons))
         self.assertIn("critical worker fallback is not running", reasons)
 
-    def test_invariants_reject_a_lease_without_a_runnable_owner(self) -> None:
+    def test_terminal_transition_cannot_leave_a_lease_without_an_owner(self) -> None:
         decision = acquire_lease(self.store, self._request(self.first["id"], pair_id=1))
         assert decision.action is not None
         action_id = int(decision.action["id"])
         self.store.execute(
             "UPDATE actions SET state = 'failed' WHERE id = ?", (action_id,)
         )
-        self.assertEqual(
-            invariant_violations(self.store),
-            [f"reservation for action {action_id} has no runnable owner"],
+        self.assertIsNone(
+            self.store.row(
+                "SELECT * FROM reservations WHERE action_id = ?", (action_id,)
+            )
         )
+        self.assertEqual(invariant_violations(self.store), [])
         release_lease(self.store, action_id, reason="test cleanup")
         self.assertEqual(invariant_violations(self.store), [])
 

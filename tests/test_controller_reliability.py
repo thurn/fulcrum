@@ -82,6 +82,33 @@ class FakeArchiveRuntime:
             raise RuntimeError("rollout is missing")
 
 
+class FakeResetTollgate:
+    def __init__(self) -> None:
+        self.active = True
+        self.calls: list[str] = []
+
+    def status(self, _repository: str, candidate: str | None = None) -> dict[str, Any]:
+        self.calls.append("status")
+        return {
+            "candidate": {
+                "item": {
+                    "id": candidate,
+                    "state": "queued" if self.active else "canceled",
+                }
+            }
+        }
+
+    def cancel(self, _repository: str, _candidate: str) -> dict[str, Any]:
+        self.calls.append("cancel")
+        self.active = False
+        return {"canceled": True}
+
+    def remove_worktree(self, _repository: str, path: str) -> dict[str, Any]:
+        self.calls.append("remove")
+        Path(path).rmdir()
+        return {"removed": True}
+
+
 class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -255,6 +282,111 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM events WHERE kind = 'reset_archive_exceptions'"
         )
         self.assertIsNotNone(event)
+
+    async def test_restart_adopts_sent_effects_and_replays_only_confirmed_unsent(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        action = self.controller.store.execute(
+            """INSERT INTO actions(task_id, assignment_id, kind, payload, state,
+               created_at, updated_at) VALUES (?, ?, 'implement', '{}', 'starting', ?, ?)""",
+            (self.executor["id"], self.assignment["id"], now, now),
+        )
+        unsent = self.controller.store.create_operation(
+            "turn_start", str(action.lastrowid), {"thread_id": "executor"}
+        )
+        sent = self.controller.store.create_operation(
+            "unknown_mutation", "native", {"value": 1}
+        )
+        self.controller.store.begin_operation_attempt(sent)
+        self.controller._adopt_stranded_operations()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM external_operations WHERE id = ?", (unsent,)
+            )["state"],
+            "canceled",
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM actions WHERE id = ?", (action.lastrowid,)
+            )["state"],
+            "pending",
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM external_operations WHERE id = ?", (sent,)
+            )["state"],
+            "uncertain",
+        )
+
+    async def test_reset_cancels_candidate_before_confirming_worktree_absent(
+        self,
+    ) -> None:
+        self.controller.store.execute(
+            "UPDATE assignments SET candidate_id = 'candidate-1' WHERE id = ?",
+            (self.assignment["id"],),
+        )
+        tollgate = FakeResetTollgate()
+        runtime = FakeArchiveRuntime()
+        self.controller.tollgate = tollgate  # type: ignore[assignment]
+        self.controller.runtime = runtime  # type: ignore[assignment]
+        with patch("fulcrum.controller.reset_brain", return_value={}):
+            await self.controller._reset_state({"mode": "reset"})
+        self.assertEqual(tollgate.calls, ["status", "cancel", "status", "remove"])
+        self.assertFalse(self.worktree.exists())
+
+    async def test_corrupt_thread_does_not_block_later_task_reconciliation(
+        self,
+    ) -> None:
+        now = "2026-01-01T00:00:00Z"
+        first = self.controller.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, native_turn_id,
+               created_at, updated_at) VALUES (?, 'implement', '{}', 'active', 'turn-1', ?, ?)""",
+            (self.executor["id"], now, now),
+        )
+        second = self.controller.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, native_turn_id,
+               created_at, updated_at) VALUES (?, 'review', '{}', 'active', 'turn-2', ?, ?)""",
+            (self.overseer["id"], now, now),
+        )
+
+        async def refresh(task: dict[str, Any]) -> dict[str, Any]:
+            if task["id"] == self.executor["id"]:
+                raise RuntimeError("missing rollout")
+            return {
+                "last_turn_terminal": True,
+                "helpers_terminal": True,
+                "last_turn_id": "turn-2",
+                "last_turn_status": "completed",
+            }
+
+        self.controller.runtime.ready = True
+        with patch.object(self.controller, "_refresh_task", side_effect=refresh):
+            await self.controller.reconcile()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM tasks WHERE id = ?", (self.executor["id"],)
+            )["state"],
+            "uncertain",
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM actions WHERE id = ?", (second.lastrowid,)
+            )["state"],
+            "terminal",
+        )
+        self.assertIsNotNone(
+            self.controller.store.row(
+                "SELECT * FROM events WHERE kind = 'reconcile_failed' AND entity_id = ?",
+                (str(self.executor["id"]),),
+            )
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM actions WHERE id = ?", (first.lastrowid,)
+            )["state"],
+            "active",
+        )
 
 
 if __name__ == "__main__":

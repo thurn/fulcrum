@@ -18,6 +18,7 @@ from fulcrum.install import (
     CONTROLLER_LABEL,
     HUMAN_SKILLS,
     REMOVED_SKILLS,
+    control_plane_source,
     package_root,
     service_definitions,
 )
@@ -72,6 +73,27 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
         "editable_import",
         package_root() == Path(config.source_root) / "src" / "fulcrum",
         str(package_root()),
+    )
+    source_package = Path(config.source_root) / "src" / "fulcrum"
+    deployed_package = control_plane_source(paths)
+    source_files = {
+        path.relative_to(source_package): path.read_bytes()
+        for path in source_package.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+    deployed_files = (
+        {
+            path.relative_to(deployed_package): path.read_bytes()
+            for path in deployed_package.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        }
+        if deployed_package.is_dir()
+        else {}
+    )
+    check(
+        "control_plane_snapshot",
+        bool(source_files) and deployed_files == source_files,
+        str(deployed_package),
     )
     for name, command in (
         ("codex", config.codex_bin),

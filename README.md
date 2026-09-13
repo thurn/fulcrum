@@ -5,7 +5,10 @@ the same app-server as the desktop, stores operational truth in SQLite, and owns
 task creation, naming, scheduling, message delivery, recovery, and archival.
 Agents retain implementation, review, planning, and strategic judgment.
 
-The complete design is [`docs/plans/fulcrum-python-runtime.md`](docs/plans/fulcrum-python-runtime.md).
+The product design is
+[`docs/plans/fulcrum-python-runtime.md`](docs/plans/fulcrum-python-runtime.md);
+failure semantics and enforced invariants are specified in
+[`docs/reliability-architecture.md`](docs/reliability-architecture.md).
 
 ## Install
 
@@ -46,6 +49,7 @@ Managed agents finish their current controller-bound action with the exact
 assignment, or dispatch IDs and cannot write operational state directly.
 
 `scripts/check` formats, type-checks, and tests the package. Python and prompt
-edits in the retained clone are live; the controller safely re-execs on Python
-changes. Dependency metadata changes require reinstalling the lock file and
+edits in the retained clone request an atomic control-plane snapshot refresh at a
+quiescent boundary. The controller never executes from the checkout its fleet can
+promote into. Dependency metadata changes require reinstalling the lock file and
 editable package.

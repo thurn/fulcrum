@@ -17,7 +17,7 @@ from typing import Any
 
 from watchfiles import awatch
 
-from fulcrum.beads import Beads, BeadsUncertainError
+from fulcrum.beads import Beads
 from dataclasses import replace
 
 from fulcrum.config import InstallationConfig, RuntimePaths, save_installation
@@ -95,6 +95,20 @@ class Controller:
                     project.source_remote,
                     int(project.enabled),
                 ),
+            )
+            self.store.event(
+                "project_reconciled",
+                f"reconciled configured project {project.project_id}",
+                entity_type="project",
+                entity_id=project.project_id,
+                detail={
+                    "origin": "installation_config",
+                    "cwd": project.repo_path,
+                    "codex_project_id": project.codex_project_id,
+                    "tollgate_repository_id": project.tollgate_repo_id,
+                    "process_id": os.getpid(),
+                },
+                now=timestamp,
             )
         self.store.execute(
             "INSERT INTO meta(key, value) VALUES ('controller_state', 'starting') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -440,12 +454,17 @@ class Controller:
                             )
                             action["payload"] = reminder_payload
                             await self._dispatch_action(action, task=task)
-            except AppServerError as error:
+            except Exception as error:
+                self.store.execute(
+                    "UPDATE tasks SET state = 'uncertain', updated_at = ? WHERE id = ?",
+                    (utc_now(), task["id"]),
+                )
                 self.store.event(
                     "reconcile_failed",
                     str(error),
                     entity_type="task",
                     entity_id=task["id"],
+                    detail={"traceback": traceback.format_exc()},
                 )
         await self._inspect_due_actions()
         self.store.execute(
@@ -630,6 +649,8 @@ class Controller:
                 await asyncio.to_thread(self._reconcile_beads_create, operation)
             elif operation["kind"] == "beads_close":
                 await asyncio.to_thread(self._reconcile_beads_close, operation)
+            elif operation["kind"] == "setup_runtime_smoke":
+                await self._reconcile_setup_runtime_smoke(operation)
             else:
                 self._retain_uncertain_condition(
                     operation,
@@ -942,6 +963,44 @@ class Controller:
                 (utc_now(), obligation["id"]),
             )
 
+    async def _reconcile_setup_runtime_smoke(self, operation: dict[str, Any]) -> None:
+        thread_id = operation["native_id"]
+        if not thread_id:
+            self._retain_uncertain_condition(
+                operation,
+                "runtime smoke thread identity was not checkpointed; operator cleanup is required",
+            )
+            return
+        thread = await self.runtime.read_thread(str(thread_id))
+        facts = thread_facts(thread)
+        inputs = json.loads(operation["input_json"])
+        if thread.get("name") != "Fulcrum setup visibility check" or thread.get(
+            "projectId"
+        ) != inputs.get("project_id"):
+            self._retain_uncertain_condition(
+                operation,
+                "runtime smoke thread identity or project binding is inconsistent",
+            )
+            return
+        if not (
+            facts["last_turn_terminal"]
+            and facts["helpers_terminal"]
+            and facts["runtime_status"] == "idle"
+        ):
+            return
+        await self.runtime.archive(str(thread_id))
+        timestamp = utc_now()
+        self.store.execute(
+            """UPDATE external_operations SET state = 'complete', result_json = ?,
+               reconciliation_used = 1, condition = NULL, completed_at = ?, updated_at = ?
+               WHERE id = ?""",
+            (json.dumps(thread), timestamp, timestamp, operation["id"]),
+        )
+        self.store.execute(
+            "INSERT INTO meta(key, value) VALUES ('desktop_smoke_check', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (timestamp,),
+        )
+
     def _retain_uncertain_condition(
         self, operation: dict[str, Any], condition: str
     ) -> None:
@@ -1152,7 +1211,10 @@ class Controller:
         )
         if bead is None or project is None:
             raise StoreError("assignment sources disappeared")
-        executor = await self._provision_task(
+        executor = self.store.row(
+            "SELECT * FROM tasks WHERE pair_id = ? AND role = 'executor' ORDER BY id DESC LIMIT 1",
+            (assignment["id"],),
+        ) or await self._provision_task(
             role="executor",
             description=bead["title"],
             project=project,
@@ -1160,7 +1222,10 @@ class Controller:
             effort=bead["executor_reasoning_effort"],
             pair_id=int(assignment["id"]),
         )
-        overseer = await self._provision_task(
+        overseer = self.store.row(
+            "SELECT * FROM tasks WHERE pair_id = ? AND role = 'overseer' ORDER BY id DESC LIMIT 1",
+            (assignment["id"],),
+        ) or await self._provision_task(
             role="overseer",
             description=bead["title"],
             project=project,
@@ -1199,9 +1264,8 @@ class Controller:
             "title": title,
         }
         operation = self.store.create_operation("thread_start", role, inputs)
-        self.store.execute(
-            "UPDATE external_operations SET state = 'sent' WHERE id = ?", (operation,)
-        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
         try:
             result = await self.runtime.create_thread(
                 cwd=project["repo_path"],
@@ -1220,10 +1284,6 @@ class Controller:
                 ),
             )
             thread = result["thread"]
-            self.store.execute(
-                "UPDATE external_operations SET native_id = ?, updated_at = ? WHERE id = ?",
-                (thread["id"], utc_now(), operation),
-            )
             task = self.store.register_task(
                 native_thread_id=thread["id"],
                 role=role,
@@ -1236,24 +1296,34 @@ class Controller:
                 role_number=role_number,
                 title=title,
             )
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result=result,
+                native_id=str(thread["id"]),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             await self.runtime.set_name(thread["id"], task["title"])
             self.store.execute(
                 "UPDATE tasks SET state = 'idle', runtime_status = 'unmaterialized', updated_at = ? WHERE id = ?",
                 (utc_now(), task["id"]),
             )
-            self.store.execute(
-                "UPDATE external_operations SET state = 'complete', native_id = ?, result_json = ?, updated_at = ? WHERE id = ?",
-                (thread["id"], json.dumps(result), utc_now(), operation),
-            )
             task["state"] = "idle"
             task["runtime_status"] = "unmaterialized"
             return task
         except Exception as error:
-            state = "uncertain" if isinstance(error, AppServerError) else "failed"
-            self.store.execute(
-                "UPDATE external_operations SET state = ?, condition = ?, updated_at = ? WHERE id = ?",
-                (state, str(error), utc_now(), operation),
+            current = self.store.row(
+                "SELECT state FROM external_operations WHERE id = ?", (operation,)
             )
+            if current is not None and current["state"] != "complete":
+                self._operation_failed(
+                    operation,
+                    error,
+                    attempt=attempt,
+                    started=started,
+                    mutation=True,
+                )
             raise
 
     async def _register_created_thread(
@@ -1455,13 +1525,6 @@ class Controller:
                    operator_hold_id = ?, next_attempt_at = NULL, condition = ?, updated_at = ?
                    WHERE id = ?""",
                 (hold.lastrowid, reason, timestamp, assignment["id"]),
-            )
-            connection.execute(
-                """INSERT INTO state_transitions(
-                       entity_type, entity_id, field_name, from_state, to_state,
-                       reason, created_at
-                   ) VALUES ('assignment', ?, 'stage', ?, 'recovering', ?, ?)""",
-                (str(assignment["id"]), assignment["stage"], reason, timestamp),
             )
 
     async def _dispatch_action(
@@ -1834,29 +1897,39 @@ class Controller:
                 assignment["bead_id"],
                 {"candidate_id": assignment["candidate_id"]},
             )
-            self.store.execute(
-                "UPDATE external_operations SET state = 'sent' WHERE id = ?",
-                (operation,),
-            )
+            attempt = self.store.begin_operation_attempt(operation)
+            started = time.monotonic()
             try:
                 await asyncio.to_thread(
                     self.beads.close,
                     assignment["bead_id"],
                     f"Delivered candidate {assignment['candidate_id']}",
                 )
-                self.store.execute(
-                    "UPDATE external_operations SET state = 'complete', updated_at = ? WHERE id = ?",
-                    (utc_now(), operation),
+                self.store.finish_operation_attempt(
+                    operation,
+                    attempt,
+                    state="complete",
+                    result={"closed": True},
+                    native_id=str(assignment["bead_id"]),
+                    duration_ms=int((time.monotonic() - started) * 1000),
                 )
-            except BeadsUncertainError as error:
-                self.store.execute(
-                    "UPDATE external_operations SET state = 'uncertain', condition = ?, updated_at = ? WHERE id = ?",
-                    (str(error), utc_now(), operation),
+            except Exception as error:
+                self._operation_failed(
+                    operation,
+                    error,
+                    attempt=attempt,
+                    started=started,
+                    mutation=True,
                 )
                 self.store.execute(
                     "UPDATE assignments SET condition = ?, updated_at = ? WHERE id = ?",
                     (str(error), utc_now(), assignment["id"]),
                 )
+                retained = self.store.row(
+                    "SELECT * FROM external_operations WHERE id = ?", (operation,)
+                )
+                if retained is not None:
+                    await asyncio.to_thread(self._reconcile_beads_close, retained)
                 return
         self._record_assignment_completed(assignment)
 
@@ -2379,9 +2452,8 @@ class Controller:
                 "project_id": project["codex_project_id"],
             },
         )
-        self.store.execute(
-            "UPDATE external_operations SET state = 'sent' WHERE id = ?", (operation,)
-        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
         try:
             result = await self.runtime.create_thread(
                 cwd=project["repo_path"],
@@ -2432,16 +2504,30 @@ class Controller:
                     "setup smoke task project binding was not retained"
                 )
             await self.runtime.archive(thread_id)
-            self.store.execute(
-                "UPDATE external_operations SET state = 'complete', native_id = ?, result_json = ?, updated_at = ? WHERE id = ?",
-                (thread_id, json.dumps(observed), utc_now(), operation),
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result=observed,
+                native_id=str(thread_id),
+                duration_ms=int((time.monotonic() - started) * 1000),
             )
             self.store.execute(
                 "INSERT INTO meta(key, value) VALUES ('desktop_smoke_check', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (utc_now(),),
             )
         except Exception as error:
-            self._operation_failed(operation, error)
+            current = self.store.row(
+                "SELECT state FROM external_operations WHERE id = ?", (operation,)
+            )
+            if current is not None and current["state"] != "complete":
+                self._operation_failed(
+                    operation,
+                    error,
+                    attempt=attempt,
+                    started=started,
+                    mutation=True,
+                )
             raise StoreError(
                 f"shared runtime visibility smoke check failed: {error}"
             ) from error
@@ -3157,6 +3243,19 @@ class Controller:
                         await asyncio.to_thread(
                             tollgate.cancel, item["tollgate_repo_id"], candidate_id
                         )
+                        confirmed = await asyncio.to_thread(
+                            tollgate.status, item["tollgate_repo_id"], candidate_id
+                        )
+                        retained = _candidate_by_id(confirmed, candidate_id)
+                        if retained and retained.get("state") in {
+                            "queued",
+                            "running",
+                            "validated",
+                            "promoting",
+                        }:
+                            raise StoreError(
+                                f"candidate {candidate_id} remains active after cancellation"
+                            )
                     completed_candidates.add(identity)
                     record["candidates_disposed"] = sorted(completed_candidates)
                     self._write_reboot_record(record)
@@ -3168,6 +3267,10 @@ class Controller:
                         item["tollgate_repo_id"],
                         item["worktree_path"],
                     )
+                    if path.exists():
+                        raise StoreError(
+                            f"worktree {path} remains present after removal"
+                        )
                 completed_worktrees.add(identity)
                 self.store.execute(
                     "UPDATE assignments SET worktree_path = NULL, updated_at = ? WHERE id = ?",
@@ -3253,7 +3356,7 @@ class Controller:
         source = Path(self.config.source_root) / "src" / "fulcrum"
         async for changes in awatch(source, debounce=250):
             self.store.heartbeat("source-watch")
-            if not any(str(path).endswith(".py") for _, path in changes):
+            if not any(str(path).endswith((".py", ".md")) for _, path in changes):
                 continue
             self.starts_enabled = False
             async with self.mutation_lock:
