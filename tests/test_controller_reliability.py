@@ -626,7 +626,18 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             (archon["id"],),
         )
         with (
-            patch.object(self.controller, "_refresh_task", new=AsyncMock()),
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "last_turn_id": "turn-1",
+                        "last_turn_status": "completed",
+                        "last_turn_terminal": True,
+                        "helpers_terminal": True,
+                    }
+                ),
+            ),
             patch.object(
                 self.controller, "_dispatch_action", new=AsyncMock()
             ) as dispatch,
@@ -680,6 +691,52 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             "SELECT state, condition FROM actions WHERE id = ?", (action.lastrowid,)
         )
         self.assertEqual(retained, {"state": "active", "condition": None})
+
+    async def test_completed_thread_overrides_stale_interrupted_event(self) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-stale-status",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        action = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, kind, payload, state, native_turn_id, outcome_kind,
+                   outcome_payload, created_at, updated_at
+               ) VALUES (?, 'archon', '{}', 'active', 'turn-1', 'decisions',
+                         ?, 'now', 'now')""",
+            (archon["id"], '{"decisions":[],"handled_update_ids":[]}'),
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?",
+            (archon["id"],),
+        )
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "last_turn_id": "turn-1",
+                    "last_turn_status": "completed",
+                    "last_turn_terminal": True,
+                    "helpers_terminal": True,
+                }
+            ),
+        ):
+            await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "archon-stale-status",
+                    "turn": {"id": "turn-1", "status": "interrupted"},
+                },
+            )
+
+        retained = self.controller.store.row(
+            "SELECT state, condition FROM actions WHERE id = ?", (action.lastrowid,)
+        )
+        self.assertEqual(retained, {"state": "processed", "condition": None})
 
     async def test_archived_task_ignores_late_runtime_events(self) -> None:
         self.controller.store.execute(

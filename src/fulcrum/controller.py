@@ -362,11 +362,17 @@ class Controller:
                 else None
             )
             if action is not None:
-                if status != "completed" and facts["last_turn_id"] != turn_id:
+                if facts["last_turn_id"] != turn_id:
                     self.advance_requested.set()
                     return
+                observed_status = (
+                    str(facts["last_turn_status"])
+                    if facts["last_turn_terminal"]
+                    and facts["last_turn_status"] is not None
+                    else str(status)
+                )
                 if (
-                    status == "completed"
+                    observed_status == "completed"
                     and action["outcome_kind"]
                     in {"ready_for_review", "permitted_repair_complete"}
                     and action["assignment_id"] is not None
@@ -377,7 +383,7 @@ class Controller:
                     if not captured:
                         return
                 result = observe_action_terminal(
-                    self.store, int(action["id"]), runtime_state=str(status)
+                    self.store, int(action["id"]), runtime_state=observed_status
                 )
                 if result.get("reminder"):
                     action["reminder_sent"] = 1
@@ -455,7 +461,9 @@ class Controller:
         self._retry_recovering_assignments()
         await self._retry_pending_actions()
         task_ids = self.store.rows("""SELECT DISTINCT task_id FROM actions
-               WHERE state IN ('starting','active','terminal','uncertain')""")
+               WHERE state IN ('starting','active','terminal','uncertain')
+               OR (state = 'failed' AND outcome_kind IS NOT NULL
+                   AND condition LIKE 'runtime turn %')""")
         for item in task_ids:
             task = self.store.row(
                 "SELECT * FROM tasks WHERE id = ?", (item["task_id"],)
@@ -465,7 +473,11 @@ class Controller:
             try:
                 facts = await self._refresh_task(task)
                 action = self.store.row(
-                    "SELECT * FROM actions WHERE task_id = ? AND state IN ('active','terminal') ORDER BY id DESC LIMIT 1",
+                    """SELECT * FROM actions WHERE task_id = ?
+                       AND (state IN ('active','terminal') OR
+                            (state = 'failed' AND outcome_kind IS NOT NULL
+                             AND condition LIKE 'runtime turn %'))
+                       ORDER BY id DESC LIMIT 1""",
                     (task["id"],),
                 )
                 if (

@@ -214,6 +214,43 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(assignment["stage"], "recovering")
         self.assertIsNotNone(assignment["next_attempt_at"])
 
+    def test_completed_observation_recovers_false_runtime_failure(self) -> None:
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        cursor = self.store.execute(
+            """INSERT INTO actions(
+                   task_id, kind, payload, state, outcome_kind, outcome_payload,
+                   condition, created_at, updated_at
+               ) VALUES (?, 'archon', '{}', 'failed', 'decisions', ?, ?, 'now', 'now')""",
+            (
+                archon["id"],
+                '{"decisions":[],"handled_update_ids":[]}',
+                "runtime turn interrupted; retained for specific recovery",
+            ),
+        )
+        self.store.execute(
+            "UPDATE tasks SET last_turn_terminal = 1, helpers_terminal = 1 WHERE id = ?",
+            (archon["id"],),
+        )
+
+        result = observe_action_terminal(
+            self.store, int(cursor.lastrowid), runtime_state="completed"
+        )
+
+        self.assertTrue(result["advanced"])
+        self.assertEqual(
+            self.store.row(
+                "SELECT state FROM actions WHERE id = ?", (cursor.lastrowid,)
+            )["state"],
+            "processed",
+        )
+
     def test_archon_cannot_lower_capacity_below_active_usage(self) -> None:
         self.store.execute("UPDATE meta SET value = '2' WHERE key = 'global_limit'")
         self.store.execute(

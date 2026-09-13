@@ -80,7 +80,13 @@ def observe_action_terminal(
         raise StoreError(f"unknown action {action_id}")
     if action["state"] == "processed":
         return {"advanced": True, "reused": True}
-    if action["state"] in {"failed", "canceled"}:
+    recoverable_runtime_failure = bool(
+        action["state"] == "failed"
+        and runtime_state == "completed"
+        and action["outcome_kind"] is not None
+        and str(action["condition"] or "").startswith("runtime turn ")
+    )
+    if action["state"] in {"failed", "canceled"} and not recoverable_runtime_failure:
         return {
             "advanced": False,
             "condition": action["condition"] or f"action is {action['state']}",
