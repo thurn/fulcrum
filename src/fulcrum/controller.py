@@ -337,7 +337,7 @@ class Controller:
                 (status, timestamp, task["id"]),
             )
         elif method == "turn/completed":
-            await self._refresh_task(task)
+            facts = await self._refresh_task(task)
             turn = params.get("turn")
             turn_id = turn.get("id") if isinstance(turn, dict) else None
             status = (
@@ -355,6 +355,9 @@ class Controller:
                 else None
             )
             if action is not None:
+                if status != "completed" and facts["last_turn_id"] != turn_id:
+                    self.advance_requested.set()
+                    return
                 if (
                     status == "completed"
                     and action["outcome_kind"]

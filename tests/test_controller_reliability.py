@@ -649,6 +649,38 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fulcrum instructions", text)
         self.assertNotIn("Exact approved proposal", text)
 
+    async def test_unconfirmed_interrupted_event_does_not_fail_new_turn(self) -> None:
+        action = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, native_turn_id,
+                   created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'active', 'new-turn', 'now', 'now')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "last_turn_id": None,
+                    "last_turn_terminal": True,
+                    "helpers_terminal": True,
+                }
+            ),
+        ):
+            await self.controller._handle_runtime_event(
+                "turn/completed",
+                {
+                    "threadId": "executor",
+                    "turn": {"id": "new-turn", "status": "interrupted"},
+                },
+            )
+
+        retained = self.controller.store.row(
+            "SELECT state, condition FROM actions WHERE id = ?", (action.lastrowid,)
+        )
+        self.assertEqual(retained, {"state": "active", "condition": None})
+
     async def test_archived_task_ignores_late_runtime_events(self) -> None:
         self.controller.store.execute(
             "UPDATE tasks SET state = 'archived', archived = 1 WHERE id = ?",
