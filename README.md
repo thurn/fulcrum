@@ -34,8 +34,15 @@ For unattended setup:
 
 ## Operate
 
-Human users create and register Weaver tasks. Fulcrum creates and manages Archon,
-Executor, and Overseer tasks.
+To begin work, a human opens a separate native Codex task in the enrolled project
+and registers that task as the Weaver:
+
+```sh
+fulcrum weaver register --project fulcrum
+```
+
+Fulcrum then creates and manages the Executor and Overseer tasks; the human does
+not create those tasks.
 
 ```sh
 fulcrum status --json
