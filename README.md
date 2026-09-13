@@ -273,15 +273,11 @@ contributions keep their dated rates when the public card changes.
 
 Workflow totals follow explicit causality from Weaver intake through Archon,
 Executor/helpers, Overseer correction/recovery cycles, specialists, delivery, and
-completion acknowledgement, excluding unrelated concurrent work. A confirmation
-such as `Action 30 completed at estimated API cost of $3.13.` reports the completed
-action. A workflow value beside it is frozen through that completion and excludes
-the running acknowledgement; the controller freezes the all-in value after that
-turn terminates. If one Archon response contains work for multiple causal
-workflows, its indivisible response cost is excluded from each workflow rather
-than copied into all of them, and those workflow totals are explicitly partial.
-An eligible completion in a mixed batch still closes independently after the
-acknowledgement terminates.
+completion acknowledgement, excluding unrelated concurrent work. Judgment-free
+completion updates are acknowledged directly by the controller without starting an
+Archon turn. The controller emits one concise completion event with any available
+frozen action-cost estimate, then freezes the eligible all-in workflow value. The
+processed update makes this restart- and replay-idempotent.
 
 ### Replace the managed fleet
 

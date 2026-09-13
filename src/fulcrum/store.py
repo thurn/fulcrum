@@ -336,6 +336,12 @@ CREATE TABLE IF NOT EXISTS updates (
   state TEXT NOT NULL DEFAULT 'retained' CHECK (state IN ('retained','batched','processed','canceled')),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(recipient_task_id, identity)
 );
+CREATE TABLE IF NOT EXISTS scope_references (
+  identity TEXT PRIMARY KEY, update_id INTEGER NOT NULL UNIQUE REFERENCES updates(id),
+  bead_id TEXT NOT NULL REFERENCES beads(bead_id),
+  project_id TEXT NOT NULL REFERENCES projects(project_id),
+  scope_snapshot TEXT NOT NULL, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS batches (
   id INTEGER PRIMARY KEY, recipient_task_id INTEGER NOT NULL REFERENCES tasks(id),
   state TEXT NOT NULL CHECK (state IN ('frozen','sending','accepted','processed','uncertain','failed')),
@@ -2581,7 +2587,7 @@ class Store:
         )
 
     def finalize_workflow_cost(self, workflow_id: str) -> dict[str, Any]:
-        """Freeze the all-in total only after the final acknowledgement terminated."""
+        """Freeze the all-in total after controller-owned completion acknowledgement."""
 
         boundary = self.row(
             "SELECT * FROM workflow_cost_boundaries WHERE workflow_id = ?",

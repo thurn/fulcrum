@@ -124,6 +124,146 @@ class LifecycleTest(unittest.TestCase):
             )
         return action_id, observe_action_terminal(self.store, action_id)
 
+    def _proposal_action(self) -> tuple[int, int, str]:
+        now = "2026-01-01T00:00:00Z"
+        scope = "Exact retained scope " + ("detail " * 100)
+        self.store.execute(
+            """INSERT INTO beads VALUES (
+                   'p-2','key-2','p','Second',?,'pending','sol','high','sol','high',
+                   'default',NULL,NULL,'[]','complete',?,?
+               )""",
+            (scope, now, now),
+        )
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        update = self.store.execute(
+            """INSERT INTO updates(
+                   recipient_task_id, identity, content, actionable, state,
+                   created_at, updated_at
+               ) VALUES (?, 'proposal:p-2', ?, 1, 'batched', ?, ?)""",
+            (
+                archon["id"],
+                json.dumps(
+                    {
+                        "kind": "proposal",
+                        "bead_id": "p-2",
+                        "project": "p",
+                        "title": "Second",
+                        "scope_summary": "Exact retained scope…",
+                        "scope_reference": "scope:test",
+                    }
+                ),
+                now,
+                now,
+            ),
+        )
+        self.store.execute(
+            """INSERT INTO scope_references(
+                   identity, update_id, bead_id, project_id, scope_snapshot, created_at
+               ) VALUES ('scope:test', ?, 'p-2', 'p', ?, ?)""",
+            (update.lastrowid, scope, now),
+        )
+        batch = self.store.execute(
+            "INSERT INTO batches(recipient_task_id, state, created_at, updated_at) VALUES (?, 'frozen', ?, ?)",
+            (archon["id"], now, now),
+        )
+        action = self.store.execute(
+            """INSERT INTO actions(
+                   task_id, kind, payload, state, created_at, updated_at
+               ) VALUES (?, 'archon', '{}', 'active', ?, ?)""",
+            (archon["id"], now, now),
+        )
+        self.store.execute(
+            "UPDATE batches SET action_id = ? WHERE id = ?",
+            (action.lastrowid, batch.lastrowid),
+        )
+        self.store.execute(
+            "INSERT INTO batch_updates(batch_id, update_id) VALUES (?, ?)",
+            (batch.lastrowid, update.lastrowid),
+        )
+        return int(action.lastrowid), int(update.lastrowid), scope
+
+    def test_archon_approval_resolves_exact_controller_retained_scope(self) -> None:
+        action_id, update_id, scope = self._proposal_action()
+        accept_finish(
+            self.store,
+            native_thread_id="archon",
+            outcome_kind="decisions",
+            options={
+                "input": {
+                    "decisions": [
+                        {
+                            "decision": "approve",
+                            "project": "p",
+                            "beads": ["p-2"],
+                            "scope_references": {"p-2": "scope:test"},
+                        }
+                    ],
+                    "handled_update_ids": [update_id],
+                }
+            },
+        )
+
+        self.assertTrue(observe_action_terminal(self.store, action_id)["advanced"])
+        approved = self.store.row(
+            "SELECT scope_snapshot FROM assignments WHERE bead_id = 'p-2'"
+        )
+        self.assertEqual(approved["scope_snapshot"], scope)
+
+    def test_archon_approval_rejects_missing_scope_reference(self) -> None:
+        action_id, update_id, _ = self._proposal_action()
+        accept_finish(
+            self.store,
+            native_thread_id="archon",
+            outcome_kind="decisions",
+            options={
+                "input": {
+                    "decisions": [
+                        {"decision": "approve", "project": "p", "beads": ["p-2"]}
+                    ],
+                    "handled_update_ids": [update_id],
+                }
+            },
+        )
+
+        result = observe_action_terminal(self.store, action_id)
+        self.assertIn("exactly one retained scope reference", result["condition"])
+        self.assertEqual(
+            self.store.row("SELECT state FROM updates WHERE id = ?", (update_id,))[
+                "state"
+            ],
+            "retained",
+        )
+
+    def test_archon_approval_rejects_stale_scope_reference(self) -> None:
+        action_id, update_id, _ = self._proposal_action()
+        accept_finish(
+            self.store,
+            native_thread_id="archon",
+            outcome_kind="decisions",
+            options={
+                "input": {
+                    "decisions": [
+                        {
+                            "decision": "approve",
+                            "project": "p",
+                            "beads": ["p-2"],
+                            "scope_references": {"p-2": "scope:old"},
+                        }
+                    ],
+                    "handled_update_ids": [update_id],
+                }
+            },
+        )
+
+        result = observe_action_terminal(self.store, action_id)
+        self.assertIn("missing or stale", result["condition"])
+
     def test_finish_is_bound_idempotent_and_advances_after_runtime_terminal(
         self,
     ) -> None:
@@ -306,20 +446,32 @@ class LifecycleTest(unittest.TestCase):
         )
         self.assertEqual(updates[0]["state"], "retained")
         escalation = json.loads(updates[0]["content"])
+        self.assertEqual(escalation["action_id"], third_action)
+        self.assertEqual(escalation["assignment_id"], self.assignment["id"])
+        self.assertEqual(escalation["bead_id"], "p-1")
+        self.assertEqual(escalation["project"], "p")
+        self.assertEqual(escalation["hold_id"], holds[0]["id"])
+        self.assertEqual(escalation["resolutions"], ["retry", "rescope", "cancel"])
         self.assertEqual(
-            escalation,
-            {
-                "action_id": third_action,
-                "assignment_id": self.assignment["id"],
-                "condition": "three substantive review failures require Archon decision",
-                "hold_id": holds[0]["id"],
-                "kind": "review_failure_escalation",
-                "required_decision": "resolve_escalation",
-                "resolutions": ["retry", "rescope", "cancel"],
-                "review_action": "changes_requested",
-                "review_failures": 3,
-            },
+            [item["problem"] for item in escalation["unresolved_findings"]],
+            ["third defect"],
         )
+        self.assertEqual(
+            [item["findings"][0] for item in escalation["prior_review_history"]],
+            ["second defect", "first defect"],
+        )
+        self.assertTrue(
+            all(
+                item["classification"]
+                == "prior review history; resolution status not inferred"
+                for item in escalation["prior_review_history"]
+            )
+        )
+        self.assertEqual(
+            escalation["reviewer_recommendation"][0], "correct third defect"
+        )
+        self.assertEqual(escalation["candidate_revision"]["source"], "source")
+        self.assertIn("implementation", escalation["changes_since_prior_attempt"])
 
         self.assertEqual(
             observe_action_terminal(self.store, third_action),

@@ -105,14 +105,26 @@ helper attribution.
 
 A causal identity begins at Weaver intake and follows its beads through Archon
 proposal/approval, all Executor/Overseer correction and recovery actions, helpers,
-delivery, and the completion Archon action. Specialist workflows use occurrence
-identity. Explicit joins exclude unrelated concurrent work and survive retries and
-Archon succession. Completion updates contain action cost and workflow cost through
-completion, excluding the acknowledgement being generated. After that Archon action
-terminates, the controller prices it and freezes/logs the all-in total. Each
-acknowledged workflow in a batch closes independently of proposal, recovery,
-escalation, operation-resolution, or succession items beside it. When one Archon
-response spans multiple workflow identities and response-level ownership is not
-available, the response is excluded from every affected workflow rather than
-duplicated; each total records that partial-allocation exclusion. Unique source
-identities and joins make replay idempotent.
+and delivery. Specialist workflows use occurrence identity. Explicit joins exclude
+unrelated concurrent work and survive retries and Archon succession. The controller
+acknowledges judgment-free completion updates without starting an Archon turn,
+emits a concise completion event, and freezes the workflow total. Conditional state
+transitions and unique source identities make replay and restart idempotent.
+
+Controller-bound Archon actions use a layered contract: action/update identities;
+bead and project with a bounded scope summary; capacity and active work;
+dependencies, holds, and conflicts; then allowed outcomes and required decisions.
+An aggregate action budget always retains frozen update facts and finish guidance;
+active-work, conflict, hold, and uncertain-operation rows share the remaining space
+round-robin, with exact shown and controller-retained counts for omitted rows. The
+complete dispatched prompt has a separate deterministic ceiling. Batch admission
+freezes the largest ordered update prefix whose mandatory layers fit; overflow
+updates remain retained for later exact batches instead of failing advancement.
+The full proposal scope is retained in a durable `scope_references` row keyed to the
+frozen update. Archon returns that stable identity, never copied scope text. Outcome
+application rejects missing, malformed, cross-update, or stale references before
+resolving the exact retained scope into an assignment. Review-failure escalations
+identify only the current failing review as unresolved, label older findings as
+history without inferring their resolution, and carry bounded candidate revision,
+intervening change evidence, and current reviewer recommendation. Complete evidence
+stays in handoffs.

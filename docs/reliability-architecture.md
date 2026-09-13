@@ -174,16 +174,30 @@ by source identity.
 
 Workflow cost uses explicit causal joins from Weaver intake, never project/run or
 thread proximity. Retries, recovery, correction cycles, specialists, helpers,
-Archon succession, and completion delivery are included once while unrelated
-work is excluded. An acknowledgement may quote only the frozen total through the
-work it acknowledges. After that Archon turn terminates and its finish is accepted,
-each eligible acknowledged boundary is finalized independently, even if unrelated
-actionable facts shared the batch. A single-workflow acknowledgement contribution
-is included and the all-in total is frozen. If the Archon response spans multiple
-workflow identities, Fulcrum cannot divide its response telemetry safely: it
-excludes that response from every affected workflow, marks each total partial, and
-never copies unrelated cost across boundaries. Replays and restarts return the
-same value and emit one finalization event.
+Archon succession, and completion delivery are included once while unrelated work
+is excluded. Judgment-free completion updates are acknowledged by a conditional
+controller transition rather than an Archon turn; the controller emits one concise
+human-facing completion event and freezes the eligible workflow boundary. Replays
+and restarts observe the processed update and cannot duplicate either operation.
+
+Scheduling prompts are bounded, layered views over authoritative state. A proposal
+stores its full scope once in `scope_references`, linked to the durable update, and
+exposes only a short summary plus the stable reference. Approval must return exactly
+one current-batch reference per bead; missing, malformed, copied-text, cross-update,
+and stale references fail atomically and release the frozen updates for retry. The
+controller then resolves the exact stored scope. Capacity, active assignments,
+dependencies, holds, and conflict keys precede result guidance. Escalations retain
+complete handoffs, identify only current-review findings as unresolved, classify
+older cycles as history without inferred resolution, and expose bounded candidate
+revision, intervening changes, and current reviewer requirements.
+Frozen update identities, proposal scope references, required decisions, and finish
+guidance are mandatory under the aggregate prompt budget. Lower-priority active,
+conflict, hold, and uncertain-operation rows are admitted round-robin from the
+remaining budget; each section reports exact shown and retained counts, and the
+controller enforces the complete dispatched-prompt ceiling before starting a turn.
+The controller admits the largest ordered prefix whose mandatory update and result
+layers fit. Later updates remain retained and unfrozen for the next batch, so a
+high-cardinality escalation queue makes bounded progress without reordering or loss.
 
 Turn binding reconciles usage that arrived before `turn/started` or before an
 uncertain start was resolved. Terminal observation finalizes the latest retained

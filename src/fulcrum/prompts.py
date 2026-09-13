@@ -13,6 +13,13 @@ class PromptError(RuntimeError):
     pass
 
 
+MAX_ARCHON_TEXT = 240
+MAX_ARCHON_ROWS = 20
+MAX_ARCHON_FACTS = 480
+MAX_ARCHON_MESSAGE_CHARS = 32_000
+MAX_ARCHON_ACTION_CHARS = 28_000
+
+
 TEMPLATES = {
     "implement": "executor.md",
     "correct": "executor.md",
@@ -102,6 +109,81 @@ def _facts(values: dict[str, Any]) -> str:
     )
 
 
+def _bounded(value: Any, limit: int = MAX_ARCHON_TEXT) -> str:
+    """Render one decision fact with a deterministic prompt-size ceiling."""
+
+    rendered = " ".join(_text(value).split())
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 1].rstrip() + "…"
+
+
+def _bounded_facts(values: dict[str, Any]) -> str:
+    rendered = "; ".join(
+        f"{_bounded(key.replace('_', ' '), 80)}: {_bounded(value)}"
+        for key, value in list(values.items())[:12]
+        if value is not None and value != [] and value != {}
+    )
+    return _bounded(rendered, MAX_ARCHON_FACTS)
+
+
+def _budgeted_archon_message(
+    required_lines: list[str],
+    snapshot_sections: list[tuple[str, str, list[str]]],
+    finish_lines: list[str],
+) -> str:
+    """Fit optional fleet detail without displacing frozen decision facts.
+
+    Snapshot rows are admitted round-robin so active work, holds, and uncertain
+    operations all remain represented under pressure. Each section summary is
+    rendered from the final admitted count, making omitted-state accounting
+    deterministic and exact.
+    """
+
+    shown = [0] * len(snapshot_sections)
+
+    def render(counts: list[int]) -> str:
+        rendered_lines = list(required_lines)
+        for index, (label, retained_noun, rows) in enumerate(snapshot_sections):
+            if not rows:
+                continue
+            count = counts[index]
+            omitted = len(rows) - count
+            summary = f"{label}: showing {count}/{len(rows)}"
+            if omitted:
+                summary += (
+                    f"; {omitted} additional {retained_noun} retained by the "
+                    "controller."
+                )
+            else:
+                summary += "; all relevant details shown."
+            rendered_lines.append(summary)
+            rendered_lines.extend(rows[:count])
+        rendered_lines.extend(finish_lines)
+        return "\n".join(rendered_lines)
+
+    message = render(shown)
+    if len(message) > MAX_ARCHON_ACTION_CHARS:
+        raise PromptError(
+            "required Archon decision facts exceed their deterministic size ceiling"
+        )
+
+    while True:
+        admitted = False
+        for index, (_, _, rows) in enumerate(snapshot_sections):
+            if shown[index] >= len(rows):
+                continue
+            candidate = list(shown)
+            candidate[index] += 1
+            candidate_message = render(candidate)
+            if len(candidate_message) <= MAX_ARCHON_ACTION_CHARS:
+                shown = candidate
+                message = candidate_message
+                admitted = True
+        if not admitted:
+            return message
+
+
 def _archon_finish_guidance(
     payload: dict[str, Any], *, action_id: int | str | None
 ) -> list[str]:
@@ -112,15 +194,11 @@ def _archon_finish_guidance(
         item["content"] for item in items if isinstance(item.get("content"), dict)
     ]
     kinds = {content.get("kind") for content in contents}
-    acknowledge_only = bool(update_ids) and kinds <= {
-        "assignment_completed",
-        "specialist_completed",
-        "archon_succession_completed",
-    }
     rendered_id = action_id if action_id is not None else "current"
     lines = [
-        f"Action {rendered_id}. Finish required: yes. Relevant outcome: "
-        + ("decisions." if acknowledge_only else "decisions or deferred.")
+        f"Action {rendered_id}. Finish required: yes. "
+        f"Update IDs: {json.dumps(update_ids)}. "
+        "Scheduling decision required; finish with decisions or deferred."
     ]
 
     if payload.get("purpose") == "initial_policies":
@@ -162,34 +240,14 @@ def _archon_finish_guidance(
         )
     elif update_ids:
         lines.append("Required handled_update_ids: " + json.dumps(update_ids) + ".")
-        if acknowledge_only:
-            lines.append(
-                "No scheduling change is required unless the update itself identifies one. Acknowledge with: "
-                + json.dumps(
-                    {"decisions": [], "handled_update_ids": update_ids},
-                    ensure_ascii=False,
-                )
-            )
-            lines.append(
-                "Repeat each controller-supplied completion cost sentence exactly. "
-                "Do not calculate, refresh, extrapolate, or invent a price. A workflow "
-                "estimate through completion excludes this still-running acknowledgement; "
-                "only a later controller finalization is all-in."
-            )
-            if any(content.get("minor_fixes") for content in contents):
-                lines.append(
-                    "Do not schedule the nonblocking follow-up; it requires a new Weaver bead."
-                )
         if "proposal" in kinds:
             proposals = [
                 {
                     "decision": "approve",
                     "project": content["project"],
                     "beads": [content["bead_id"]],
-                    "scope": {
-                        content["bead_id"]: (
-                            f"exact Scope text from update {item['update_id']}"
-                        )
+                    "scope_references": {
+                        content["bead_id"]: content.get("scope_reference", "missing")
                     },
                 }
                 for item in items
@@ -197,7 +255,7 @@ def _archon_finish_guidance(
                 and content.get("kind") == "proposal"
             ]
             lines.append(
-                "For approval, use this shape and replace each scope marker with the exact Scope text above: "
+                "Approve only with the listed controller-retained scope reference: "
                 + json.dumps(
                     {"decisions": proposals, "handled_update_ids": update_ids},
                     ensure_ascii=False,
@@ -228,10 +286,9 @@ def _archon_finish_guidance(
     lines.append(
         'Finish decisions: write complete JSON to a sibling temporary file, atomically rename it to "/absolute/decisions.json", then run `fulcrum finish decisions --input "/absolute/decisions.json"`.'
     )
-    if not acknowledge_only:
-        lines.append(
-            'Defer the whole batch only when it must wait: `fulcrum finish deferred --reason "why" --input "/absolute/reactivation.json"`. Reactivation JSON must contain exactly one concrete trigger: capacity, dependency, hold, operator_change, or next_check_at.'
-        )
+    lines.append(
+        'Defer the whole batch only when it must wait: `fulcrum finish deferred --reason "why" --input "/absolute/reactivation.json"`. Reactivation JSON must contain exactly one concrete trigger: capacity, dependency, hold, operator_change, or next_check_at.'
+    )
     return lines
 
 
@@ -239,12 +296,13 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
     """Render the pending decisions, not the entire fleet record or role manual."""
     items = payload.get("batch_items", [])
     lines: list[str] = []
+    snapshot_sections: list[tuple[str, str, list[str]]] = []
     projects: set[str] = set()
     for item in items:
         content = item["content"]
         prefix = f"Update {item['update_id']}: "
         if not isinstance(content, dict):
-            lines.append(prefix + _text(content))
+            lines.append(prefix + _bounded(content))
             continue
         project = content.get("project") or content.get("project_id")
         if project:
@@ -253,7 +311,9 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
         if kind == "proposal":
             lines.append(
                 prefix
-                + f"Approve or defer {content['bead_id']} ({project}): {content['title']}.\nScope: {content['scope']}"
+                + f"{content['bead_id']} ({project}) — {_bounded(content['title'])}. "
+                + f"Scope summary: {_bounded(content.get('scope_summary', 'unavailable'))}. "
+                + f"Retained scope: {content.get('scope_reference', 'missing')}."
             )
             details = {key: content.get(key) for key in ("dependencies", "context")}
             plan = content.get("plan") or {}
@@ -262,24 +322,24 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
             models = content.get("models") or {}
             if models.get("provenance") not in {None, "default"}:
                 details["models"] = models
-            if _facts(details):
-                lines.append(_facts(details))
+            if _bounded_facts(details):
+                lines.append(_bounded_facts(details))
         elif kind == "assignment_completed":
             lines.append(
                 prefix
-                + f"{content['bead_id']} completed (assignment {content['assignment_id']}, run {content['run_id']})."
+                + f"{_bounded(content['bead_id'])} completed (assignment {content['assignment_id']}, run {content['run_id']})."
             )
             lines.extend(_archon_cost_confirmation(content))
             if content.get("minor_fixes"):
                 lines.append(
                     "Overseer nonblocking follow-up (not approved work): "
-                    + _text(content["minor_fixes"])
+                    + _bounded(content["minor_fixes"])
                 )
         elif kind == "assignment_recovery":
             lines.append(
                 prefix
-                + f"Assignment {content['assignment_id']} ({content['bead_id']}, run {content['run_id']}) needs recovery: {content['condition']}. "
-                + _facts(
+                + f"Assignment {content['assignment_id']} ({_bounded(content['bead_id'])}, run {content['run_id']}) needs recovery: {_bounded(content['condition'])}. "
+                + _bounded_facts(
                     {
                         "attempt": content.get("attempt"),
                         "next_attempt_at": content.get("next_attempt_at"),
@@ -289,8 +349,22 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
         elif kind == "review_failure_escalation":
             lines.append(
                 prefix
-                + f"Assignment {content['assignment_id']} reached {content['review_failures']} substantive review failures: {content['condition']}. "
-                + _facts(
+                + f"Assignment {content['assignment_id']} reached {content['review_failures']} substantive review failures: {_bounded(content['condition'])}. "
+                + f"Bead/project: {_bounded(content.get('bead_id'))}/{_bounded(content.get('project'))}."
+            )
+            for label, value in (
+                ("Candidate revision", content.get("candidate_revision")),
+                ("Unresolved findings", content.get("unresolved_findings")),
+                ("Prior review history", content.get("prior_review_history")),
+                (
+                    "Changes since prior attempt",
+                    content.get("changes_since_prior_attempt"),
+                ),
+                ("Reviewer recommendation", content.get("reviewer_recommendation")),
+            ):
+                lines.append(f"{label.lower()}: {_bounded(value, MAX_ARCHON_FACTS)}")
+            lines.append(
+                _bounded_facts(
                     {
                         "review_action_id": content.get("action_id"),
                         "review_action": content.get("review_action"),
@@ -303,14 +377,14 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
         elif kind == "specialist_completed":
             lines.append(
                 prefix
-                + f"{content['specialist']} report {content['occurrence_id']}: {content['summary']} ({content['finding_count']} findings). "
-                + _facts({"scope": content.get("scope")})
+                + f"{_bounded(content['specialist'])} report {content['occurrence_id']}: {_bounded(content['summary'])} ({content['finding_count']} findings). "
+                + _bounded_facts({"scope": content.get("scope")})
             )
             lines.extend(_archon_cost_confirmation(content))
         else:
             # Unknown exceptions retain their actual decision data instead of
             # silently becoming an uninformative notification count.
-            lines.append(prefix + _facts(content))
+            lines.append(prefix + _bounded_facts(content))
     snapshot = payload.get("fleet_snapshot") or {}
     capacity = snapshot.get("capacity") or {}
     if capacity:
@@ -318,11 +392,9 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
         usage = capacity.get("project_usage") or {}
         if not items:
             projects.update(limits)
-        line = f"Capacity used: global {capacity.get('global_usage', 0)}/{capacity.get('global_limit', 'unset')}"
+        line = f"Capacity used: global {_bounded(capacity.get('global_usage', 0), 32)}/{_bounded(capacity.get('global_limit', 'unset'), 32)}"
         for project in sorted(projects):
-            line += (
-                f"; {project} {usage.get(project, 0)}/{limits.get(project, 'unset')}"
-            )
+            line += f"; {_bounded(project, 120)} {_bounded(usage.get(project, 0), 32)}/{_bounded(limits.get(project, 'unset'), 32)}"
         lines.append(line + ".")
     # Active work is pertinent when approving overlapping work. Completion-only
     # notifications need neither the whole project backlog nor unchanged policies.
@@ -338,27 +410,41 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
         for item in items
     )
     if scheduling:
-        active = snapshot.get("unfinished_assignments", [])
+        active = [
+            row
+            for row in snapshot.get("unfinished_assignments", [])
+            if not projects or row.get("project_id") in projects
+        ]
+        active_rows: list[str] = []
         for row in active:
-            if projects and row.get("project_id") not in projects:
-                continue
-            lines.append(
-                f"Existing {row['bead_id']} ({row.get('project_id')}, run {row['run_id']}, assignment {row['id']}): {row['stage']}"
-                + (f" — {row['condition']}" if row.get("condition") else "")
+            detail = (
+                f"Existing {_bounded(row['bead_id'])} ({_bounded(row.get('project_id'))}, run {row['run_id']}, assignment {row['id']}): {_bounded(row['stage'], 80)}"
+                + (f" — {_bounded(row['condition'])}" if row.get("condition") else "")
                 + f"; priority {row.get('priority', 0)}."
             )
-        for hold in snapshot.get("holds", []):
-            # Run and assignment holds are retained: their scope may be relevant
-            # even when the update does not include a project binding.
-            if (
+            if row.get("conflict_keys"):
+                detail += (
+                    f"\nConflicts for assignment {row['id']}: "
+                    f"{_bounded(row['conflict_keys'])}."
+                )
+            active_rows.append(detail)
+        snapshot_sections.append(("Active work", "relevant assignments", active_rows))
+        holds = [
+            hold
+            for hold in snapshot.get("holds", [])
+            if not (
                 hold.get("scope") == "project"
                 and projects
                 and str(hold.get("target")) not in projects
-            ):
-                continue
-            lines.append(
+            )
+        ]
+        hold_rows: list[str] = []
+        for hold in holds:
+            # Run and assignment holds are retained: their scope may be relevant
+            # even when the update does not include a project binding.
+            hold_rows.append(
                 f"Hold {hold['id']}: "
-                + _facts(
+                + _bounded_facts(
                     {
                         key: hold.get(key)
                         for key in (
@@ -371,10 +457,13 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
                     }
                 )
             )
-        for operation in snapshot.get("uncertain_operations", []):
-            lines.append(
+        snapshot_sections.append(("Holds", "relevant holds", hold_rows))
+        operations = snapshot.get("uncertain_operations", [])
+        operation_rows: list[str] = []
+        for operation in operations:
+            operation_rows.append(
                 f"External operation {operation['id']} requires explicit resolution: "
-                + _facts(
+                + _bounded_facts(
                     {
                         key: operation.get(key)
                         for key in (
@@ -386,20 +475,41 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
                     }
                 )
             )
+        snapshot_sections.append(
+            (
+                "External operations",
+                "unresolved operations",
+                operation_rows,
+            )
+        )
     if not items:
         lines.insert(
             0,
-            str(
+            _bounded(
                 payload.get("required")
                 or "Set the initial fleet capacity and recurring policies."
             ),
         )
         if payload.get("projects"):
-            lines.append("Projects: " + ", ".join(payload["projects"]) + ".")
-        for policy in snapshot.get("policies", []):
-            lines.append("Policy: " + _facts(policy))
+            lines.append("Projects: " + _bounded(payload["projects"]) + ".")
+        for policy in snapshot.get("policies", [])[:MAX_ARCHON_ROWS]:
+            lines.append("Policy: " + _bounded_facts(policy))
     guidance = _archon_finish_guidance(payload, action_id=action_id)
-    return "\n".join([guidance[0], *lines, *guidance[1:]])
+    return _budgeted_archon_message(
+        [guidance[0], *lines], snapshot_sections, guidance[1:]
+    )
+
+
+def archon_action_fits(payload: dict[str, Any]) -> bool:
+    """Return whether one frozen batch fits the reserved Archon action budget."""
+
+    try:
+        # SQLite action IDs cannot exceed this value. Using it before the action
+        # row exists makes admission conservative and independent of ID width.
+        _archon_message(payload, action_id=9_223_372_036_854_775_807)
+    except PromptError:
+        return False
+    return True
 
 
 def _archon_cost_confirmation(content: dict[str, Any]) -> list[str]:

@@ -121,7 +121,10 @@ def validate_outcome(
             handled = payload.get("handled_update_ids")
             if handled is not None and (
                 not isinstance(handled, list)
-                or not all(isinstance(item, int) for item in handled)
+                or not all(
+                    isinstance(item, int) and not isinstance(item, bool)
+                    for item in handled
+                )
             ):
                 raise OutcomeError("handled_update_ids must be an integer list")
         if outcome_kind == "changes_requested":
@@ -289,7 +292,7 @@ def finish_examples(action_kind: str) -> dict[str, Any]:
                     "decision": "approve",
                     "project": "project-id",
                     "beads": ["bead-id"],
-                    "scope": {"bead-id": "exact scope"},
+                    "scope_references": {"bead-id": "scope:update-id"},
                 },
                 {
                     "decision": "hold",

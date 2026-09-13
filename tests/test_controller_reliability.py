@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -3789,6 +3790,24 @@ print(json.dumps({
             project_id="p",
             state="idle",
         )
+        now = utc_now()
+        full_scope = (
+            "Show an empty state for zero matches; verify matching results remain correct. "
+            + ("authoritative detail " * 30)
+            + "SCOPE-TAIL"
+        )
+        self.controller.store.execute(
+            """INSERT INTO beads VALUES (
+                   'p-2','proposal-p-2','p','Fix empty results',?,
+                   'pending','sol','high','sol','high','default',NULL,NULL,
+                   '["conflict:search-ui"]','complete',?,?
+               )""",
+            (
+                full_scope,
+                now,
+                now,
+            ),
+        )
         self.controller._queue_archon_update(
             "proposal:p-2",
             {
@@ -3819,20 +3838,510 @@ print(json.dumps({
         ):
             await self.controller._deliver_update_batch()
         text = start.call_args.args[1]
-        self.assertIn("Approve or defer p-2 (p): Fix empty results", text)
+        self.assertIn("p-2 (p) — Fix empty results", text)
         self.assertIn(
             "Show an empty state for zero matches; verify matching results remain correct.",
             text,
         )
+        self.assertIn("Retained scope: scope:", text)
+        self.assertNotIn("SCOPE-TAIL", text)
+        self.assertNotIn('"scope":', text)
         self.assertIn("Capacity used:", text)
         self.assertIn("Existing p-1", text)
         self.assertNotIn("fulcrum instructions", text)
         self.assertIn("You are Archon", text)
         self.assertIn("# Current action", text)
         self.assertNotIn("Exact JSON", text)
-        self.assertLess(len(text.split()), 380)
+        self.assertLess(len(text.split()), 500)
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'",
+            (
+                self.controller.store.row(
+                    "SELECT id FROM tasks WHERE native_thread_id = 'archon-inline'"
+                )["id"],
+            ),
+        )
+        payload = json.loads(action["payload"])
+        reference = payload["batch_items"][0]["content"]["scope_reference"]
+        retained = self.controller.store.row(
+            "SELECT * FROM scope_references WHERE identity = ?", (reference,)
+        )
+        self.assertEqual(retained["scope_snapshot"], full_scope)
+        self.assertNotIn("SCOPE-TAIL", action["payload"])
 
-    async def test_mixed_archon_batch_finalizes_only_acknowledged_workflow_once(
+    async def test_completion_only_update_is_acknowledged_without_archon_turn(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-auto-completion",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        self.controller._queue_archon_update(
+            "completion:auto",
+            {
+                "kind": "assignment_completed",
+                "assignment_id": self.assignment["id"],
+                "bead_id": "p-1",
+                "run_id": self.assignment["run_id"],
+                "action_id": 30,
+                "minor_fixes": [],
+                "cost": {"action": {"attributed_display": "$3.13"}},
+            },
+        )
+        update = self.controller.store.row(
+            "SELECT * FROM updates WHERE identity = 'completion:auto'"
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        self.controller.runtime = runtime
+
+        await self.controller._deliver_update_batch()
+        await self.controller._deliver_update_batch()
+
+        runtime.start_turn.assert_not_awaited()
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT state FROM updates WHERE id = ?", (update["id"],)
+            )["state"],
+            "processed",
+        )
+        events = self.controller.store.rows(
+            """SELECT * FROM events WHERE kind = 'completion_acknowledged'
+               AND entity_id = ?""",
+            (update["id"],),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertIn("p-1 completed", events[0]["message"])
+        self.assertIn("$3.13", events[0]["message"])
+        self.assertEqual(events[0]["detail_json"].count("automatic"), 1)
+
+    async def test_archon_batch_and_prompt_size_are_bounded(self) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-bounded-batch",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        for number in range(25):
+            self.controller._queue_archon_update(
+                f"exception:{number}",
+                {
+                    "kind": "new_exception",
+                    "project": "p",
+                    "decision_needed": f"resolve {number}",
+                    "evidence": "large evidence " * 1000,
+                },
+            )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.return_value = "bounded-turn"
+        self.controller.runtime = runtime
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "can_start": True,
+                    "last_turn_id": None,
+                    "runtime_status": "idle",
+                }
+            ),
+        ):
+            await self.controller._deliver_update_batch()
+
+        prompt = runtime.start_turn.await_args.args[1]
+        states = {
+            row["state"]: row["count"]
+            for row in self.controller.store.rows(
+                "SELECT state, COUNT(*) AS count FROM updates GROUP BY state"
+            )
+        }
+        self.assertEqual(states, {"batched": 20, "retained": 5})
+        self.assertLess(len(prompt), 20_000)
+        self.assertIn("Update IDs:", prompt)
+        self.assertEqual(
+            len(
+                self.controller.store.rows(
+                    "SELECT * FROM batch_updates WHERE batch_id = (SELECT MAX(id) FROM batches)"
+                )
+            ),
+            20,
+        )
+
+    async def test_assignment_recovery_prompt_bounds_untrusted_exception(self) -> None:
+        self.controller.store.register_task(
+            native_thread_id="archon-bounded-recovery",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        condition = "recovery failed: " + ("unbounded-runtime-error " * 20_000)
+        self.controller._queue_archon_update(
+            "recovery:bounded",
+            {
+                "kind": "assignment_recovery",
+                "assignment_id": self.assignment["id"],
+                "run_id": self.assignment["run_id"],
+                "bead_id": "p-1",
+                "attempt": 2,
+                "condition": condition,
+                "next_attempt_at": "2026-01-01T00:00:00Z",
+            },
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.return_value = "bounded-recovery-turn"
+        self.controller.runtime = runtime
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "can_start": True,
+                    "last_turn_id": None,
+                    "runtime_status": "idle",
+                }
+            ),
+        ):
+            await self.controller._deliver_update_batch()
+
+        prompt = runtime.start_turn.await_args.args[1]
+        self.assertLess(len(prompt), 5_000)
+        self.assertIn(
+            f"Assignment {self.assignment['id']} (p-1, run {self.assignment['run_id']}) needs recovery",
+            prompt,
+        )
+        self.assertIn("recovery failed:", prompt)
+        self.assertIn("…", prompt)
+        self.assertNotIn("unbounded-runtime-error " * 20, prompt)
+        self.assertIn("automatic retry scheduled", prompt)
+
+    async def test_combined_maximum_archon_state_is_budgeted_and_dispatched(
+        self,
+    ) -> None:
+        self.controller.store.register_task(
+            native_thread_id="archon-combined-maximum",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        now = "2026-01-01T00:00:00Z"
+        large = "decision-relevant-controller-state " * 200
+        for number in range(20):
+            bead_id = f"p-max-proposal-{number:02d}"
+            self.controller.store.execute(
+                """INSERT INTO beads(
+                       bead_id, intake_key, project_id, title, description,
+                       activation, executor_model, executor_reasoning_effort,
+                       overseer_model, overseer_reasoning_effort,
+                       model_provenance, context_json, publication_state,
+                       created_at, updated_at
+                   ) VALUES (?, ?, 'p', ?, ?, 'pending', 'sol', 'high',
+                             'sol', 'high', 'default', ?, 'complete', ?, ?)""",
+                (
+                    bead_id,
+                    f"max-proposal-{number:02d}",
+                    f"Maximum proposal {number:02d} {large}",
+                    f"Authoritative retained scope {number:02d} {large}",
+                    json.dumps([f"conflict:proposal-{number:02d}-{large}"]),
+                    now,
+                    now,
+                ),
+            )
+            self.controller._queue_archon_update(
+                f"proposal:{bead_id}",
+                {
+                    "kind": "proposal",
+                    "bead_id": bead_id,
+                    "project": "p",
+                    "title": f"Maximum proposal {number:02d} {large}",
+                    "scope": f"Authoritative retained scope {number:02d} {large}",
+                    "dependencies": [f"dependency-{number:02d}-{large}"],
+                    "context": [f"conflict:proposal-{number:02d}-{large}"],
+                },
+            )
+
+        # The fixture already supplies one relevant unfinished assignment.
+        for number in range(19):
+            bead_id = f"p-max-active-{number:02d}"
+            self.controller.store.execute(
+                """INSERT INTO beads(
+                       bead_id, intake_key, project_id, title, description,
+                       activation, executor_model, executor_reasoning_effort,
+                       overseer_model, overseer_reasoning_effort,
+                       model_provenance, context_json, publication_state,
+                       created_at, updated_at
+                   ) VALUES (?, ?, 'p', ?, ?, 'pending', 'sol', 'high',
+                             'sol', 'high', 'default', ?, 'complete', ?, ?)""",
+                (
+                    bead_id,
+                    f"max-active-{number:02d}",
+                    f"Maximum active work {number:02d}",
+                    f"Active scope {number:02d}",
+                    json.dumps([{"conflict_key": f"active-{number:02d}-{large}"}]),
+                    now,
+                    now,
+                ),
+            )
+            run = self.controller.store.execute(
+                """INSERT INTO runs(
+                       project_id, authority, state, priority, created_at, updated_at
+                   ) VALUES ('p', ?, 'active', ?, ?, ?)""",
+                (f"maximum-state-{number:02d}", number, now, now),
+            )
+            self.controller.store.execute(
+                """INSERT INTO assignments(
+                       run_id, bead_id, stage, scope_snapshot, condition,
+                       created_at, updated_at
+                   ) VALUES (?, ?, 'implementing', ?, ?, ?, ?)""",
+                (
+                    run.lastrowid,
+                    bead_id,
+                    f"Active scope {number:02d}",
+                    f"Active condition {number:02d} {large}",
+                    now,
+                    now,
+                ),
+            )
+
+        for number in range(20):
+            self.controller.store.execute(
+                """INSERT INTO holds(
+                       scope, target, reason, urgent, release_condition, created_at
+                   ) VALUES ('project', 'p', ?, ?, ?, ?)""",
+                (
+                    f"Hold reason {number:02d} {large}",
+                    number % 2,
+                    f"Release condition {number:02d} {large}",
+                    now,
+                ),
+            )
+            self.controller.store.execute(
+                """INSERT INTO external_operations(
+                       kind, target, input_json, state, reconciliation_used,
+                       condition, correlation_id, created_at, updated_at
+                   ) VALUES ('maximum_test', ?, '{}', 'uncertain', 1, ?, ?, ?, ?)""",
+                (
+                    f"target-{number:02d}-{large}",
+                    f"Uncertain condition {number:02d} {large}",
+                    f"maximum-operation-{number:02d}",
+                    now,
+                    now,
+                ),
+            )
+
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.return_value = "combined-maximum-turn"
+        self.controller.runtime = runtime
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "can_start": True,
+                    "last_turn_id": None,
+                    "runtime_status": "idle",
+                }
+            ),
+        ):
+            await self.controller._deliver_update_batch()
+
+        prompt = runtime.start_turn.await_args.args[1]
+        self.assertLessEqual(len(prompt), 32_000)
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE kind = 'archon' ORDER BY id DESC LIMIT 1"
+        )
+        payload = json.loads(action["payload"])
+        self.assertEqual(len(payload["batch_items"]), 20)
+        for item in payload["batch_items"]:
+            content = item["content"]
+            self.assertIn(f"Update {item['update_id']}:", prompt)
+            self.assertIn(content["bead_id"], prompt)
+            self.assertIn(content["scope_reference"], prompt)
+        self.assertIn("Required handled_update_ids:", prompt)
+        self.assertIn("Approve only with the listed", prompt)
+        self.assertIn("Finish decisions:", prompt)
+        self.assertIn("Defer the whole batch only when it must wait", prompt)
+
+        for label, total in (
+            ("Active work", 20),
+            ("Holds", 20),
+            ("External operations", 20),
+        ):
+            match = re.search(
+                rf"{label}: showing (\d+)/{total}; (\d+) additional", prompt
+            )
+            self.assertIsNotNone(match, label)
+            shown, retained = (int(value) for value in match.groups())
+            self.assertGreater(shown, 0, label)
+            self.assertEqual(shown + retained, total, label)
+
+    async def test_mandatory_escalation_budget_splits_exact_ordered_batches(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-mandatory-escalations",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        large = "bounded-current-review-evidence " * 200
+        for number in range(20):
+            self.controller._queue_archon_update(
+                f"review-escalation:maximum:{number:02d}",
+                {
+                    "kind": "review_failure_escalation",
+                    "assignment_id": 1_000 + number,
+                    "bead_id": f"p-escalation-{number:02d}",
+                    "project": "p",
+                    "review_failures": 3,
+                    "condition": f"Third review failed {number:02d}: {large}",
+                    "candidate_revision": {
+                        "candidate_id": f"candidate-{number:02d}",
+                        "source": f"source-{number:02d}-{large}",
+                    },
+                    "unresolved_findings": [
+                        {
+                            "problem": f"current problem {number:02d} {large}",
+                            "required_change": f"current repair {number:02d} {large}",
+                        }
+                    ],
+                    "prior_review_history": [
+                        {
+                            "classification": "history; resolution not inferred",
+                            "findings": f"prior context {number:02d} {large}",
+                        }
+                    ],
+                    "changes_since_prior_attempt": {
+                        "evidence": f"candidate delta {number:02d} {large}"
+                    },
+                    "reviewer_recommendation": {
+                        "resolution": "retry",
+                        "reason": f"bounded recommendation {number:02d} {large}",
+                    },
+                    "action_id": 2_000 + number,
+                    "review_action": "changes_requested",
+                    "hold_id": 3_000 + number,
+                    "required_decision": "retry, rescope, complete_non_code, or cancel",
+                    "resolutions": [
+                        "retry",
+                        "rescope",
+                        "complete_non_code",
+                        "cancel",
+                    ],
+                },
+            )
+
+        original_ids = [
+            row["id"]
+            for row in self.controller.store.rows(
+                "SELECT id FROM updates WHERE recipient_task_id = ? ORDER BY id",
+                (archon["id"],),
+            )
+        ]
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.start_turn.side_effect = [
+            f"mandatory-escalation-turn-{number}" for number in range(20)
+        ]
+        self.controller.runtime = runtime
+        seen: list[int] = []
+        batch_sizes: list[int] = []
+        with patch.object(
+            self.controller,
+            "_refresh_task",
+            new=AsyncMock(
+                return_value={
+                    "can_start": True,
+                    "last_turn_id": None,
+                    "runtime_status": "idle",
+                }
+            ),
+        ):
+            while len(seen) < len(original_ids):
+                await self.controller._deliver_update_batch()
+                action = self.controller.store.row(
+                    """SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'
+                       ORDER BY id DESC LIMIT 1""",
+                    (archon["id"],),
+                )
+                payload = json.loads(action["payload"])
+                batch_ids = [item["update_id"] for item in payload["batch_items"]]
+                self.assertEqual(
+                    batch_ids,
+                    original_ids[len(seen) : len(seen) + len(batch_ids)],
+                )
+                self.assertTrue(set(batch_ids).isdisjoint(seen))
+                batch_sizes.append(len(batch_ids))
+                seen.extend(batch_ids)
+
+                prompt = runtime.start_turn.await_args.args[1]
+                self.assertLessEqual(len(prompt), 32_000)
+                for update_id in batch_ids:
+                    self.assertIn(f"Update {update_id}:", prompt)
+                for category in (
+                    "candidate revision:",
+                    "unresolved findings:",
+                    "prior review history:",
+                    "changes since prior attempt:",
+                    "reviewer recommendation:",
+                ):
+                    self.assertEqual(prompt.count(category), len(batch_ids), category)
+                self.assertEqual(
+                    prompt.count("requires resolve_escalation"), len(batch_ids)
+                )
+                states = {
+                    row["state"]: row["count"]
+                    for row in self.controller.store.rows(
+                        """SELECT state, COUNT(*) AS count FROM updates
+                           WHERE recipient_task_id = ? GROUP BY state""",
+                        (archon["id"],),
+                    )
+                }
+                self.assertEqual(states.get("batched"), len(batch_ids))
+                self.assertEqual(states.get("retained", 0), 20 - len(seen))
+
+                self.controller.store.execute(
+                    "UPDATE updates SET state = 'processed' WHERE state = 'batched'"
+                )
+                self.controller.store.execute(
+                    "UPDATE batches SET state = 'processed' WHERE action_id = ?",
+                    (action["id"],),
+                )
+                self.controller.store.execute(
+                    "UPDATE actions SET state = 'processed' WHERE id = ?",
+                    (action["id"],),
+                )
+                self.controller.store.execute(
+                    """UPDATE tasks SET state = 'idle', runtime_status = 'idle',
+                       last_turn_terminal = 1 WHERE id = ?""",
+                    (archon["id"],),
+                )
+
+        self.assertGreater(len(batch_sizes), 1)
+        self.assertLess(batch_sizes[0], 20)
+        self.assertEqual(seen, original_ids)
+        self.assertEqual(runtime.start_turn.await_count, len(batch_sizes))
+
+    async def test_completion_is_finalized_before_unrelated_archon_batch_once(
         self,
     ) -> None:
         archon = self.controller.store.register_task(
@@ -3890,6 +4399,14 @@ print(json.dumps({
             "UPDATE assignments SET stage = 'completed' WHERE id = ?",
             (self.assignment["id"],),
         )
+        self.controller.store.execute(
+            """INSERT INTO beads VALUES (
+                   'p-mixed','mixed-key','p','Unrelated work','Separate scope',
+                   'pending','sol','high','sol','high','default',NULL,NULL,'[]',
+                   'complete',?,?
+               )""",
+            (now, now),
+        )
         self.controller._queue_archon_update(
             "completion:mixed",
             {
@@ -3905,10 +4422,10 @@ print(json.dumps({
             "proposal:mixed",
             {
                 "kind": "proposal",
-                "bead_id": "unrelated",
+                "bead_id": "p-mixed",
                 "project": "p",
                 "title": "Unrelated work",
-                "scope": "Keep this concurrent workflow separate.",
+                "scope_summary": "Keep this concurrent workflow separate.",
                 "workflow_id": "workflow-concurrent",
             },
         )
@@ -3968,13 +4485,15 @@ print(json.dumps({
                WHERE action_id = ? ORDER BY workflow_id""",
             (acknowledgement["id"],),
         )
-        self.assertEqual([row["include_cost"] for row in links], [0, 0])
+        self.assertEqual([row["include_cost"] for row in links], [1])
         report = self.controller.store.cost_report(
             workflow_id="workflow-complete", group_by="workflow"
         )["groups"][0]
         self.assertEqual(report["attributed"]["amount"], "0.01")
         self.assertEqual(report["coverage"], "partial")
-        self.assertIn("mixed-workflow Archon response", " ".join(report["exclusions"]))
+        self.assertNotIn(
+            "mixed-workflow Archon response", " ".join(report["exclusions"])
+        )
         self.assertEqual(
             self.controller.store.row("""SELECT COUNT(*) AS count FROM events
                    WHERE kind = 'workflow_cost_finalized'
@@ -4261,6 +4780,12 @@ print(json.dumps({
         self.assertIn(f"review action id: {review_action_ids[-1]}", prompt)
         self.assertIn(f"hold id: {hold_id}", prompt)
         self.assertIn('resolutions: ["retry", "rescope", "cancel"]', prompt)
+        self.assertIn("unresolved findings", prompt)
+        self.assertIn("substantive defect 3", prompt)
+        self.assertIn("candidate revision", prompt)
+        self.assertIn("changes since prior attempt", prompt)
+        self.assertIn("reviewer recommendation", prompt)
+        self.assertLess(len(prompt), 7000)
         frozen_action = self.controller.store.row(
             """SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'
                ORDER BY id DESC LIMIT 1""",
@@ -6179,9 +6704,17 @@ print(json.dumps({
             (f"succession:{old['id']}:{successor['id']}",),
         )
         self.assertIsNotNone(completion)
-        self.assertEqual(completion["state"], "retained")
+        self.assertEqual(completion["state"], "processed")
         self.assertEqual(
             json.loads(completion["content"])["successor_task_id"], successor["id"]
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                """SELECT COUNT(*) AS count FROM events
+                   WHERE kind = 'completion_acknowledged' AND entity_id = ?""",
+                (completion["id"],),
+            )["count"],
+            1,
         )
 
     async def test_archon_succession_still_rejects_unrelated_current_archon(

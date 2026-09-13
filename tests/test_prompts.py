@@ -52,7 +52,8 @@ class PromptsTest(unittest.TestCase):
                             "bead_id": "p-1",
                             "project": "p",
                             "title": "Fix empty results",
-                            "scope": "Show an empty state when search returns no matches; test both paths.",
+                            "scope_summary": "Show an empty state when search returns no matches; test both paths.",
+                            "scope_reference": "scope:17",
                         },
                     }
                 ],
@@ -68,11 +69,12 @@ class PromptsTest(unittest.TestCase):
             },
         }
         text = action_message(action=action)
-        self.assertIn("Approve or defer p-1 (p)", text)
+        self.assertIn("p-1 (p) — Fix empty results", text)
         self.assertIn("Update 17", text)
         self.assertIn(
             "Show an empty state when search returns no matches; test both paths.", text
         )
+        self.assertIn("scope:17", text)
         self.assertIn("p 0/2", text)
         self.assertTrue(text.startswith("Action 42. Finish required: yes."))
         self.assertIn("fulcrum finish decisions", text)
@@ -89,142 +91,6 @@ class PromptsTest(unittest.TestCase):
             "suspend_policy",
         ):
             self.assertNotIn(irrelevant, text)
-
-    def test_archon_completion_message_gives_exact_minimal_acknowledgement(
-        self,
-    ) -> None:
-        text = action_message(
-            action={
-                "id": 8,
-                "kind": "archon",
-                "payload": {
-                    "batch_items": [
-                        {
-                            "update_id": 2,
-                            "content": {
-                                "kind": "assignment_completed",
-                                "bead_id": "p-1",
-                                "assignment_id": 1,
-                                "run_id": 1,
-                                "minor_fixes": [
-                                    {
-                                        "problem": "Tighten wording",
-                                        "evidence": "README.md:20",
-                                        "requested_change": "Use a shorter sentence",
-                                    }
-                                ],
-                            },
-                        }
-                    ],
-                    "fleet_snapshot": {
-                        "capacity": {
-                            "global_usage": 0,
-                            "global_limit": 2,
-                            "project_usage": {"p": 0},
-                            "project_limits": {"p": 2},
-                        }
-                    },
-                },
-            }
-        )
-        self.assertTrue(
-            text.startswith(
-                "Action 8. Finish required: yes. Relevant outcome: decisions."
-            )
-        )
-        self.assertIn('{"decisions": [], "handled_update_ids": [2]}', text)
-        self.assertIn("Overseer nonblocking follow-up", text)
-        self.assertIn("requires a new Weaver bead", text)
-        for irrelevant in (
-            "request_specialist",
-            "resolve_operation",
-            "resolve_escalation",
-            '"decision": "approve"',
-            "fulcrum finish deferred",
-        ):
-            self.assertNotIn(irrelevant, text)
-        self.assertLess(len(text.split()), 145)
-
-    def test_archon_completion_omits_absent_minor_followup(self) -> None:
-        text = action_message(
-            action={
-                "id": 9,
-                "kind": "archon",
-                "payload": {
-                    "batch_items": [
-                        {
-                            "update_id": 3,
-                            "content": {
-                                "kind": "assignment_completed",
-                                "bead_id": "p-2",
-                                "assignment_id": 2,
-                                "run_id": 2,
-                                "minor_fixes": [],
-                            },
-                        }
-                    ]
-                },
-            }
-        )
-        self.assertNotIn("nonblocking follow-up", text)
-        self.assertNotIn("Weaver bead", text)
-
-    def test_archon_repeats_frozen_cost_and_marks_acknowledgement_boundary(
-        self,
-    ) -> None:
-        text = action_message(
-            action={
-                "id": 31,
-                "kind": "archon",
-                "payload": {
-                    "batch_items": [
-                        {
-                            "update_id": 4,
-                            "content": {
-                                "kind": "assignment_completed",
-                                "bead_id": "brain-oea",
-                                "assignment_id": 7,
-                                "run_id": 7,
-                                "action_id": 30,
-                                "cost": {
-                                    "action": {"attributed_display": "$3.13"},
-                                    "workflow_through_completion": {"display": "$3.20"},
-                                    "coverage": "partial",
-                                    "assumptions": ["effective tier assumed standard"],
-                                    "exclusions": [],
-                                },
-                            },
-                        }
-                    ]
-                },
-            }
-        )
-        self.assertIn("Action 30 completed at estimated API cost of $3.13.", text)
-        self.assertIn("$3.20", text)
-        self.assertIn("excludes the currently running Archon acknowledgement", text)
-        self.assertIn("Partial estimate: effective tier assumed standard.", text)
-
-        absent = action_message(
-            action={
-                "id": 32,
-                "kind": "archon",
-                "payload": {
-                    "batch_items": [
-                        {
-                            "update_id": 5,
-                            "content": {
-                                "kind": "assignment_completed",
-                                "bead_id": "x",
-                                "assignment_id": 8,
-                                "run_id": 8,
-                            },
-                        }
-                    ]
-                },
-            }
-        )
-        self.assertIn("do not invent one", absent)
-        self.assertNotIn("estimated API cost of $", absent)
 
     def test_archon_initial_policy_message_is_project_specific(self) -> None:
         text = action_message(
@@ -260,7 +126,9 @@ class PromptsTest(unittest.TestCase):
                             "bead_id": "p-2",
                             "project": "p",
                             "title": "Repair",
-                            "scope": "exact scope " * 1000,
+                            "scope_summary": "exact scope " * 1000,
+                            "scope_reference": "scope:2",
+                            "dependencies": ["p-0"],
                         },
                     },
                     {
@@ -281,6 +149,7 @@ class PromptsTest(unittest.TestCase):
                             "project_id": "p",
                             "stage": "implementing",
                             "condition": "overlapping source",
+                            "conflict_keys": ["shared-schema"],
                         }
                     ],
                     "holds": [
@@ -297,14 +166,17 @@ class PromptsTest(unittest.TestCase):
         }
         text = action_message(action=action)
         for required in (
-            "exact scope " * 1000,
             "overlapping source",
             "measurement complete",
             "unknown delivery outcome",
             "attach observed candidate",
+            'dependencies: ["p-0"]',
+            'Conflicts for assignment 1: ["shared-schema"]',
             "Update 3",
         ):
             self.assertIn(required, text)
+        self.assertLess(len(text), 2500)
+        self.assertNotIn("exact scope " * 30, text)
 
     def test_compaction_is_a_reminder_not_a_replay_or_required_read(self) -> None:
         for kind in ALLOWED:

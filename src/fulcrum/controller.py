@@ -48,7 +48,9 @@ from fulcrum.kernel import (
     schedule_action_retry,
 )
 from fulcrum.prompts import (
+    MAX_ARCHON_MESSAGE_CHARS,
     action_message,
+    archon_action_fits,
     role_instructions,
     weaver_instructions,
 )
@@ -89,6 +91,8 @@ RUNTIME_TELEMETRY_EVENTS: frozenset[str] = frozenset(
     }
 )
 MAX_EXACT_SOURCE_ARTIFACT_BYTES = 1_000_000
+ARCHON_SCOPE_SUMMARY_CHARS = 240
+ARCHON_BATCH_LIMIT = 20
 
 
 class DeliveryDisposition(StrEnum):
@@ -2945,6 +2949,8 @@ class Controller:
                     prompt,
                 ]
             )
+        if task["role"] == "archon" and len(prompt) > MAX_ARCHON_MESSAGE_CHARS:
+            raise StoreError("Archon prompt exceeds its deterministic size ceiling")
         operation = self.store.create_operation(
             "turn_start",
             str(action["id"]),
@@ -5217,7 +5223,7 @@ class Controller:
                     "bead_id": bead["bead_id"],
                     "project": bead["project_id"],
                     "title": bead["title"],
-                    "scope": bead["description"],
+                    "scope_summary": self._scope_summary(bead["description"]),
                     "dependencies": dependencies,
                     "context": json.loads(bead["context_json"] or "[]"),
                     "models": {
@@ -5253,7 +5259,182 @@ class Controller:
                 ),
             )
 
+    @staticmethod
+    def _scope_summary(scope: Any) -> str:
+        rendered = " ".join(str(scope).split())
+        if len(rendered) <= ARCHON_SCOPE_SUMMARY_CHARS:
+            return rendered
+        return rendered[: ARCHON_SCOPE_SUMMARY_CHARS - 1].rstrip() + "…"
+
+    def _freeze_proposal_scope(
+        self, update: dict[str, Any], content: dict[str, Any], connection: Any
+    ) -> dict[str, Any]:
+        """Replace inline proposal scope with an action-stable controller reference."""
+
+        if content.get("kind") != "proposal":
+            return content
+        bead_id = content.get("bead_id")
+        project = content.get("project")
+        if not isinstance(bead_id, str) or not isinstance(project, str):
+            raise StoreError("proposal update is missing bead or project identity")
+        bead = connection.execute(
+            "SELECT project_id, description FROM beads WHERE bead_id = ?",
+            (bead_id,),
+        ).fetchone()
+        if bead is None or bead["project_id"] != project:
+            raise StoreError(
+                f"proposal {bead_id} does not match retained project {project}"
+            )
+        reference = f"scope:{update['id']}"
+        connection.execute(
+            """INSERT OR IGNORE INTO scope_references(
+                   identity, update_id, bead_id, project_id, scope_snapshot, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                reference,
+                update["id"],
+                bead_id,
+                project,
+                bead["description"],
+                utc_now(),
+            ),
+        )
+        retained = connection.execute(
+            "SELECT * FROM scope_references WHERE identity = ?", (reference,)
+        ).fetchone()
+        if (
+            retained is None
+            or retained["update_id"] != update["id"]
+            or retained["bead_id"] != bead_id
+            or retained["project_id"] != project
+        ):
+            raise StoreError(f"scope reference {reference} has stale proposal identity")
+        prepared = dict(content)
+        prepared.pop("scope", None)
+        prepared["scope_reference"] = reference
+        prepared["scope_summary"] = self._scope_summary(retained["scope_snapshot"])
+        return prepared
+
+    @staticmethod
+    def _completion_needs_judgment(content: dict[str, Any]) -> bool:
+        return bool(
+            content.get("required_decision") or content.get("requires_decision")
+        )
+
+    def _acknowledge_completion_updates(self) -> None:
+        """Consume judgment-free completion facts without spending an Archon turn."""
+
+        updates = self.store.rows(
+            """SELECT * FROM updates WHERE state = 'retained' AND actionable = 1
+               AND json_extract(content, '$.kind') IN (
+                   'assignment_completed', 'specialist_completed',
+                   'archon_succession_completed'
+               ) ORDER BY id"""
+        )
+        for update in updates:
+            content = json.loads(update["content"])
+            if self._completion_needs_judgment(content):
+                continue
+            timestamp = utc_now()
+            with self.store.transaction() as connection:
+                changed = connection.execute(
+                    """UPDATE updates SET state = 'processed', updated_at = ?
+                       WHERE id = ? AND state = 'retained'""",
+                    (timestamp, update["id"]),
+                ).rowcount
+                if changed == 1:
+                    self._report_automatic_completion(int(update["id"]), content)
+            if changed != 1:
+                continue
+        # Finalization is independently replayable: a crash after the update/report
+        # commit cannot strand the workflow boundary.
+        processed_completions = self.store.rows(
+            """SELECT id, content FROM updates WHERE state = 'processed'
+               AND json_extract(content, '$.kind') IN (
+                   'assignment_completed', 'specialist_completed'
+               ) ORDER BY id"""
+        )
+        for update in processed_completions:
+            self._finalize_automatically_acknowledged_workflows(
+                int(update["id"]), json.loads(update["content"])
+            )
+
+    def _report_automatic_completion(
+        self, update_id: int, content: dict[str, Any]
+    ) -> None:
+        kind = str(content.get("kind"))
+        if kind == "assignment_completed":
+            subject = str(content.get("bead_id") or content.get("assignment_id"))
+            message = f"{subject} completed"
+        elif kind == "specialist_completed":
+            subject = (
+                f"{content.get('specialist')} report {content.get('occurrence_id')}"
+            )
+            message = (
+                f"{subject} completed with {content.get('finding_count', 0)} findings"
+            )
+        else:
+            subject = f"Archon succession {content.get('successor_task_id')}"
+            message = f"{subject} completed"
+        cost = content.get("cost")
+        action_cost = cost.get("action") if isinstance(cost, dict) else None
+        display = (
+            action_cost.get("attributed_display")
+            if isinstance(action_cost, dict)
+            else None
+        )
+        if isinstance(display, str):
+            message += f" at estimated API cost of {display}"
+        self.store.event(
+            "completion_acknowledged",
+            message + ".",
+            entity_type="update",
+            entity_id=update_id,
+            detail={
+                "kind": kind,
+                "subject": subject,
+                "minor_fixes": content.get("minor_fixes", []),
+                "automatic": True,
+            },
+        )
+
+    def _finalize_automatically_acknowledged_workflows(
+        self, update_id: int, content: dict[str, Any]
+    ) -> None:
+        if content.get("kind") not in {"assignment_completed", "specialist_completed"}:
+            return
+        for workflow_id in sorted(self._workflow_ids_for_update(content)):
+            unfinished = self.store.row(
+                """SELECT 1 FROM workflow_cost_beads bead
+                   WHERE bead.workflow_id = ? AND NOT EXISTS (
+                     SELECT 1 FROM assignments assignment
+                     WHERE assignment.bead_id = bead.bead_id
+                       AND assignment.stage = 'completed') LIMIT 1""",
+                (workflow_id,),
+            )
+            if unfinished is not None:
+                continue
+            report = self.store.finalize_workflow_cost(workflow_id)
+            if not report.pop("_newly_finalized", False):
+                continue
+            group = report["groups"][0] if report["groups"] else {}
+            self.store.event(
+                "workflow_cost_finalized",
+                "froze all-in API-equivalent workflow cost after automatic completion acknowledgement",
+                entity_type="workflow",
+                entity_id=workflow_id,
+                detail={
+                    "amount": report.get("frozen_amount"),
+                    "display": (group.get("attributed") or {}).get("display"),
+                    "coverage": group.get("coverage", "partial"),
+                    "acknowledgement_update_id": update_id,
+                    "includes_acknowledgement_action": False,
+                    "acknowledgement_exclusion": None,
+                },
+            )
+
     async def _deliver_update_batch(self, *, recovery_only: bool = False) -> None:
+        self._acknowledge_completion_updates()
         self._reactivate_deferred_batches(recovery_only=recovery_only)
         archon = self.store.row(
             "SELECT * FROM tasks WHERE role = 'archon' AND state = 'idle'"
@@ -5292,28 +5473,55 @@ class Controller:
             """SELECT * FROM updates WHERE recipient_task_id = ?
                AND state = 'retained' AND actionable = 1
                AND (? = 0 OR json_extract(content, '$.kind') = 'operation_resolution')
-               ORDER BY id""",
-            (archon["id"], int(recovery_only)),
+               ORDER BY id LIMIT ?""",
+            (archon["id"], int(recovery_only), ARCHON_BATCH_LIMIT),
         )
         if not updates:
             return
         timestamp = utc_now()
-        prepared_updates = [
-            (row, self._with_workflow_context(json.loads(row["content"])))
-            for row in updates
-        ]
-        payload = {
-            "fleet_snapshot": self._fleet_snapshot(),
-            "batch_items": [
-                {
-                    "update_id": row["id"],
-                    "identity": row["identity"],
-                    "content": content,
-                }
-                for row, content in prepared_updates
-            ],
-        }
+        snapshot = self._fleet_snapshot()
         with self.store.transaction() as connection:
+            prepared_updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for row in updates:
+                connection.execute("SAVEPOINT archon_update_admission")
+                content = self._freeze_proposal_scope(
+                    row,
+                    self._with_workflow_context(json.loads(row["content"])),
+                    connection,
+                )
+                candidate_updates = [*prepared_updates, (row, content)]
+                candidate_payload = {
+                    "fleet_snapshot": snapshot,
+                    "batch_items": [
+                        {
+                            "update_id": candidate_row["id"],
+                            "identity": candidate_row["identity"],
+                            "content": candidate_content,
+                        }
+                        for candidate_row, candidate_content in candidate_updates
+                    ],
+                }
+                if not archon_action_fits(candidate_payload):
+                    connection.execute("ROLLBACK TO SAVEPOINT archon_update_admission")
+                    connection.execute("RELEASE SAVEPOINT archon_update_admission")
+                    break
+                connection.execute("RELEASE SAVEPOINT archon_update_admission")
+                prepared_updates.append((row, content))
+            if not prepared_updates:
+                raise StoreError(
+                    "one bounded Archon update exceeds the mandatory action budget"
+                )
+            payload = {
+                "fleet_snapshot": snapshot,
+                "batch_items": [
+                    {
+                        "update_id": row["id"],
+                        "identity": row["identity"],
+                        "content": content,
+                    }
+                    for row, content in prepared_updates
+                ],
+            }
             batch_cursor = connection.execute(
                 "INSERT INTO batches(recipient_task_id, state, created_at, updated_at) VALUES (?, 'frozen', ?, ?)",
                 (archon["id"], timestamp, timestamp),
@@ -5343,14 +5551,20 @@ class Controller:
         await self._dispatch_action(action, task=archon)
 
     def _fleet_snapshot(self) -> dict[str, Any]:
+        unfinished = self.store.rows(
+            """SELECT a.id, a.run_id, a.bead_id, a.stage, a.condition,
+                      a.next_attempt_at, a.operator_hold_id, r.project_id, r.priority
+               FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.stage NOT IN ('completed','canceled')
+               ORDER BY r.priority DESC, a.run_id, a.id"""
+        )
+        for assignment in unfinished:
+            assignment["conflict_keys"] = list(
+                self._assignment_conflict_keys(assignment)
+            )
         return {
             "capacity": capacity(self.store),
-            "unfinished_assignments": self.store.rows(
-                """SELECT a.id, a.run_id, a.bead_id, a.stage, a.condition,
-                          a.next_attempt_at, a.operator_hold_id, r.project_id, r.priority
-                   FROM assignments a JOIN runs r ON r.id = a.run_id
-                   WHERE a.stage NOT IN ('completed','canceled') ORDER BY r.priority DESC, a.run_id, a.id"""
-            ),
+            "unfinished_assignments": unfinished,
             "approved_waiting": self.store.rows(
                 """SELECT r.id AS run_id, r.project_id, r.priority, a.id AS assignment_id,
                           a.bead_id, a.stage

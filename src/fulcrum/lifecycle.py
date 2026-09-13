@@ -29,6 +29,100 @@ OPERATOR_OPERATION_RESOLUTIONS = {
     "confirmed_unsent",
 }
 
+ESCALATION_ITEMS_LIMIT = 5
+ESCALATION_TEXT_LIMIT = 320
+
+
+def _bounded_escalation_text(value: Any) -> str:
+    rendered = " ".join(str(value).split())
+    if len(rendered) <= ESCALATION_TEXT_LIMIT:
+        return rendered
+    return rendered[: ESCALATION_TEXT_LIMIT - 1].rstrip() + "…"
+
+
+def _review_escalation_synthesis(
+    store: Store,
+    assignment: dict[str, Any],
+    current_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Build bounded decision evidence while full handoffs remain durable."""
+
+    findings: list[dict[str, str]] = []
+    prior = store.rows(
+        """SELECT source_action_id, content_json FROM handoffs
+           WHERE assignment_id = ? AND kind = 'review_findings'
+           ORDER BY id DESC LIMIT ?""",
+        (assignment["id"], ESCALATION_ITEMS_LIMIT),
+    )
+    current_findings = (
+        current_payload.get("findings", []) if isinstance(current_payload, dict) else []
+    )
+    for finding in current_findings[:ESCALATION_ITEMS_LIMIT]:
+        if not isinstance(finding, dict):
+            continue
+        item = {
+            key: _bounded_escalation_text(finding.get(key, ""))
+            for key in ("problem", "evidence", "required_change")
+        }
+        if item["problem"]:
+            findings.append(item)
+
+    history: list[dict[str, Any]] = []
+    for row in prior[:ESCALATION_ITEMS_LIMIT]:
+        source = json.loads(row["content_json"])
+        historical_findings = (
+            source.get("findings", []) if isinstance(source, dict) else []
+        )
+        history.append(
+            {
+                "review_action_id": int(row["source_action_id"]),
+                "findings": [
+                    _bounded_escalation_text(item.get("problem", ""))
+                    for item in historical_findings[:ESCALATION_ITEMS_LIMIT]
+                    if isinstance(item, dict) and item.get("problem")
+                ],
+                "classification": "prior review history; resolution status not inferred",
+            }
+        )
+
+    implementation = store.row(
+        """SELECT source_action_id, content_json FROM handoffs
+           WHERE assignment_id = ? AND kind = 'implementation_evidence'
+           ORDER BY id DESC LIMIT 1""",
+        (assignment["id"],),
+    )
+    changes = "No newer implementation evidence was retained."
+    prior_review_action = max(
+        (int(row["source_action_id"]) for row in prior), default=0
+    )
+    if (
+        implementation is not None
+        and int(implementation["source_action_id"]) > prior_review_action
+    ):
+        evidence = json.loads(implementation["content_json"])
+        if isinstance(evidence, dict):
+            changes = _bounded_escalation_text(
+                evidence.get("evidence_content") or evidence.get("evidence") or evidence
+            )
+        else:
+            changes = _bounded_escalation_text(evidence)
+    recommendations = [
+        finding["required_change"]
+        for finding in findings
+        if finding.get("required_change")
+    ]
+    return {
+        "candidate_revision": {
+            "candidate_id": assignment.get("candidate_id"),
+            "source": assignment.get("source_oid"),
+            "tested": assignment.get("tested_oid"),
+        },
+        "unresolved_findings": findings,
+        "prior_review_history": history,
+        "changes_since_prior_attempt": changes,
+        "reviewer_recommendation": recommendations[:ESCALATION_ITEMS_LIMIT],
+    }
+
 
 def accept_finish(
     store: Store,
@@ -395,7 +489,9 @@ def _apply_outcome(
             return {"assignment_id": assignment_id, "stage": "delivering"}
         if outcome in {"changes_requested", "incomplete"}:
             assignment = store.row(
-                "SELECT review_failures FROM assignments WHERE id = ?", (assignment_id,)
+                """SELECT a.*, r.project_id FROM assignments a
+                   JOIN runs r ON r.id = a.run_id WHERE a.id = ?""",
+                (assignment_id,),
             )
             if assignment is None:
                 raise StoreError("review assignment disappeared")
@@ -409,6 +505,7 @@ def _apply_outcome(
                 else None
             )
             if failures >= 3:
+                synthesis = _review_escalation_synthesis(store, assignment, payload)
                 hold = store.execute(
                     """INSERT INTO holds(scope, target, reason, urgent, release_condition, created_at)
                        VALUES ('assignment', ?, ?, 1,
@@ -444,6 +541,8 @@ def _apply_outcome(
                                 {
                                     "kind": "review_failure_escalation",
                                     "assignment_id": assignment_id,
+                                    "bead_id": assignment["bead_id"],
+                                    "project": assignment["project_id"],
                                     "action_id": action["id"],
                                     "review_action": outcome,
                                     "review_failures": failures,
@@ -451,6 +550,7 @@ def _apply_outcome(
                                     "hold_id": hold_id,
                                     "required_decision": "resolve_escalation",
                                     "resolutions": ["retry", "rescope", "cancel"],
+                                    **synthesis,
                                 },
                                 sort_keys=True,
                             ),
@@ -680,6 +780,7 @@ def _apply_outcome(
         batch = store.row("SELECT id FROM batches WHERE action_id = ?", (action["id"],))
         required_operation_ids: set[int] = set()
         required_escalations: dict[int, tuple[int, set[str]]] = {}
+        proposal_scopes: dict[tuple[str, str], tuple[str, str]] = {}
         if batch is not None:
             expected = {
                 int(row["update_id"])
@@ -688,19 +789,54 @@ def _apply_outcome(
                     (batch["id"],),
                 )
             }
-            handled = set(payload.get("handled_update_ids", []))
-            if handled != expected:
+            handled_items = payload.get("handled_update_ids", [])
+            handled = set(handled_items)
+            if (
+                any(isinstance(item, bool) for item in handled_items)
+                or len(handled_items) != len(handled)
+                or handled != expected
+            ):
                 raise StoreError(
                     "Archon must handle every frozen update exactly; "
-                    f"expected={sorted(expected)} handled={sorted(handled)}"
+                    f"expected={sorted(expected)} handled={handled_items}"
                 )
             for row in store.rows(
-                """SELECT u.content FROM updates u JOIN batch_updates bu
+                """SELECT u.id, u.content FROM updates u JOIN batch_updates bu
                    ON bu.update_id = u.id WHERE bu.batch_id = ?""",
                 (batch["id"],),
             ):
                 content = json.loads(row["content"])
                 update_kind = content.get("kind")
+                if update_kind == "proposal":
+                    bead_id = content.get("bead_id")
+                    project = content.get("project")
+                    reference = content.get("scope_reference")
+                    if not all(
+                        isinstance(value, str) and value
+                        for value in (bead_id, project, reference)
+                    ):
+                        raise StoreError(
+                            "proposal update has a malformed retained scope reference"
+                        )
+                    retained_scope = store.row(
+                        """SELECT bead_id, project_id, scope_snapshot, update_id
+                           FROM scope_references WHERE identity = ?""",
+                        (reference,),
+                    )
+                    if (
+                        retained_scope is None
+                        or retained_scope["update_id"] != row["id"]
+                        or retained_scope["bead_id"] != bead_id
+                        or retained_scope["project_id"] != project
+                    ):
+                        raise StoreError(
+                            f"proposal scope reference {reference!r} is missing or stale"
+                        )
+                    proposal_scopes[(project, bead_id)] = (
+                        reference,
+                        retained_scope["scope_snapshot"],
+                    )
+                    continue
                 if update_kind == "review_failure_escalation":
                     assignment_id = content.get("assignment_id")
                     hold_id = content.get("hold_id")
@@ -752,6 +888,55 @@ def _apply_outcome(
                     and operation["reconciliation_used"]
                 ):
                     required_operation_ids.add(operation_id)
+            resolved_decisions: list[dict[str, Any]] = []
+            for decision in payload.get("decisions", []):
+                if (
+                    not isinstance(decision, dict)
+                    or decision.get("decision") != "approve"
+                ):
+                    resolved_decisions.append(decision)
+                    continue
+                project = decision.get("project")
+                beads = decision.get("beads")
+                references = decision.get("scope_references")
+                if "scope" in decision:
+                    raise StoreError(
+                        "Archon approval must reference retained scope, not echo scope text"
+                    )
+                if (
+                    not isinstance(project, str)
+                    or not isinstance(beads, list)
+                    or not beads
+                    or not all(isinstance(bead, str) for bead in beads)
+                    or not isinstance(references, dict)
+                    or set(references) != set(beads)
+                    or not all(
+                        isinstance(reference, str) and reference
+                        for reference in references.values()
+                    )
+                ):
+                    raise StoreError(
+                        "Archon approval requires exactly one retained scope reference per bead"
+                    )
+                stored_scopes: dict[str, str] = {}
+                for bead_id in beads:
+                    retained = proposal_scopes.get((project, bead_id))
+                    if retained is None or references[bead_id] != retained[0]:
+                        raise StoreError(
+                            f"scope reference for {project}/{bead_id} is missing or stale"
+                        )
+                    stored_scopes[bead_id] = retained[1]
+                resolved_decisions.append(
+                    {
+                        **{
+                            key: value
+                            for key, value in decision.items()
+                            if key != "scope_references"
+                        },
+                        "scope": stored_scopes,
+                    }
+                )
+            payload = {**payload, "decisions": resolved_decisions}
             supplied_operation_ids = [
                 decision.get("operation_id")
                 for decision in payload.get("decisions", [])
@@ -1739,6 +1924,10 @@ def apply_archon_decisions(
                     )
                     if not isinstance(scope, str) or not scope.strip():
                         raise StoreError(f"bead {bead_id} has no approved scope")
+                    if scope != bead["description"]:
+                        raise StoreError(
+                            f"approved scope for {bead_id} does not match retained scope"
+                        )
                     connection.execute(
                         "INSERT INTO run_beads(run_id, bead_id, position, scope_snapshot) VALUES (?, ?, ?, ?)",
                         (run_id, bead_id, position, scope),
