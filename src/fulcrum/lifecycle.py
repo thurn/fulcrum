@@ -385,7 +385,7 @@ def _apply_outcome(
             store.execute(
                 "UPDATE assignments SET stage = 'delivering', repair_permissions = ?, mandate_candidate_id = ?, mandate_scope = ?, condition = NULL, updated_at = ? WHERE id = ?",
                 (
-                    json.dumps(payload.get("allow_repair", [])),
+                    json.dumps(payload.get("repair_permissions", [])),
                     assignment["candidate_id"],
                     assignment["scope_snapshot"],
                     timestamp,

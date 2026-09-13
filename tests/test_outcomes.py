@@ -10,17 +10,56 @@ from fulcrum.outcomes import OutcomeError, finish_syntax, validate_outcome
 
 class OutcomesTest(unittest.TestCase):
     def test_concrete_forms(self) -> None:
-        self.assertEqual(
-            validate_outcome(
-                "review",
-                "approved",
-                {"assessment": "Correct", "allow_repair": ["formatting"]},
-            ),
-            {"assessment": "Correct", "allow_repair": ["formatting"]},
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "approval.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "assessment": "Correct",
+                        "minor_fixes": [
+                            {
+                                "problem": "Awkward name",
+                                "evidence": "module.py:10",
+                                "requested_change": "Use the domain term next time",
+                            }
+                        ],
+                        "repair_permissions": ["formatting"],
+                    }
+                )
+            )
+            self.assertEqual(
+                validate_outcome("review", "approved", {"input": str(path)}),
+                {
+                    "assessment": "Correct",
+                    "minor_fixes": [
+                        {
+                            "problem": "Awkward name",
+                            "evidence": "module.py:10",
+                            "requested_change": "Use the domain term next time",
+                        }
+                    ],
+                    "repair_permissions": ["formatting"],
+                },
+            )
         self.assertIn("fulcrum finish", finish_syntax("implement"))
         with self.assertRaises(OutcomeError):
             validate_outcome("review", "ready_for_review", {"evidence": "x"})
+
+    def test_approval_requires_explicit_well_formed_minor_fixes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "approval.json"
+            for content in (
+                {"assessment": "Correct"},
+                {"assessment": "Correct", "minor_fixes": [{}]},
+                {
+                    "assessment": "Correct",
+                    "minor_fixes": [],
+                    "repair_permissions": [""],
+                },
+            ):
+                path.write_text(json.dumps(content))
+                with self.assertRaises(OutcomeError):
+                    validate_outcome("review", "approved", {"input": str(path)})
 
     def test_report_requires_explicit_evidence_fields(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

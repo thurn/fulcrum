@@ -80,14 +80,30 @@ def validate_outcome(
     if outcome_kind in {"blocked", "exception"}:
         return {"reason": _required_text(options, "reason")}
     if outcome_kind == "approved":
-        repairs = options.get("allow_repair") or []
-        if not isinstance(repairs, list) or not all(
-            isinstance(item, str) and item.strip() for item in repairs
+        payload = _json_file(options)
+        assessment = payload.get("assessment")
+        if not isinstance(assessment, str) or not assessment.strip():
+            raise OutcomeError("approval input requires a nonempty assessment")
+        minor_fixes = payload.get("minor_fixes")
+        if not isinstance(minor_fixes, list):
+            raise OutcomeError("approval input requires an explicit minor_fixes list")
+        for fix in minor_fixes:
+            if not isinstance(fix, dict) or not all(
+                isinstance(fix.get(field), str) and fix[field].strip()
+                for field in ("problem", "evidence", "requested_change")
+            ):
+                raise OutcomeError(
+                    "each minor fix requires problem, evidence, and requested_change"
+                )
+        repair_permissions = payload.get("repair_permissions", [])
+        if not isinstance(repair_permissions, list) or not all(
+            isinstance(item, str) and item.strip() for item in repair_permissions
         ):
-            raise OutcomeError("--allow-repair values must be nonempty")
+            raise OutcomeError("repair_permissions must contain nonempty strings")
         return {
-            "assessment": _required_text(options, "assessment"),
-            "allow_repair": repairs,
+            "assessment": assessment.strip(),
+            "minor_fixes": minor_fixes,
+            "repair_permissions": repair_permissions,
         }
     if outcome_kind in {
         "changes_requested",
@@ -250,6 +266,17 @@ def finish_examples(action_kind: str) -> dict[str, Any]:
 
     contracts: dict[str, Any] = {
         "review": {
+            "approved": {
+                "assessment": "Why the exact candidate satisfies the approved scope",
+                "minor_fixes": [
+                    {
+                        "problem": "Nonblocking issue that may ship unchanged",
+                        "evidence": "file/line or observed result",
+                        "requested_change": "Bounded follow-up improvement",
+                    }
+                ],
+                "repair_permissions": [],
+            },
             "changes_requested": {
                 "findings": [
                     {
@@ -393,6 +420,15 @@ def finish_contract(action_kind: str, *, interviews_allowed: bool = True) -> str
             '{"capacity": true}, {"dependency": "bead-id"}, {"hold": 1}, '
             '{"operator_change": true}, or {"next_check_at": "2026-10-01T12:00:00Z"}.'
         )
+    if action_kind == "review":
+        lines.append(
+            "Approval's minor_fixes list is explicit and may be empty. Each item is "
+            "a nonblocking follow-up request retained with the approval; it does not "
+            "delay promotion or return the assignment to Executor. Put every change "
+            "required before promotion in changes_requested instead. "
+            "repair_permissions is optional and may contain only narrow replacement "
+            "categories that Executor may apply without another review."
+        )
     if action_kind == "weaver":
         lines.append(
             'For substantial approved plans, `fulcrum intake --input "/absolute/tasks.json"` accepts this graph (replace all example values). Keep intake_key stable across retries. Each task requires title and description, inherits project, and may include activation, context, depends_on, plan_id, plan_commit, executor_model, executor_reasoning_effort, overseer_model, and overseer_reasoning_effort. depends_on may name an earlier graph task\'s intake_key or an existing Beads ID. Include the approved plan reference on every planned task.\n```json\n{"project":"project-id","intake_key":"plan-name","tasks":[{"intake_key":"plan-name:first","title":"Bounded outcome","description":"Change, scope, acceptance and validation","plan_id":"plan-name","plan_commit":"actual-approved-commit","context":["/absolute/brain/plans/plan-name.md"],"depends_on":[]}]}\n```'
@@ -438,8 +474,8 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
             "Repair clearly fits a retained explicit permission and has been validated.",
         ),
         "approved": (
-            '--assessment "Why the candidate satisfies scope"',
-            "No blocking findings remain. Optionally append --allow-repair ordinary_merge_conflict or --allow-repair bounded_in_scope_ci_fix.",
+            '--input "/absolute/approval.json"',
+            "The exact candidate is ready for promotion; minor fixes are nonblocking follow-up requests.",
         ),
         "changes_requested": (
             '--input "/absolute/findings.json"',
@@ -513,6 +549,22 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
                 "Blocked on a scope or authority decision:\n"
                 '`fulcrum finish blocked --reason "Observed blocker and decision needed"`',
                 "If Repair permission is unclear, use `ready_for_review`.",
+            ]
+        )
+    if action_kind == "review":
+        return "\n\n".join(
+            [
+                "# Finish\n\nRun exactly one:",
+                "Ready for promotion, with any nonblocking minor fixes recorded:\n"
+                '`fulcrum finish approved --input "/absolute/approval.json"`',
+                "Blocking source defects require correction before promotion:\n"
+                '`fulcrum finish changes_requested --input "/absolute/findings.json"`',
+                "No defect established because specific evidence is missing:\n"
+                '`fulcrum finish incomplete --input "/absolute/missing.json"`',
+                "Review authority or scope needs adjudication:\n"
+                '`fulcrum finish exception --reason "Review boundary and decision needed"`',
+                "Use approval only when the submitted candidate may be promoted unchanged. "
+                "A minor fix never blocks this delivery.",
             ]
         )
     rows = []

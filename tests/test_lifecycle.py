@@ -1515,14 +1515,22 @@ class LifecycleTest(unittest.TestCase):
             (self.assignment["id"],),
         )
         review = self._action("review")
+        approval = Path(self.temporary.name) / "approval.json"
+        approval.write_text(
+            json.dumps(
+                {
+                    "assessment": "candidate matches the retained scope",
+                    "minor_fixes": [],
+                    "repair_permissions": ["bounded_in_scope_ci_fix"],
+                }
+            ),
+            encoding="utf-8",
+        )
         accept_finish(
             self.store,
             native_thread_id="executor",
             outcome_kind="approved",
-            options={
-                "assessment": "candidate matches the retained scope",
-                "allow_repair": ["bounded_in_scope_ci_fix"],
-            },
+            options={"input": str(approval)},
         )
         observe_action_terminal(self.store, review)
         mandate = self.store.row(

@@ -104,8 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
         item = finish_sub.add_parser(name)
         item.add_argument("--reason", required=True)
     approved = finish_sub.add_parser("approved")
-    approved.add_argument("--assessment", required=True)
-    approved.add_argument("--allow-repair", action="append", default=[])
+    approved.add_argument("--input", required=True)
     for name in (
         "changes_requested",
         "incomplete",

@@ -1024,14 +1024,14 @@ thread and its helpers stop. Routine commands need no identity arguments:
 
 ```sh
 fulcrum finish ready_for_review --evidence path/to/validation.md
-fulcrum finish approved --assessment "Matches the approved scope"
+fulcrum finish approved --input path/to/approval.json
 fulcrum finish blocked --reason "Required test service is unavailable"
 ```
 
 These are alternative outcomes. The agent supplies judgment and evidence;
-Python supplies the workflow context. Substantial findings, scheduling decisions,
-and reports may use `--input <file.json>` as specified in the outcome table below.
-Routine outcomes require no intermediate file.
+Python supplies the workflow context. Structured approvals, findings, scheduling
+decisions, and reports use `--input <file.json>` as specified in the outcome table
+below; simple stop outcomes remain inline.
 
 ### Bind to the thread's current action
 
@@ -1210,7 +1210,10 @@ candidate, including any expressly permitted replacement categories. It is
 Fulcrum approval evidence; it is not a new Tollgate certification mechanism.
 
 - Review outcomes are approved, changes requested, or incomplete. Approval
-  requires an explicit scope assessment and no unresolved blocking findings.
+  requires an explicit scope assessment, an explicit list of nonblocking minor
+  fixes that may be empty, and no unresolved blocking findings. Minor fixes are
+  retained as follow-up input and do not delay promotion or return the assignment
+  to Executor.
 - Findings identify incorrect behavior, evidence, and a requested correction.
   Preserve stable finding references within a review cycle.
 - Count each newly assessed source once. Missing evidence, duplicate reports,
@@ -1242,9 +1245,15 @@ contract assumes Overseer has classified the concrete repair. In the controller
 workflow, Overseer grants the categories, Executor classifies the repair, and
 Python records the permitted replacement after the mechanical checks above.
 
-```sh
-fulcrum finish approved --assessment "Matches the approved indexing task" \
-  --allow-repair ordinary_merge_conflict --allow-repair bounded_in_scope_ci_fix
+```json
+{
+  "assessment": "Matches the approved indexing task",
+  "minor_fixes": [],
+  "repair_permissions": [
+    "ordinary_merge_conflict",
+    "bounded_in_scope_ci_fix"
+  ]
+}
 ```
 
 Source immutability, registered caller, current assignment, and explicit review
@@ -1704,7 +1713,7 @@ prompt command rendering, and finish validation. Implement these concrete forms:
 | Executor submission | `ready_for_review --evidence <path>`; candidate receipt comes from the submission helper |
 | Executor covered repair | `permitted_repair_complete --repair-category <category> --repair-rationale <text> --evidence <path>` |
 | Executor stop/block | `checkpointed --evidence <path>` or `blocked --reason <text>` |
-| Overseer approval | `approved --assessment <text>` with zero or more `--allow-repair <category>` arguments |
+| Overseer approval | `approved --input <approval.json>` with an assessment, explicit nonblocking `minor_fixes` list, and optional `repair_permissions` list |
 | Overseer other result | `changes_requested --input <findings.json>`, `incomplete --input <missing-evidence.json>`, or `exception --reason <text>` |
 | Archon decision | `decisions --input <decisions.json>` containing the proposed run/exception targets, decisions, and optional policy/summary changes |
 | Archon deferral | `deferred --reason <text> --input <reactivation.json>` referring to a concrete capacity, dependency, hold, operator-change condition, or explicit next check time for a suspected stall |

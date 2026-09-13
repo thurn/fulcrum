@@ -46,17 +46,23 @@ def role_instructions(action_kind: str, *, role: str | None = None) -> str:
     """Onboarding and command reference, supplied once at task creation."""
     finish_kind = "correct" if action_kind == "implement" else action_kind
     interviews_allowed = role == "sage"
-    lifecycle = (
-        "Finish this action exactly once, then end. The controller binds and routes "
-        "the result. If finish fails, correct the reported error and retry. An action "
-        "labeled `Workflow debrief only` replaces the assignment instructions; follow "
-        "its finish command without resuming implementation."
-        if role == "executor"
-        else "Subsequent messages contain the actual request and necessary facts. Use them "
-        "directly. Do not manage other conversations. An interview temporarily replaces "
-        "your normal duties. Finish the current action once through `fulcrum finish`, "
-        "then end; the controller binds identity and routes the result. Wait for native "
-        "helpers before submitting. If finish fails, correct the reported error."
+    lifecycle = {
+        "executor": (
+            "Finish this implementation or correction once, then end. The controller "
+            "routes the result. Correct and retry a failed finish command. A later "
+            "`Workflow debrief only` action replaces implementation duties."
+        ),
+        "overseer": (
+            "Finish this review once, then end; the controller routes it. Wait only for "
+            "helpers you started. Correct and retry a failed finish command. A later "
+            "`Workflow debrief only` action replaces review duties."
+        ),
+    }.get(
+        role or "",
+        "Finish the current action exactly once, then end. The controller binds and "
+        "routes the result. Wait only for helper agents you started. If finish fails, "
+        "correct the reported error and retry. A `Workflow debrief only` action replaces "
+        "the role's normal duties.",
     )
     return "\n\n".join(
         [

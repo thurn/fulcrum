@@ -277,7 +277,9 @@ class PromptsTest(unittest.TestCase):
             "# Ownership boundaries",
             "# Corrections only",
             "# Finish",
-            "Edit only the assigned worktree",
+            "Make repository edits only in the assigned worktree",
+            "Repository push or publication requirements",
+            "evidence file may use a",
             "If Repair permission is unclear",
             "Workflow debrief only",
             "fulcrum finish ready_for_review",
@@ -294,6 +296,32 @@ class PromptsTest(unittest.TestCase):
             self.assertNotIn(irrelevant, text)
         self.assertEqual(text.count("wait for helper agents"), 1)
         self.assertLess(len(text.split()), 380)
+
+    def test_overseer_creation_instructions_are_concise_and_candidate_specific(
+        self,
+    ) -> None:
+        text = role_instructions("review", role="overseer")
+        for required in (
+            "You are Overseer",
+            "# Review",
+            "# Boundaries",
+            "source and tests are authoritative",
+            "minor fixes",
+            "may be promoted unchanged",
+            "Wait only for helpers you started",
+            "fulcrum finish approved --input",
+            '"minor_fixes"',
+            '"repair_permissions"',
+        ):
+            self.assertIn(required, text)
+        for irrelevant in (
+            "Planning Weaver",
+            "An interview temporarily replaces",
+            "Wait for native helpers",
+            "No blocking findings remain",
+        ):
+            self.assertNotIn(irrelevant, text)
+        self.assertLess(len(text.split()), 480)
 
     def test_every_file_example_is_accepted_without_an_outcome_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -316,6 +344,14 @@ class PromptsTest(unittest.TestCase):
             self.assertNotIn(" | ", syntax)
             for outcome in outcomes:
                 self.assertIn(f"fulcrum finish {outcome}", syntax)
+
+    def test_approval_cli_uses_one_structured_input(self) -> None:
+        args = build_parser().parse_args(
+            ["finish", "approved", "--input", "/tmp/approval.json"]
+        )
+        self.assertEqual(args.input, "/tmp/approval.json")
+        with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
+            build_parser().parse_args(["finish", "approved", "--assessment", "Correct"])
 
     def test_planning_registration_has_no_finish_obligation(self) -> None:
         text = weaver_instructions(plan_mode=True, project="p")

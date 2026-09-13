@@ -4373,6 +4373,14 @@ print(json.dumps({
         self,
     ) -> None:
         now = "2026-01-01T00:00:00Z"
+        self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
         self.controller.store.execute(
             """UPDATE assignments SET stage = 'reviewing', candidate_id = 'candidate-1',
                source_oid = 'source-1', tested_oid = 'tested-1' WHERE id = ?""",
@@ -4415,7 +4423,14 @@ print(json.dumps({
                 json.dumps(
                     {
                         "assessment": "candidate matches the approved scope",
-                        "allow_repair": ["bounded_in_scope_ci_fix"],
+                        "minor_fixes": [
+                            {
+                                "problem": "Nonblocking naming inconsistency",
+                                "evidence": "module.py:10",
+                                "requested_change": "Use the domain term in follow-up work",
+                            }
+                        ],
+                        "repair_permissions": ["bounded_in_scope_ci_fix"],
                     }
                 ),
                 now,
@@ -4517,6 +4532,20 @@ print(json.dumps({
         self.assertEqual(completed["mandate_scope"], approved["scope_snapshot"])
         self.assertEqual(tollgate.approved, ["candidate-1"])
         self.assertEqual(beads.closed, ["p-1"])
+        completion = self.controller.store.row(
+            "SELECT content FROM updates WHERE identity = ?",
+            (f"completion:{self.assignment['id']}",),
+        )
+        self.assertEqual(
+            json.loads(completion["content"])["minor_fixes"],
+            [
+                {
+                    "problem": "Nonblocking naming inconsistency",
+                    "evidence": "module.py:10",
+                    "requested_change": "Use the domain term in follow-up work",
+                }
+            ],
+        )
 
     async def test_reconcile_releases_stale_delivery_boundary_hold(self) -> None:
         hold = self.controller.store.execute(

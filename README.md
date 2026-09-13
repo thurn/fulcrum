@@ -61,8 +61,9 @@ Fulcrum uses a few terms throughout its status output and conversations:
 5. **Overseer reviews independently.** When the retained candidate and evidence
    are ready for review, the controller creates Overseer and gives it the exact
    candidate, scope, and evidence. Overseer reads the source without editing the
-   Executor worktree. It either approves, requests bounded changes, or identifies
-   missing evidence; the controller routes any correction back to Executor.
+   Executor worktree. It approves candidates that may ship unchanged, optionally
+   records nonblocking minor fixes, requests blocking changes, or identifies missing
+   evidence. The controller routes outcomes and any required correction.
 6. **The controller and Tollgate deliver.** After approval, the controller asks
    Tollgate to certify and promote the candidate. Tollgate runs the configured
    checks, integrates the code into the repository's main/integration branch,
@@ -88,7 +89,7 @@ resulting findings for implementation nor bypasses normal capacity controls.
 | **Archon** | Chooses which pending outcomes to approve, their priority, run grouping, capacity, holds, and responses to unresolved exceptions. | Setup creates the current Archon. The controller wakes it with pending proposals or material updates; a human can locate its long-lived conversation for strategic direction. | Does not implement code, run builds, dispatch agents, or write operational records. |
 | **Weaver** | Clarifies human intent and authors an implementation-ready bead, task graph, or substantial plan. | A human creates a Codex task and registers it as Weaver; the returned instructions guide direct intake or Plan Mode. | Does not approve or schedule the bead, implement it, or manage publication, retries, or archival. |
 | **Executor** | Decides how to implement the exact approved scope, which proportionate checks to run, and how to make bounded in-scope corrections. | The controller creates and starts it when an Archon-approved assignment is eligible. | Does not choose its own scope, create or promote a Tollgate candidate, push its worktree branch, review itself, or write Fulcrum's operational state. |
-| **Overseer** | Independently decides whether the exact candidate satisfies scope; it owns blocking findings, approval, and any narrow repair permission. | The controller starts it after Executor finishes and the immutable candidate and evidence are available. | Does not edit source, build in Executor's worktree, contact Executor directly, certify or promote code, or perform delivery. |
+| **Overseer** | Independently decides whether the exact candidate satisfies scope; it owns blocking findings, nonblocking minor fixes, approval, and any narrow repair permission. | The controller starts it after Executor finishes and the immutable candidate and evidence are available. | Does not edit source, build in Executor's worktree, contact Executor directly, certify or promote code, or perform delivery. |
 | **Sage** | Reviews **workflow effectiveness**: failures, wasted effort, handoff friction, and evidence-backed process improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not implement findings, approve them for implementation, set its own cadence, schedule interviews, or publish its own report and issues. |
 | **Inquisitor** | Reviews **project architecture** across the selected codebase and proposes evidence-backed structural improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not edit product source, authorize implementation or promotion, or publish its own report and issues. |
 

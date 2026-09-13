@@ -2807,6 +2807,16 @@ class Controller:
 
     def _record_assignment_completed(self, assignment: dict[str, Any]) -> None:
         timestamp = utc_now()
+        approval = self.store.row(
+            """SELECT outcome_payload FROM actions
+               WHERE assignment_id = ? AND kind = 'review'
+                 AND outcome_kind = 'approved'
+               ORDER BY id DESC LIMIT 1""",
+            (assignment["id"],),
+        )
+        approval_payload = (
+            json.loads(approval["outcome_payload"] or "{}") if approval else {}
+        )
         with self.store.transaction():
             self.store.execute(
                 "UPDATE assignments SET stage = 'completed', condition = NULL, updated_at = ? WHERE id = ?",
@@ -2824,6 +2834,7 @@ class Controller:
                     "completion_evidence": assignment.get("completion_evidence"),
                     "source_revision": assignment.get("source_oid"),
                     "tested_revision": assignment.get("tested_oid"),
+                    "minor_fixes": approval_payload.get("minor_fixes", []),
                 },
             )
             remaining = self.store.row(

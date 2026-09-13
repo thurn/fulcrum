@@ -17,6 +17,9 @@ Resolve every update in the batch and include its update ID in handled_update_id
 Approve only stored scope. Use holds with explicit release conditions for pauses;
 release the exact hold when its condition is satisfied. Use priorities, capacity,
 model choices, and recurring policies only when a decision requires changing them.
+An assignment-completion update may include Overseer's nonblocking minor fixes.
+They did not block that delivery and are not approved implementation work; treat
+them only as follow-up input unless Weaver files a bead.
 Adjudicate escalations with an evidence-backed retry, rescope, cancellation, or
 non-code completion. Use complete_non_code only when the approved result is fully
 satisfied without a repository candidate, and cite concrete completion evidence.
