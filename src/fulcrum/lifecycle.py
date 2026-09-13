@@ -471,6 +471,31 @@ def _apply_outcome(
                        WHERE id = ?""",
                     (hold.lastrowid, reason, timestamp, assignment_id),
                 )
+                archon = store.row("""SELECT id FROM tasks WHERE role = 'archon'
+                       AND state NOT IN ('retired','archived')""")
+                if archon is not None:
+                    store.execute(
+                        """INSERT OR IGNORE INTO updates(
+                               recipient_task_id, identity, content, actionable,
+                               state, created_at, updated_at
+                           ) VALUES (?, ?, ?, 1, 'retained', ?, ?)""",
+                        (
+                            archon["id"],
+                            f"blocked:{assignment_id}:{action['id']}",
+                            json.dumps(
+                                {
+                                    "kind": "assignment_blocked",
+                                    "assignment_id": assignment_id,
+                                    "action_id": action["id"],
+                                    "condition": reason,
+                                    "hold_id": int(hold.lastrowid),
+                                },
+                                sort_keys=True,
+                            ),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
         return {
             "assignment_id": assignment_id,
             "stage": "recovering",

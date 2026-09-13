@@ -142,7 +142,6 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(
             json.loads(handoff["content_json"])["evidence"], "/tmp/evidence"
         )
-
         repeated = observe_action_terminal(self.store, action)
         self.assertEqual(repeated, {"advanced": True, "reused": True})
         self.assertEqual(
@@ -153,6 +152,31 @@ class LifecycleTest(unittest.TestCase):
             ),
             1,
         )
+
+    def test_blocked_assignment_notifies_archon(self) -> None:
+        archon = self.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        action = self._action()
+        accept_finish(
+            self.store,
+            native_thread_id="executor",
+            outcome_kind="blocked",
+            options={"reason": "requires an explicit administrative decision"},
+        )
+
+        result = observe_action_terminal(self.store, action)
+
+        self.assertTrue(result["advanced"])
+        update = self.store.row(
+            "SELECT * FROM updates WHERE recipient_task_id = ?", (archon["id"],)
+        )
+        self.assertEqual(json.loads(update["content"])["kind"], "assignment_blocked")
+        self.assertIn("administrative decision", update["content"])
 
     def test_review_findings_are_retained_for_the_correction_handoff(self) -> None:
         action = self._action("review")
