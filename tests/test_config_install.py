@@ -182,10 +182,45 @@ class ConfigInstallTest(unittest.TestCase):
             APP_SERVER_LABEL: "/tmp/app-server.plist",
             CONTROLLER_LABEL: "/tmp/controller.plist",
         }
+        controller_booted_out = False
+        controller_bootstrapped = False
+        removal_polls = 0
+        events: list[str] = []
 
         def completed(
             command: list[str], **_kwargs: object
         ) -> subprocess.CompletedProcess:
+            nonlocal controller_booted_out, controller_bootstrapped, removal_polls
+            operation = command[1]
+            label = command[-1].rsplit("/", 1)[-1]
+            if operation == "bootout":
+                controller_booted_out = True
+                events.append("bootout")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if operation == "bootstrap":
+                self.assertGreaterEqual(removal_polls, 3)
+                controller_bootstrapped = True
+                events.append("bootstrap")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if (
+                operation == "print"
+                and label == CONTROLLER_LABEL
+                and controller_booted_out
+                and not controller_bootstrapped
+            ):
+                removal_polls += 1
+                if removal_polls < 3:
+                    events.append("still-loaded")
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout="\tstate = SIGTERMed\n\tpid = 123\n",
+                        stderr="",
+                    )
+                events.append("unloaded")
+                return subprocess.CompletedProcess(
+                    command, 1, stdout="", stderr="absent"
+                )
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -211,6 +246,10 @@ class ConfigInstallTest(unittest.TestCase):
         self.assertNotIn(
             ["launchctl", "kickstart", f"gui/501/{CONTROLLER_LABEL}"], commands
         )
+        self.assertEqual(
+            events,
+            ["bootout", "still-loaded", "still-loaded", "unloaded", "bootstrap"],
+        )
 
     def test_start_services_repairs_a_loaded_job_after_a_partial_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -226,13 +265,21 @@ class ConfigInstallTest(unittest.TestCase):
                 CONTROLLER_LABEL: str(definition),
             }
             repaired = False
+            booted_out = False
 
             def completed(
                 command: list[str], **_kwargs: object
             ) -> subprocess.CompletedProcess:
-                nonlocal repaired
+                nonlocal repaired, booted_out
+                if command[1] == "bootout":
+                    booted_out = True
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
                 if command[1] == "bootstrap":
                     repaired = True
+                if command[1] == "print" and booted_out and not repaired:
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout="", stderr="absent"
+                    )
                 path = "/expected/bin:/usr/bin" if repaired else "/stale/bin:/usr/bin"
                 output = (
                     "\tstate = running\n\tpid = 123\n"

@@ -469,6 +469,19 @@ def _wait_for_running_service(label: str, *, timeout: float = 10) -> ServiceObse
     return latest
 
 
+def _wait_for_unloaded_service(
+    label: str, *, timeout: float = 10
+) -> ServiceObservation:
+    """Wait until launchd has finished removing a booted-out job."""
+
+    deadline = time.monotonic() + timeout
+    latest = inspect_service(label)
+    while latest.loaded and time.monotonic() < deadline:
+        time.sleep(0.2)
+        latest = inspect_service(label)
+    return latest
+
+
 def verify_runtime_ownership_or_availability(endpoint: str) -> ServiceObservation:
     """Reject a ready app-server endpoint not owned by the configured launchd job."""
 
@@ -515,6 +528,13 @@ def start_services(
                 raise InstallationError(
                     f"could not unload stale {label}: "
                     f"{result.stderr.strip() or result.stdout.strip()}"
+                )
+            stopped = _wait_for_unloaded_service(label)
+            if stopped.loaded:
+                raise InstallationError(
+                    f"configured service {label} did not finish unloading; "
+                    f"domain={domain}; state={stopped.state!r}; "
+                    f"pid={stopped.pid!r}; detail={stopped.detail!r}"
                 )
             loaded = False
             if (
