@@ -101,6 +101,16 @@ def _record_published_task(
             "UPDATE external_operations SET state = 'complete', native_id = ?, result_json = ?, updated_at = ? WHERE id = ?",
             (bead_id, json.dumps({"bead_id": bead_id}), timestamp, operation),
         )
+        connection.execute(
+            """UPDATE external_operations SET state = 'canceled', updated_at = ?
+               WHERE kind = 'beads_create' AND target = ? AND state = 'failed' AND id < ?""",
+            (timestamp, task.intake_key, operation),
+        )
+        connection.execute(
+            """UPDATE obligations SET state = 'complete', detail = NULL, updated_at = ?
+               WHERE kind = 'beads_publication' AND identity = ?""",
+            (timestamp, task.intake_key),
+        )
 
 
 def reconcile_beads_creation(

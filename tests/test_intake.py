@@ -18,6 +18,15 @@ class FakeBeads:
         return f"fc-{len(self.tasks)}"
 
 
+class FailOnceBeads(FakeBeads):
+    def create(self, task: Any) -> str:
+        if not self.tasks:
+            self.tasks.append(task)
+            raise OSError("deterministic publication failure")
+        self.tasks.append(task)
+        return "fc-recovered"
+
+
 class IntakeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -48,6 +57,44 @@ class IntakeTest(unittest.TestCase):
         row = self.store.row("SELECT * FROM beads WHERE bead_id = 'fc-1'")
         self.assertEqual(row["executor_model"], "gpt-5.6-sol")
         self.assertEqual(row["overseer_reasoning_effort"], "high")
+
+    def test_successful_retry_supersedes_failed_publication(self) -> None:
+        draft = task_from_payload(
+            {
+                "project": "fulcrum",
+                "title": "Retry publication",
+                "description": "Publish one durable bead after a deterministic failure.",
+            },
+            intake_key="retry-publication",
+        )
+        beads = FailOnceBeads()
+
+        with self.assertRaisesRegex(OSError, "deterministic publication failure"):
+            file_task(self.store, beads, draft)  # type: ignore[arg-type]
+        result = file_task(self.store, beads, draft)  # type: ignore[arg-type]
+
+        self.assertEqual(result["bead_id"], "fc-recovered")
+        self.assertEqual(
+            self.store.rows(
+                "SELECT bead_id FROM beads WHERE intake_key = 'retry-publication'"
+            ),
+            [{"bead_id": "fc-recovered"}],
+        )
+        operations = self.store.rows("""SELECT state, condition FROM external_operations
+               WHERE kind = 'beads_create' AND target = 'retry-publication'
+               ORDER BY id""")
+        self.assertEqual(
+            [operation["state"] for operation in operations], ["canceled", "complete"]
+        )
+        self.assertEqual(
+            operations[0]["condition"], "deterministic publication failure"
+        )
+        obligation = self.store.row("""SELECT state, detail FROM obligations
+               WHERE kind = 'beads_publication' AND identity = 'retry-publication'""")
+        self.assertEqual(obligation, {"state": "complete", "detail": None})
+        status = self.store.status()
+        self.assertEqual(status["operations"], [])
+        self.assertEqual(status["obligations"], [])
 
     def test_graph_is_topological_and_marked_complete(self) -> None:
         result = file_graph(
