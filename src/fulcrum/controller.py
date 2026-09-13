@@ -978,13 +978,7 @@ class Controller:
             )
             await self._close_delivered_assignment(assignment)
             return
-        terminal = isinstance(candidate, dict) and candidate.get("state") not in {
-            "queued",
-            "running",
-            "validated",
-            "promoting",
-        }
-        if terminal and isinstance(candidate, dict):
+        if _candidate_definitively_failed(candidate):
             tollgate = self.tollgate
             assert tollgate is not None
             diagnosis = await asyncio.to_thread(
@@ -992,6 +986,7 @@ class Controller:
                 assignment["tollgate_repo_id"],
                 assignment["candidate_id"],
             )
+            assert isinstance(candidate, dict)
             condition = f"Tollgate candidate ended in {candidate.get('state')}"
             self.store.execute(
                 "UPDATE external_operations SET state = 'failed', reconciliation_used = 1, result_json = ?, condition = ?, updated_at = ? WHERE id = ?",
@@ -2122,12 +2117,7 @@ class Controller:
             failure = _delivery_contract_failure(candidate, observed)
             if failure is None:
                 await self._close_delivered_assignment(assignment)
-            elif candidate and candidate.get("state") not in {
-                "queued",
-                "running",
-                "validated",
-                "promoting",
-            }:
+            elif _candidate_definitively_failed(candidate):
                 self.store.execute(
                     "UPDATE assignments SET prior_stage = 'delivering', stage = 'correcting', condition = ?, updated_at = ? WHERE id = ?",
                     (failure, utc_now(), assignment["id"]),
@@ -2161,12 +2151,7 @@ class Controller:
             failure = _delivery_contract_failure(candidate, observed)
             if failure is not None:
                 diagnosis: dict[str, Any] | None = None
-                if candidate and candidate.get("state") not in {
-                    "queued",
-                    "running",
-                    "validated",
-                    "promoting",
-                }:
+                if _candidate_definitively_failed(candidate):
                     diagnosis = await asyncio.to_thread(
                         tollgate.diagnose,
                         project["tollgate_repo_id"],
@@ -4558,6 +4543,10 @@ def _delivery_contract_failure(
     if not candidate.get("certificate_id"):
         return "candidate has no retained Tollgate certificate"
     return None
+
+
+def _candidate_definitively_failed(candidate: dict[str, Any] | None) -> bool:
+    return bool(candidate and candidate.get("state") in {"canceled", "failed"})
 
 
 def _find_codex_project_id(

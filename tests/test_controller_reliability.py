@@ -11,7 +11,12 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
-from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV, _find_candidate
+from fulcrum.controller import (
+    Controller,
+    INHERITED_LOCK_FD_ENV,
+    _candidate_definitively_failed,
+    _find_candidate,
+)
 from fulcrum.lifecycle import apply_archon_decisions, observe_action_terminal
 from fulcrum.store import StoreError
 from fulcrum.tollgate import TollgateError, TollgateUncertainError
@@ -1324,6 +1329,21 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             _find_candidate(status, str(self.worktree), source_oid="current-head")
         )
+
+    def test_promoted_candidate_with_pending_cleanup_is_not_a_failed_delivery(
+        self,
+    ) -> None:
+        self.assertFalse(
+            _candidate_definitively_failed(
+                {
+                    "state": "promoted",
+                    "remote_state": "pending",
+                    "cleanup_state": "pending",
+                }
+            )
+        )
+        self.assertTrue(_candidate_definitively_failed({"state": "failed"}))
+        self.assertTrue(_candidate_definitively_failed({"state": "canceled"}))
 
     async def test_ambiguous_approval_is_reconciled_to_completed_delivery(self) -> None:
         self.controller.store.execute(
