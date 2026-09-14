@@ -75,6 +75,9 @@ class ParsedRequest:
     wait: bool = False
     timeout: float = 30.0
     offline: bool = False
+    # Controller-internal execution hook. It is intentionally absent from the
+    # wire representation so callers cannot inject runtime authority over IPC.
+    runtime_submit: Any | None = field(default=None, compare=False, repr=False)
 
     @property
     def command_name(self) -> str:

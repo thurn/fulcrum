@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from fulcrum.configuration import ConfigurationManager
-from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
+from fulcrum.contracts import (
+    ActorContext,
+    CommandResult,
+    CommandState,
+    FulcrumError,
+    ParsedRequest,
+)
 from fulcrum.ipc import IpcServer
 from fulcrum.ledger import (
     Ledger,
@@ -23,6 +29,15 @@ from fulcrum.ledger import (
     OperationRecord,
     operation_view,
     utc_now,
+)
+from fulcrum.leadership import (
+    ADMISSION_NAMESPACE,
+    LEADERSHIP_NAMESPACE,
+    build_brief,
+    capacity_snapshot,
+    dependency_readiness,
+    ensure_leadership,
+    normalize_native_intake,
 )
 from fulcrum.runtime import AppServerError, AppServerRuntime, TaskFacts, TurnInput
 
@@ -185,6 +200,7 @@ class ControllerSupervisor:
         operation_id: str | None = None,
         keep_runtime: bool = False,
     ) -> PassSummary:
+        self._loop = asyncio.get_running_loop()
         records = await asyncio.to_thread(self.ledger.list_records, limit=0)
         intake = tuple(
             sorted(
@@ -193,6 +209,20 @@ class ControllerSupervisor:
                 if record.kind is None and record.status != "closed"
             )
         )
+        actions: list[Mapping[str, Any]] = []
+        gaps: list[Mapping[str, Any]] = []
+        leadership_actions = await ensure_leadership(
+            self.request, self.ledger, self.runtime, self.config
+        )
+        actions.extend(
+            {"kind": "leadership", **action} for action in leadership_actions
+        )
+        intake_actions = await asyncio.to_thread(
+            normalize_native_intake, self.request, self.ledger
+        )
+        actions.extend({"kind": "intake", **action} for action in intake_actions)
+        if leadership_actions or intake_actions:
+            records = await asyncio.to_thread(self.ledger.list_records, limit=0)
         operations = [
             OperationRecord.from_record(record)
             for record in records
@@ -237,8 +267,6 @@ class ControllerSupervisor:
         }
         task_rows: list[Mapping[str, Any]] = []
         work_rows: list[Mapping[str, Any]] = []
-        actions: list[Mapping[str, Any]] = []
-        gaps: list[Mapping[str, Any]] = []
         facts: dict[str, TaskFacts] = {}
         pressure: dict[str, Any] = {"paused": False, "reason": None}
         if tasks:
@@ -284,6 +312,19 @@ class ControllerSupervisor:
                         "waiting": fc.get("waiting"),
                     }
                 )
+            judgment_candidate = bool(intake) or any(
+                work.status != "closed"
+                and work.fc
+                and work.fc.get("phase") in {"backlog", "recovering", "human"}
+                and work.fc.get("dispatch") is None
+                for work in work_by_id.values()
+            )
+            if not pressure["paused"] and judgment_candidate:
+                judgment = await self._request_marshal_judgment(facts)
+                if judgment is not None:
+                    actions.append(judgment)
+            if not pressure["paused"]:
+                actions.extend(await self._start_authorized_work())
             self.health.success(
                 "reconciliation",
                 {
@@ -299,7 +340,7 @@ class ControllerSupervisor:
                 "intake", {"discovered": len(intake), "busy": bool(intake)}
             )
         finally:
-            if tasks and not keep_runtime:
+            if not keep_runtime:
                 await self.runtime.close()
         return PassSummary(
             observed_at=_format_time(self.clock.now()),
@@ -311,6 +352,204 @@ class ControllerSupervisor:
             pressure=pressure,
             gaps=tuple(gaps),
         )
+
+    async def _request_marshal_judgment(
+        self, facts: Mapping[str, TaskFacts]
+    ) -> Mapping[str, Any] | None:
+        control = await asyncio.to_thread(self.ledger.show, "fc-system")
+        if control is None or not control.fc:
+            return None
+        marshal_thread = _optional_string(control.fc.get("marshal_thread"))
+        if marshal_thread is None:
+            return None
+        observed = facts.get(marshal_thread)
+        if observed is not None and observed.active_turn is not None:
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "reason": "standing Marshal already has an active turn",
+            }
+        manager = ConfigurationManager(self.request.instance.config_path)
+        document, _ = manager.load()
+        config = manager.effective(document)
+        brief, _ = await asyncio.to_thread(
+            build_brief,
+            self.ledger,
+            config,
+            requested_kind="auto",
+            bead_id=None,
+        )
+        fc = dict(control.fc)
+        pending = fc.get("pending_decision")
+        if not brief["decision_required"]:
+            if pending is not None:
+                fc["pending_decision"] = None
+                await asyncio.to_thread(self.ledger.update_fc, control.id, fc)
+            return None
+        operations = await asyncio.to_thread(
+            self.ledger.list_records, kind="operation", limit=0
+        )
+        outstanding = next(
+            (
+                record
+                for record in operations
+                if record.fc
+                and record.fc.get("command") == "marshal.request"
+                and record.fc.get("state") in {"accepted", "running"}
+            ),
+            None,
+        )
+        if outstanding is not None:
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "operation_id": outstanding.id,
+                "reason": "one Marshal decision is already outstanding",
+            }
+        now = self.clock.now()
+        if not isinstance(pending, Mapping) or pending.get("kind") != brief["kind"]:
+            pending = {
+                "kind": brief["kind"],
+                "first_seen_at": _format_time(now),
+                "selected_ids": [row["bead_id"] for row in brief["rows"]],
+            }
+            fc["pending_decision"] = pending
+            await asyncio.to_thread(self.ledger.update_fc, control.id, fc)
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "reason": "coalescing compatible judgment events",
+                "eligible_at": _format_time(
+                    now
+                    + timedelta(
+                        seconds=float(
+                            _mapping(config["timing"])["marshal_coalesce_seconds"]
+                        )
+                    )
+                ),
+            }
+        first_seen = _parse_time(str(pending["first_seen_at"]))
+        coalesce = float(_mapping(config["timing"])["marshal_coalesce_seconds"])
+        if (now - first_seen).total_seconds() < coalesce:
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "reason": "coalescing compatible judgment events",
+                "eligible_at": _format_time(first_seen + timedelta(seconds=coalesce)),
+            }
+        request = ParsedRequest(
+            command=("marshal", "request"),
+            arguments={"kind": brief["kind"]},
+            input={},
+            actor=ActorContext(kind="task", task_id=marshal_thread),
+            instance=self.request.instance,
+            request_id=str(
+                uuid.uuid5(
+                    LEADERSHIP_NAMESPACE,
+                    f"automatic:{brief['kind']}:{pending['first_seen_at']}",
+                )
+            ),
+            thread_id=marshal_thread,
+            timeout=self.request.timeout,
+            offline=True,
+            runtime_submit=self._runtime_submit,
+        )
+        async with self.external_slots:
+            result = await asyncio.to_thread(self.application.dispatch, request)
+        latest = await asyncio.to_thread(self.ledger.show, "fc-system")
+        if latest is not None and latest.fc:
+            latest_fc = dict(latest.fc)
+            latest_fc["pending_decision"] = None
+            await asyncio.to_thread(self.ledger.update_fc, latest.id, latest_fc)
+        return {
+            "kind": "marshal_decision",
+            "started": result.state in {CommandState.RUNNING, CommandState.COMPLETED},
+            "operation_id": result.operation_id,
+            "state": result.state.value,
+        }
+
+    async def _start_authorized_work(self) -> list[Mapping[str, Any]]:
+        results: list[Mapping[str, Any]] = []
+        records = await asyncio.to_thread(
+            self.ledger.list_records, kind="work", limit=0
+        )
+        manager = ConfigurationManager(self.request.instance.config_path)
+        document, _ = manager.load()
+        config = manager.effective(document)
+        candidates = sorted(
+            records, key=lambda item: (int(item.native.get("priority", 2)), item.id)
+        )
+        for record in candidates:
+            fc = record.fc or {}
+            dispatch = fc.get("dispatch")
+            if (
+                record.status == "closed"
+                or fc.get("phase") != "backlog"
+                or not isinstance(dispatch, Mapping)
+            ):
+                continue
+            reservation = dispatch.get("reservation")
+            if isinstance(reservation, Mapping) and reservation.get("state") in {
+                "in_flight",
+                "unknown",
+                "started",
+            }:
+                continue
+            ready, _ = await asyncio.to_thread(
+                dependency_readiness, self.ledger, record
+            )
+            if not ready:
+                continue
+            capacity = await asyncio.to_thread(capacity_snapshot, self.ledger, config)
+            project = str(fc.get("project") or "")
+            project_row = capacity["projects"].get(project, {})
+            if not dispatch.get("human_bypass") and (
+                capacity["occupied"] >= capacity["global_limit"]
+                or int(project_row.get("occupied", 0))
+                >= int(project_row.get("limit", capacity["default_project_limit"]))
+                or project in capacity["paused_projects"]
+            ):
+                continue
+            decision = str(dispatch.get("decision_operation") or "none")
+            request = ParsedRequest(
+                command=("dispatch",),
+                arguments={"bead": record.id},
+                input={},
+                actor=ActorContext(kind="controller"),
+                instance=self.request.instance,
+                request_id=str(
+                    uuid.uuid5(
+                        ADMISSION_NAMESPACE,
+                        f"mechanical:{record.id}:{decision}",
+                    )
+                ),
+                timeout=self.request.timeout,
+                offline=True,
+                runtime_submit=self._runtime_submit,
+            )
+            async with self.external_slots:
+                result = await asyncio.to_thread(self.application.dispatch, request)
+            results.append(
+                {
+                    "kind": "authorized_start",
+                    "bead_id": record.id,
+                    "operation_id": result.operation_id,
+                    "state": result.state.value,
+                }
+            )
+        return results
+
+    def _runtime_submit(
+        self,
+        action: Callable[[AppServerRuntime], Awaitable[Any]],
+    ) -> Any:
+        """Run command-layer runtime work on the controller's shared loop."""
+
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("controller runtime loop is not established")
+        future = asyncio.run_coroutine_threadsafe(action(self.runtime), loop)
+        return future.result(timeout=self.request.timeout + 5)
 
     async def serve(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -415,6 +654,8 @@ class ControllerSupervisor:
                 if item.kind is None and item.status != "closed"
             ]
             self.health.success("intake", {"discovered": len(intake)})
+            if intake:
+                await self.run_once(keep_runtime=True)
             delay = float(
                 timing["intake_busy_seconds"]
                 if intake
@@ -611,6 +852,7 @@ class ControllerSupervisor:
         facts: TaskFacts | None,
     ) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
         fc = dict(task.fc or {})
+        original_fc = dict(fc)
         actions: list[Mapping[str, Any]] = []
         if facts is None:
             return (
@@ -635,7 +877,24 @@ class ControllerSupervisor:
         ):
             fc["last_tool_evidence_at"] = _format_time(now)
         fc["last_observed"] = facts.to_dict()
-        event_at = _optional_time(fc.get("last_runtime_event_at"))
+        if fc.get("purpose") == "leadership":
+            if fc != original_fc:
+                await asyncio.to_thread(self.ledger.update_fc, task.id, fc)
+            return (
+                {
+                    "task_record_id": task.id,
+                    "thread_id": facts.id,
+                    "runtime_status": facts.runtime_status,
+                    "active_turn": facts.active_turn,
+                    "work_bead": None,
+                    "progress_age_seconds": 0.0,
+                    "observed": True,
+                },
+                actions,
+            )
+        event_at = _optional_time(fc.get("last_runtime_event_at")) or _optional_time(
+            fc.get("last_inspection_at")
+        )
         timing = _mapping(self.config["timing"])
         if event_at is None or (now - event_at).total_seconds() >= float(
             timing["event_silence_seconds"]
@@ -710,7 +969,8 @@ class ControllerSupervisor:
                 fc["recovery_requested_operation"] = recovery["operation_id"]
                 fc["recovery_requested_acquisition"] = acquisition
                 actions.append(recovery)
-        await asyncio.to_thread(self.ledger.update_fc, task.id, fc)
+        if fc != original_fc:
+            await asyncio.to_thread(self.ledger.update_fc, task.id, fc)
         return (
             {
                 "task_record_id": task.id,
@@ -734,7 +994,11 @@ class ControllerSupervisor:
         key = str(fc.get("work_bead") or f"task:{task.id}")
         lock = self.bead_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            fresh = await asyncio.to_thread(self.ledger.show, task.id)
+            fresh = (
+                task
+                if fc.get("purpose") == "leadership"
+                else await asyncio.to_thread(self.ledger.show, task.id)
+            )
             return await self._reconcile_task(
                 fresh if fresh is not None else task, work_by_id, facts
             )
@@ -901,6 +1165,7 @@ class ControllerSupervisor:
                 if (
                     observed is not None
                     and observed.active_turn is None
+                    and fc.get("purpose") != "leadership"
                     and (work is None or work.status == "closed")
                 ):
                     try:
@@ -1014,6 +1279,7 @@ def _restore_request(
         ownership_operation=_optional_string(accepted.get("ownership_operation")),
         timeout=template.timeout,
         offline=True,
+        runtime_submit=template.runtime_submit,
     )
 
 

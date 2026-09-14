@@ -6,7 +6,7 @@ import asyncio
 import concurrent.futures
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from fulcrum.configuration import ConfigurationManager, ROLES
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
@@ -720,6 +720,8 @@ def _runtime_call(
             await runtime.close()
 
     try:
+        if request.runtime_submit is not None:
+            return cast(T, request.runtime_submit(action))
         try:
             asyncio.get_running_loop()
         except RuntimeError:

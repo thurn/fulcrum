@@ -781,22 +781,9 @@ def _loop_health(
 
 
 def _capacity(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
+    from fulcrum.leadership import capacity_snapshot
+
     manager = ConfigurationManager(request.instance.config_path)
     document, _ = manager.load()
     config = manager.effective(document)
-    policy = config["policy"]
-    task_records = ledger.list_records(kind="task", limit=0)
-    active = [
-        item.id for item in task_records if item.status not in {"closed", "cancelled"}
-    ]
-    limit = int(policy["automatic_capacity"])
-    return {
-        "global_limit": limit,
-        "default_project_limit": int(policy["default_project_capacity"]),
-        "project_limits": dict(policy["project_capacity"]),
-        "active_managed_ids": active,
-        "pending_start_reservations": [],
-        "unknown_managed_ids": [],
-        "human_bypasses": [],
-        "pressure": len(active) / limit if limit else None,
-    }
+    return capacity_snapshot(ledger, config)

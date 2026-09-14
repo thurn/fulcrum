@@ -16,6 +16,7 @@ from fulcrum.ledger import (
     LedgerFailure,
     OperationService,
 )
+from fulcrum.leadership import LeadershipService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.roles import RoleService
 from fulcrum.supervision import ReconciliationService
@@ -67,6 +68,13 @@ class Application:
         self.register(("enter",), roles.enter)
         self.register(("context",), roles.context)
         self.register(("hook", "context"), roles.hook_context)
+        leadership = LeadershipService()
+        self.register(("leader", "show"), leadership.leader_show)
+        self.register(("marshal", "brief"), leadership.marshal_brief)
+        self.register(("marshal", "request"), leadership.marshal_request)
+        self.register(("marshal", "decide"), leadership.marshal_decide)
+        self.register(("backlog", "list"), leadership.backlog_list)
+        self.register(("dispatch",), leadership.dispatch)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

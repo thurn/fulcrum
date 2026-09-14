@@ -194,6 +194,60 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         self.clock = FakeClock()
         self.runtime = FakeRuntime()
         self.ledger = Ledger(self.brain)
+        self.ledger.create_record(
+            record_id="fc-system",
+            kind="control",
+            title="Fulcrum control",
+            description="Standing leadership identities.",
+            owner="native-marshal-leader",
+            fc={
+                "kind": "control",
+                "owner": "native-marshal-leader",
+                "vizier_thread": "native-vizier-leader",
+                "marshal_thread": "native-marshal-leader",
+                "active_takeover": None,
+                "last_transition": None,
+            },
+        )
+        for role in ("vizier", "marshal"):
+            thread_id = f"native-{role}-leader"
+            facts = TaskFacts(
+                id=thread_id,
+                title=f"standing {role}",
+                cwd=str(self.brain),
+                project_id=None,
+                workspace_roots=(str(self.brain),),
+                archived=False,
+                exists=True,
+                loaded=True,
+                runtime_status="idle",
+                active_turn=None,
+                last_turn=None,
+                pending_requests=(),
+                observed_at="2026-09-14T16:00:00Z",
+            )
+            self.runtime.facts[thread_id] = facts
+            self.ledger.create_record(
+                record_id=f"fc-{role}-leader-task",
+                kind="task",
+                title=f"Managed task: standing {role}",
+                description=f"Standing {role} task.",
+                owner=thread_id,
+                external_ref=f"fulcrum:thread:{thread_id}",
+                fc={
+                    "kind": "task",
+                    "owner": thread_id,
+                    "thread_id": thread_id,
+                    "role": role,
+                    "purpose": "leadership",
+                    "work_bead": None,
+                    "creation_operation": f"fc-{role}-bootstrap",
+                    "last_observed": facts.to_dict(),
+                    "last_turn": None,
+                    "deleted_at": None,
+                    "replaced_by": None,
+                },
+            )
         self.request = ParsedRequest(
             command=("reconcile",),
             arguments={},

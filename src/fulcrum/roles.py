@@ -476,6 +476,10 @@ class RoleService:
         return str(nested["bead_id"])
 
     def context(self, request: ParsedRequest) -> CommandResult:
+        if request.arguments.get("role") == "marshal":
+            from fulcrum.leadership import marshal_context
+
+            return marshal_context(request)
         role = request.arguments.get("role")
         bead_id = request.arguments.get("bead") or request.input.get("bead")
         if bead_id:

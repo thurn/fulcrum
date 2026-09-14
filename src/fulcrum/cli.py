@@ -365,6 +365,13 @@ def _add_command_options(
     elif path[:1] == ("marshal",) and path[-1] in {"brief", "request"}:
         _option(parser, "--kind", choices=("auto", "groom", "dispatch", "recover"))
         _option(parser, "--bead")
+    elif path == ("leader", "show"):
+        parser.add_argument("role", choices=("vizier", "marshal"))
+    elif path == ("backlog", "list"):
+        _option(parser, "--ready", action="store_true")
+        _option(parser, "--include-deferred", action="store_true")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
     elif path == ("dispatch",):
         _option(parser, "--bead", required=True)
         group = parser.add_mutually_exclusive_group()
