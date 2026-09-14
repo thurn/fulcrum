@@ -378,7 +378,7 @@ class DiagnosticService:
         components.append(
             _health(
                 "service_socket",
-                "healthy" if socket_exists and not request.offline else "unavailable",
+                "healthy" if socket_exists else "unavailable",
                 evidence={
                     "path": str(request.instance.socket_path),
                     "exists": socket_exists,
@@ -732,6 +732,12 @@ def _loop_health(
     for name, deadline in deadlines.items():
         value = retained.get(name)
         last = value.get("last_success_at") if isinstance(value, Mapping) else None
+        retained_state = value.get("state") if isinstance(value, Mapping) else None
+        failures = (
+            int(value.get("consecutive_failures", 0))
+            if isinstance(value, Mapping)
+            else 0
+        )
         age: float | None = None
         if isinstance(last, str):
             try:
@@ -740,7 +746,12 @@ def _loop_health(
                 ).total_seconds()
             except ValueError:
                 age = None
-        state = "unknown" if age is None else ("stale" if age > deadline else "healthy")
+        if retained_state == "unavailable" and failures:
+            state = "unavailable"
+        else:
+            state = (
+                "unknown" if age is None else ("stale" if age > deadline else "healthy")
+            )
         result.append(
             _health(
                 name,
@@ -752,6 +763,10 @@ def _loop_health(
                     "deadline_seconds": deadline,
                     "age_seconds": age,
                     "path": str(health_path),
+                    "consecutive_failures": failures,
+                    "error": (
+                        value.get("error") if isinstance(value, Mapping) else None
+                    ),
                 },
                 affected_commands=(
                     ["automatic workflow progress"] if state != "healthy" else []

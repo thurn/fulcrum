@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from fulcrum.ledger import (
 )
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.roles import RoleService
+from fulcrum.supervision import ReconciliationService
 from fulcrum.work import WorkService
 
 Handler = Callable[[ParsedRequest], CommandResult]
@@ -82,10 +84,18 @@ class Application:
         self.register(("operation", "wait"), self._operation_wait)
         self.register(("operation", "cancel"), self._operation_cancel)
         self.register(("operation", "reconcile"), self._operation_reconcile)
+        self.register(("reconcile",), ReconciliationService(self).reconcile)
 
     def register(self, command: tuple[str, ...], handler: Handler) -> None:
         if command in self._handlers:
             raise ValueError(f"handler already registered for {' '.join(command)}")
+        self._handlers[command] = handler
+
+    def replace_handler(self, command: tuple[str, ...], handler: Handler) -> None:
+        if command not in self._handlers:
+            raise ValueError(
+                f"cannot replace unregistered handler for {' '.join(command)}"
+            )
         self._handlers[command] = handler
 
     def dispatch(self, request: ParsedRequest) -> CommandResult:
@@ -228,6 +238,22 @@ class Application:
     @staticmethod
     def _service_status(request: ParsedRequest) -> CommandResult:
         socket = request.instance.socket_path
+        health_path = request.instance.instance_root / "service-health.json"
+        controller_pid: int | None = None
+        try:
+            retained = json.loads(health_path.read_text(encoding="utf-8"))
+            if isinstance(retained, dict):
+                pids = [
+                    value.get("pid")
+                    for value in retained.values()
+                    if isinstance(value, dict) and isinstance(value.get("pid"), int)
+                ]
+                if pids and len(set(pids)) == 1:
+                    controller_pid = pids[0]
+        except (OSError, json.JSONDecodeError):
+            pass
+        if not request.offline:
+            controller_pid = os.getpid()
         return CommandResult.query(
             {
                 "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -237,9 +263,16 @@ class Application:
                     "path": str(request.instance.config_path),
                     "exists": request.instance.config_path.exists(),
                 },
-                "process": {"pid": os.getpid(), "controller_pid": None},
-                "responsive": None,
-                "gaps": ["controller process ownership is not yet recorded"],
+                "process": {
+                    "pid": os.getpid(),
+                    "controller_pid": controller_pid,
+                },
+                "responsive": not request.offline,
+                "gaps": (
+                    []
+                    if not request.offline
+                    else ["controller did not answer this inspection"]
+                ),
             }
         )
 

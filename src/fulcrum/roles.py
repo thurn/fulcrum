@@ -705,6 +705,12 @@ def _bind_task(
         "archive_operation": None,
         "last_observed": native.to_dict(),
         "last_turn": None,
+        "last_runtime_event_at": utc_now(),
+        "last_substantive_progress_at": utc_now(),
+        "last_inspection_at": None,
+        "last_checkpoint_operation": None,
+        "last_finish_reminder_operation": None,
+        "recovery_requested_operation": None,
         "last_transition": ownership_operation,
     }
     existing = ledger.show(task_record_id)

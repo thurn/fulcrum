@@ -259,31 +259,12 @@ class Fulcrum2DiagnosticsTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        server = subprocess.Popen(
-            [
-                str(self.executable),
-                "serve",
-                "--once",
-                "--instance",
-                str(self.instance),
-                "--json",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
+        # A socket artifact is component evidence, not proof that critical loops
+        # are current. The retained deadlines must still expose each stale loop.
+        (self.instance / "controller.sock").touch()
+        doctor = self.invoke(
+            "doctor", "--instance", str(self.instance), "--offline", "--json"
         )
-        for _ in range(100):
-            if (self.instance / "controller.sock").exists():
-                break
-            time.sleep(0.02)
-        try:
-            doctor = self.invoke("doctor", "--instance", str(self.instance), "--json")
-        finally:
-            try:
-                server.communicate(timeout=10)
-            except subprocess.TimeoutExpired:
-                server.terminate()
-                server.communicate(timeout=10)
         self.assertEqual(doctor.returncode, 0, doctor.stderr + doctor.stdout)
         result = json.loads(doctor.stdout)["result"]
         components = {item["name"]: item for item in result["components"]}

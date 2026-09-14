@@ -25,10 +25,10 @@ from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.instance import WriterLock, resolve_instance
 from fulcrum.ipc import (
     ControllerUnavailable,
-    IpcServer,
     MAX_MESSAGE_BYTES,
     request_sync,
 )
+from fulcrum.supervision import ControllerSupervisor
 
 ROLES = (
     "vizier",
@@ -321,6 +321,10 @@ def _add_command_options(
         _option(parser, "--reason", required=True)
     if path == ("serve",):
         _option(parser, "--once", action="store_true")
+    elif path == ("reconcile",):
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument("--bead", default=argparse.SUPPRESS)
+        group.add_argument("--operation", default=argparse.SUPPRESS)
     elif path == ("setup",):
         _option(parser, "--non-interactive", action="store_true")
     elif path == ("enter",):
@@ -837,12 +841,11 @@ def _serve(request: ParsedRequest) -> CommandResult:
         )
     application = default_application()
     with WriterLock(request.instance.lock_path):
-        server = IpcServer(
-            request.instance.socket_path,
-            application.dispatch,
-            once=bool(request.arguments.get("once", False)),
-        )
-        asyncio.run(server.run())
+        supervisor = ControllerSupervisor(request, application)
+        if request.arguments.get("once"):
+            summary = asyncio.run(supervisor.run_once())
+            return CommandResult.query(summary.to_dict())
+        asyncio.run(supervisor.serve())
     return CommandResult.query({"stopped": True})
 
 

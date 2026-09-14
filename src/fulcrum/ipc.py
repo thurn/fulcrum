@@ -130,7 +130,8 @@ class IpcServer:
                 raise FulcrumError.invalid(
                     "INVALID_REQUEST", "request must be an object"
                 )
-            response = self.handler(ParsedRequest.from_wire(payload)).to_dict()
+            parsed = ParsedRequest.from_wire(payload)
+            response = (await asyncio.to_thread(self.handler, parsed)).to_dict()
         except FulcrumError as error:
             response = error.to_result().to_dict()
         except Exception as error:  # pragma: no cover - last-resort protocol boundary
