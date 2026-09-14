@@ -7,6 +7,8 @@ Read [contracts.md](contracts.md) for the complete executable interfaces and dat
 contracts, and [failure-analysis.md](failure-analysis.md) for the operational
 evidence and recovery sequences. These three documents supersede the old Fulcrum
 design for the replacement. They introduce no compatibility or migration path.
+[audit.md](audit.md) records requirement coverage, retained capabilities, and
+intentional removals; the design and contracts remain normative.
 
 ## 1. Decisions and intended outcome
 
@@ -119,9 +121,14 @@ machine per command. Each public operation has input validation, an ownership
 check, a recorded mutation plan when needed, and a postcondition inspector.
 
 Controller code runs from an installed package, not an editable project worktree.
-An explicit `service restart` activates a new installation after outstanding
-external requests are recorded. Promoting Fulcrum source must not hot-reload the
-controller in the middle of a transaction. Development installation into the
+Preserve automatic source refresh through a quiescent installed-package swap.
+A source-change event or `service update` records a pending update, stops new
+automatic dispatch, and waits for in-flight controller mutations to settle.
+Build and import-check a separate installation before atomically activating it
+and restarting with the writer lock retained or reacquired before reconciliation.
+Running workers and delivery operations retain their Beads identities. A failed
+installation leaves the working service active. Do not hot-load Python modules
+in the middle of a transaction. Development installation into the
 repository `.venv` remains available; the service uses its separate installed
 environment. No new release-version scheme or source-content hashes are added.
 
@@ -177,8 +184,9 @@ The worker prompt is a fixed instruction to read the named bead and follow it.
 `fulcrum context --bead ...` prints that material plus current ownership and
 operation facts. Compaction recovery uses the same command.
 
-Sage, Mason, and Justiciar ship static emergency role instructions in the installed
-CLI. If `bd cook` or the ledger is unavailable, print those instructions and the
+All eight roles ship short static fallback instructions in the installed CLI;
+Sage, Mason, and Justiciar additionally include emergency diagnostic guidance.
+If `bd cook` or the ledger is unavailable, print the relevant instructions and
 available evidence, continue useful diagnosis, and report `degraded` registration.
 Do not fabricate a bead ID or write a second queue for later replay. Existing native
 conversation history preserves the user's request until a real bead can be
@@ -186,6 +194,29 @@ created. Terminal-only invocation can receive the same guidance even if Codex is
 unavailable; it cannot promise to have started a model in an unavailable runtime.
 
 ## 4. Roles and ownership lifecycle
+
+### Persistent bead identity and visible task names
+
+Remove exactly the leading `fc-` from the bead ID and prepend the current role
+code inside brackets. For `fc-51o`, the same scope uses these exact titles:
+
+| Role | Native task title |
+| --- | --- |
+| Vizier | `🔮 VIZIER 🔮` |
+| Marshal | `🧭 MARSHAL 🧭` |
+| Weaver | `🧵[wvr-51o] Design search indexing` |
+| Executor | `🛠️[exe-51o] Design search indexing` |
+| Warden | `🛡️[war-51o] Design search indexing` |
+| Sage | `📖[sge-51o] Design search indexing` |
+| Mason | `🧱[mas-51o] Design search indexing` |
+| Justiciar | `🔥[jus-51o] Design search indexing` |
+
+There is no space before `[`, role codes are lowercase, and the suffix is the
+entire remaining bead ID, not a new role counter. Update the description when the
+work's title changes. A replacement task may have the same visible title; its
+native thread ID distinguishes it. Scoped specialists retain the investigated
+bead's ID, while global/unrelated work receives a new bead. Parent and child beads
+have their own IDs; a child's worker never displays its parent's ID instead.
 
 ### Golden rule
 
@@ -262,8 +293,12 @@ Ordinary dispatch requires an actionable outcome, identified project, and
 proportionate acceptance checks. Questions about missing scope route to Weaver or
 Marshal instead of repeatedly starting implementations that cannot succeed.
 
-Executor implements, runs relevant checks, and commits. `finish --outcome
-ready_for_review` records source and evidence, invokes delivery preparation, and
+Executor implements, runs relevant checks, and commits. Preserve proportionate
+behavioral verification, including boundary/error cases when material and rendered
+evidence for visible UI changes. Stop owned background tools and finish or stop
+helpers before handoff. Do not impose full end-to-end role execution on every
+change. Executor does not push its worktree branch or promote source.
+`finish --outcome ready_for_review` records source and evidence, invokes delivery preparation, and
 arranges Warden ownership. Executor performs no further implementation after its
 accepted handoff. If native termination has not yet been observed, the handoff
 waits before starting Warden edits. The controller does not send Executor another
@@ -349,9 +384,10 @@ need another Marshal turn if an approved next task already exists.
 Default automatic capacity is 30 active native tasks, including leadership,
 specialists, and recovery; keep one slot available for recovery by admitting at
 most 29 ordinary automatic turns. Active helpers count toward the same ceiling.
-Default project capacity is 30, constrained by the global limit. Allow at most
-two active helpers per worker by default. Human-started tasks bypass these policy
-limits and are included in observations; do not interrupt them to restore the
+Default project capacity is 30, constrained by the global limit. Helpers use the
+same capacity accounting; there is no additional fixed per-worker helper ceiling
+by default. An optional policy can impose one. Human-started tasks bypass these
+policy limits and are included in observations; do not interrupt them to restore the
 configured count. Unknown helper activity makes capacity conservative rather than
 being counted as zero. Marshal may lower limits, but cannot create resources the
 runtime lacks.
@@ -434,7 +470,11 @@ without a model. Only an irreducible external dependency goes to HUMAN.
 ### Archive once
 
 Default completion archival is ten minutes after a task is idle and owns no open
-work. Persist `archive_state=pending|requested|done|suppressed` on its task record,
+work, and its associated bead/plan has no active or pending implementation.
+Explicitly deferred future work alone does not retain a finished authoring task.
+Handoff alone does not make the originating Weaver or Executor archive-eligible.
+Idle subscriptions are released immediately regardless of this visibility rule.
+Persist `archive_state=pending|requested|done|suppressed` on its task record,
 including the deadline and request operation. Each native task can receive one
 automatic archival request over its lifetime. Record `requested` before the send;
 an uncertain result is inspected rather than resent. A later manual unarchive
@@ -458,8 +498,12 @@ retention never removes the only fact required to finish work.
 workflow blockers. `logs` and `trace` retrieve evidence without loading agent
 tasks. Track command latency, queue delay, active execution time, coordination
 turns, review/fix work, recovery attempts, and raw observed token usage. Sum final
-per-turn counters, not repeated cumulative samples. Missing cost/usage is unknown;
-do not invent an API-equivalent billing subsystem for the first implementation.
+per-turn counters, not repeated cumulative samples. Preserve the existing
+API-equivalent cost reporting, including workflow attribution, rate provenance,
+helper costs, and explicit partial coverage. These are estimates, not subscription
+billing. Store bounded analytical facts in Beads; diagnostic log retention must
+not erase them. Missing cost/usage is unknown, never zero. See the analytics
+[contract](contracts.md#usage-and-cost-commands).
 
 Every finish response includes this nonblocking reminder: “If you encountered a
 pre-existing issue or a problem with your tools, file it now with `fulcrum report`.”
@@ -496,15 +540,19 @@ Implementation order:
    isolated real Beads ledger.
 2. **Runtime and context:** Shared Codex adapter, recorded task creation intent,
    context formulas, all microskill entry paths, role naming, explicit task IDs,
-   subscription cleanup, and deterministic runtime adapter.
+   subscription cleanup, compaction hook, model overrides, and deterministic runtime
+   adapter. Implement plan publication/refinement and durable memory on the ledger
+   primitives before dispatching authored plans.
 3. **Ownership and delivery:** Claim tokens, stop-before-transfer, Executor to
    Warden, delivery interface and Tollgate mapping, complete CLI lifecycle, and
-   deterministic delivery adapter. A scripted bead reaches observed promotion.
+   deterministic delivery adapter. Include configured source publication and the
+   missing-finish reminder. A scripted bead reaches observed promotion.
 4. **Leadership and recovery:** Marshal briefs/decisions, Vizier policy, deferred
    backlog and duplicates, finite retry/reconciliation, offline repair, HUMAN
    resolution, permanent Sage/Mason transitions, and Justiciar takeover.
 5. **Operations and replacement:** Logs/status/doctor, archive-once behavior,
-   isolated installed runtime, hard-reset/cutover command, service packaging,
+   usage/cost attribution, isolated recovery launcher, fleet replacement, quiescent
+   source refresh, hard-reset/cutover command, service repair/desktop launch,
    focused CLI regression scenarios, and the small concurrency smoke command.
 
 Each step ships usable public CLI operations; do not defer the CLI to the end.
@@ -520,3 +568,81 @@ maximum, 30-native-task concurrency smoke. No manual interview matrix, prolonged
 soak test, or live skill invocation is a routine promotion requirement. The smoke
 checks task/turn start, tool use, completion, and subscription release; it does not
 claim to prove long-term memory reclamation or all production reliability.
+
+## 9. Capabilities retained from current Fulcrum
+
+A ground-up implementation changes mechanisms without discarding useful product
+behavior. The following are required, with exact interfaces in
+[contracts.md](contracts.md#9-knowledge-analytics-and-maintenance).
+
+### Plans, memory, and publication
+
+Weaver supports substantial approved plans, incremental refinement, standalone
+future plans, and immediate small tasks. A plan is an epic with ordered, stable-key
+children and a complete outcome/acceptance specification. Refinement reconciles
+those keys; it does not recreate delivered tasks or silently change active work.
+Future plans remain explicitly deferred until human activation, with no timer.
+Retain two review perspectives for substantial plans: a cold reader using only
+the draft, and a requirements review using the original request, discussion, and
+draft. Native independent helpers normally provide them. These are authoring
+reviews, not live-role execution or stress-test gates; resource failure records a
+missing review and allows continued investigation. Publication records completed
+reviews or an explicit human/Vizier/Justiciar waiver, rather than looping forever.
+Small tasks and question answering do not require this plan workflow.
+
+Respect the host's Plan Mode: no product edits, publication, or finish mutation
+while writes are prohibited. Role identification/context remains useful; if
+registration cannot be performed legally, return degraded guidance and register
+when writable. Immediate bead creation is subject to actual platform write
+capability, not grounds to pretend registration succeeded.
+
+Retain human-readable plan publication and durable curated global/project memory.
+Canonical plan scope, task state, and memory are Beads data. Markdown plans may be
+exported to a configured private knowledge repository or project documentation;
+Git copies are published artifacts, never an independent editable workflow ledger.
+Record path, local commit, observed remote commit, and originating task on the
+publication receipt. Replacements retrieve current policy, concise memory, and
+relevant plans without replaying transcripts. This preserves the older documented
+Vizier memory capability; the audit does not claim it was fully implemented.
+
+Configured publication synchronizes on an explicit publish/finish operation, not
+a schedule. Preserve remote changes and local unsent work; a conflict is a repair
+item. Required publication is not complete until the remote result is inspected.
+Unrelated delivery may proceed while knowledge publication needs repair. Git
+source publication separately follows each project's configured source remote;
+Executor prepares and commits, Warden promotes and synchronizes. Justiciar retains
+its explicit exception authority.
+
+### Continuity, compaction, and fleet maintenance
+
+Prefer the existing idle native task for the same bead and role when its scope,
+configuration, and claims are still valid. Resume safely across controller restart
+without another task-creation side effect. A closed unrelated task is not a worker
+pool. Leadership replacement and fleet replacement preserve policy, memory, owned
+beads, worktree evidence, and causal attribution. A drain replacement waits for
+managed turns/helpers to stop; an interrupt replacement first interrupts and
+observes termination. Both retain work, unlike the separately specified hard reset.
+Neither restarts the shared runtime or interrupts unrelated tasks.
+
+Retain a read-only compaction hook with a short role/bead/next-action reminder and
+`context` command. Unrelated and inactive tasks receive no injected text. Hook
+failure is advisory, never a tool denial or invented authority. A terminal worker
+that omitted its required finish receives one short reminder to supply that
+outcome; preserve the original scope and decision input. Continued omission goes
+to the finite recovery policy, without an unchanged retry loop.
+
+Setup is rerunnable and repairs only owned service definitions and skill links.
+Provide unattended configuration and a convenience missing-values-only prompt.
+Validate advertised models/efforts, projects, shared-runtime connectivity, Beads,
+delivery, and installed assets. Failures disable the affected operation, while
+inspection and investigation remain available. A CLI desktop launcher selects the
+configured shared runtime; a protocol handshake alone does not prove Desktop is
+attached to it. Do not terminate a separate runtime to force attachment.
+
+Install `fulcrum-recover` in a separate, private runtime independent of the main
+controller installation, source checkout, and development environment. It uses
+the same repair application contracts and Beads records, with no alternate state
+journal. It remains able to inspect or repair when the main package cannot import.
+Replace this recovery artifact atomically only after a small import/help probe.
+Normal repair retains recoverable dirty work or quarantines corrupt artifacts;
+the explicitly destructive cutover reset deliberately wipes old managed data.

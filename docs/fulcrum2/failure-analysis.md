@@ -207,6 +207,32 @@ The temporary reset workspace is not kept as a second operational store. If it
 cannot be initialized, do not begin destructive multi-resource cleanup; continue
 dependency repair and report a concrete degraded result.
 
+## Capabilities that failures do not justify removing
+
+The [capability audit](audit.md) found omissions in the initial replacement
+documents. Operational defects are reasons to repair a capability's implementation,
+not automatically to delete the capability:
+
+- Partial cost data calls for explicit coverage, correct native/helper attribution,
+  and retained rate provenance. It does not justify removing the implemented
+  `usage` and `cost` reporting surfaces.
+- Publication failures call for independent receipts and inspected remote results.
+  Plans, incremental graph refinement, future plans, and curated knowledge still
+  need a durable authoring/publication path.
+- Fragile source reload and recovery require a quiescent installed-package swap
+  and a separately installed emergency launcher. A recovery command that cannot
+  import when the main environment breaks is insufficient.
+- Archive and resource failures require independent ownership, visibility, loading,
+  and active-work facts. Preserve task continuity and associated-plan visibility
+  without retaining idle subscriptions or restoring repeated archive timers.
+- Broken prerequisites must not disable investigation. Setup still diagnoses
+  missing capabilities, and compaction still restores concise context; neither
+  should impose a healthy-world gate on role entry.
+
+These findings come from comparing existing code and product contracts, not from
+additional live incidents. Detailed provenance and intentional removals are in
+the audit. No new production experiment was necessary for this comparison.
+
 ## Focused verification
 
 The highest-value automated coverage is at the public CLI boundary with a real
