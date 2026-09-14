@@ -33,6 +33,24 @@ product code changed during this documentation work.
 | Deterministic delivery plus optional concurrency did not prove assembled role behavior. | Require live Luna/low functional testing for all eight roles and actual Tollgate/Git delivery within 50 minutes, plus the ten-minute 30-task smoke. Tasks 23–24. |
 | Testing risked becoming another product workflow engine. | External scripts own assertions and reports. Public fixture/provider controls and normal CLI actions manage the test; there is no acceptance work kind or scenario state machine. Task 22. |
 
+## Targeted Marshal revisions
+
+The user approved four focused changes to reduce Marshal overload while improving
+backlog judgment. Design §5 and the contracts' Marshal decision/context section
+are normative; the implementation plan carries each change into execution:
+
+| Revision | Implementation ownership |
+| --- | --- |
+| Briefs describe a decision, why now, relevant evidence and unknowns; routine activity does not wake Marshal | Task 09 selects/sends briefs and validates judgment, with task 22 behavioral fixtures |
+| Authors supply benefit/outcome/dependencies/uncertainty without brittle intake gates; substantial investigation returns to Weaver | Tasks 04 and 07 retain fields and authoring guidance; task 09 routes same-bead clarification |
+| Grooming, dispatch and recovery have separate batch purposes within one Marshal | Task 09 adds the kind selector and safe-boundary prioritization; no recurring grooming agent/job |
+| Current decisions/rationale/reconsideration survive compaction without accumulated incident transcripts | Task 09 derives the current working set, task 07 hooks context, task 14 keeps memory distinct, and task 18 restores it on replacement |
+
+Existing deterministic fixtures test information and transition correctness. The
+existing task 23 live workflow assesses actual context-seeking and prioritization
+without expanding its time budget or adding a routine promotion gate. Brief
+length and turn counts are diagnostics, not proof of good judgment.
+
 ## Retained capability and implementation coverage
 
 The existing-code references identify useful behavior or mechanisms to inspect,

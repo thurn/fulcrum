@@ -46,6 +46,14 @@ Report observed API-equivalent cost with coverage, never guessed subscription sp
    actual code in its prepared workspace, run checks, commit and finish; observe
    Warden independently review/fix as needed and promote. Verify fixture integration
    content, provider source mapping, required remote ancestry, cleanup and root state.
+   In this existing workflow, retain the grooming and dispatch inputs/outputs to
+   assess decision quality: supply one proposal with a material uncertainty and
+   related/dependent work. Verify Marshal seeks the missing context or assigns
+   focused Weaver investigation instead of treating the unknown as resolved,
+   explains its ordering using relevant evidence, and keeps actionable work moving.
+   Score observable choices/evidence, not exact wording or one mandatory priority
+   order. This stays within the existing role workflow and 3,000-second budget;
+   it adds no separate live suite, stress run, or ordinary promotion gate.
 4. Use a separate small plan whose checks are covered by existing work to prove no
    validation child is inserted by default. Exercise future deferral then explicit
    activation; no timer/capacity event may start it prematurely.

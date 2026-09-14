@@ -31,6 +31,11 @@ operation facts. `context --bead ID` returns current work/role context; `context
    requires stopping its owned background tools. Persist original
    authoring fields and compiled description in the same work update. Do not pour
    extra stage beads or rewrite the bead's identity on a role transition.
+   Weaver/report authoring guidance asks for benefit, concrete outcome, relevant
+   dependencies and material uncertainty; rough effort is optional and must have
+   a basis. Preserve short/native requests with missing-information markers,
+   rather than enforcing an intake checklist. Weaver clarification prompts carry
+   Marshal's specific question and return findings on the same bead.
 2. Pass the complete cooked text directly at turn start. Add correlation using
    task 06's start receipt. Tests inspect actual sent content, not formatting-only
    snapshots. Context recovery uses the same source without rewriting requirements.
@@ -51,6 +56,10 @@ operation facts. `context --bead ID` returns current work/role context; `context
    replay journal. Respect actual host Plan Mode write restrictions.
 8. The compact hook injects context only for current managed compacted sessions;
    unrelated/inactive tasks get none. Failure is advisory, never a tool denial.
+   Expose a role-specific current-context projection hook for task 09. Marshal
+   compaction uses `context --role marshal` to recover current decisions/rationale
+   from Beads/YAML, not a replay of old notifications. Task 09 supplies that
+   projection without creating a dependency here on later memory/publication.
 
 ## Acceptance
 

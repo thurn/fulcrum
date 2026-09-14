@@ -43,6 +43,9 @@ is unloaded or archived.
    Task mapping reconciles partial replacement without duplicate starts. Replace each
    standing leader once; a Vizier successor receives no unsolicited model turn.
    Optional explicit archival retains a successor link and old evidence.
+   A Marshal successor rebuilds the task 09 current-context projection, including
+   pending decisions and current rationale/triggers, before its next decision.
+   Do not load completed incidents or replay the predecessor's notification log.
 6. Project-scoped replacement cannot unexpectedly replace shared standing leadership;
    it replaces selected project work/review tasks, with leaders retained. Instance-wide
    replacement includes both leaders. Neither restarts the shared native runtime nor

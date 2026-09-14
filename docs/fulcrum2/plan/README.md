@@ -20,6 +20,9 @@ workflow store. Task numbers order implementation work; they are not versions.
   reserved recovery slot. Idle leaders do not count; thirty is a tested capacity goal.
 - Independent reviews are ordinary Codex tasks linked in Beads. Fulcrum has no
   native-subagent orchestration, discovery, or special accounting requirements.
+- Marshal receives decision-focused grooming/dispatch/recovery batches. Authors
+  provide useful intake; substantial clarification returns to Weaver. Current
+  decisions/rationale are rebuilt from Beads after compaction, not message history.
 - Only human/Vizier authorizes future-plan activation. Root completion is mechanical
   over approved obligations; cancelled children do not imply success. A separate
   validation child is a judgment call, never a default for small plans.
@@ -79,7 +82,7 @@ publication until then. No false positive completes those integration obligation
 | [06 — Codex runtime adapter](06-codex-runtime-adapter.md) | Native task lifecycle, prompts, requests and response-loss recovery. | [02](02-beads-ledger-and-operations.md), [03](03-configuration-and-projects.md) |
 | [07 — Role context and entry](07-role-context-and-entry.md) | Eight formulas, role entry, model selection, skills and compaction. | [04](04-work-and-ownership.md), [06](06-codex-runtime-adapter.md) |
 | [08 — Controller supervision](08-controller-supervision.md) | Continuous bounded supervision, retries, progress and loop health. | [04](04-work-and-ownership.md), [05](05-observability-and-inspection.md), [06](06-codex-runtime-adapter.md) |
-| [09 — Leadership and admission](09-leadership-and-admission.md) | Leadership, recorded judgment, deferrals and four-slot admission. | [07](07-role-context-and-entry.md), [08](08-controller-supervision.md) |
+| [09 — Leadership and admission](09-leadership-and-admission.md) | Decision-focused briefs, intake clarification, current context, deferrals and four-slot admission. | [07](07-role-context-and-entry.md), [08](08-controller-supervision.md) |
 | [10 — Task control and independent reviews](10-task-control-and-reviews.md) | Terminal task control/output and independent plan reviews. | [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md) |
 | [11 — Workspaces and delivery adapter](11-workspaces-and-delivery-adapter.md) | Worktrees and normalized Tollgate/Git facts. | [02](02-beads-ledger-and-operations.md), [03](03-configuration-and-projects.md), [04](04-work-and-ownership.md) |
 | [12 — Executor to Warden delivery](12-executor-warden-delivery.md) | One-way handoff, Warden fixes and observed delivery. | [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [11](11-workspaces-and-delivery-adapter.md) |
@@ -137,7 +140,7 @@ an explicit bootstrap, degraded repair, hook, or test-provider exception applies
 | `work adopt/transfer/reopen` | enter / transfer | [04](04-work-and-ownership.md), [12](12-executor-warden-delivery.md) | Acquisition freshness and stop-before-transfer |
 | `work close`, `finish`, `progress`, `report` | finish / update_work | [04](04-work-and-ownership.md), [07](07-role-context-and-entry.md), [12](12-executor-warden-delivery.md), [13](13-plans-and-root-completion.md), [17](17-recovery-and-human-resolution.md) | Sealed finish, disposition evidence and independent report |
 | `leader show/replace` | leadership projection / replacement | [09](09-leadership-and-admission.md), [18](18-task-continuity-and-fleet.md) | No unsolicited Vizier turn and preserved owned work |
-| `marshal brief/request/decide`, `backlog list` | decision preview / request / decide | [09](09-leadership-and-admission.md) | Bounded brief, mixed stale rows, changed scope |
+| `marshal brief/request/decide`, `backlog list` | decision preview / request / decide | [09](09-leadership-and-admission.md) | Decision/evidence relevance, separated purposes, same-bead clarification, current context and mixed stale rows |
 | `dispatch [--authorize\|--human]` | decide / enter under admission | [09](09-leadership-and-admission.md) | Four-slot default, queued authorization versus bypass |
 | `human list/resolve` | work projection / decide | [17](17-recovery-and-human-resolution.md) | Actual external blocker and selective reason resolution |
 | `task list/show/start/send/output/wait` | task resource operations / native projections | [06](06-codex-runtime-adapter.md), [10](10-task-control-and-reviews.md) | Full prompt, lost create/start, non-resuming output |
@@ -177,6 +180,7 @@ replacement acceptance checklist, not a new acceptance concept in Fulcrum.
 | Outcome preservation and complete direct role prompts | [04](04-work-and-ownership.md), [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md) | Sent native inputs, same-bead transition and compact context |
 | Accountable ownership and receipt-based acquisition | [02](02-beads-ledger-and-operations.md), [04](04-work-and-ownership.md), [12](12-executor-warden-delivery.md), [17](17-recovery-and-human-resolution.md) | Stale same-task command and every handoff crash boundary |
 | Eight roles, human entry, permanent specialists, independent reviews | [07](07-role-context-and-entry.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [17](17-recovery-and-human-resolution.md), [23](23-luna-end-to-end-validation.md) | Live native task/effect evidence for each role |
+| Marshal decision quality and manageable context | [04](04-work-and-ownership.md), [07](07-role-context-and-entry.md), [09](09-leadership-and-admission.md), [14](14-memory-and-document-publication.md), [18](18-task-continuity-and-fleet.md), [22](22-deterministic-cli-validation.md), [23](23-luna-end-to-end-validation.md) | Author intake/unknowns, decision-focused separate batches, focused clarification, no routine wakeups, recovered rationale; actual choices in the existing live workflow |
 | Four active tasks, no reserve, goal of 30 | [09](09-leadership-and-admission.md), [17](17-recovery-and-human-resolution.md), [24](24-thirty-task-concurrency.md) | Deterministic admission plus real overlap and no-slot repair |
 | Continuous supervision without recurring model jobs | [05](05-observability-and-inspection.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md) | Injected timers, idle quiet, bounded escalation and loop failure |
 | Current-source Warden fixes and observed delivery | [11](11-workspaces-and-delivery-adapter.md), [12](12-executor-warden-delivery.md), [23](23-luna-end-to-end-validation.md) | Real submitted/approved/integration source and remote ancestry |

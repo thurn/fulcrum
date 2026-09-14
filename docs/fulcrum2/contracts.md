@@ -199,7 +199,7 @@ project-specific command. Setup writes absolute executable paths for services.
 | `enter ROLE --description TEXT [--bead ID] [--origin human\|dispatch]` | Create/adopt work and bind the current explicit task, or create a native task when none is supplied; default origin human |
 | `leader show vizier\|marshal` | Native ID, fixed title, and control-bead reference |
 | `leader replace ROLE --reason TEXT` | Explicitly replace broken leadership, invalidate old leadership ownership references, retain policy in `fulcrum.yaml` |
-| `context [--bead ID] [--role ROLE]` | Current bead, compiled instructions, ownership, actionable evidence, and pending operation references |
+| `context [--bead ID] [--role ROLE]` | Current work context; `--role marshal` derives standing leadership’s current decisions/rationale; unavailable context returns truthful fallback guidance |
 | `work create --input FILE` | Create an outcome or graph; returns root and child IDs |
 | `work show ID` / `work list` | Work-only view, excluding control/operation issues; filters `--project`, `--role`, `--owner`, `--phase` |
 | `work adopt ID --role ROLE` | Explicit adoption; existing owner must consent/stop or caller must use takeover authority |
@@ -247,20 +247,21 @@ through Marshal afterward, not to a new Executor implementation.
 `work create` accepts `title`, `outcome`, optional `project`, `acceptance` (array of
 strings), `requested_role` (default weaver for incomplete requests, executor when
 explicitly supplied), `priority` (0–4, default 2), `context` (array of references),
-optional `models` keyed by role to `{model, effort}`, and optional `children`. A graph child has a caller-local `key` and the same task
+optional `intake` (`benefit`, `uncertainties`), optional `models` keyed by role to
+`{model, effort}`, and optional `children`. A graph child has a caller-local `key` and the same task
 fields; `depends_on` contains child keys or existing bead IDs. Persist the planned
 ID mapping on the creation receipt before writing children. Reject cycles before
 mutation; a crash midway resumes missing children and dependencies under the same
 receipt. Parent/children become dispatchable only after graph completion.
 
 `work update` accepts any subset of `title`, `outcome`, `acceptance`, `summary`,
-`size` (`small|medium|large|unknown`), `overlap_tags`, `context`, and `models`. A scope change
+`size` (`small|medium|large|unknown`), `overlap_tags`, `context`, `intake`, and `models`. A scope change
 invalidates approval for the previous source/scope combination; it does not modify
 an already completed delivery. `progress` accepts `kind` (`investigation|source|
 validation|blocker`), `summary`, and `evidence` references.
 
 `report` accepts `title`, `problem`, `observed_evidence`, `required_change`,
-`acceptance_checks`, optional `project`, `discovered_from`, and `context`. The
+`acceptance_checks`, optional `project`, `discovered_from`, `context`, and `intake`. The
 request ID is the report retry identity. It returns the actual bead and filing
 state independently of subsequent dispatch.
 
@@ -271,7 +272,7 @@ state independently of subsequent dispatch.
 | `policy show` | Read the policy section of `fulcrum.yaml` and its rationale |
 | `policy set --input FILE` | Human/Vizier-only edit of the YAML policy section through the same config operation |
 | `backlog list [--ready] [--include-deferred]` | Compact work summaries, dependency/wait reasons, and priority |
-| `marshal brief [--bead ID]` | Exact default decision input plus omitted counts and continuation commands |
+| `marshal brief [--bead ID] [--kind auto\|groom\|dispatch\|recover]` | Read-only decision preview with one purpose, omitted counts, and continuation commands |
 | `marshal decide --input FILE` | Apply independent decisions after checking their ownership/snapshot expectations |
 | `dispatch --bead ID` | Execute an already-authorized dispatch; `--authorize` records operator authorization under ordinary limits, `--human` authorizes immediate operator bypass |
 | `human list` | Work assigned HUMAN and the exact action needed |
@@ -446,6 +447,7 @@ its supported update fields are only status, priority, title, and assignee.
     "outcome": "Optimize sorting while preserving documented ordering semantics.",
     "acceptance": ["Ordering tests pass", "Representative large input avoids quadratic growth"],
     "context": [],
+    "intake": {"benefit": "Keep large sorting requests responsive.", "uncertainties": []},
     "size": "small",
     "overlap_tags": ["sorting"],
     "next_action": "Implement and run the relevant sorting checks.",
@@ -1543,6 +1545,92 @@ This section completes the contracts above. [The implementation index](plan/READ
 maps every command family to its application operation, implementation task, and
 verification. No second workflow engine is implied by the larger CLI surface.
 
+### Marshal decision briefs and current context
+
+`marshal brief` and `marshal request` accept `--kind auto|groom|dispatch|recover`,
+default `auto`, plus the existing optional `--bead ID`. Auto selects a purpose from
+the decision actually needed. Recovery/external intervention uses `recover`;
+unclear proposals, duplicates, splitting and readiness use `groom`; actionable
+work needing authorization/order uses `dispatch`. An explicit kind filters the
+eligible work; it does not turn an ineligible bead into an actionable candidate.
+`marshal request` records/sends the same selected input as automatic judgment;
+`marshal brief` creates no receipt. If no judgment is needed, return
+`decision_required=false`, `kind` (null when no purpose applies), `rows=[]`,
+`omitted_counts`, and the reason,
+without a native turn. A mutation request may retain its own no-op receipt, but
+must not manufacture a decision turn simply to produce a nonempty result.
+
+A serialized brief contains `kind`, `decision_required`, `why_now`, relevant
+`policy_capacity`, `rows`, `omitted_counts` by purpose, and `continuations` (CLI
+argv arrays). Each row carries `bead_id`, `title`, `outcome`, `owner`, `phase`,
+`decision_needed`, a concise `decision_context`, `unknowns`, and `evidence_refs`.
+`decision_context` contains the dependencies/blockers/size/overlap/progress facts
+that matter to this choice. `proposed_action` is optional and carries its source
+(author proposal or explicit policy rule); Python does not invent product value,
+technical confidence, or priority tradeoffs. Omit redundant status narration.
+The full serialized brief, including any current-context/memory excerpt, remains
+at most 6,000 characters and 12 rows. Use fewer rows if required. Keep complete
+comparison facts on the decision receipt and expose full evidence on demand.
+
+At each safe decision boundary, prioritize urgent recovery, then relevant existing
+priority and waiting age; a free slot alone executes existing authorization. Batch
+only one kind at a time. Count omitted work by kind and supply a continuation
+query, so a short brief does not pretend to show the whole backlog. Events arriving
+while Marshal runs wait as current bead facts. Recompute selection at the next
+safe boundary; do not interrupt a productive turn or append unrelated recovery
+history to a grooming response. These are selectors in the existing decision
+operation, not separate schedulers or periodic backlog-review jobs. Kind selects
+what the briefing is about, not a new authority boundary or mandatory pipeline:
+a grooming answer may also authorize newly clear work if no further competing
+choice remains. Do not require a second Marshal turn just to repeat that decision.
+
+Authoring guidance lives in the Weaver/report formulas. `fc.intake` is null or
+`{benefit: string|null, uncertainties: string[]|null}`; absent/null means unknown,
+while `uncertainties=[]` means the author identified none. Other intake facts use
+existing outcome, acceptance, native dependencies, context and size fields.
+`work create/update` and `report` accept the optional `intake` object. Native `bd`
+callers need no Fulcrum metadata: preserve their request, read the supplied text,
+and show unknown fields in the brief rather than rejecting intake or filling them
+with invented values. Guidance should improve proposals without making every
+small request satisfy a formal readiness ceremony.
+
+`clarify` retains its existing `{question}` payload and records an investigation
+request on the same unstarted bead. Transfer it to Weaver through normal ownership
+and admission operations, with that question and the expected clarification in
+its next action. Do not ask the human when repository evidence can answer it.
+Weaver's ready/blocked outcome returns it to Marshal; relevant scope/evidence
+changes create a new grooming decision. The old unknown alone does not repeatedly
+wake Marshal or restart Weaver. Other eligible work continues. Active delivery
+problems instead use recovery; clarification must not silently bounce Warden work
+back to Executor. Splitting a proposal uses Weaver's ordinary graph/refinement
+path, not a new Marshal-specific split engine.
+
+Accepted decisions write the current reason and reconsideration triggers into
+existing `dispatch`, `waiting.reasons`, or `disposition`, adding
+`decision_operation` there to reference the originating receipt. Dispatch also
+retains its reason; a waiting reason already has `reason` and `reconsider_when`.
+A replacement decision supersedes current rationale, with prior evidence retained
+on the old receipt. No duplicate backlog list or full task body lives on the
+leadership control bead.
+
+`context --role marshal` returns the current-context projection for standing
+leadership: relevant YAML policy, current outstanding decision if any, actionable/
+blocked work references, present rationale/reconsideration conditions, and omitted
+counts with continuation commands. It uses the same 6,000-character/12-row bound.
+The next decision prompt combines selected current context and its batch within
+that single bound, never by concatenating two independently full-sized payloads.
+After compaction or leader replacement, rebuild from Beads and YAML before acting;
+do not replay historical notifications. The hook returns only a short current
+reminder and the context command, and never creates a decision or rewrites memory.
+General `memory` records may add lasting lessons/preferences once task 14 exists;
+the current-work projection must work independently of that later capability.
+
+Completed work and superseded incidents are omitted unless directly relevant to a
+current dependency/recovery decision, in which case include only the needed fact
+and evidence link. Exact historical inputs remain on their receipts for diagnosis.
+All this context is a derived read view; losing Marshal's conversation does not
+lose backlog decisions or require another durable summary store.
+
 ### Ownership operation and decision freshness
 
 `fc.ownership_operation` is the ID of the acquisition/transfer receipt, not its
@@ -1567,10 +1655,10 @@ not invalidated merely because the successful transfer changed the work owner.
 per-row decision-relevant facts. `marshal decide` input adds
 `decision_operation` to `{decisions:[...]}`. Compare each row's owner, ownership
 operation, phase, outcome, acceptance, dependencies, priority, relevant waiting
-reasons, current source/approval, overlap tags, and relevant effective policy
+reasons, current source/approval, intake benefit/uncertainties, overlap tags, and relevant effective policy
 against that receipt. Store complete comparison facts even when the displayed
 brief summarizes them. Never use a digest or revision counter. `marshal decide`
-may reference a receipt from `marshal request [--bead ID]`, which initiates the
+may reference a receipt from `marshal request [--bead ID] [--kind auto|groom|dispatch|recover]`, which initiates the
 same coalesced decision operation as automatic dispatch judgment. Its result is
 `decision_operation`, selected IDs, and task/turn facts. Human requests can use
 this command without invoking a skill.
@@ -1592,7 +1680,7 @@ clipped into the comparison facts or a worker prompt.
 | `task terminals ID` | Exact owned terminal IDs, running/completed/unknown status and output references; read-only. |
 | `task terminal stop ID --terminal TERMINAL_ID --reason TEXT` | Owner/human/scoped Justiciar; record intent and observe termination. If the native API only supports all-terminal cleanup, reject targeted stopping as unsupported rather than stopping additional running terminals. |
 | `task terminal stop ID --all-owned --reason TEXT` | Explicitly stop all background terminals belonging to that managed task through the supported native method, then observe; mutually exclusive with `--terminal`. |
-| `marshal request [--bead ID]` | Initiate the recorded decision described above; returns its receipt and selected work. |
+| `marshal request [--bead ID] [--kind auto\|groom\|dispatch\|recover]` | Initiate the selected recorded decision; return its receipt/work, or an explicit no-decision result without a model turn. |
 
 `work update` additionally accepts `priority` (0–4) and `title`. Its known fields
 are `title`, `outcome`, `acceptance`, `summary`, `size`, `overlap_tags`, `context`,

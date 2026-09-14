@@ -29,7 +29,10 @@ commit and origin task. Ledger mutation/local publication/remote sync are distin
 2. Select relevant global/project/role memory into context with a 4,000-character
    selected-text bound, titles and continuation references. Do not truncate original
    task requirements or include full conversations. Marshal's whole brief remains
-   within its own bound after memory selection.
+   within its own bound after memory selection. Marshal's live working set and
+   decision rationale come from task 09's Beads projection; curated memory adds
+   lasting preferences/lessons, never a second backlog, incident history or
+   transcript summary. Memory unavailability cannot disable that projection.
 3. Validate export destinations/relative paths against configured roots, including
    symlink escapes. Record exact selected content and paths before filesystem/Git
    effects. Use an isolated Git worktree so unrelated staged/dirty user changes

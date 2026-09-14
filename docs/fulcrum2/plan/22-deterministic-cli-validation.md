@@ -46,6 +46,10 @@ work kinds or controller acceptance workflows.
   scope conflicts and stale ownership after same-task reacquisition.
 - Marshal mixed stale/valid decisions, changed acceptance with unchanged phase,
   four-slot admission, direct human bypass, independent waits and future activation.
+  Extend these fixtures with task 09's separate grooming/dispatch/recovery briefs,
+  accepted incomplete intake, same-bead Weaver clarification, and recovered current
+  context without superseded history. Routine activity must not create new turns;
+  size/count assertions alone do not prove a useful decision brief.
 - Lost task create/start, pending native requests, full prompt delivery, interruption,
   sealed finish, handoff crashes, Warden fixes and uncertain successful promotion.
 - Publication native writes/cadence/idle suppression, concurrent control edits, remote

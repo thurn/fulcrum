@@ -28,7 +28,10 @@ Owner writes carry `--thread-id ID --ownership-operation OP`; mismatch is
 1. Validate graph keys, external targets, priorities and cycles before writing.
    Persist all planned IDs and edges first; reconcile interrupted creation without
    replacing delivered children or duplicating roots. Render native acceptance
-   from the canonical acceptance array.
+   from the canonical acceptance array. Accept optional `intake.benefit` and
+   `intake.uncertainties` on work create/update and reports. Retain unknown values
+   without blocking native intake; outcome/dependencies/evidence remain in their
+   existing fields, not a duplicated intake specification.
 2. Normalize raw role-assigned intake to Marshal accountability, preserving the
    original native text. Do not treat a role string as an executing owner. Ambiguous
    project evidence remains inspectable and routes to clarification.

@@ -427,36 +427,90 @@ permissions and the human's assigned scope remain real boundaries.
 
 ## 5. Marshal context and dispatch
 
+### Briefs are requests for judgment
+
 The default Marshal brief targets **2,000 model-input tokens**, with a hard
-6,000-character bound over the complete serialized brief, including JSON facts. It contains:
+6,000-character bound over the complete serialized brief, including JSON facts.
+Every brief states the decision required, why it is needed now, and the evidence
+that supports the available actions. It is not a digest of recent activity.
+For example, “two actionable changes overlap; choose their order or request a
+combined scope” needs judgment. An Executor completion or a newly freed slot
+normally does not: Python already owns handoff and authorized dispatch.
 
-- The decision required and why it is needed now.
-- Effective policy, available capacity, and relevant resource pressure.
-- Up to 12 candidate/changed work rows, ordered by urgency and priority.
-- Each row's ID, title, one-sentence outcome, phase/owner, dependencies or blocker,
-  last substantive progress, estimated size, overlap tags, and suggested action.
-- Counts and an explicit continuation command for omitted rows.
+Include effective policy/capacity facts relevant to this decision, at most 12
+related work rows, and counts plus continuation commands for omitted work. Each
+row includes ID, title, outcome, phase/owner, decision needed, relevant dependency/
+blocker or uncertainty, and evidence references. Include size, overlap and progress
+only when they affect the choice. A suggested action is an identifiable proposal,
+not a substitute for missing evidence. If necessary, send fewer complete rows;
+never hide a material uncertainty or clip requirements to fit a fuller batch.
+Marshal can selectively read `context --bead` and filtered `backlog list` results.
+Short input and fewer turns are diagnostic measures; decision quality and knowing
+when to request more context are the actual objective.
 
-The numeric character limit is the mechanical bound; the token figure is a design
-target, not an assertion that characters always map to tokens at a fixed ratio.
-Store a short `summary` and optional size/overlap annotations on each work bead.
-Use title and missing-summary markers when absent, rather than silently clipping
-the full task into an ambiguous request. Marshal can request `context --bead` or a
-larger filtered `backlog list` when a concrete decision needs it.
+### Authors prepare useful intake
 
-Only judgment-required events wake Marshal: newly actionable work without an
-applicable decision, conflicting scopes, depleted policy allowance, a meaningful
-recovery escalation, or a HUMAN request. Coalesce them for up to two seconds or
-until an already-idle decision batch can be sent. One outstanding Marshal turn
-per installation. New events remain represented by bead facts, not a growing
-queue of copied prompts. An immutable decision input and its ordered bead IDs are
-retained on the decision operation receipt. On finish, re-read each bead and reject
-only stale decisions; apply independent valid decisions normally.
+Weaver and other proposal authors supply the intended benefit, concrete outcome,
+relevant dependencies, and material uncertainty, with a rough size estimate only
+when they have grounds for one. Reuse the outcome, acceptance, dependency, evidence,
+and summary fields already on the bead; avoid a second copy of the specification.
+Marshal challenges and grooms this information instead of having to reconstruct
+all intent itself. Native `bd` intake and short human requests remain valid when
+some information is absent: mark what is unknown, do not reject registration or
+make authors satisfy another rigid checklist.
 
-Marshal authorizes `dispatch`, `defer`, `clarify`, `duplicate`, `reject`, or
-`recover`. An authorized dispatch remains durable and is executed by Python when
-capacity and dependencies allow. Capacity freed by a routine completion does not
-need another Marshal turn if an approved next task already exists.
+If a short read resolves the ambiguity, Marshal can proceed. If scope, duplicate
+analysis, or technical feasibility requires substantial investigation, Marshal
+uses `clarify` to assign the existing unstarted bead to Weaver with the concrete
+question and a useful expected result, then continues with other backlog. Weaver
+returns findings or refined scope on that same bead for reconsideration. Use the
+HUMAN path only when an external action or human preference is actually needed.
+No interview protocol or new intake-review role is introduced.
+
+### Separate grooming, dispatch, and recovery decisions
+
+Each batch has one purpose: `groom` resolves scope, duplicates, splitting and
+readiness; `dispatch` chooses among actionable work under capacity/overlap
+constraints; `recover` addresses stuck work or an external decision needed to
+unblock it. These are brief types for the same Marshal, not separate agents,
+queues with their own engines, or scheduled grooming jobs. A grooming decision
+may authorize work that is now clear; no second dispatch-approval turn is required
+when it would merely repeat the same judgment. A recovery item is not
+buried among speculative feature proposals. When urgent recovery arrives during
+a turn, select it next at the normal safe turn boundary; do not interrupt a
+productive turn merely to inject another briefing.
+
+Only judgment-required events wake Marshal. Coalesce compatible events for up to
+two seconds, keeping one outstanding Marshal turn per installation. New events
+remain represented by bead facts; repeated unchanged notices do not generate new
+turns. Choose the most urgent relevant batch and show omitted counts by purpose.
+The immutable decision input and full comparison facts live on the existing
+decision receipt. On finish, reject only stale rows and apply independent valid
+decisions. Deferring a bead includes its reason and relevant reconsideration
+condition, so no timer wakes Marshal merely to touch it again.
+
+Marshal authorizes `dispatch`, `defer`, `clarify`, `duplicate`, `reject`, `recover`,
+or `human`. A recorded dispatch executes mechanically when dependencies and
+capacity allow; ordinary completion or freed capacity requires no fresh judgment.
+
+### Keep a current working set across compaction
+
+A succession of small briefs can still overwhelm a long-lived conversation.
+Current choices, their rationale, and reconsideration conditions belong on the
+work beads and their decision receipts, not solely in Marshal's conversation.
+Store them in the existing dispatch/waiting/disposition fields with a reference
+to the decision receipt. Superseded rationale stays in that receipt's history;
+it is not pasted into the next brief.
+
+`context --role marshal` derives a bounded current working set from standing YAML
+policy, pending decisions, relevant live work, and their current rationale. Before
+turns and after compaction/replacement, use this same projection plus the selected
+batch. Re-read live facts before acting. Do not replay completed incidents, every
+past decision, or a full backlog into the conversation. There is no second durable
+Marshal ledger or rolling transcript summary that can contradict Beads. The
+compaction hook points to this context without creating a turn or mutating state;
+curated memory adds lasting preferences/lessons, not copied task histories. Its
+selected content shares the brief's existing total size limit.
 
 Default automatic capacity is **four active Fulcrum-managed tasks**, with all four
 available for ordinary work. Default per-project capacity is also four, constrained
@@ -653,7 +707,8 @@ Implementation order:
    deterministic delivery adapter. Include configured source publication and the
    missing-finish reminder. A scripted bead reaches observed promotion.
 4. **Leadership and recovery:** Marshal briefs/decisions, Vizier policy, deferred
-   backlog and duplicates, finite retry/reconciliation, offline repair, HUMAN
+   decision-focused grooming/dispatch/recovery briefs, author clarification, current
+   Marshal context, backlog and duplicates, finite retry/reconciliation, offline repair, HUMAN
    resolution, permanent Sage/Mason transitions, and Justiciar takeover.
 5. **Operations and replacement:** Logs/status/doctor, archive-once behavior,
    usage/cost attribution, isolated recovery launcher, fleet replacement, quiescent
