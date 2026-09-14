@@ -15,15 +15,13 @@ from fulcrum.install import InstallationError, reconcile_skill_links  # noqa: E4
 
 def main() -> int:
     try:
-        result = reconcile_skill_links(SOURCE_ROOT)
+        installed = reconcile_skill_links(SOURCE_ROOT)
     except InstallationError as error:
         print(f"fulcrum skill reconciliation failed: {error}", file=sys.stderr)
         return 2
 
-    for target in result["skills"]:
+    for target in installed:
         print(f"linked {target}")
-    for target in result["removed"]:
-        print(f"removed retired skill {target}")
     return 0
 
 

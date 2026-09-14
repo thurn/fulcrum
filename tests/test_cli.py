@@ -176,7 +176,7 @@ class CliTest(unittest.TestCase):
             )
             self.assertFalse(bead_check["ok"])
 
-    def test_skill_reconciliation_repairs_wrong_links_and_removes_retired_skills(
+    def test_skill_reconciliation_repairs_wrong_links_and_preserves_other_skills(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -197,7 +197,7 @@ class CliTest(unittest.TestCase):
             unrelated = skills_root / "unrelated"
             unrelated.mkdir()
 
-            result = reconcile_skill_links(source, skills_root=skills_root)
+            installed = reconcile_skill_links(source, skills_root=skills_root)
 
             for name in HUMAN_SKILLS:
                 self.assertEqual(
@@ -205,10 +205,10 @@ class CliTest(unittest.TestCase):
                     (source / "skills" / name).resolve(strict=True),
                 )
             for name in REMOVED_SKILLS:
-                self.assertFalse((skills_root / name).is_symlink())
+                self.assertTrue((skills_root / name).is_symlink())
             self.assertEqual(
-                set(result["removed"]),
-                {str(skills_root / name) for name in REMOVED_SKILLS},
+                set(installed),
+                {str(skills_root / name) for name in HUMAN_SKILLS},
             )
             self.assertTrue(unrelated.is_dir())
 

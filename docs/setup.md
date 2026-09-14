@@ -54,8 +54,8 @@ replaced them, run this from the retained Fulcrum checkout:
 ./scripts/reconcile_skills
 ```
 
-The script links every current human-facing Fulcrum skill, removes retired
-Fulcrum skill links, and refuses to replace a real file or directory.
+The script links every current human-facing Fulcrum skill and refuses to replace
+a real file or directory. It does not remove any other installed skill.
 
 Structured `fulcrum finish --input` files use exact action-scoped destinations
 under the configured control root. The destination follows `FULCRUM_CONFIG`

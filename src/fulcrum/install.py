@@ -377,7 +377,7 @@ def _replace_owned_link(source: Path, target: Path) -> None:
 
 def reconcile_skill_links(
     source_root: Path, *, skills_root: Path | None = None
-) -> dict[str, list[str]]:
+) -> list[str]:
     """Point every installed Fulcrum skill at the retained source checkout."""
 
     source = source_root.resolve(strict=True)
@@ -395,14 +395,7 @@ def reconcile_skill_links(
         target = root / name
         _replace_owned_link(skill, target)
         installed.append(str(target))
-
-    removed: list[str] = []
-    for name in REMOVED_SKILLS:
-        target = root / name
-        if target.is_symlink():
-            target.unlink()
-            removed.append(str(target))
-    return {"skills": installed, "removed": removed}
+    return installed
 
 
 def install_links(
@@ -410,8 +403,15 @@ def install_links(
 ) -> dict[str, Any]:
     source = Path(config.source_root).resolve(strict=True)
     root = codex_root or Path.home() / ".codex"
-    skills = reconcile_skill_links(source, skills_root=root / "skills")
-    removed = skills["removed"]
+    installed = reconcile_skill_links(source, skills_root=root / "skills")
+    removed: list[str] = []
+    for name in REMOVED_SKILLS:
+        target = root / "skills" / name
+        if target.is_symlink():
+            resolved = target.resolve(strict=False)
+            if resolved.is_relative_to(source) or not resolved.exists():
+                target.unlink()
+                removed.append(str(target))
     hook_source = source / "hooks" / "fulcrum-hook"
     cli_source = source / ".venv" / "bin" / "fulcrum"
     if not os.access(hook_source, os.X_OK) or not os.access(cli_source, os.X_OK):
@@ -428,7 +428,7 @@ def install_links(
     _replace_owned_link(cli_source, cli_target)
     install_hook_config(root / "hooks.json", hook_target)
     return {
-        "skills": skills["skills"],
+        "skills": installed,
         "removed": removed,
         "hook": str(hook_target),
         "cli": str(cli_target),
