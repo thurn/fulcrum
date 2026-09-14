@@ -41,12 +41,20 @@ separate publication obligations, or role-specific retry engines. A work bead ha
 one current owner, one current phase, and an explicit next action. A significant
 external mutation has one inspectable operation receipt in Beads.
 
-There are **no scheduled tasks**: no cron, heartbeat automation, recurring Sage or
-Mason work, calendar dispatch, or periodic self-improvement jobs. A persistent
-controller may react to submitted work and use operational polling, retry
-deadlines, inactivity detection, and one-time archival deadlines. These maintain
-user-initiated work; they do not invent new work on a schedule. `serve --once` and
-`reconcile` expose the same processing to tests and terminal users.
+**Continuous supervision is required; recurring agent jobs are excluded.** The
+persistent Python controller acts as a watchdog: it consumes runtime events and
+periodically checks existing work for stale owners, stalled agents, incomplete
+handoffs, and uncertain operations. It applies bounded mechanical recovery and
+escalates judgment to Marshal, which may dispatch Justiciar. This supervision
+runs automatically without the user requesting each check; it is not a recurring
+model-powered patrol.
+
+User initiation governs the origin of work, not every subsequent controller
+action. Operational polling, retry deadlines, inactivity detection, and one-time
+archival timers maintain that work. There are no cron or heartbeat agent jobs,
+recurring Sage/Mason reviews, calendar dispatch, or periodic self-improvement
+assignments. `serve --once` and `reconcile` expose the same supervisory processing
+to tests and terminal users. Section 6 specifies the polling and escalation rules.
 
 ### Product requirements
 
