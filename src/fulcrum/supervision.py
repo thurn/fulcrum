@@ -45,6 +45,7 @@ TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
 RETRY_DELAYS = (2.0, 10.0)
 MAX_SENDS = 3
 REMINDER_NAMESPACE = uuid.UUID("8842f0c3-557a-44d9-8e4a-c8c96f3955d1")
+DELIVERY_NAMESPACE = uuid.UUID("d531e65f-328e-4a90-a1f0-eb56bd09eedb")
 
 
 class Clock(Protocol):
@@ -202,7 +203,15 @@ class ControllerSupervisor:
         operation_id: str | None = None,
         keep_runtime: bool = False,
     ) -> PassSummary:
-        self._loop = asyncio.get_running_loop()
+        current_loop = asyncio.get_running_loop()
+        if self._loop is not None and self._loop is not current_loop:
+            # Bounded callers may reuse one supervisor across separate asyncio.run
+            # invocations.  Coordination primitives bind lazily to the first loop
+            # that contends on them, so rebuild only those process-local primitives
+            # at that boundary.  Durable ordering still comes from ledger receipts.
+            self.external_slots = asyncio.Semaphore(4)
+            self.bead_locks = {}
+        self._loop = current_loop
         records = await asyncio.to_thread(self.ledger.list_records, limit=0)
         intake = tuple(
             sorted(
@@ -951,6 +960,30 @@ class ControllerSupervisor:
             and facts.last_turn is not None
             and facts.runtime_status in {"idle", "completed", "failed"}
         )
+        handoff_advanced = False
+        if (
+            terminal
+            and work is not None
+            and work.fc
+            and work.fc.get("phase") == "handoff"
+            and isinstance(work.fc.get("handoff"), Mapping)
+            and work.fc["handoff"].get("from_thread") == facts.id
+        ):
+            handoff_action = await self._advance_executor_handoff(task, work, facts)
+            actions.append(handoff_action)
+            handoff_advanced = bool(handoff_action.get("started"))
+        delivery_advanced = False
+        if (
+            terminal
+            and work is not None
+            and work.fc
+            and work.fc.get("phase") == "delivering"
+            and isinstance(work.fc.get("delivery_finish"), Mapping)
+            and work.fc.get("owner") == facts.id
+        ):
+            delivery_action = await self._advance_warden_delivery(task, work, facts)
+            actions.append(delivery_action)
+            delivery_advanced = bool(delivery_action.get("advanced"))
         if fc.get("purpose") == "plan_review" and terminal:
             if fc.get("review_result_operation"):
                 if fc.get("subscription_state") != "released":
@@ -997,7 +1030,13 @@ class ControllerSupervisor:
             and work.fc
             and work.fc.get("owner") == facts.id
         ):
-            if terminal and fc.get("last_finish_reminder_acquisition") != acquisition:
+            if (
+                terminal
+                and not handoff_advanced
+                and not delivery_advanced
+                and work.fc.get("phase") not in {"handoff", "delivering"}
+                and fc.get("last_finish_reminder_acquisition") != acquisition
+            ):
                 action = await self._send_task_notice(
                     task,
                     facts,
@@ -1054,6 +1093,262 @@ class ControllerSupervisor:
             },
             actions,
         )
+
+    async def _advance_executor_handoff(
+        self, task: Any, work: Any, facts: TaskFacts
+    ) -> Mapping[str, Any]:
+        handoff = work.fc.get("handoff") if work.fc else None
+        assert isinstance(handoff, Mapping)
+        request_id = _optional_string(handoff.get("start_request_id"))
+        if request_id is None:
+            return {
+                "kind": "executor_warden_handoff",
+                "bead_id": work.id,
+                "started": False,
+                "reason": "retained handoff has no Warden start identity",
+            }
+        try:
+            terminal_facts = await self.runtime.terminals(
+                facts.id, limit=0, cursor=None
+            )
+        except AppServerError as error:
+            return {
+                "kind": "executor_warden_handoff",
+                "bead_id": work.id,
+                "started": False,
+                "reason": str(error),
+                "gap": "owned terminal state could not be observed",
+            }
+        running = terminal_facts.get("items")
+        if isinstance(running, list) and running:
+            return {
+                "kind": "executor_warden_handoff",
+                "bead_id": work.id,
+                "started": False,
+                "reason": "Executor still owns running background terminals",
+                "terminals": running,
+            }
+        try:
+            released = await self.runtime.release(facts.id)
+        except AppServerError as error:
+            return {
+                "kind": "executor_warden_handoff",
+                "bead_id": work.id,
+                "started": False,
+                "reason": str(error),
+            }
+        if released.active_terminals:
+            return {
+                "kind": "executor_warden_handoff",
+                "bead_id": work.id,
+                "started": False,
+                "reason": "Executor release still observed active terminals",
+                "release": released.to_dict(),
+            }
+        current_task = await asyncio.to_thread(self.ledger.show, task.id)
+        if current_task is not None and current_task.fc:
+            task_fc = dict(current_task.fc)
+            task_fc["subscription_state"] = "released"
+            task_fc["subscription_release"] = released.to_dict()
+            await asyncio.to_thread(self.ledger.update_fc, current_task.id, task_fc)
+        request = ParsedRequest(
+            command=("enter",),
+            arguments={"role": "warden", "origin": "dispatch"},
+            input={
+                "description": (
+                    "Review the retained current source, fix any issue in the same "
+                    "workspace, and deliver only the exact approved source."
+                ),
+                "bead": work.id,
+            },
+            actor=ActorContext(kind="controller"),
+            instance=self.request.instance,
+            request_id=request_id,
+            timeout=self.request.timeout,
+            offline=True,
+            runtime_submit=self._runtime_submit,
+        )
+        async with self.external_slots:
+            result = await asyncio.to_thread(self.application.dispatch, request)
+        return {
+            "kind": "executor_warden_handoff",
+            "bead_id": work.id,
+            "started": result.state in {CommandState.RUNNING, CommandState.COMPLETED},
+            "operation_id": result.operation_id,
+            "state": result.state.value,
+            "executor_release": released.to_dict(),
+        }
+
+    async def _advance_warden_delivery(
+        self, task: Any, work: Any, facts: TaskFacts
+    ) -> Mapping[str, Any]:
+        delivery_finish = work.fc.get("delivery_finish") if work.fc else None
+        assert isinstance(delivery_finish, Mapping)
+        finish_operation = str(delivery_finish.get("operation_id") or "unknown")
+        base = ParsedRequest(
+            command=("promotion", "show"),
+            arguments={"bead": work.id},
+            input={},
+            actor=ActorContext(kind="task", task_id=facts.id),
+            instance=self.request.instance,
+            request_id=None,
+            thread_id=facts.id,
+            ownership_operation=str(work.fc.get("ownership_operation")),
+            timeout=self.request.timeout,
+            offline=True,
+            runtime_submit=self._runtime_submit,
+        )
+        try:
+            observed = await asyncio.to_thread(self.application.dispatch, base)
+        except FulcrumError as error:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "reason": error.message,
+                "code": error.code,
+            }
+        result = observed.result or {}
+        delivery = result.get("delivery") if isinstance(result, Mapping) else None
+        if not isinstance(delivery, Mapping):
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "reason": "promotion inspection returned no delivery facts",
+            }
+        if (
+            delivery.get("validation") == "failed"
+            or delivery.get("promotion") == "failed"
+        ):
+            current = await asyncio.to_thread(self.ledger.show, work.id)
+            if current is not None and current.fc:
+                fc = dict(current.fc)
+                fc["phase"] = "reviewing"
+                fc["next_action"] = (
+                    "Warden must inspect failed delivery evidence, fix the same workspace, "
+                    "and validate a new exact source."
+                )
+                fc["last_transition"] = finish_operation
+                await asyncio.to_thread(self.ledger.update_fc, current.id, fc)
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": True,
+                "state": "returned_to_review",
+                "delivery": dict(delivery),
+            }
+        if delivery.get("promotion") != "promoted":
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "state": "provider_pending",
+                "delivery": dict(delivery),
+            }
+        try:
+            terminal_facts = await self.runtime.terminals(
+                facts.id, limit=0, cursor=None
+            )
+        except AppServerError as error:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "reason": str(error),
+                "gap": "owned terminal state could not be observed",
+            }
+        running = terminal_facts.get("items")
+        if isinstance(running, list) and running:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "reason": "Warden still owns running background terminals",
+                "terminals": running,
+            }
+        try:
+            released = await self.runtime.release(facts.id)
+        except AppServerError as error:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "reason": str(error),
+            }
+        if released.active_terminals:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "reason": "Warden release still observed active terminals",
+                "release": released.to_dict(),
+            }
+        current_task = await asyncio.to_thread(self.ledger.show, task.id)
+        if current_task is not None and current_task.fc:
+            task_fc = dict(current_task.fc)
+            task_fc["subscription_state"] = "released"
+            task_fc["subscription_release"] = released.to_dict()
+            await asyncio.to_thread(self.ledger.update_fc, current_task.id, task_fc)
+        sync = await asyncio.to_thread(
+            self.application.dispatch,
+            replace(
+                base,
+                command=("source", "sync"),
+                request_id=_delivery_request_id(finish_operation, "source-sync"),
+            ),
+        )
+        if sync.state not in {CommandState.COMPLETED}:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "state": "synchronization_unresolved",
+                "operation_id": sync.operation_id,
+                "result_state": sync.state.value,
+            }
+        cleanup = await asyncio.to_thread(
+            self.application.dispatch,
+            replace(
+                base,
+                command=("worktree", "cleanup"),
+                request_id=_delivery_request_id(finish_operation, "cleanup"),
+            ),
+        )
+        if cleanup.state not in {CommandState.COMPLETED}:
+            return {
+                "kind": "warden_delivery",
+                "bead_id": work.id,
+                "advanced": False,
+                "state": "cleanup_unresolved",
+                "operation_id": cleanup.operation_id,
+                "result_state": cleanup.state.value,
+            }
+        close = await asyncio.to_thread(
+            self.application.dispatch,
+            replace(
+                base,
+                command=("work", "close"),
+                arguments={
+                    "id": work.id,
+                    "outcome": "delivered",
+                    "summary": str(delivery_finish.get("summary") or "Delivered"),
+                },
+                request_id=_delivery_request_id(finish_operation, "close"),
+            ),
+        )
+        return {
+            "kind": "warden_delivery",
+            "bead_id": work.id,
+            "advanced": close.state == CommandState.COMPLETED,
+            "state": (
+                "closed" if close.state == CommandState.COMPLETED else close.state.value
+            ),
+            "source_sync_operation": sync.operation_id,
+            "cleanup_operation": cleanup.operation_id,
+            "close_operation": close.operation_id,
+            "warden_release": released.to_dict(),
+        }
 
     async def _send_review_finish_reminder(
         self, task: Any, facts: TaskFacts
@@ -1543,6 +1838,10 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _optional_string(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _delivery_request_id(finish_operation: str, step: str) -> str:
+    return str(uuid.uuid5(DELIVERY_NAMESPACE, f"{finish_operation}:{step}"))
 
 
 def _optional_time(value: Any) -> datetime | None:

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.configuration import ConfigurationService, ProjectService
+from fulcrum.completion import CompletionService
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
 from fulcrum.ledger import (
@@ -76,6 +77,7 @@ class Application:
         self.register(("worktree", "cleanup"), delivery.worktree_cleanup)
         self.register(("validation", "start"), delivery.validation_start)
         self.register(("validation", "show"), delivery.validation_show)
+        self.register(("review", "approve"), delivery.review_approve)
         self.register(("promotion", "start"), delivery.promotion_start)
         self.register(("promotion", "show"), delivery.promotion_show)
         self.register(("source", "sync"), delivery.source_sync)
@@ -103,6 +105,7 @@ class Application:
         self.register(("work", "dependencies"), work.dependencies)
         self.register(("work", "close"), work.close)
         self.register(("work", "reopen"), work.reopen)
+        self.register(("finish",), CompletionService().finish)
         self.register(("progress",), work.progress)
         self.register(("report",), work.report)
         self.register(("operation", "show"), self._operation_show)

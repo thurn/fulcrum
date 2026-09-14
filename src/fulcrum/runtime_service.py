@@ -1434,7 +1434,7 @@ def _valid_legacy_approval_decision(value: Any) -> bool:
 def _authorize_task_message(
     ledger: Ledger, request: ParsedRequest, record: LedgerRecord
 ) -> None:
-    if request.actor.kind == "human":
+    if request.actor.kind in {"human", "controller"}:
         return
     fc = record.fc or {}
     if request.thread_id not in {_thread_id(record), _marshal_owner(ledger)}:

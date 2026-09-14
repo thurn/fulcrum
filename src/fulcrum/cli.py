@@ -427,8 +427,10 @@ def _add_command_options(
         _option(
             parser,
             "--source",
-            required=path in {("validation", "start"), ("promotion", "start")},
+            required=True,
         )
+        if path == ("review", "approve"):
+            _option(parser, "--summary", required=True)
     elif path in {
         ("validation", "show"),
         ("promotion", "show"),

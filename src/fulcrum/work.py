@@ -408,6 +408,8 @@ class WorkService:
             delivery["approved_source"] = None
             delivery["approval_invalidated_by"] = operation.id
             fc["delivery"] = delivery
+            if fc.get("role") == "warden" and record.status != "closed":
+                fc["phase"] = "reviewing"
             fc["next_action"] = "Review the changed scope before continuing delivery."
         fc["last_transition"] = operation.id
         updated = ledger.update_fc(

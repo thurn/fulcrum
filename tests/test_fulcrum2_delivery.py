@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any
 
+from fulcrum.application import Application
+from fulcrum.contracts import ActorContext, ParsedRequest
 from fulcrum.delivery import (
     DeliveryProviderError,
     SourceRef,
@@ -16,6 +20,16 @@ from fulcrum.delivery import (
     WorkRef,
     _delivery_facts,
 )
+from fulcrum.instance import resolve_instance
+from fulcrum.ledger import Ledger
+from fulcrum.runtime import (
+    ReleaseFacts,
+    ResourceFacts,
+    RuntimeCapabilities,
+    TaskFacts,
+    TurnFacts,
+)
+from fulcrum.supervision import ControllerSupervisor
 from fulcrum.tollgate import TollgateUncertainError
 
 
@@ -127,6 +141,134 @@ class FakeTollgate:
     def cancel(self, repository_id: str, candidate_id: str) -> dict[str, Any]:
         self.candidates[candidate_id]["item"]["state"] = "canceled"
         return {"item_id": candidate_id}
+
+
+class HandoffRuntime:
+    def __init__(self) -> None:
+        self.facts: dict[str, TaskFacts] = {}
+        self.creation_cwds: dict[str, str] = {}
+        self.turns: dict[tuple[str, str], TurnFacts] = {}
+        self.inputs: list[str] = []
+        self.released: list[str] = []
+        self.running_terminals: list[dict[str, Any]] = []
+
+    async def connect(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def capabilities(self) -> RuntimeCapabilities:
+        return RuntimeCapabilities(
+            available=True,
+            endpoint="fixture://runtime",
+            methods=(),
+            models={"gpt-5.6-sol": ("high",)},
+        )
+
+    async def resources(self) -> ResourceFacts:
+        return ResourceFacts(
+            loaded_count=len(self.facts),
+            active_count=sum(
+                item.active_turn is not None for item in self.facts.values()
+            ),
+            loaded_ids=tuple(self.facts),
+            fd_soft_limit=1000,
+            fd_usage=20,
+            overloaded=False,
+            observed_at="2026-09-14T20:00:00Z",
+        )
+
+    async def inspect_task(self, thread_id: str) -> TaskFacts:
+        return self.facts[thread_id]
+
+    async def find_tasks(self, creation_cwd: str) -> list[TaskFacts]:
+        return [
+            self.facts[thread]
+            for thread, cwd in self.creation_cwds.items()
+            if cwd == creation_cwd
+        ]
+
+    async def create_task(self, spec: Any) -> TaskFacts:
+        thread_id = f"native-warden-{len(self.creation_cwds) + 1}"
+        self.creation_cwds[thread_id] = spec.creation_cwd
+        facts = TaskFacts(
+            id=thread_id,
+            title=spec.title,
+            cwd=spec.creation_cwd,
+            project_id=spec.project_id,
+            workspace_roots=spec.workspace_roots,
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="idle",
+            active_turn=None,
+            last_turn=None,
+            pending_requests=(),
+            observed_at="2026-09-14T20:00:00Z",
+        )
+        self.facts[thread_id] = facts
+        return facts
+
+    async def configure_task(self, thread_id: str, spec: Any) -> TaskFacts:
+        current = self.facts[thread_id]
+        configured = TaskFacts(
+            **{
+                **current.__dict__,
+                "title": spec.title,
+                "cwd": spec.cwd,
+                "project_id": spec.project_id,
+                "workspace_roots": spec.workspace_roots,
+            }
+        )
+        self.facts[thread_id] = configured
+        return configured
+
+    async def find_turn(self, thread_id: str, operation_id: str) -> TurnFacts | None:
+        return self.turns.get((thread_id, operation_id))
+
+    async def start_turn(self, thread_id: str, turn: Any) -> TurnFacts:
+        self.inputs.append(str(turn.text))
+        facts = TurnFacts(
+            id=f"turn-{len(self.turns) + 1}",
+            thread_id=thread_id,
+            state="inProgress",
+            operation_id=turn.operation_id,
+            completed=False,
+            error=None,
+            tools=(),
+            usage=None,
+            observed_at="2026-09-14T20:00:00Z",
+        )
+        self.turns[(thread_id, turn.operation_id)] = facts
+        current = self.facts[thread_id]
+        self.facts[thread_id] = TaskFacts(
+            **{
+                **current.__dict__,
+                "runtime_status": "active",
+                "active_turn": facts.id,
+                "last_turn": facts.to_dict(),
+            }
+        )
+        return facts
+
+    async def terminals(
+        self, thread_id: str, *, limit: int, cursor: str | None
+    ) -> dict[str, Any]:
+        return {
+            "thread_id": thread_id,
+            "items": list(self.running_terminals),
+            "next_cursor": None,
+        }
+
+    async def release(self, thread_id: str) -> ReleaseFacts:
+        self.released.append(thread_id)
+        return ReleaseFacts(
+            thread_id=thread_id,
+            status="unsubscribed",
+            active_terminals=(),
+            observed_at="2026-09-14T20:00:00Z",
+        )
 
 
 class Fulcrum2DeliveryAdapterTest(unittest.IsolatedAsyncioTestCase):
@@ -458,12 +600,12 @@ else:
             capture_output=True,
             text=True,
             check=False,
-            timeout=60,
+            timeout=120,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         return json.loads(completed.stdout)
 
-    def test_installed_cli_delivery_lifecycle(self) -> None:
+    def test_01_installed_cli_delivery_lifecycle(self) -> None:
         created = self.invoke(
             "work",
             "create",
@@ -541,6 +683,84 @@ else:
             "--json",
         )
         self.assertEqual(shown["result"]["state"], "passed")
+        approved = self.invoke(
+            "review",
+            "approve",
+            "--bead",
+            bead_id,
+            "--source",
+            source_oid,
+            "--summary",
+            "Current source satisfies the fixture acceptance check",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--json",
+        )
+        self.assertEqual(
+            approved["result"]["result"]["approved_source"]["oid"], source_oid
+        )
+        (workspace / "warden-fix.txt").write_text("fixed\n", encoding="utf-8")
+        git(workspace, "add", "warden-fix.txt")
+        git(workspace, "commit", "-m", "warden fix")
+        fixed_oid = git(workspace, "rev-parse", "HEAD")
+        stale_promotion = subprocess.run(
+            [
+                str(self.executable),
+                "promotion",
+                "start",
+                "--bead",
+                bead_id,
+                "--source",
+                source_oid,
+                "--instance",
+                str(self.instance),
+                "--offline",
+                "--actor",
+                "human",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertNotEqual(stale_promotion.returncode, 0)
+        stale_operation = json.loads(stale_promotion.stdout)
+        self.assertEqual(stale_operation["result"]["error"]["code"], "STALE_SOURCE")
+        self.invoke(
+            "validation",
+            "start",
+            "--bead",
+            bead_id,
+            "--source",
+            fixed_oid,
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--json",
+        )
+        self.invoke(
+            "review",
+            "approve",
+            "--bead",
+            bead_id,
+            "--source",
+            fixed_oid,
+            "--summary",
+            "Warden fix is current, validated, and accepted",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--json",
+        )
+        source_oid = fixed_oid
         promoted = self.invoke(
             "promotion",
             "start",
@@ -617,6 +837,425 @@ else:
             "human",
             "--json",
         )
+
+    def test_02_executor_finish_waits_for_terminal_then_starts_one_warden(self) -> None:
+        remote_release = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.remote),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/release",
+            ],
+            check=False,
+        )
+        if remote_release.returncode == 0:
+            git(self.project, "fetch", str(self.remote), "release")
+            git(self.project, "reset", "--hard", "FETCH_HEAD")
+        created = self.invoke(
+            "work",
+            "create",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--input",
+            "-",
+            "--json",
+            payload={
+                "title": "Controlled handoff",
+                "outcome": "Transfer one clean commit to Warden",
+                "project": "toy",
+                "acceptance": ["Exactly one Warden receives current source"],
+                "requested_role": "executor",
+            },
+        )
+        bead_id = created["result"]["result"]["bead_id"]
+        prepared = self.invoke(
+            "worktree",
+            "prepare",
+            "--bead",
+            bead_id,
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--json",
+        )
+        workspace = Path(prepared["result"]["result"]["workspace"]["path"])
+        (workspace / "handoff.txt").write_text("ready\n", encoding="utf-8")
+        git(workspace, "add", "handoff.txt")
+        git(workspace, "commit", "-m", "prepare handoff")
+        source_oid = git(workspace, "rev-parse", "HEAD")
+        ledger = Ledger(self.brain)
+        work = ledger.show(bead_id)
+        assert work is not None and work.fc
+        acquisition = "fc-executor-acquisition"
+        executor = "native-executor"
+        work_fc = dict(work.fc)
+        work_fc.update(
+            {
+                "owner": executor,
+                "role": "executor",
+                "phase": "working",
+                "ownership_operation": acquisition,
+                "next_action": "Implement and finish.",
+            }
+        )
+        ledger.update_fc(bead_id, work_fc, assignee=executor, status="in_progress")
+        ledger.create_record(
+            record_id="fc-executor-task",
+            kind="task",
+            title="Managed Executor",
+            description=f"Executor for {bead_id}",
+            owner=executor,
+            external_ref=f"fulcrum:thread:{executor}",
+            fc={
+                "kind": "task",
+                "owner": executor,
+                "thread_id": executor,
+                "role": "executor",
+                "work_bead": bead_id,
+                "ownership_operation": acquisition,
+                "creation_operation": acquisition,
+                "creation_cwd": str(self.root / "executor-thread"),
+                "model": "gpt-5.6-sol",
+                "effort": "high",
+                "associated_beads": [],
+                "replaced_by": None,
+                "deleted_at": None,
+                "last_observed": None,
+                "last_turn": None,
+                "last_transition": acquisition,
+            },
+        )
+        finish_request = str(uuid.uuid4())
+        finish_arguments = (
+            "finish",
+            "--bead",
+            bead_id,
+            "--outcome",
+            "ready_for_review",
+            "--thread-id",
+            executor,
+            "--ownership-operation",
+            acquisition,
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            f"task:{executor}",
+            "--request-id",
+            finish_request,
+            "--input",
+            "-",
+            "--json",
+        )
+        payload = {
+            "summary": "Implemented and committed the accepted handoff fixture",
+            "source_oid": source_oid,
+            "checks": [
+                {
+                    "name": "fixture",
+                    "status": "passed",
+                    "evidence": "result file committed",
+                }
+            ],
+            "evidence": [f"git:{source_oid}"],
+        }
+        finished = self.invoke(*finish_arguments, payload=payload)
+        self.assertTrue(finished["result"]["result"]["accepted"])
+        retried = self.invoke(*finish_arguments, payload=payload)
+        self.assertEqual(retried["operation_id"], finished["operation_id"])
+        stale = subprocess.run(
+            [
+                str(self.executable),
+                "finish",
+                "--bead",
+                bead_id,
+                "--outcome",
+                "ready_for_review",
+                "--thread-id",
+                executor,
+                "--ownership-operation",
+                acquisition,
+                "--instance",
+                str(self.instance),
+                "--offline",
+                "--actor",
+                f"task:{executor}",
+                "--request-id",
+                str(uuid.uuid4()),
+                "--input",
+                "-",
+                "--json",
+            ],
+            input=json.dumps({**payload, "summary": "A conflicting second finish"}),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(stale.returncode, 5)
+        self.assertEqual(json.loads(stale.stdout)["error"]["code"], "FINISH_SEALED")
+
+        runtime = HandoffRuntime()
+        active_turn = {
+            "id": "executor-turn",
+            "status": "inProgress",
+            "operationId": acquisition,
+        }
+        runtime.facts[executor] = TaskFacts(
+            id=executor,
+            title="Executor",
+            cwd=str(workspace),
+            project_id="native-toy",
+            workspace_roots=(str(self.project),),
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="active",
+            active_turn="executor-turn",
+            last_turn=active_turn,
+            pending_requests=(),
+            observed_at="2026-09-14T20:00:00Z",
+        )
+        for role in ("vizier", "marshal"):
+            thread_id = f"native-{role}-leader"
+            runtime.facts[thread_id] = TaskFacts(
+                id=thread_id,
+                title=role,
+                cwd=str(self.brain),
+                project_id=None,
+                workspace_roots=(str(self.brain),),
+                archived=False,
+                exists=True,
+                loaded=True,
+                runtime_status="idle",
+                active_turn=None,
+                last_turn=None,
+                pending_requests=(),
+                observed_at="2026-09-14T20:00:00Z",
+            )
+            ledger.create_record(
+                record_id=f"fc-{role}-delivery-leader",
+                kind="task",
+                title=f"Managed {role}",
+                description=f"Standing {role}",
+                owner=thread_id,
+                external_ref=f"fulcrum:thread:{thread_id}",
+                fc={
+                    "kind": "task",
+                    "owner": thread_id,
+                    "thread_id": thread_id,
+                    "role": role,
+                    "purpose": "leadership",
+                    "work_bead": None,
+                    "creation_operation": f"fc-{role}-bootstrap",
+                    "last_observed": runtime.facts[thread_id].to_dict(),
+                    "deleted_at": None,
+                    "replaced_by": None,
+                },
+            )
+        ledger.create_record(
+            record_id="fc-system",
+            kind="control",
+            title="Fulcrum control",
+            description="Standing leaders",
+            owner="native-marshal-leader",
+            fc={
+                "kind": "control",
+                "owner": "native-marshal-leader",
+                "vizier_thread": "native-vizier-leader",
+                "marshal_thread": "native-marshal-leader",
+                "active_takeover": None,
+                "last_transition": None,
+            },
+        )
+        request = ParsedRequest(
+            command=("reconcile",),
+            arguments={"bead": bead_id},
+            input={},
+            actor=ActorContext(kind="human"),
+            instance=resolve_instance(instance=str(self.instance), config=None),
+            request_id=str(uuid.uuid4()),
+            timeout=30,
+            offline=True,
+        )
+        supervisor = ControllerSupervisor(
+            request, Application(), runtime=runtime  # type: ignore[arg-type]
+        )
+        asyncio.run(supervisor.run_once(bead_id=bead_id))
+        waiting = ledger.show(bead_id)
+        assert waiting is not None and waiting.fc
+        self.assertEqual(waiting.fc["owner"], executor)
+        self.assertNotIn(executor, runtime.released)
+
+        runtime.facts[executor] = TaskFacts(
+            **{
+                **runtime.facts[executor].__dict__,
+                "runtime_status": "idle",
+                "active_turn": None,
+                "last_turn": {"id": "executor-turn", "status": "completed"},
+            }
+        )
+        runtime.running_terminals = [{"terminal_id": "terminal-1", "status": "running"}]
+        blocked = asyncio.run(supervisor.run_once(bead_id=bead_id))
+        still_waiting = ledger.show(bead_id)
+        assert still_waiting is not None and still_waiting.fc
+        self.assertEqual(still_waiting.fc["owner"], executor)
+        self.assertEqual(runtime.released, [])
+        blocked_handoff = [
+            action
+            for action in blocked.next_actions
+            if action.get("kind") == "executor_warden_handoff"
+        ]
+        self.assertEqual(len(blocked_handoff), 1)
+        self.assertFalse(blocked_handoff[0]["started"])
+        runtime.running_terminals = []
+        summary = asyncio.run(supervisor.run_once(bead_id=bead_id))
+        transferred = ledger.show(bead_id)
+        assert transferred is not None and transferred.fc
+        self.assertEqual(transferred.fc["role"], "warden")
+        self.assertEqual(transferred.fc["phase"], "reviewing")
+        self.assertNotEqual(transferred.fc["owner"], executor)
+        self.assertEqual(runtime.released, [executor])
+        handoffs = [
+            action
+            for action in summary.next_actions
+            if action.get("kind") == "executor_warden_handoff"
+        ]
+        self.assertEqual(len(handoffs), 1)
+        self.assertTrue(handoffs[0]["started"])
+        warden_tasks = [
+            item
+            for item in ledger.list_records(kind="task", limit=0)
+            if item.fc and item.fc.get("role") == "warden"
+        ]
+        self.assertEqual(len(warden_tasks), 1)
+        self.assertEqual(len(runtime.inputs), 1)
+        self.assertIn("Fulcrum Warden", runtime.inputs[0])
+        self.assertIn(source_oid, runtime.inputs[0])
+        warden_start_operation = str(handoffs[0]["operation_id"])
+        interrupted_start = ledger.show(warden_start_operation)
+        assert interrupted_start is not None and interrupted_start.fc
+        interrupted_fc = dict(interrupted_start.fc)
+        interrupted_fc["state"] = "accepted"
+        interrupted_fc["step"] = "ownership_bound_before_turn_observation"
+        interrupted_fc.pop("completed_at", None)
+        ledger.update_fc(warden_start_operation, interrupted_fc, status="open")
+        warden_task = warden_tasks[0]
+        warden_task_fc = dict(warden_task.fc or {})
+        warden_task_fc["last_turn"] = None
+        ledger.update_fc(warden_task.id, warden_task_fc)
+        asyncio.run(supervisor.run_once(bead_id=bead_id))
+        recovered_start = ledger.show(warden_start_operation)
+        assert recovered_start is not None and recovered_start.fc
+        self.assertEqual(recovered_start.fc["state"], "completed")
+        self.assertEqual(len(runtime.turns), 1)
+        self.assertEqual(
+            len(
+                [
+                    item
+                    for item in ledger.list_records(kind="task", limit=0)
+                    if item.fc and item.fc.get("role") == "warden"
+                ]
+            ),
+            1,
+        )
+        stale_progress = subprocess.run(
+            [
+                str(self.executable),
+                "progress",
+                "--bead",
+                bead_id,
+                "--kind",
+                "source",
+                "--summary",
+                "Old Executor attempted a late source mutation",
+                "--evidence",
+                "git:stale",
+                "--thread-id",
+                executor,
+                "--ownership-operation",
+                acquisition,
+                "--instance",
+                str(self.instance),
+                "--offline",
+                "--actor",
+                f"task:{executor}",
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(stale_progress.returncode, 5)
+        self.assertEqual(
+            json.loads(stale_progress.stdout)["error"]["code"],
+            "OWNERSHIP_CONFLICT",
+        )
+        warden = str(transferred.fc["owner"])
+        warden_acquisition = str(transferred.fc["ownership_operation"])
+        approved_finish = self.invoke(
+            "finish",
+            "--bead",
+            bead_id,
+            "--outcome",
+            "approved",
+            "--thread-id",
+            warden,
+            "--ownership-operation",
+            warden_acquisition,
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            f"task:{warden}",
+            "--input",
+            "-",
+            "--json",
+            payload={
+                "summary": "Reviewed the current source and accepted it for delivery",
+                "source_oid": source_oid,
+                "checks": [
+                    {
+                        "name": "handoff fixture",
+                        "status": "passed",
+                        "evidence": "current committed source reviewed",
+                    }
+                ],
+                "evidence": [f"git:{source_oid}"],
+            },
+        )
+        self.assertEqual(approved_finish["result"]["step"], "warden_delivery_started")
+        runtime.facts[warden] = TaskFacts(
+            **{
+                **runtime.facts[warden].__dict__,
+                "runtime_status": "idle",
+                "active_turn": None,
+                "last_turn": {"id": "warden-turn", "status": "completed"},
+            }
+        )
+        delivered = asyncio.run(supervisor.run_once(bead_id=bead_id))
+        closed = ledger.show(bead_id)
+        assert closed is not None and closed.fc
+        self.assertEqual(closed.status, "closed")
+        self.assertEqual(closed.fc["phase"], "done")
+        self.assertEqual(closed.fc["disposition"]["outcome"], "delivered")
+        self.assertFalse(workspace.exists())
+        delivery_actions = [
+            action
+            for action in delivered.next_actions
+            if action.get("kind") == "warden_delivery"
+        ]
+        self.assertEqual(len(delivery_actions), 1)
+        self.assertEqual(delivery_actions[0]["state"], "closed")
 
 
 if __name__ == "__main__":

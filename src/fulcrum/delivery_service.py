@@ -168,6 +168,15 @@ class DeliveryService:
             },
             operation.id,
         )
+        current = ledger.show(work.id)
+        if current is not None and current.fc and current.fc.get("role") == "warden":
+            fc = dict(current.fc)
+            fc["phase"] = "reviewing"
+            fc["next_action"] = (
+                "Inspect exact-source validation and explicitly approve the current source."
+            )
+            fc["last_transition"] = operation.id
+            ledger.update_fc(work.id, fc)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
@@ -200,9 +209,112 @@ class DeliveryService:
             }
         )
 
+    def review_approve(self, request: ParsedRequest) -> CommandResult:
+        ledger, work, project, provider = _context(request)
+        _authorize_warden(ledger, request, work)
+        requested_source = str(request.arguments["source"])
+        summary = request.arguments.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "review approval requires a summary"
+            )
+        source, handle = _retained_delivery_source(request, work, project)
+        if requested_source != source.oid:
+            raise FulcrumError(
+                "STALE_SOURCE",
+                "review approval source does not match the retained validation submission",
+                exit_code=5,
+                details={"requested": requested_source, "validated": source.oid},
+            )
+        delivery = (work.fc or {}).get("delivery")
+        validation = (
+            delivery.get("validation") if isinstance(delivery, Mapping) else None
+        )
+        if not isinstance(validation, Mapping) or validation.get("state") != "passed":
+            raise FulcrumError(
+                "VALIDATION_NOT_PASSED",
+                "review approval requires passed validation of the exact source",
+                exit_code=5,
+                details={"validation": validation},
+            )
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "source": source.to_dict(),
+                "handle": handle,
+                "acceptance": list((work.fc or {}).get("acceptance") or []),
+                "summary": summary,
+            },
+            next_action="Verify the current clean source and retain explicit Warden approval.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        try:
+            workspace = _call(provider.inspect_workspace(source.work))
+        except DeliveryProviderError as error:
+            return _failed_operation(ledger, operation, error, "review_approval")
+        if (
+            not workspace.exists
+            or not workspace.owned
+            or workspace.dirty
+            or workspace.head_oid != source.oid
+        ):
+            operation = ledger.update_operation(
+                operation.id,
+                state="failed",
+                step="review_source_changed",
+                error={
+                    "code": "STALE_SOURCE",
+                    "message": "workspace no longer matches the clean validated source",
+                    "retryable": False,
+                },
+                result={"workspace": workspace.to_dict()},
+                next_action="Commit and validate the current Warden source before approving it.",
+            )
+            return _operation_result(operation)
+        current = ledger.show(work.id)
+        assert current is not None and current.fc
+        fc = dict(current.fc)
+        retained_delivery = dict(fc.get("delivery") or {})
+        retained_delivery["approved_source"] = {
+            "oid": source.oid,
+            "provider_handle": handle,
+            "summary": summary.strip(),
+            "acceptance": list(fc.get("acceptance") or []),
+            "operation_id": operation.id,
+            "approved_at": utc_now(),
+        }
+        fc["delivery"] = retained_delivery
+        fc["phase"] = "delivering"
+        fc["next_action"] = (
+            "Promote the exact approved source through the delivery provider."
+        )
+        fc["last_transition"] = operation.id
+        ledger.update_fc(work.id, fc)
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step="review_source_approved",
+            external={
+                "provider": "tollgate",
+                "repository_id": source.work.repository_id,
+                "handle": handle,
+            },
+            result={
+                "bead_id": work.id,
+                "source_oid": source.oid,
+                "provider_handle": handle,
+                "approved_source": retained_delivery["approved_source"],
+                "workspace": workspace.to_dict(),
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
+
     def promotion_start(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
-        _authorize(ledger, request, work)
+        _authorize_warden(ledger, request, work)
         source, handle = _retained_delivery_source(request, work, project)
         requested_source = str(request.arguments["source"])
         if requested_source != source.oid:
@@ -212,6 +324,7 @@ class DeliveryService:
                 exit_code=5,
                 details={"requested": requested_source, "validated": source.oid},
             )
+        _require_approved_source(work, source.oid)
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
@@ -219,6 +332,29 @@ class DeliveryService:
             next_action="Authorize the exact provider handle without blocking on CI.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        try:
+            workspace = _call(provider.inspect_workspace(source.work))
+        except DeliveryProviderError as error:
+            return _failed_operation(ledger, operation, error, "promotion_source")
+        if (
+            not workspace.exists
+            or not workspace.owned
+            or workspace.dirty
+            or workspace.head_oid != source.oid
+        ):
+            operation = ledger.update_operation(
+                operation.id,
+                state="failed",
+                step="promotion_source_changed",
+                error={
+                    "code": "STALE_SOURCE",
+                    "message": "workspace no longer matches the exact approved source",
+                    "retryable": False,
+                },
+                result={"workspace": workspace.to_dict()},
+                next_action="Validate and approve the current Warden source before promotion.",
+            )
             return _operation_result(operation)
         try:
             facts = _call(provider.promote(source, handle))
@@ -616,6 +752,44 @@ def _authorize(ledger: Ledger, request: ParsedRequest, work: LedgerRecord) -> No
         "delivery mutation requires the current owner, Marshal, controller, or human",
         exit_code=5,
     )
+
+
+def _authorize_warden(
+    ledger: Ledger, request: ParsedRequest, work: LedgerRecord
+) -> None:
+    _authorize(ledger, request, work)
+    if request.actor.kind in {"human", "controller"}:
+        return
+    role = (work.fc or {}).get("role")
+    if role not in {"warden", "justiciar"}:
+        raise FulcrumError(
+            "ROLE_AUTHORITY_DENIED",
+            "only the current Warden or Justiciar may approve or promote source",
+            exit_code=5,
+            details={"role": role},
+        )
+
+
+def _require_approved_source(work: LedgerRecord, source_oid: str) -> None:
+    delivery = (work.fc or {}).get("delivery")
+    approved = (
+        delivery.get("approved_source") if isinstance(delivery, Mapping) else None
+    )
+    if not isinstance(approved, Mapping) or approved.get("oid") != source_oid:
+        raise FulcrumError(
+            "STALE_APPROVAL",
+            "promotion requires explicit approval of the current validated source",
+            exit_code=5,
+            details={"source_oid": source_oid, "approved_source": approved},
+        )
+    validation = delivery.get("validation") if isinstance(delivery, Mapping) else None
+    if not isinstance(validation, Mapping) or validation.get("state") != "passed":
+        raise FulcrumError(
+            "VALIDATION_NOT_PASSED",
+            "promotion requires passed validation of the approved source",
+            exit_code=5,
+            details={"validation": validation},
+        )
 
 
 def _call(action: Coroutine[Any, Any, T]) -> T:

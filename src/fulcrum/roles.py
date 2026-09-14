@@ -148,8 +148,27 @@ class RoleService:
                 "only scoped Sage or Mason investigation may enter closed work directly",
                 exit_code=5,
             )
+        current_owner = work.fc.get("owner")
+        handoff = work.fc.get("handoff")
+        controller_handoff = (
+            request.actor.kind == "controller"
+            and role == "warden"
+            and isinstance(handoff, Mapping)
+            and handoff.get("to_role") == "warden"
+            and handoff.get("start_request_id") == request.request_id
+            and (
+                (
+                    work.fc.get("phase") == "handoff"
+                    and handoff.get("from_thread") == current_owner
+                )
+                or (
+                    work.fc.get("role") == "warden"
+                    and handoff.get("to_thread") == current_owner
+                )
+            )
+        )
         existing = _valid_existing_entry(ledger, work, request.thread_id, role)
-        if existing is not None:
+        if existing is not None and not controller_handoff:
             instructions = _cook_role(
                 ledger,
                 request,
@@ -170,9 +189,12 @@ class RoleService:
                     "reused": True,
                 }
             )
-        current_owner = work.fc.get("owner")
         allowed = {"HUMAN", _marshal_owner(ledger), request.thread_id}
-        if work.status != "closed" and current_owner not in allowed:
+        if (
+            work.status != "closed"
+            and current_owner not in allowed
+            and not controller_handoff
+        ):
             raise FulcrumError(
                 "OWNERSHIP_CONFLICT",
                 "role entry cannot start a second writer over active owned work",
@@ -583,6 +605,8 @@ def _cook_role(
     evidence = {
         "summary": fc.get("summary"),
         "last_progress": fc.get("last_progress"),
+        "finish": fc.get("finish"),
+        "handoff": fc.get("handoff"),
         "delivery": fc.get("delivery"),
     }
     variables = {
@@ -637,6 +661,7 @@ def _bind_work(
     compiled_description: str,
 ) -> LedgerRecord:
     fc = dict(work.fc or {})
+    prior_phase = fc.get("phase")
     if work.status == "closed":
         if role not in {"sage", "mason"}:
             raise FulcrumError(
@@ -666,6 +691,15 @@ def _bind_work(
             },
         }
     )
+    handoff = fc.get("handoff")
+    if prior_phase == "handoff" and role == "warden" and isinstance(handoff, Mapping):
+        fc["handoff"] = {
+            **dict(handoff),
+            "to_thread": thread_id,
+            "to_ownership_operation": ownership_operation,
+            "state": "transferred",
+            "transferred_at": utc_now(),
+        }
     return ledger.update_fc(
         work.id,
         fc,
