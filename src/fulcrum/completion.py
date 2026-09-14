@@ -8,15 +8,19 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.delivery_service import DeliveryService, _context
 from fulcrum.ledger import (
     Ledger,
     LedgerRecord,
     OperationRecord,
+    accepted_input,
+    operation_id,
     operation_view,
     utc_now,
 )
+from fulcrum.work import _marshal_or_human
 
 HANDOFF_NAMESPACE = uuid.UUID("5f41c1ab-35bf-4df6-a85b-a75cb82ab40e")
 FINISH_CHILD_NAMESPACE = uuid.UUID("c5846683-3cc4-40a8-92af-cb14a44ca88b")
@@ -32,9 +36,18 @@ class CompletionService:
         request = replace(
             request, arguments={**dict(request.arguments), "bead": bead_id}
         )
+        replayed = _finish_replay(request)
+        if replayed is not None:
+            return replayed
         ledger, work = _owned_work(request)
         outcome = request.input.get("outcome") or request.arguments.get("outcome")
         role = str((work.fc or {}).get("role") or "")
+        if role == "weaver" and outcome == "answered":
+            return self._weaver_answered(request, ledger, work)
+        if role == "weaver" and outcome == "ready":
+            return self._weaver_ready(request, ledger, work)
+        if role == "weaver" and outcome == "planned":
+            return self._weaver_planned(request, ledger, work)
         if role == "executor" and outcome == "ready_for_review":
             return self._executor_finish(request, ledger, work)
         if role == "warden" and outcome == "approved":
@@ -45,6 +58,163 @@ class CompletionService:
             exit_code=4,
             details={"role": role, "outcome": outcome},
         )
+
+    def _weaver_answered(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary, evidence = _weaver_payload(request, evidence_required=True)
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={"summary": summary, "evidence": evidence},
+            next_action="Retain the answer evidence and close only this question root.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        fc = dict(work.fc or {})
+        fc["phase"] = "done"
+        fc["disposition"] = {
+            "outcome": "answered",
+            "summary": summary,
+            "evidence": evidence,
+            "completed_at": utc_now(),
+            "ownership_operation": request.ownership_operation,
+        }
+        fc["last_transition"] = operation.id
+        fc["next_action"] = (
+            "No question work remains unless the root is explicitly reopened."
+        )
+        ledger.update_fc(work.id, fc, status="closed")
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step="weaver_answer_retained",
+            result={
+                "bead_id": work.id,
+                "accepted": True,
+                "disposition": fc["disposition"],
+                "report_reminder": _report_reminder(work.id),
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
+
+    def _weaver_ready(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary, _ = _weaver_payload(request, evidence_required=False)
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={"summary": summary},
+            next_action="Return the completed scope to Marshal backlog without dispatching it.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        owner = _marshal_or_human(ledger)
+        fc = dict(work.fc or {})
+        fc["summary"] = summary
+        fc["owner"] = owner
+        fc["role"] = "marshal" if owner != "HUMAN" else None
+        fc["phase"] = "backlog"
+        fc["dispatch"] = None
+        fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")
+        fc["last_transition"] = operation.id
+        fc["next_action"] = "Marshal must review and authorize the completed scope."
+        ledger.update_fc(work.id, fc, assignee=owner, status="open")
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step="weaver_scope_returned",
+            result={
+                "bead_id": work.id,
+                "accepted": True,
+                "owner": owner,
+                "phase": "backlog",
+                "report_reminder": _report_reminder(work.id),
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
+
+    def _weaver_planned(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary, _ = _weaver_payload(request, evidence_required=False)
+        plan_id = request.input.get("plan_id")
+        if plan_id != work.id:
+            raise FulcrumError.invalid(
+                "INVALID_PLAN",
+                "finish planned must reference the Weaver-owned plan root",
+            )
+        plan = (work.fc or {}).get("plan")
+        if (
+            not isinstance(plan, Mapping)
+            or plan.get("published_scope") is None
+            or plan.get("activation") != "future"
+        ):
+            raise FulcrumError(
+                "APPROVAL_CONFLICT",
+                "finish planned requires a published future plan",
+                exit_code=5,
+            )
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "summary": summary,
+                "plan_id": plan_id,
+                "published_approval_operation": plan.get(
+                    "published_approval_operation"
+                ),
+            },
+            next_action="End Weaver authoring while retaining the future root and deferral.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        owner = _marshal_or_human(ledger)
+        current = _reload_work(ledger, work.id)
+        fc = dict(current.fc or {})
+        current_plan = dict(fc.get("plan") or {})
+        current_plan["authoring"] = {
+            "state": "completed",
+            "finish_operation": operation.id,
+            "summary": summary,
+            "completed_at": utc_now(),
+        }
+        current_plan["authoring_ready"] = True
+        fc["plan"] = current_plan
+        fc["summary"] = summary
+        fc["owner"] = owner
+        fc["role"] = "marshal" if owner != "HUMAN" else None
+        fc["phase"] = "backlog"
+        fc["dispatch"] = None
+        fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")
+        fc["last_transition"] = operation.id
+        fc["next_action"] = (
+            "Future plan remains deferred until human/Vizier authorization and Marshal execution."
+        )
+        ledger.update_fc(work.id, fc, assignee=owner, status="open")
+        _settle_plan_authoring_children(ledger, current_plan, operation.id)
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step="future_plan_authoring_completed",
+            result={
+                "bead_id": work.id,
+                "plan_id": work.id,
+                "accepted": True,
+                "root_closed": False,
+                "activation": "future",
+                "owner": owner,
+                "report_reminder": _report_reminder(work.id),
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
 
     def _executor_finish(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
@@ -304,7 +474,12 @@ def _finish_child_unresolved(
 
 
 def _owned_work(request: ParsedRequest) -> tuple[Ledger, LedgerRecord]:
-    ledger, work, _, _ = _context(request)
+    ledger = _ledger(request)
+    work = ledger.show(str(request.arguments["bead"]))
+    if work is None or work.kind != "work" or not work.fc:
+        raise FulcrumError.invalid(
+            "NOT_FOUND", f"unknown work {request.arguments['bead']}"
+        )
     if request.actor.kind != "human" and (
         request.thread_id != (work.fc or {}).get("owner")
         or request.ownership_operation != (work.fc or {}).get("ownership_operation")
@@ -321,6 +496,117 @@ def _owned_work(request: ParsedRequest) -> tuple[Ledger, LedgerRecord]:
             },
         )
     return ledger, work
+
+
+def _ledger(request: ParsedRequest) -> Ledger:
+    if request.instance.brain_root is None:
+        raise FulcrumError(
+            "LEDGER_UNAVAILABLE", "finish requires a configured brain", exit_code=4
+        )
+    manager = ConfigurationManager(request.instance.config_path)
+    document, _ = manager.load()
+    config = manager.effective(document)
+    beads = config["beads"]
+    executable = beads.get("executable") if isinstance(beads, Mapping) else None
+    return Ledger(
+        request.instance.brain_root,
+        executable=str(executable) if executable else None,
+        timeout=request.timeout,
+    )
+
+
+def _finish_replay(request: ParsedRequest) -> CommandResult | None:
+    if request.request_id is None:
+        return None
+    ledger = _ledger(request)
+    record = ledger.show(operation_id(request.request_id))
+    if record is None:
+        return None
+    operation = OperationRecord.from_record(record)
+    if operation.operation.get("command") != "finish" or operation.operation.get(
+        "input"
+    ) != accepted_input(request):
+        raise FulcrumError(
+            "REQUEST_CONFLICT",
+            f"request ID {request.request_id} was already used with different input",
+            exit_code=5,
+            request_id=request.request_id,
+            operation_id=operation.id,
+        )
+    if operation.operation.get("state") in TERMINAL_STATES:
+        return _operation_result(operation)
+    return None
+
+
+def _weaver_payload(
+    request: ParsedRequest, *, evidence_required: bool
+) -> tuple[str, list[str]]:
+    summary = request.input.get("summary")
+    evidence = request.input.get("evidence", [])
+    if not isinstance(summary, str) or not summary.strip():
+        raise FulcrumError.invalid("INVALID_INPUT", "Weaver finish requires summary")
+    if (
+        not isinstance(evidence, list)
+        or not all(isinstance(item, str) and item.strip() for item in evidence)
+        or (evidence_required and not evidence)
+    ):
+        raise FulcrumError.invalid(
+            "INVALID_INPUT",
+            (
+                "Weaver answer evidence must be a nonempty array of references"
+                if evidence_required
+                else "Weaver finish evidence must be an array of references"
+            ),
+        )
+    return summary.strip(), list(evidence)
+
+
+def _settle_plan_authoring_children(
+    ledger: Ledger, plan: Mapping[str, Any], operation_id: str
+) -> None:
+    mapping = plan.get("children_by_key")
+    keys = plan.get("approved_keys")
+    if not isinstance(mapping, Mapping) or not isinstance(keys, list):
+        return
+    for key in keys:
+        identifier = mapping.get(str(key))
+        child = ledger.show(str(identifier)) if identifier else None
+        if child is None or child.status == "closed" or not child.fc:
+            continue
+        fc = dict(child.fc)
+        link = dict(fc.get("plan") or {})
+        link["authoring_ready"] = True
+        link["authoring_finish_operation"] = operation_id
+        fc["plan"] = link
+        fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")
+        remaining_reasons = (
+            fc["waiting"].get("reasons", [])
+            if isinstance(fc.get("waiting"), Mapping)
+            else []
+        )
+        if any(
+            isinstance(reason, Mapping) and reason.get("kind") == "external"
+            for reason in remaining_reasons
+        ):
+            fc["next_action"] = (
+                "Wait for required remote publication, then explicit future-plan activation."
+            )
+        else:
+            fc["next_action"] = (
+                "Wait for explicit activation of the approved future plan."
+            )
+        fc["last_transition"] = operation_id
+        ledger.update_fc(child.id, fc)
+
+
+def _without_waiting_kind(value: Any, kind: str) -> dict[str, Any] | None:
+    reasons = value.get("reasons", []) if isinstance(value, Mapping) else []
+    retained = [
+        dict(reason)
+        for reason in reasons
+        if isinstance(reason, Mapping) and reason.get("kind") != kind
+    ]
+    return {"reasons": retained} if retained else None
 
 
 def _finish_payload(request: ParsedRequest) -> dict[str, Any]:

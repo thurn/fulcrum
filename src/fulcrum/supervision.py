@@ -46,6 +46,7 @@ RETRY_DELAYS = (2.0, 10.0)
 MAX_SENDS = 3
 REMINDER_NAMESPACE = uuid.UUID("8842f0c3-557a-44d9-8e4a-c8c96f3955d1")
 DELIVERY_NAMESPACE = uuid.UUID("d531e65f-328e-4a90-a1f0-eb56bd09eedb")
+PLAN_COMPLETION_NAMESPACE = uuid.UUID("6d2a024c-9c95-44d6-bf2d-19877ac43a5d")
 
 
 class Clock(Protocol):
@@ -323,11 +324,15 @@ class ControllerSupervisor:
                         "waiting": fc.get("waiting"),
                     }
                 )
+            plan_actions, closed_plans = await self._complete_plan_roots(records)
+            actions.extend(plan_actions)
             judgment_candidate = bool(intake) or any(
                 work.status != "closed"
+                and work.id not in closed_plans
                 and work.fc
                 and work.fc.get("phase") in {"backlog", "recovering", "human"}
                 and work.fc.get("dispatch") is None
+                and not _durably_deferred(work.fc.get("waiting"))
                 for work in work_by_id.values()
             )
             if not pressure["paused"] and judgment_candidate:
@@ -363,6 +368,81 @@ class ControllerSupervisor:
             pressure=pressure,
             gaps=tuple(gaps),
         )
+
+    async def _complete_plan_roots(
+        self, records: Sequence[Any]
+    ) -> tuple[list[Mapping[str, Any]], set[str]]:
+        actions: list[Mapping[str, Any]] = []
+        closed: set[str] = set()
+        roots = [
+            record
+            for record in records
+            if record.kind == "work"
+            and record.status != "closed"
+            and record.fc
+            and record.fc.get("workflow_root") == record.id
+            and isinstance(record.fc.get("plan"), Mapping)
+            and record.fc["plan"].get("published_scope") is not None
+        ]
+        for root in roots:
+            plan = root.fc.get("plan") if root.fc else None
+            assert isinstance(plan, Mapping)
+            boundary = str(
+                plan.get("published_approval_operation")
+                or root.fc.get("ownership_operation")
+            )
+            request = ParsedRequest(
+                command=("plan", "complete"),
+                arguments={"id": root.id},
+                input={},
+                actor=ActorContext(kind="controller"),
+                instance=self.request.instance,
+                request_id=str(
+                    uuid.uuid5(PLAN_COMPLETION_NAMESPACE, f"{root.id}:{boundary}")
+                ),
+                timeout=self.request.timeout,
+                offline=True,
+                runtime_submit=self._runtime_submit,
+            )
+            try:
+                result = await asyncio.to_thread(self.application.dispatch, request)
+            except FulcrumError as error:
+                actions.append(
+                    {
+                        "kind": "plan_completion",
+                        "bead_id": root.id,
+                        "root_closed": False,
+                        "code": error.code,
+                        "reason": error.message,
+                    }
+                )
+                continue
+            payload = result.result or {}
+            observed = (
+                payload.get("result")
+                if isinstance(payload, Mapping)
+                and isinstance(payload.get("result"), Mapping)
+                else payload
+            )
+            root_closed = bool(
+                isinstance(observed, Mapping) and observed.get("root_closed")
+            )
+            if root_closed:
+                closed.add(root.id)
+            actions.append(
+                {
+                    "kind": "plan_completion",
+                    "bead_id": root.id,
+                    "root_closed": root_closed,
+                    "operation_id": result.operation_id,
+                    "unsatisfied": (
+                        observed.get("unsatisfied", [])
+                        if isinstance(observed, Mapping)
+                        else []
+                    ),
+                }
+            )
+        return actions, closed
 
     async def _request_marshal_judgment(
         self, facts: Mapping[str, TaskFacts]
@@ -1842,6 +1922,16 @@ def _optional_string(value: Any) -> str | None:
 
 def _delivery_request_id(finish_operation: str, step: str) -> str:
     return str(uuid.uuid5(DELIVERY_NAMESPACE, f"{finish_operation}:{step}"))
+
+
+def _durably_deferred(value: Any) -> bool:
+    reasons = value.get("reasons", []) if isinstance(value, Mapping) else []
+    return any(
+        isinstance(reason, Mapping)
+        and reason.get("kind")
+        in {"future_activation", "defer", "external", "authoring"}
+        for reason in reasons
+    )
 
 
 def _optional_time(value: Any) -> datetime | None:

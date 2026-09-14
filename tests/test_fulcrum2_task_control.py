@@ -359,13 +359,14 @@ class Fulcrum2TaskControlReviewTest(unittest.TestCase):
             "tasks": [
                 {
                     "key": "implementation",
+                    "title": "Implement the candidate",
                     "outcome": "Implement it.",
                     "acceptance": ["The behavior passes."],
                     "depends_on": [],
                 }
             ],
             "summary": "One implementation task.",
-            "publication": {"required": False},
+            "publication": None,
             "validation": {"summary": "Run focused tests.", "checks": []},
         }
         return self.ledger.create_record(

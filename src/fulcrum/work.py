@@ -185,6 +185,7 @@ class WorkService:
                 children_by_key.get(value, value) for value in spec["depends_on"]
             ]
             _reconcile_dependencies(ledger, child_id, expected)
+            ledger.set_parent(child_id, root_id)
         root_dependencies = root_spec.get("depends_on", [])
         _reconcile_dependencies(
             ledger, root_id, [str(item) for item in root_dependencies]
@@ -586,6 +587,24 @@ class WorkService:
         fc["ownership_operation"] = operation.id
         fc["phase"] = "working" if role and request.thread_id else "backlog"
         fc["reopen_reason"] = reason
+        if isinstance(fc.get("plan"), Mapping):
+            plan = dict(fc["plan"])
+            intervals = list(plan.get("reopen_intervals") or [])
+            if isinstance(fc.get("disposition"), Mapping):
+                intervals.append(
+                    {
+                        "disposition": dict(fc["disposition"]),
+                        "completion_cost": fc.get("completion_cost"),
+                        "reopened_by": operation.id,
+                    }
+                )
+            plan["reopen_intervals"] = intervals
+            plan["reopen_requirement"] = {
+                "operation_id": operation.id,
+                "reason": reason.strip(),
+                "state": "requires_approved_refinement",
+            }
+            fc["plan"] = plan
         fc["last_transition"] = operation.id
         updated = ledger.update_fc(
             bead_id,

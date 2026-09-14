@@ -499,11 +499,7 @@ class AdmissionService:
                 )
                 return _operation_result(operation)
             plan = fc.get("plan")
-            if (
-                isinstance(plan, Mapping)
-                and plan.get("activation") == "future"
-                and not plan.get("activation_authorization")
-            ):
+            if isinstance(plan, Mapping) and plan.get("activation") == "future":
                 _set_waiting(
                     fc,
                     reason_id=f"future-plan:{record.id}",
@@ -513,7 +509,7 @@ class AdmissionService:
                     kind="future_activation",
                 )
                 fc["next_action"] = (
-                    "Human or Vizier must authorize the current approved future plan."
+                    "Human or Vizier must authorize, then Marshal must execute, the current approved future plan."
                 )
                 ledger.update_fc(record.id, fc)
                 operation = ledger.update_operation(
@@ -523,6 +519,56 @@ class AdmissionService:
                     error={
                         "code": "ACTIVATION_REQUIRED",
                         "message": "Marshal dispatch cannot activate future work",
+                        "retryable": False,
+                    },
+                    next_action=fc["next_action"],
+                )
+                return _operation_result(operation)
+            if isinstance(plan, Mapping) and plan.get("publication_ready") is False:
+                _set_waiting(
+                    fc,
+                    reason_id=f"plan-publication:{record.id}",
+                    reason="required remote plan publication has not been observed",
+                    triggers=[{"event": "external_changed", "subject": record.id}],
+                    decision_operation=str(dispatch.get("decision_operation")),
+                    kind="external",
+                )
+                fc["next_action"] = (
+                    "Observe required remote plan publication before implementation starts."
+                )
+                ledger.update_fc(record.id, fc)
+                operation = ledger.update_operation(
+                    operation,
+                    state="failed",
+                    step="plan_publication_required",
+                    error={
+                        "code": "PUBLICATION_NOT_READY",
+                        "message": "required remote plan publication is not observed",
+                        "retryable": False,
+                    },
+                    next_action=fc["next_action"],
+                )
+                return _operation_result(operation)
+            if isinstance(plan, Mapping) and plan.get("authoring_ready") is False:
+                _set_waiting(
+                    fc,
+                    reason_id=f"plan-authoring:{record.id}",
+                    reason="Weaver has not finished published plan authoring",
+                    triggers=[{"event": "owner_changed", "subject": record.id}],
+                    decision_operation=str(dispatch.get("decision_operation")),
+                    kind="authoring",
+                )
+                fc["next_action"] = (
+                    "Weaver must finish the published plan authoring turn."
+                )
+                ledger.update_fc(record.id, fc)
+                operation = ledger.update_operation(
+                    operation,
+                    state="failed",
+                    step="plan_authoring_not_finished",
+                    error={
+                        "code": "PLAN_AUTHORING_NOT_FINISHED",
+                        "message": "published plan authoring is not finished",
                         "retryable": False,
                     },
                     next_action=fc["next_action"],

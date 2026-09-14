@@ -449,7 +449,7 @@ class Ledger:
         return observed
 
     def dependencies(self, record_id: str) -> list[str]:
-        value = self.run(("dep", "list", record_id)).value
+        value = self.run(("dep", "list", record_id, "--type", "blocks")).value
         if not isinstance(value, list):
             return []
         result: list[str] = []

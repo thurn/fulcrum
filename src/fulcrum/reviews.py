@@ -19,6 +19,7 @@ from fulcrum.ledger import (
     random_record_id,
     utc_now,
 )
+from fulcrum.plans import validate_plan_draft
 from fulcrum.runtime import TaskSpec
 from fulcrum.runtime_service import (
     _create_and_configure,
@@ -49,7 +50,7 @@ class ReviewService:
         _authorize_author(request, root.fc)
         plan = root.fc.get("plan")
         draft = plan.get("draft") if isinstance(plan, Mapping) else None
-        retained_draft = _validate_draft(draft)
+        retained_draft = validate_plan_draft(draft)
         assert request.request_id is not None
         expected_operation = operation_id(request.request_id)
         reviews = plan.get("reviews") if isinstance(plan, Mapping) else None
@@ -476,49 +477,6 @@ class ReviewService:
             next_action="Resolve or waive findings during explicit plan approval.",
         )
         return _operation_result(receipt)
-
-
-def _validate_draft(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise FulcrumError.invalid(
-            "PLAN_DRAFT_REQUIRED",
-            "plan review requires a retained unpublished draft",
-        )
-    required = {"text", "tasks", "summary", "publication", "validation"}
-    if set(value) != required:
-        raise FulcrumError.invalid(
-            "INVALID_PLAN_DRAFT",
-            "retained draft must contain text, tasks, summary, publication, and validation",
-        )
-    if not isinstance(value["text"], str) or not value["text"].strip():
-        raise FulcrumError.invalid("INVALID_PLAN_DRAFT", "draft text is required")
-    if not isinstance(value["summary"], str) or not value["summary"].strip():
-        raise FulcrumError.invalid("INVALID_PLAN_DRAFT", "draft summary is required")
-    if not isinstance(value["tasks"], list) or not all(
-        isinstance(item, Mapping)
-        and isinstance(item.get("key"), str)
-        and item.get("key")
-        and isinstance(item.get("outcome"), str)
-        and item.get("outcome")
-        and isinstance(item.get("acceptance"), list)
-        and isinstance(item.get("depends_on", []), list)
-        for item in value["tasks"]
-    ):
-        raise FulcrumError.invalid(
-            "INVALID_PLAN_DRAFT", "draft tasks require stable keys and typed scope"
-        )
-    keys = [str(item["key"]) for item in value["tasks"]]
-    if len(keys) != len(set(keys)):
-        raise FulcrumError.invalid(
-            "INVALID_PLAN_DRAFT", "draft task keys must be unique"
-        )
-    if not isinstance(value["publication"], Mapping) or not isinstance(
-        value["validation"], Mapping
-    ):
-        raise FulcrumError.invalid(
-            "INVALID_PLAN_DRAFT", "publication and validation must be objects"
-        )
-    return json.loads(json.dumps(dict(value), ensure_ascii=False))
 
 
 def _review_prompt(root: Any, perspective: str, draft: Mapping[str, Any]) -> str:

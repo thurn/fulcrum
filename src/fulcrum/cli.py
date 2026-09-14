@@ -77,7 +77,6 @@ READ_ONLY_COMMANDS = {
     ("wait",),
     ("recover", "inspect"),
     ("plan", "show"),
-    ("plan", "complete"),
     ("memory", "list"),
     ("memory", "show"),
     ("ledger", "status"),
@@ -471,6 +470,8 @@ def _add_command_options(
         )
     elif path == ("plan", "review", "finish"):
         _option(parser, "--task", required=True)
+    elif path == ("plan", "activate"):
+        _option(parser, "--authorization")
     elif path in {("memory", "list"), ("usage",), ("cost",)}:
         for name in ("scope", "workflow", "role", "task", "turn", "root"):
             _option(parser, f"--{name}")
@@ -645,6 +646,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "known_defects",
         "waived_requirements",
         "answer",
+        "plan_id",
     },
     ("progress",): {"kind", "summary", "evidence", "bead"},
     ("report",): {
@@ -677,6 +679,9 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "approval_operation",
         "approved_by",
         "approval_evidence",
+        "activation",
+        "text",
+        "reviews",
         "tasks",
         "publication",
     },
@@ -935,6 +940,9 @@ def _exit_code(result: dict[str, Any]) -> int:
         "STALE_REVIEW",
         "APPROVAL_CONFLICT",
         "ACTIVATION_NOT_AUTHORIZED",
+        "ACTIVE_SCOPE_CHANGE",
+        "PUBLICATION_NOT_READY",
+        "PLAN_AUTHORING_NOT_FINISHED",
     }:
         return 5
     if result.get("state") == "uncertain" or code in {

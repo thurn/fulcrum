@@ -19,6 +19,7 @@ from fulcrum.ledger import (
     OperationService,
 )
 from fulcrum.leadership import LeadershipService
+from fulcrum.plans import PlanService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.reviews import ReviewService
 from fulcrum.roles import RoleService
@@ -95,6 +96,14 @@ class Application:
         reviews = ReviewService()
         self.register(("plan", "review", "start"), reviews.start)
         self.register(("plan", "review", "finish"), reviews.finish)
+        plans = PlanService()
+        self.register(("plan", "draft"), plans.draft)
+        self.register(("plan", "show"), plans.show)
+        self.register(("plan", "approve"), plans.approve)
+        self.register(("plan", "publish"), plans.publish)
+        self.register(("plan", "refine"), plans.refine)
+        self.register(("plan", "activate"), plans.activate)
+        self.register(("plan", "complete"), plans.complete)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

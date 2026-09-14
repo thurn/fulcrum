@@ -157,6 +157,10 @@ class Fulcrum2WorkTest(unittest.TestCase):
         dependent = first_result["children_by_key"]["second"]
         prerequisite = first_result["children_by_key"]["first"]
         self.assertEqual(ledger.dependencies(dependent), [prerequisite])
+        self.assertEqual(
+            {item.id for item in ledger.children(first_result["bead_id"])},
+            {dependent, prerequisite},
+        )
 
     def test_dependency_cycle_is_rejected_before_an_edge_is_written(self) -> None:
         first, _ = self.create_work("Cycle first")
