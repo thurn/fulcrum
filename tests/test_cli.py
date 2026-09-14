@@ -12,7 +12,13 @@ from fulcrum.beads import Beads
 from fulcrum.cli import FINISH_REPORT_HINT, main
 from fulcrum.config import InstallationConfig, RuntimePaths
 from fulcrum.doctor import human_skill_link_checks
-from fulcrum.install import HUMAN_SKILLS, InstallationError, install_links
+from fulcrum.install import (
+    HUMAN_SKILLS,
+    REMOVED_SKILLS,
+    InstallationError,
+    install_links,
+    reconcile_skill_links,
+)
 from fulcrum.intake import report_task_from_payload
 from fulcrum.store import StoreError
 
@@ -169,6 +175,63 @@ class CliTest(unittest.TestCase):
                 item for item in checks if item["name"] == "skill:fulcrum-bead"
             )
             self.assertFalse(bead_check["ok"])
+
+    def test_skill_reconciliation_repairs_wrong_links_and_removes_retired_skills(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            skills_root = root / "codex-skills"
+            smoke = root / "smoke"
+            skills_root.mkdir()
+            smoke.mkdir()
+            for name in HUMAN_SKILLS:
+                skill = source / "skills" / name
+                skill.mkdir(parents=True)
+                skill.joinpath("SKILL.md").write_text(f"---\nname: {name}\n---\n")
+            for name in HUMAN_SKILLS[:-1]:
+                (skills_root / name).symlink_to(smoke, target_is_directory=True)
+            for name in REMOVED_SKILLS:
+                (skills_root / name).symlink_to(smoke, target_is_directory=True)
+            unrelated = skills_root / "unrelated"
+            unrelated.mkdir()
+
+            result = reconcile_skill_links(source, skills_root=skills_root)
+
+            for name in HUMAN_SKILLS:
+                self.assertEqual(
+                    (skills_root / name).resolve(strict=True),
+                    (source / "skills" / name).resolve(strict=True),
+                )
+            for name in REMOVED_SKILLS:
+                self.assertFalse((skills_root / name).is_symlink())
+            self.assertEqual(
+                set(result["removed"]),
+                {str(skills_root / name) for name in REMOVED_SKILLS},
+            )
+            self.assertTrue(unrelated.is_dir())
+
+    def test_skill_reconciliation_preflights_non_symlink_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            skills_root = root / "codex-skills"
+            skills_root.mkdir()
+            for name in HUMAN_SKILLS:
+                skill = source / "skills" / name
+                skill.mkdir(parents=True)
+                skill.joinpath("SKILL.md").write_text(f"---\nname: {name}\n---\n")
+            conflict = skills_root / HUMAN_SKILLS[-1]
+            conflict.mkdir()
+            conflict.joinpath("notes.txt").write_text("keep me")
+
+            with self.assertRaisesRegex(InstallationError, "non-symlink"):
+                reconcile_skill_links(source, skills_root=skills_root)
+
+            self.assertEqual(conflict.joinpath("notes.txt").read_text(), "keep me")
+            for name in HUMAN_SKILLS[:-1]:
+                self.assertFalse((skills_root / name).exists())
 
     def test_report_publication_has_report_label_and_provenance_metadata(self) -> None:
         task = report_task_from_payload(

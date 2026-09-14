@@ -1,0 +1,31 @@
+#!/usr/bin/env python3.12
+"""Repair Codex skill links without running the full Fulcrum setup."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SOURCE_ROOT / "src"))
+
+from fulcrum.install import InstallationError, reconcile_skill_links  # noqa: E402
+
+
+def main() -> int:
+    try:
+        result = reconcile_skill_links(SOURCE_ROOT)
+    except InstallationError as error:
+        print(f"fulcrum skill reconciliation failed: {error}", file=sys.stderr)
+        return 2
+
+    for target in result["skills"]:
+        print(f"linked {target}")
+    for target in result["removed"]:
+        print(f"removed retired skill {target}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

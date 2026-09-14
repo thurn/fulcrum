@@ -47,6 +47,16 @@ project and Tollgate identities, Git/Beads connectivity, linked assets, SQLite,
 and initial Archon policies. It prints `setup incomplete` with the exact remaining
 condition and exits nonzero until all required checks pass.
 
+To repair only the links under `~/.codex/skills` after a disposable checkout has
+replaced them, run this from the retained Fulcrum checkout:
+
+```sh
+./scripts/reconcile_skills
+```
+
+The script links every current human-facing Fulcrum skill, removes retired
+Fulcrum skill links, and refuses to replace a real file or directory.
+
 Structured `fulcrum finish --input` files use exact action-scoped destinations
 under the configured control root. The destination follows `FULCRUM_CONFIG`
 adjacency or `FULCRUM_CONTROL_ROOT`; it is never derived from a repository or

@@ -375,27 +375,43 @@ def _replace_owned_link(source: Path, target: Path) -> None:
     os.replace(temporary, target)
 
 
+def reconcile_skill_links(
+    source_root: Path, *, skills_root: Path | None = None
+) -> dict[str, list[str]]:
+    """Point every installed Fulcrum skill at the retained source checkout."""
+
+    source = source_root.resolve(strict=True)
+    root = skills_root or Path.home() / ".codex" / "skills"
+    skill_sources = {name: source / "skills" / name for name in HUMAN_SKILLS}
+    for name, skill in skill_sources.items():
+        if not (skill / "SKILL.md").is_file():
+            raise InstallationError(f"missing human entry skill {skill}")
+        target = root / name
+        if target.exists() and not target.is_symlink():
+            raise InstallationError(f"refusing to replace non-symlink asset {target}")
+
+    installed: list[str] = []
+    for name, skill in skill_sources.items():
+        target = root / name
+        _replace_owned_link(skill, target)
+        installed.append(str(target))
+
+    removed: list[str] = []
+    for name in REMOVED_SKILLS:
+        target = root / name
+        if target.is_symlink():
+            target.unlink()
+            removed.append(str(target))
+    return {"skills": installed, "removed": removed}
+
+
 def install_links(
     config: InstallationConfig, *, codex_root: Path | None = None
 ) -> dict[str, Any]:
     source = Path(config.source_root).resolve(strict=True)
     root = codex_root or Path.home() / ".codex"
-    installed: list[str] = []
-    for name in HUMAN_SKILLS:
-        skill = source / "skills" / name
-        if not (skill / "SKILL.md").is_file():
-            raise InstallationError(f"missing human entry skill {skill}")
-        target = root / "skills" / name
-        _replace_owned_link(skill, target)
-        installed.append(str(target))
-    removed: list[str] = []
-    for name in REMOVED_SKILLS:
-        target = root / "skills" / name
-        if target.is_symlink():
-            resolved = target.resolve(strict=False)
-            if resolved.is_relative_to(source) or not resolved.exists():
-                target.unlink()
-                removed.append(str(target))
+    skills = reconcile_skill_links(source, skills_root=root / "skills")
+    removed = skills["removed"]
     hook_source = source / "hooks" / "fulcrum-hook"
     cli_source = source / ".venv" / "bin" / "fulcrum"
     if not os.access(hook_source, os.X_OK) or not os.access(cli_source, os.X_OK):
@@ -412,7 +428,7 @@ def install_links(
     _replace_owned_link(cli_source, cli_target)
     install_hook_config(root / "hooks.json", hook_target)
     return {
-        "skills": installed,
+        "skills": skills["skills"],
         "removed": removed,
         "hook": str(hook_target),
         "cli": str(cli_target),
