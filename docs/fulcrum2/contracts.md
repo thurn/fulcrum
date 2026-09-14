@@ -433,6 +433,7 @@ its supported update fields are only status, priority, title, and assignee.
     "caused_by": null,
     "models": {},
     "plan": null,
+    "completion_cost": null,
     "summary": "Return correctly ordered values without quadratic behavior.",
     "outcome": "Optimize sorting while preserving documented ordering semantics.",
     "acceptance": ["Ordering tests pass", "Representative large input avoids quadratic growth"],
@@ -1150,6 +1151,79 @@ freeze with the gap recorded rather than blocking delivery. Later recovery adds
 an explicit correction record referencing the frozen result, and queries show
 both the original and corrected total; do not silently rewrite historical facts.
 A reopened bead starts a new recorded completion interval under the same ID.
+
+### Automatic cost metadata on top-level beads
+
+Every completed top-level work bead receives `metadata.fc.completion_cost`
+automatically. A top-level work bead is the originating work/plan whose ID equals
+its `workflow_root`, including Weaver question/authoring sessions and roots
+created through direct role entry. An epic's deliverable children contribute to
+that root; they are not charged again by summing child/root rollups. Control,
+task, and operation records do not receive this annotation as top-level work.
+
+The annotation is a field on the original bead, not a new cost-label bead:
+
+```json
+{
+  "completion_cost": {
+    "estimated_api_cost_usd": "12.340000",
+    "priced_subtotal_usd": "12.340000",
+    "currency": "USD",
+    "coverage": "complete",
+    "state": "finalized",
+    "scope": "workflow_lifetime",
+    "summary_bead": "fc-c05a1234",
+    "completed_at": "2026-09-14T08:00:00Z",
+    "calculated_at": "2026-09-14T08:00:02Z",
+    "missing_reasons": []
+  }
+}
+```
+
+Amounts are decimal strings, calculated with the response-level rate rules above.
+The example amount is illustrative, not a measured cost. USD rate cards are
+required for this annotation; a contribution priced only in another currency is
+explicitly unpriced here, with no invented exchange rate. `estimated_api_cost_usd`
+is null when coverage is partial/unknown; `priced_subtotal_usd` retains any known
+priced portion and is null if no priced evidence exists. A zero value requires
+known zero cost, not missing telemetry. Include all causally attributed work from
+Weaver planning/intake through child delivery and recovery, including helpers,
+shared Marshal decision allocations, and supported model-billed tool charges.
+The summary record retains component/rate provenance and attribution assumptions.
+This is an API-equivalent estimate, not an actual subscription charge.
+
+Closing the root queues this mechanical finalization through its existing
+completion operation. Write the available annotation with `state=pending` if
+terminal usage still needs observation, then set `state=finalized` when the frozen
+summary is ready. Never hold promotion/closure open while waiting for pricing or
+start a Marshal/Sage turn solely to compute the total. A finalized annotation may
+still have partial coverage; it records the evidence actually available.
+
+Persist the summary record first, then update the root metadata using the normal
+full-`fc` merge and transition receipt. A restart reconciles a missing root update
+from that same receipt and summary ID. Duplicate completion events never add cost
+again. The root's completion operation records finalization as unsettled until
+its annotation is written or an explicit telemetry gap is finalized, so a closed
+root with a pending annotation remains discoverable by normal reconciliation.
+Unavailable Beads is a pending persistence failure, not successful annotation.
+These metadata changes are included in the usual brain Git publication cadence.
+
+Late usage/pricing recovery appends the correction record already specified above
+and updates the root annotation to point to the corrected summary, with a new
+`calculated_at`. Preserve the original summary and its evidence. Reopening starts
+a new completion interval; the next closure refreshes the lifetime workflow
+estimate from unique attributed native turns across its intervals. Do not add a
+previous rollup to the same raw turns or silently include unrelated work filed
+later from that conversation. While reopened, retain the last completion value as
+historical metadata; `completed_at` identifies the closure it describes.
+
+`bd show ID --json` exposes the native metadata directly. `fulcrum work show ID
+--json` exposes it at `.result.fc.completion_cost`; `cost --workflow ID` returns
+the same summary and coverage. `usage reconcile --bead ID` also reconciles this
+annotation after gathering late evidence. Extend the existing deterministic
+successful-delivery and duplicate/restart scenarios to assert a root with children
+gets the expected USD estimate exactly once, and missing usage produces explicit
+partial metadata. No live models or additional stress test are required.
 
 A concise terminal example after a completed scenario:
 

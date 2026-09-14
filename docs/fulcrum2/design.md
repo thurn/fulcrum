@@ -576,6 +576,18 @@ billing. Store bounded analytical facts in Beads; diagnostic log retention must
 not erase them. Missing cost/usage is unknown, never zero. See the analytics
 [contract](contracts.md#usage-and-cost-commands).
 
+On completion, automatically write `metadata.fc.completion_cost` onto each
+top-level work bead, including the root created for a Weaver session or plan.
+Record the estimated **USD API-equivalent cost of completing the whole workflow**:
+Weaver authoring, attributed Marshal decisions, child work, Executor/Warden turns,
+helpers, and same-scope recovery/specialists. Exclude unrelated follow-up work.
+This is directly readable from the bead; it is not available only through a cost
+report. Include coverage, a priced subtotal when incomplete, and the supporting
+analytics reference. Finalize from native terminal usage without another agent
+turn; missing telemetry never blocks delivery. The
+[completion-cost contract](contracts.md#automatic-cost-metadata-on-top-level-beads)
+defines fields, restart behavior, and later corrections.
+
 Every finish response includes this nonblocking reminder: “If you encountered a
 pre-existing issue or a problem with your tools, file it now with `fulcrum report`.”
 Sage and Mason produce actionable reports with evidence, required change, and

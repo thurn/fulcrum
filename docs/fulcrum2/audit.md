@@ -129,6 +129,16 @@ actual allocation/recovery decisions in Beads. Justiciar's broad recovery powers
 do not override the file restriction. Authorized configuration edits are published
 on the brain Git cadence; mechanical publication does not authorize edits.
 
+## Follow-up requirement: completion cost on the root bead
+
+Every completed top-level work bead, including a Weaver session/plan root, is
+annotated with `metadata.fc.completion_cost`. The USD API-equivalent estimate
+covers the whole causally attributed workflow and its children/helpers, with
+explicit coverage and a supporting summary record. Python performs annotation
+and restart reconciliation automatically; incomplete telemetry does not block
+completion or masquerade as zero cost. The original bead exposes the result
+through ordinary `bd show`, and the same metadata is pushed with Beads history.
+
 ## Remaining qualifications
 
 There is no unresolved product-scope question from this audit. Native runtime
