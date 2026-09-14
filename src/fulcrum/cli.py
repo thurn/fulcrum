@@ -11,13 +11,17 @@ import asyncio
 import json
 import os
 import sys
+import time
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn, Sequence
 
 from fulcrum.application import default_application
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
+from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.instance import WriterLock, resolve_instance
 from fulcrum.ipc import (
     ControllerUnavailable,
@@ -401,8 +405,12 @@ def _add_command_options(
         _option(parser, "--cursor")
     elif path == ("logs",):
         _option(parser, "--follow", action="store_true")
+        _option(parser, "--bead")
+        _option(parser, "--operation")
+        _option(parser, "--since")
         _option(parser, "--limit", type=int)
         _option(parser, "--cursor")
+        _option(parser, "--max-bytes", type=int)
     elif path == ("wait",):
         _option(parser, "--bead", required=True)
         _option(parser, "--until", required=True)
@@ -827,7 +835,7 @@ def _execute(request: ParsedRequest) -> dict[str, Any]:
                     timeout=request.timeout,
                 )
             except ControllerUnavailable:
-                return application.dispatch(request).to_dict()
+                return application.dispatch(replace(request, offline=True)).to_dict()
         if request.instance.lock_path is None:
             raise FulcrumError(
                 "CONFIG_INVALID",
@@ -906,6 +914,65 @@ def _emit(result: dict[str, Any], *, json_output: bool) -> None:
             print("next: " + " ".join(error["next_command"]), file=sys.stderr)
 
 
+def _emit_log_stream(request: ParsedRequest, result: dict[str, Any]) -> None:
+    current = result.get("result") or {}
+    emitted = 0
+    cursor = current.get("cursor")
+    gaps: list[Any] = list(current.get("gaps", []))
+
+    def emit_items(items: Sequence[Mapping[str, Any]]) -> None:
+        nonlocal emitted
+        for item in items:
+            print(
+                json.dumps(
+                    {"ok": True, "state": "running", "event": item},
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            emitted += 1
+
+    emit_items(current.get("items", []))
+    deadline = time.monotonic() + request.timeout
+    log = DiagnosticLog.from_request(request)
+    arguments = request.arguments
+    while time.monotonic() < deadline:
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        page = log.read(
+            bead=str(arguments["bead"]) if "bead" in arguments else None,
+            operation=(
+                str(arguments["operation"]) if "operation" in arguments else None
+            ),
+            since=str(arguments["since"]) if "since" in arguments else None,
+            limit=int(arguments.get("limit", 20)),
+            cursor=str(cursor) if cursor else None,
+            max_bytes=int(arguments.get("max_bytes", 256 * 1024)),
+        )
+        emit_items(page["items"])
+        if page.get("cursor"):
+            cursor = page["cursor"]
+        gaps.extend(page.get("gaps", []))
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "state": "completed",
+                "result": {
+                    "items_emitted": emitted,
+                    "cursor": cursor,
+                    "gaps": gaps,
+                    "observed_until": datetime.now(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                },
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     namespace: argparse.Namespace | None = None
@@ -913,6 +980,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         namespace = parser.parse_args(argv)
         request = _build_request(namespace)
         result = _execute(request)
+        if request.command == ("logs",) and request.arguments.get("follow"):
+            _emit_log_stream(request, result)
+            return _exit_code(result)
         _emit(result, json_output=bool(getattr(namespace, "json", False)))
         return _exit_code(result)
     except FulcrumError as error:

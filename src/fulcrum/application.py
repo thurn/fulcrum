@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
 
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.configuration import ConfigurationService, ProjectService
+from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
-    OperationRecord,
     OperationService,
-    operation_view,
 )
-from fulcrum.work import WorkService, work_view
+from fulcrum.work import WorkService
 
 Handler = Callable[[ParsedRequest], CommandResult]
 
@@ -24,7 +23,13 @@ Handler = Callable[[ParsedRequest], CommandResult]
 class Application:
     def __init__(self) -> None:
         self._handlers: dict[tuple[str, ...], Handler] = {}
-        self.register(("status",), self._status)
+        diagnostics = DiagnosticService()
+        self.register(("status",), diagnostics.status)
+        self.register(("doctor",), diagnostics.doctor)
+        self.register(("logs",), diagnostics.logs)
+        self.register(("logs", "prune"), diagnostics.prune)
+        self.register(("trace",), diagnostics.trace)
+        self.register(("wait",), diagnostics.wait)
         self.register(("service", "status"), self._service_status)
         configuration = ConfigurationService()
         self.register(("config", "show"), configuration.show)
@@ -64,9 +69,10 @@ class Application:
         self._handlers[command] = handler
 
     def dispatch(self, request: ParsedRequest) -> CommandResult:
+        started = time.monotonic()
         handler = self._handlers.get(request.command)
         if handler is None:
-            raise FulcrumError(
+            error = FulcrumError(
                 "CAPABILITY_UNAVAILABLE",
                 f"{' '.join(request.command)} is not implemented by this installation",
                 exit_code=4,
@@ -75,11 +81,13 @@ class Application:
                 next_command=("fulcrum", "doctor", "--json"),
                 details={"command": list(request.command)},
             )
+            self._log(request, started, error=error)
+            raise error
         try:
-            return handler(request)
+            result = handler(request)
         except LedgerFailure as error:
             state = CommandState.UNCERTAIN if error.uncertain else CommandState.FAILED
-            raise FulcrumError(
+            converted = FulcrumError(
                 "LEDGER_UNCERTAIN" if error.uncertain else "LEDGER_UNAVAILABLE",
                 str(error),
                 exit_code=4,
@@ -92,37 +100,64 @@ class Application:
                     "duration_ms": error.duration_ms,
                     "truncated": error.truncated,
                 },
-            ) from error
+            )
+            self._log(request, started, error=converted, adapter_error=error)
+            raise converted from error
+        except FulcrumError as error:
+            self._log(request, started, error=error)
+            raise
+        except Exception as error:
+            self._log(request, started, error=error)
+            raise
+        self._log(request, started, result=result)
+        return result
 
-    def _status(self, request: ParsedRequest) -> CommandResult:
-        operations: list[dict[str, Any]] = []
-        work: list[dict[str, Any]] = []
-        gaps: list[dict[str, Any]] = []
+    @staticmethod
+    def _log(
+        request: ParsedRequest,
+        started: float,
+        *,
+        result: CommandResult | None = None,
+        error: Exception | None = None,
+        adapter_error: LedgerFailure | None = None,
+    ) -> None:
+        public_error = error if isinstance(error, FulcrumError) else None
+        event = {
+            "event": "command_completed",
+            "command": request.command_name,
+            "request_id": request.request_id,
+            "operation_id": (
+                result.operation_id
+                if result
+                else public_error.operation_id if public_error else None
+            ),
+            "bead_id": request.arguments.get("id")
+            or request.arguments.get("bead")
+            or request.input.get("bead"),
+            "task_id": request.thread_id,
+            "turn_id": None,
+            "role": request.arguments.get("role"),
+            "adapter": "beads" if adapter_error else "application",
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "outcome": result.state.value if result else "failed",
+            "error_category": (
+                adapter_error.category
+                if adapter_error
+                else (
+                    public_error.code
+                    if public_error
+                    else type(error).__name__ if error else None
+                )
+            ),
+            "error": str(error) if error else None,
+            "stdout": adapter_error.stdout if adapter_error else None,
+            "stderr": adapter_error.stderr if adapter_error else None,
+            "truncated": adapter_error.truncated if adapter_error else False,
+        }
         try:
-            service = self._operations(request)
-            operations = [
-                operation_view(OperationRecord.from_record(item))
-                for item in service.ledger.list_records(kind="operation", limit=20)
-            ]
-            work = [
-                work_view(service.ledger, item)
-                for item in service.ledger.list_records(limit=20)
-                if item.kind
-                not in {"control", "task", "memory", "analytics", "operation"}
-            ]
-        except (FulcrumError, LedgerFailure) as error:
-            gaps.append({"component": "ledger", "reason": str(error)})
-        return CommandResult.query(
-            {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "instance": request.instance.to_dict(),
-                "work": work,
-                "operations": operations,
-                "capacity": None,
-                "publication": None,
-                "gaps": gaps,
-            }
-        )
+            DiagnosticLog.from_request(request).append(event)
+        except (OSError, FulcrumError):
+            pass
 
     @staticmethod
     def _operations(request: ParsedRequest) -> OperationService:
