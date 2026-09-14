@@ -1,0 +1,5 @@
+interface:
+  display_name: "Fulcrum Executor"
+  short_description: "Implement one owned Fulcrum scope"
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Fulcrum Marshal"
+  short_description: "Enter Fulcrum coordination leadership"
+policy:
+  allow_implicit_invocation: false

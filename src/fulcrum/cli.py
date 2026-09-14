@@ -325,8 +325,9 @@ def _add_command_options(
         _option(parser, "--non-interactive", action="store_true")
     elif path == ("enter",):
         parser.add_argument("role", choices=ROLES)
-        _option(parser, "--description")
+        _option(parser, "--description", required=True)
         _option(parser, "--bead")
+        _option(parser, "--origin", choices=("human", "dispatch"), default="human")
     elif path == ("context",):
         group = parser.add_mutually_exclusive_group()
         group.add_argument("--bead", default=argparse.SUPPRESS)
@@ -514,6 +515,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
+    ("hook", "context"): {
+        "hook_event_name",
+        "source",
+        "session_id",
+        "cwd",
+        "model",
+        "permission_mode",
+        "transcript_path",
+    },
     ("setup",): {
         "brain",
         "beads",
@@ -995,12 +1005,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         namespace = parser.parse_args(argv)
         request = _build_request(namespace)
         result = _execute(request)
+        if request.command == ("hook", "context"):
+            print(
+                json.dumps(
+                    result.get("result") or {"continue": True},
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+            )
+            return 0
         if request.command == ("logs",) and request.arguments.get("follow"):
             _emit_log_stream(request, result)
             return _exit_code(result)
         _emit(result, json_output=bool(getattr(namespace, "json", False)))
         return _exit_code(result)
     except FulcrumError as error:
+        if namespace is not None and tuple(getattr(namespace, "_command_path", ())) == (
+            "hook",
+            "context",
+        ):
+            print('{"continue":true}')
+            return 0
         result = error.to_result().to_dict()
         json_output = (
             bool(getattr(namespace, "json", False))

@@ -128,6 +128,20 @@ class Fulcrum2SpineTest(unittest.TestCase):
         self.assertEqual(restored.input, payload)
         self.assertEqual(restored.request_id, request_id)
 
+        project = self.root / "project"
+        project.mkdir()
+        self.config.write_text(
+            (
+                f"brain:\n  root: {self.brain}\n"
+                "projects:\n"
+                "  toy:\n"
+                f"    root: {project}\n"
+                "    enabled: true\n"
+                "    delivery:\n"
+                "      id: fixture\n"
+            ),
+            encoding="utf-8",
+        )
         generated = self.invoke(
             "enter",
             "weaver",
@@ -138,7 +152,7 @@ class Fulcrum2SpineTest(unittest.TestCase):
             "--offline",
             "--json",
         )
-        self.assertEqual(generated.returncode, 4)
+        self.assertEqual(generated.returncode, 6)
         emitted = generated.stderr.strip().removeprefix("request_id=")
         uuid.UUID(emitted)
         self.assertEqual(json.loads(generated.stdout)["request_id"], emitted)

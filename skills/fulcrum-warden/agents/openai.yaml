@@ -1,0 +1,5 @@
+interface:
+  display_name: "Fulcrum Warden"
+  short_description: "Review and deliver exact source"
+policy:
+  allow_implicit_invocation: false

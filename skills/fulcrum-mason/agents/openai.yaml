@@ -1,0 +1,5 @@
+interface:
+  display_name: "Fulcrum Mason"
+  short_description: "Investigate architecture and responsibility"
+policy:
+  allow_implicit_invocation: false

@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [tool.setuptools.package-data]
-fulcrum = ["prompts/*.md"]
+fulcrum = ["prompts/*.md", "formulas/*.json", "role_fallbacks/*.md"]
 
 [project.optional-dependencies]
 dev = [

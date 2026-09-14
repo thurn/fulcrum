@@ -16,6 +16,7 @@ from fulcrum.ledger import (
     OperationService,
 )
 from fulcrum.runtime_service import RuntimeService, TaskService
+from fulcrum.roles import RoleService
 from fulcrum.work import WorkService
 
 Handler = Callable[[ParsedRequest], CommandResult]
@@ -60,6 +61,10 @@ class Application:
         self.register(("task", "archive"), tasks.archive)
         self.register(("task", "unarchive"), tasks.unarchive)
         self.register(("task", "delete"), tasks.delete)
+        roles = RoleService()
+        self.register(("enter",), roles.enter)
+        self.register(("context",), roles.context)
+        self.register(("hook", "context"), roles.hook_context)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)
@@ -72,7 +77,6 @@ class Application:
         self.register(("work", "reopen"), work.reopen)
         self.register(("progress",), work.progress)
         self.register(("report",), work.report)
-        self.register(("context",), work.context)
         self.register(("operation", "show"), self._operation_show)
         self.register(("operation", "list"), self._operation_list)
         self.register(("operation", "wait"), self._operation_wait)

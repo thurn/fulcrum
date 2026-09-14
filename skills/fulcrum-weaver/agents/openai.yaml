@@ -1,2 +1,5 @@
+interface:
+  display_name: "Fulcrum Weaver"
+  short_description: "Investigate or plan durable work"
 policy:
   allow_implicit_invocation: false

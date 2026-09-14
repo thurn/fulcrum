@@ -471,6 +471,45 @@ class Ledger:
             else []
         )
 
+    def cook(self, formula: str, variables: Mapping[str, str]) -> dict[str, str]:
+        arguments: list[str] = ["cook", formula, "--mode", "runtime"]
+        for key in sorted(variables):
+            arguments.extend(("--var", f"{key}={variables[key]}"))
+        value = self.run(arguments).value
+        if not isinstance(value, Mapping):
+            raise LedgerFailure(
+                "Beads formula returned no object",
+                category="unsupported",
+                retryable=False,
+            )
+        steps = value.get("steps")
+        if not isinstance(steps, list):
+            raise LedgerFailure(
+                "Beads formula returned no steps",
+                category="unsupported",
+                retryable=False,
+            )
+        work_steps = [
+            step
+            for step in steps
+            if isinstance(step, Mapping) and step.get("id") == "work"
+        ]
+        if len(steps) != 1 or len(work_steps) != 1:
+            raise LedgerFailure(
+                "role formula must contain exactly one work step",
+                category="unsupported",
+                retryable=False,
+            )
+        title = work_steps[0].get("title")
+        description = work_steps[0].get("description")
+        if not isinstance(title, str) or not isinstance(description, str):
+            raise LedgerFailure(
+                "role formula work step has no title or description",
+                category="unsupported",
+                retryable=False,
+            )
+        return {"title": title, "description": description}
+
     def create_operation(
         self,
         request: ParsedRequest,
