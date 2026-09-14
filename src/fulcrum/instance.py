@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
+from ruamel.yaml import YAML  # pyre-ignore[21]
 
 from fulcrum.contracts import FulcrumError, InstanceContext
 
@@ -28,7 +28,9 @@ def _absolute(value: str | Path, field: str) -> Path:
 
 def _brain_from_config(path: Path) -> Path:
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        parser = YAML(typ="safe")
+        parser.allow_duplicate_keys = False
+        loaded = parser.load(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
         raise FulcrumError(
             "CONFIG_NOT_FOUND",
@@ -36,7 +38,7 @@ def _brain_from_config(path: Path) -> Path:
             exit_code=4,
             next_command=("fulcrum", "config", "validate", "--config", str(path)),
         ) from error
-    except (OSError, yaml.YAMLError) as error:
+    except Exception as error:
         raise FulcrumError(
             "CONFIG_INVALID",
             f"cannot read authoritative configuration {path}: {error}",

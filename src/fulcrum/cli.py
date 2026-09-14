@@ -314,6 +314,8 @@ def _add_command_options(
 ) -> None:
     if path in POSITIONAL_ID:
         parser.add_argument("id")
+    if path == ("project", "disable"):
+        _option(parser, "--reason", required=True)
     if path == ("serve",):
         _option(parser, "--once", action="store_true")
     elif path == ("setup",):
@@ -475,6 +477,7 @@ def build_parser() -> argparse.ArgumentParser:
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     ("setup",): {
         "brain",
+        "beads",
         "runtime",
         "delivery",
         "models",
@@ -488,6 +491,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     },
     ("config", "set"): {
         "brain",
+        "beads",
         "runtime",
         "delivery",
         "models",
@@ -499,16 +503,26 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "resources",
         "policy",
     },
-    ("policy", "set"): {"automatic_capacity", "project_capacity"},
+    ("policy", "set"): {
+        "automatic_capacity",
+        "default_project_capacity",
+        "project_capacity",
+        "paused_projects",
+        "suspended_rules",
+        "rationale",
+    },
     ("project", "add"): {
         "id",
         "root",
         "codex_project_id",
-        "tollgate_repo_id",
+        "delivery",
+        "integration_branch",
+        "prepare_argv",
+        "validate_argv",
         "enabled",
-        "validation",
         "source_remote",
-        "source_sync",
+        "require_source_sync",
+        "models",
     },
     ("work", "create"): {
         "title",
@@ -813,6 +827,8 @@ def _execute(request: ParsedRequest) -> dict[str, Any]:
 
 
 def _exit_code(result: dict[str, Any]) -> int:
+    if result.get("state") == "degraded":
+        return 6
     if result.get("ok"):
         return 0
     error = result.get("error") or {}
@@ -829,8 +845,6 @@ def _exit_code(result: dict[str, Any]) -> int:
         "ACTIVATION_NOT_AUTHORIZED",
     }:
         return 5
-    if result.get("state") == "degraded":
-        return 6
     if result.get("state") == "uncertain" or code in {
         "CONTROLLER_UNAVAILABLE",
         "WRITER_BUSY",

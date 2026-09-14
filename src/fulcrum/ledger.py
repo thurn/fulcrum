@@ -141,16 +141,15 @@ class Ledger:
         actor: str = "fulcrum-controller",
         timeout: float = 30.0,
     ) -> None:
+        requested = executable or "bd"
         resolved = (
-            shutil.which(executable or "bd")
-            if not Path(executable or "bd").is_absolute()
-            else executable
+            shutil.which(requested) if not Path(requested).is_absolute() else requested
         )
-        if not resolved:
-            raise FulcrumError(
-                "LEDGER_UNAVAILABLE",
-                "stock Beads executable was not found",
-                exit_code=4,
+        if not resolved or not Path(resolved).is_file():
+            raise LedgerFailure(
+                f"stock Beads executable was not found: {requested}",
+                category="unavailable",
+                retryable=False,
             )
         self.executable = str(Path(resolved).resolve(strict=True))
         self.workspace: Path = workspace.resolve(strict=False)

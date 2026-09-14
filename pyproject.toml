@@ -12,7 +12,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Derek Thurn" }]
 dependencies = [
   "jsonschema==4.25.1",
-  "PyYAML==6.0.3",
+  "ruamel.yaml==0.19.1",
   "watchfiles==1.1.0",
   "websockets==15.0.1",
 ]

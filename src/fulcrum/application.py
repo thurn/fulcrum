@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
+from fulcrum.configuration import ConfigurationService, ProjectService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -24,6 +25,19 @@ class Application:
         self._handlers: dict[tuple[str, ...], Handler] = {}
         self.register(("status",), self._status)
         self.register(("service", "status"), self._service_status)
+        configuration = ConfigurationService()
+        self.register(("config", "show"), configuration.show)
+        self.register(("config", "validate"), configuration.validate)
+        self.register(("config", "set"), configuration.set)
+        self.register(("policy", "show"), configuration.policy_show)
+        self.register(("policy", "set"), configuration.policy_set)
+        projects = ProjectService()
+        self.register(("project", "list"), projects.list)
+        self.register(("project", "show"), projects.show)
+        self.register(("project", "add"), projects.add)
+        self.register(("project", "enable"), projects.enable)
+        self.register(("project", "disable"), projects.disable)
+        self.register(("project", "remove"), projects.remove)
         self.register(("operation", "show"), self._operation_show)
         self.register(("operation", "list"), self._operation_list)
         self.register(("operation", "wait"), self._operation_wait)
@@ -47,7 +61,24 @@ class Application:
                 next_command=("fulcrum", "doctor", "--json"),
                 details={"command": list(request.command)},
             )
-        return handler(request)
+        try:
+            return handler(request)
+        except LedgerFailure as error:
+            state = CommandState.UNCERTAIN if error.uncertain else CommandState.FAILED
+            raise FulcrumError(
+                "LEDGER_UNCERTAIN" if error.uncertain else "LEDGER_UNAVAILABLE",
+                str(error),
+                exit_code=4,
+                retryable=error.retryable,
+                state=state,
+                request_id=request.request_id,
+                details={
+                    "category": error.category,
+                    "returncode": error.returncode,
+                    "duration_ms": error.duration_ms,
+                    "truncated": error.truncated,
+                },
+            ) from error
 
     def _status(self, request: ParsedRequest) -> CommandResult:
         operations: list[dict[str, Any]] = []
