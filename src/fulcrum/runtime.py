@@ -393,6 +393,18 @@ class CodexRuntime:
 
     async def archive(self, thread_id: str) -> None:
         await self.request("thread/archive", {"threadId": thread_id})
+        await self.unsubscribe(thread_id)
+
+    async def unsubscribe(self, thread_id: str) -> None:
+        result = await self.request("thread/unsubscribe", {"threadId": thread_id})
+        if result.get("status") not in {
+            "notLoaded",
+            "notSubscribed",
+            "unsubscribed",
+        }:
+            raise AppServerError(
+                f"thread/unsubscribe returned an invalid status for {thread_id}"
+            )
 
     async def unarchive(self, thread_id: str) -> None:
         await self.request("thread/unarchive", {"threadId": thread_id})

@@ -84,6 +84,14 @@ from fulcrum.prompts import (
 )
 from fulcrum.readiness import progress_readiness, state_readiness
 from fulcrum.reset import reset_brain
+from fulcrum.resources import (
+    AppServerResourceProbe,
+    MAX_ACTIVE_CONVERSATIONS,
+    MAX_IDLE_WORKER_CONVERSATIONS,
+    ResourceProbeError,
+    ResourceSnapshot,
+    bounded_condition,
+)
 from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
 from fulcrum.scheduling import (
     capacity,
@@ -97,6 +105,7 @@ from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 INHERITED_LOCK_FD_ENV = "FULCRUM_INHERITED_LOCK_FD"
 FALLBACK_RECONCILIATION_SECONDS = 30
 COMPLETION_ARCHIVE_DELAY = timedelta(minutes=10)
+RESOURCE_RECLAIM_DELAY = timedelta(minutes=10)
 COMPLETION_ARCHIVE_ROLES: frozenset[str] = frozenset(
     {"weaver", "executor", "overseer", "sage", "inquisitor"}
 )
@@ -145,6 +154,10 @@ class DeliveryDisposition(StrEnum):
     UNRESOLVED = "unresolved"
 
 
+class ResourceAdmissionPaused(StoreError):
+    """A native thread/turn start was withheld to preserve descriptor reserve."""
+
+
 @dataclass(frozen=True)
 class DeliveryStatus:
     disposition: DeliveryDisposition
@@ -182,6 +195,18 @@ class Controller:
         self.stop_event = asyncio.Event()
         self.advance_requested = asyncio.Event()
         self.starts_enabled = False
+        # Unit callers construct Controller without starting its external
+        # services.  The live process installs the probe in start().
+        self.resource_probe: AppServerResourceProbe | None = None
+        self.last_resource_snapshot: ResourceSnapshot | None = None
+        retained_resource_condition = self.store.row(
+            "SELECT value FROM meta WHERE key = 'resource_admission_condition'"
+        )
+        self.resource_admission_condition: str | None = (
+            str(retained_resource_condition["value"])
+            if retained_resource_condition and retained_resource_condition["value"]
+            else None
+        )
         self.critical_workers = {
             "events",
             "fallback",
@@ -398,6 +423,10 @@ class Controller:
                 entity_id="tollgate",
             )
         await self._connect_runtime()
+        # A substituted runtime (tests or an embedding) cannot safely be paired
+        # with telemetry from an unrelated launchd-owned app-server.
+        if isinstance(self.runtime, CodexRuntime):
+            self.resource_probe = AppServerResourceProbe()
         if self.runtime.ready and not self._operative_fenced():
             await self._verify_projects()
             await self._repair_task_project_bindings()
@@ -665,7 +694,9 @@ class Controller:
         timestamp = utc_now()
         if method == "turn/started":
             self.store.execute(
-                "UPDATE tasks SET archive_eligible_at = NULL, archive_idle_turn_id = NULL WHERE id = ?",
+                """UPDATE tasks SET archive_eligible_at = NULL,
+                   archive_idle_turn_id = NULL, resource_idle_since = NULL,
+                   resource_reclaimed_at = NULL WHERE id = ?""",
                 (task["id"],),
             )
             turn = params.get("turn")
@@ -678,7 +709,10 @@ class Controller:
             if action is None:
                 return False
             self.store.execute(
-                "UPDATE tasks SET state = 'active', runtime_status = 'active', last_turn_terminal = 0, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
+                """UPDATE tasks SET state = 'active', runtime_status = 'active',
+                   last_turn_terminal = 0, archive_eligible_at = NULL,
+                   archive_idle_turn_id = NULL, resource_idle_since = NULL,
+                   resource_reclaimed_at = NULL, updated_at = ? WHERE id = ?""",
                 (timestamp, task["id"]),
             )
             if isinstance(turn_id, str):
@@ -700,8 +734,10 @@ class Controller:
                        THEN archive_eligible_at ELSE NULL END,
                    archive_idle_turn_id = CASE WHEN ? = 'idle'
                        THEN archive_idle_turn_id ELSE NULL END,
+                   resource_idle_since = CASE WHEN ? = 'idle'
+                       THEN COALESCE(resource_idle_since, ?) ELSE NULL END,
                    updated_at = ? WHERE id = ?""",
-                (status, status, status, timestamp, task["id"]),
+                (status, status, status, status, timestamp, timestamp, task["id"]),
             )
         elif method == "turn/completed":
             facts: dict[str, Any] | None = None
@@ -779,12 +815,41 @@ class Controller:
             )
         elif method in {"thread/archived", "thread/unarchived"}:
             archived = int(method == "thread/archived")
+            if method == "thread/archived" and task["resource_orphan_active"]:
+                try:
+                    await self.runtime.unsubscribe(thread_id)
+                except AppServerError as error:
+                    self.store.event(
+                        "resource_reconciliation_deferred",
+                        str(error)[:500],
+                        entity_type="task",
+                        entity_id=task["id"],
+                    )
+                    return False
+                self.store.execute(
+                    """UPDATE tasks SET archived = 1, resource_orphan_active = 0,
+                       runtime_status = 'notLoaded', resource_idle_since = NULL,
+                       resource_reclaimed_at = NULL, updated_at = ? WHERE id = ?""",
+                    (timestamp, task["id"]),
+                )
+                return True
+            if method == "thread/archived" and task["resource_reclaimed_at"]:
+                self.store.execute(
+                    """UPDATE tasks SET runtime_status = 'notLoaded',
+                       resource_idle_since = NULL, updated_at = ? WHERE id = ?""",
+                    (timestamp, task["id"]),
+                )
+                return True
             if int(task["archived"]) == archived:
                 return False
             state = "archived" if archived else "idle"
             self.store.execute(
-                "UPDATE tasks SET archived = ?, state = ?, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
-                (archived, state, timestamp, task["id"]),
+                """UPDATE tasks SET archived = ?, state = ?,
+                   archive_eligible_at = NULL, archive_idle_turn_id = NULL,
+                   resource_reclaimed_at = NULL,
+                   resource_idle_since = CASE WHEN ? = 0 THEN ? ELSE NULL END,
+                   updated_at = ? WHERE id = ?""",
+                (archived, state, archived, timestamp, timestamp, task["id"]),
             )
         else:
             return False
@@ -1117,6 +1182,11 @@ class Controller:
             and facts["last_turn_terminal"]
             and facts["helpers_terminal"]
         )
+        resource_parked = bool(task.get("resource_reclaimed_at"))
+        logical_archived = bool(
+            task["archived"] or (facts["archived"] and not resource_parked)
+        )
+        timestamp = utc_now()
         self.store.execute(
             """UPDATE tasks SET runtime_status = ?, last_turn_terminal = ?,
                helpers_terminal = ?, archived = ?,
@@ -1124,15 +1194,20 @@ class Controller:
                    THEN archive_eligible_at ELSE NULL END,
                archive_idle_turn_id = CASE WHEN ? = 1
                    THEN archive_idle_turn_id ELSE NULL END,
+               resource_idle_since = CASE WHEN ? = 1 AND ? = 0
+                   THEN COALESCE(resource_idle_since, ?) ELSE NULL END,
                updated_at = ? WHERE id = ?""",
             (
                 facts["runtime_status"],
                 int(facts["last_turn_terminal"]),
                 int(facts["helpers_terminal"]),
-                int(bool(task["archived"]) or facts["archived"]),
+                int(logical_archived),
                 int(safely_idle),
                 int(safely_idle),
-                utc_now(),
+                int(safely_idle),
+                int(resource_parked),
+                timestamp,
+                timestamp,
                 task["id"],
             ),
         )
@@ -1147,8 +1222,10 @@ class Controller:
             is None
         ):
             self.store.execute(
-                "UPDATE tasks SET state = 'idle', updated_at = ? WHERE id = ?",
-                (utc_now(), task["id"]),
+                """UPDATE tasks SET state = 'idle',
+                   resource_idle_since = COALESCE(resource_idle_since, ?),
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, timestamp, task["id"]),
             )
         return facts
 
@@ -1637,7 +1714,8 @@ class Controller:
         """Return terminal tasks without a current action to their idle state."""
 
         self.store.execute(
-            """UPDATE tasks SET state = 'idle', updated_at = ?
+            """UPDATE tasks SET state = 'idle',
+               resource_idle_since = COALESCE(resource_idle_since, ?), updated_at = ?
                WHERE archived = 0 AND state IN ('provisioning','active','uncertain')
                AND last_turn_terminal = 1 AND helpers_terminal = 1
                AND NOT EXISTS (
@@ -1645,7 +1723,7 @@ class Controller:
                    WHERE actions.task_id = tasks.id
                    AND actions.state IN ('pending','starting','active','terminal','uncertain')
                )""",
-            (utc_now(),),
+            (utc_now(), utc_now()),
         )
 
     async def _retry_pending_actions(self) -> None:
@@ -1743,7 +1821,11 @@ class Controller:
                 continue
             facts = await self._refresh_task(task)
             condition = None
-            if not facts["last_turn_terminal"] or not facts["helpers_terminal"]:
+            if (
+                facts["runtime_status"] == "active"
+                or not facts["last_turn_terminal"]
+                or not facts["helpers_terminal"]
+            ):
                 condition = (
                     f"possible stall: {task['title']} remained active at its scheduled "
                     "liveness inspection; no interruption or replacement was attempted"
@@ -1812,6 +1894,8 @@ class Controller:
                 await self._reconcile_tollgate_candidate(operation)
             elif operation["kind"] == "thread_archive":
                 await self._reconcile_thread_archive(operation)
+            elif operation["kind"] == "thread_park":
+                await self._reconcile_thread_park(operation)
             elif operation["kind"] == "beads_create":
                 await asyncio.to_thread(self._reconcile_beads_create, operation)
             elif operation["kind"] == "beads_close":
@@ -2152,19 +2236,50 @@ class Controller:
             (operation["target"],),
         )
         if thread.get("archived"):
+            try:
+                await self.runtime.unsubscribe(str(operation["target"]))
+            except AppServerError as error:
+                timestamp = utc_now()
+                condition = (
+                    "native archive is confirmed but thread unsubscribe remains "
+                    f"unconfirmed: {error}"
+                )
+                self.store.execute(
+                    """UPDATE external_operations SET state = 'uncertain',
+                       reconciliation_used = 0, condition = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (condition, timestamp, operation["id"]),
+                )
+                if obligation:
+                    self.store.execute(
+                        """UPDATE obligations SET state = 'failed', detail = ?,
+                           next_attempt_at = NULL, updated_at = ? WHERE id = ?""",
+                        (condition, timestamp, obligation["id"]),
+                    )
+                self.store.event(
+                    "archive_unsubscribe_deferred",
+                    condition,
+                    entity_type="operation",
+                    entity_id=operation["id"],
+                    detail={"native_thread_id": operation["target"]},
+                )
+                return
+            timestamp = utc_now()
             self.store.execute(
-                "UPDATE external_operations SET state = 'complete', reconciliation_used = 1, condition = NULL, updated_at = ? WHERE id = ?",
-                (utc_now(), operation["id"]),
+                """UPDATE external_operations SET state = 'complete',
+                   reconciliation_used = 1, condition = NULL, completed_at = ?,
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, timestamp, operation["id"]),
             )
             if task:
                 self.store.execute(
                     "UPDATE tasks SET state = 'archived', archived = 1, archive_eligible_at = NULL, archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?",
-                    (utc_now(), task["id"]),
+                    (timestamp, task["id"]),
                 )
             if obligation:
                 self.store.execute(
                     "UPDATE obligations SET state = 'complete', updated_at = ? WHERE id = ?",
-                    (utc_now(), obligation["id"]),
+                    (timestamp, obligation["id"]),
                 )
             return
         self.store.execute(
@@ -2176,6 +2291,78 @@ class Controller:
                 "UPDATE obligations SET state = 'failed', detail = 'targeted read confirmed archive did not take effect', updated_at = ? WHERE id = ?",
                 (utc_now(), obligation["id"]),
             )
+
+    async def _reconcile_thread_park(self, operation: dict[str, Any]) -> None:
+        inputs = json.loads(operation["input_json"])
+        task = self.store.row(
+            "SELECT * FROM tasks WHERE id = ?", (int(operation["target"]),)
+        )
+        thread_id = inputs.get("thread_id")
+        if task is None or not isinstance(thread_id, str):
+            self._retain_uncertain_condition(
+                operation, "parked thread cannot be reconciled to its managed task"
+            )
+            return
+        thread = await self.runtime.read_thread(thread_id)
+        facts = thread_facts(thread)
+        timestamp = utc_now()
+        if facts["archived"]:
+            await self.runtime.unsubscribe(thread_id)
+            self.store.execute(
+                """UPDATE tasks SET resource_reclaimed_at = COALESCE(resource_reclaimed_at, ?),
+                   resource_idle_since = NULL, runtime_status = 'notLoaded',
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, timestamp, task["id"]),
+            )
+            self.store.execute(
+                """UPDATE external_operations SET state = 'complete', native_id = ?,
+                   result_json = ?, reconciliation_used = 1, condition = NULL,
+                   completed_at = ?, updated_at = ? WHERE id = ?""",
+                (
+                    thread_id,
+                    json.dumps({"parked": True}, sort_keys=True),
+                    timestamp,
+                    timestamp,
+                    operation["id"],
+                ),
+            )
+            return
+        if (
+            facts["runtime_status"] == "active"
+            or not facts["last_turn_terminal"]
+            or not facts["helpers_terminal"]
+        ):
+            self.store.execute(
+                """UPDATE tasks SET resource_reclaimed_at = NULL,
+                   archived = 0, state = 'active', runtime_status = ?,
+                   last_turn_terminal = ?, helpers_terminal = ?,
+                   updated_at = ? WHERE id = ?""",
+                (
+                    facts["runtime_status"],
+                    int(
+                        facts["last_turn_terminal"]
+                        and facts["runtime_status"] != "active"
+                    ),
+                    int(facts["helpers_terminal"]),
+                    timestamp,
+                    task["id"],
+                ),
+            )
+            self.store.execute(
+                """UPDATE external_operations SET state = 'failed',
+                   reconciliation_used = 1,
+                   condition = 'active turn retained without interruption',
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, operation["id"]),
+            )
+            return
+        self.store.execute(
+            """UPDATE external_operations SET state = 'failed',
+               reconciliation_used = 1,
+               condition = 'targeted read confirmed idle thread was not parked',
+               updated_at = ? WHERE id = ?""",
+            (timestamp, operation["id"]),
+        )
 
     async def _reconcile_setup_runtime_smoke(self, operation: dict[str, Any]) -> None:
         thread_id = operation["native_id"]
@@ -2196,13 +2383,66 @@ class Controller:
                 "runtime smoke thread identity or project binding is inconsistent",
             )
             return
-        if not (
-            facts["last_turn_terminal"]
-            and facts["helpers_terminal"]
-            and facts["runtime_status"] == "idle"
-        ):
+        turns = thread.get("turns") if isinstance(thread.get("turns"), list) else []
+        correlation = f"fulcrum-operation-{operation['id']}"
+        matches = [
+            turn
+            for turn in turns
+            if isinstance(turn, dict)
+            and any(
+                isinstance(item, dict)
+                and item.get("type") == "userMessage"
+                and item.get("clientId") == correlation
+                for item in (
+                    turn.get("items", []) if isinstance(turn.get("items"), list) else []
+                )
+            )
+        ]
+        if not matches and facts["archived"]:
+            await self.runtime.unsubscribe(str(thread_id))
+            timestamp = utc_now()
+            self.store.execute(
+                """UPDATE external_operations SET state = 'failed',
+                   reconciliation_used = 1,
+                   condition = 'archived partial smoke thread had no correlated turn',
+                   completed_at = ?, updated_at = ? WHERE id = ?""",
+                (timestamp, timestamp, operation["id"]),
+            )
             return
-        await self.runtime.archive(str(thread_id))
+        expected_turn_id = inputs.get("smoke_turn_id")
+        if (
+            len(matches) != 1
+            or expected_turn_id is not None
+            and matches[0].get("id") != expected_turn_id
+            or matches[0].get("id") != facts["last_turn_id"]
+        ):
+            self._retain_uncertain_condition(
+                operation,
+                "runtime smoke thread does not contain exactly one matching latest correlated turn",
+            )
+            return
+        if not facts["last_turn_terminal"]:
+            return
+        if (
+            facts["last_turn_status"] != "completed"
+            or not facts["helpers_terminal"]
+            or facts["runtime_status"] != "idle"
+        ):
+            if facts["helpers_terminal"] and facts["runtime_status"] == "idle":
+                await self.runtime.archive(str(thread_id))
+                timestamp = utc_now()
+                self.store.execute(
+                    """UPDATE external_operations SET state = 'failed', result_json = ?,
+                       reconciliation_used = 1,
+                       condition = 'correlated runtime smoke turn did not complete successfully',
+                       completed_at = ?, updated_at = ? WHERE id = ?""",
+                    (json.dumps(thread), timestamp, timestamp, operation["id"]),
+                )
+            return
+        if not facts["archived"]:
+            await self.runtime.archive(str(thread_id))
+        else:
+            await self.runtime.unsubscribe(str(thread_id))
         timestamp = utc_now()
         self.store.execute(
             """UPDATE external_operations SET state = 'complete', result_json = ?,
@@ -2365,6 +2605,10 @@ class Controller:
             "occurrence-publication", self._publish_occurrences
         )
         if self.runtime.ready:
+            if self.resource_probe is not None:
+                await self._run_advancement_step(
+                    "resource-lifecycle", self._maintain_resource_lifecycle
+                )
             await self._run_advancement_step(
                 "archon-succession", self._process_archon_succession
             )
@@ -2385,8 +2629,8 @@ class Controller:
                 lambda: self._deliver_update_batch(recovery_only=True),
             )
             return
-        # Admission is deliberately one-at-a-time. Each started action commits a
-        # lease before the next capacity snapshot is calculated.
+        # Admission remains one-at-a-time. Each started action commits its lease
+        # and passes the resource gate before the next capacity snapshot.
         considered: set[int] = set()
         while True:
             ready = [
@@ -2428,6 +2672,336 @@ class Controller:
         ):
             await self._run_advancement_step(name, step)
         self._update_readiness()
+
+    async def _observe_app_server_resources(self) -> ResourceSnapshot | None:
+        probe = self.resource_probe
+        if probe is None:
+            return None
+        try:
+            snapshot = await asyncio.to_thread(probe.snapshot)
+        except ResourceProbeError as error:
+            condition = (
+                "resource admission paused: app-server descriptor telemetry is "
+                f"unavailable ({str(error)[:240]}); restore the supervised app-server "
+                "or inspect its process ownership"
+            )
+            self._set_resource_admission_condition(condition)
+            return None
+        prior = self.last_resource_snapshot
+        self.last_resource_snapshot = snapshot
+        detail = snapshot.detail()
+        self.store.execute(
+            """INSERT INTO meta(key, value) VALUES ('app_server_resources', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (json.dumps(detail, sort_keys=True),),
+        )
+        if prior is None or (
+            prior.process_id,
+            prior.soft_limit,
+            prior.descriptor_count,
+            prior.child_count,
+        ) != (
+            snapshot.process_id,
+            snapshot.soft_limit,
+            snapshot.descriptor_count,
+            snapshot.child_count,
+        ):
+            self.store.event(
+                "app_server_resources_observed",
+                "observed app-server descriptor and direct-child counts",
+                entity_type="capability",
+                entity_id="app_server",
+                detail=detail,
+            )
+        return snapshot
+
+    def _set_resource_admission_condition(self, condition: str | None) -> None:
+        condition = condition[:500] if condition else None
+        if condition == self.resource_admission_condition:
+            return
+        prior = self.resource_admission_condition
+        self.resource_admission_condition = condition
+        self.store.execute(
+            """INSERT INTO meta(key, value) VALUES ('resource_admission_condition', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (condition or "",),
+        )
+        self.store.event(
+            "resource_admission_paused" if condition else "resource_admission_resumed",
+            condition or "app-server descriptor reserve restored",
+            entity_type="capability",
+            entity_id="app_server",
+            detail={"previous_condition": prior} if not condition and prior else None,
+        )
+
+    def _resident_idle_worker_candidates(self) -> list[dict[str, Any]]:
+        return self.store.rows(
+            """SELECT * FROM tasks WHERE state = 'idle' AND archived = 0
+               AND resource_reclaimed_at IS NULL
+               AND role IN ('executor','overseer','sage','inquisitor')
+               AND NOT EXISTS (
+                 SELECT 1 FROM actions WHERE actions.task_id = tasks.id
+                   AND actions.state IN ('pending','starting','active','terminal','uncertain')
+               )
+               ORDER BY COALESCE(resource_idle_since, updated_at), id"""
+        )
+
+    async def _admit_runtime_start(self, kind: str, target: str) -> None:
+        resident_idle_count = len(self._resident_idle_worker_candidates())
+        if resident_idle_count > MAX_IDLE_WORKER_CONVERSATIONS:
+            condition = (
+                f"resource admission paused before {kind} for {target}: "
+                f"{resident_idle_count} eligible idle worker conversations remain "
+                f"resident above the supported maximum of "
+                f"{MAX_IDLE_WORKER_CONVERSATIONS}; wait for lifecycle reclamation "
+                "or inspect resource_reclamation_failed events and restore native "
+                "archive/unsubscribe"
+            )[:500]
+            self._set_resource_admission_condition(condition)
+            raise ResourceAdmissionPaused(condition)
+        if self.resource_probe is None:
+            return
+        snapshot = await self._observe_app_server_resources()
+        if snapshot is None:
+            raise ResourceAdmissionPaused(
+                self.resource_admission_condition
+                or "resource admission paused because telemetry is unavailable"
+            )
+        active_row = self.store.row("""SELECT COUNT(*) AS count FROM tasks
+               WHERE (state = 'active' OR resource_orphan_active = 1)
+                 AND archived = 0""")
+        assert active_row is not None
+        active_count = int(active_row["count"])
+        if active_count >= MAX_ACTIVE_CONVERSATIONS:
+            condition = (
+                f"resource admission paused before {kind} for {target}: "
+                f"{active_count} active conversations already use the supported "
+                f"maximum of {MAX_ACTIVE_CONVERSATIONS}; wait for an active turn "
+                "to finish"
+            )
+            self._set_resource_admission_condition(condition)
+            raise ResourceAdmissionPaused(condition)
+        if snapshot.admits_start():
+            self._set_resource_admission_condition(None)
+            return
+        condition = bounded_condition(
+            f"resource admission paused before {kind} for {target}", snapshot.detail()
+        )
+        self._set_resource_admission_condition(condition)
+        raise ResourceAdmissionPaused(condition)
+
+    async def _maintain_resource_lifecycle(self) -> None:
+        """Park idle workers and reconcile parked/retired threads after restart."""
+
+        now = utc_now()
+        snapshot = await self._observe_app_server_resources()
+        pressured = snapshot is not None and not snapshot.admits_start()
+        if pressured and snapshot is not None:
+            self._set_resource_admission_condition(
+                bounded_condition(
+                    "resource admission paused while reclaiming idle workers",
+                    snapshot.detail(),
+                )
+            )
+
+        for task in self.store.rows(
+            """SELECT * FROM tasks WHERE resource_reclaimed_at IS NOT NULL
+               OR resource_orphan_active = 1
+               OR state IN ('retired','archived') ORDER BY id"""
+        ):
+            try:
+                thread = await self.runtime.read_thread(task["native_thread_id"])
+                facts = thread_facts(thread)
+            except AppServerError as error:
+                self.store.event(
+                    "resource_reconciliation_deferred",
+                    str(error)[:500],
+                    entity_type="task",
+                    entity_id=task["id"],
+                )
+                continue
+            if (
+                facts["runtime_status"] == "active"
+                or not facts["last_turn_terminal"]
+                or not facts["helpers_terminal"]
+            ):
+                if task["resource_reclaimed_at"]:
+                    self.store.execute(
+                        """UPDATE tasks SET resource_reclaimed_at = NULL,
+                           resource_orphan_active = 0, state = 'active', archived = 0,
+                           runtime_status = ?,
+                           last_turn_terminal = ?, helpers_terminal = ?,
+                           updated_at = ? WHERE id = ?""",
+                        (
+                            facts["runtime_status"],
+                            int(
+                                facts["last_turn_terminal"]
+                                and facts["runtime_status"] != "active"
+                            ),
+                            int(facts["helpers_terminal"]),
+                            now,
+                            task["id"],
+                        ),
+                    )
+                    self.store.event(
+                        "resource_reconciliation_reassociated",
+                        "parked thread was active after restart; retained without interruption",
+                        entity_type="task",
+                        entity_id=task["id"],
+                    )
+                elif not task["resource_orphan_active"]:
+                    self.store.execute(
+                        """UPDATE tasks SET resource_orphan_active = 1,
+                           archived = 0, runtime_status = ?,
+                           last_turn_terminal = ?, helpers_terminal = ?,
+                           resource_idle_since = NULL, updated_at = ? WHERE id = ?""",
+                        (
+                            facts["runtime_status"],
+                            int(
+                                facts["last_turn_terminal"]
+                                and facts["runtime_status"] != "active"
+                            ),
+                            int(facts["helpers_terminal"]),
+                            now,
+                            task["id"],
+                        ),
+                    )
+                    self.store.event(
+                        "resource_reconciliation_reassociated",
+                        "retired or archived thread was active after restart; tracking until terminal cleanup",
+                        entity_type="task",
+                        entity_id=task["id"],
+                    )
+                continue
+            if facts["archived"]:
+                try:
+                    await self.runtime.unsubscribe(str(task["native_thread_id"]))
+                except Exception as error:
+                    self.store.event(
+                        "resource_reconciliation_deferred",
+                        str(error)[:500],
+                        entity_type="task",
+                        entity_id=task["id"],
+                    )
+                    continue
+                if task["resource_orphan_active"]:
+                    self.store.execute(
+                        """UPDATE tasks SET resource_orphan_active = 0, archived = 1,
+                           runtime_status = 'notLoaded', resource_idle_since = NULL,
+                           resource_reclaimed_at = NULL, updated_at = ? WHERE id = ?""",
+                        (now, task["id"]),
+                    )
+                continue
+            try:
+                await self._park_task(task, now=now, reconciliation=True)
+                if task["resource_orphan_active"]:
+                    self.store.execute(
+                        """UPDATE tasks SET resource_orphan_active = 0, archived = 1,
+                           state = ?, resource_reclaimed_at = NULL,
+                           updated_at = ? WHERE id = ?""",
+                        (task["state"], now, task["id"]),
+                    )
+            except Exception as error:
+                self.store.event(
+                    "resource_reconciliation_deferred",
+                    str(error)[:500],
+                    entity_type="task",
+                    entity_id=task["id"],
+                )
+
+        candidates = self._resident_idle_worker_candidates()
+        excess_idle = max(0, len(candidates) - MAX_IDLE_WORKER_CONVERSATIONS)
+        for task in candidates:
+            try:
+                facts = await self._refresh_task(task)
+            except AppServerError:
+                continue
+            if not (
+                facts["runtime_status"] == "idle"
+                and facts["last_turn_terminal"]
+                and facts["helpers_terminal"]
+            ):
+                continue
+            retained = self.store.row("SELECT * FROM tasks WHERE id = ?", (task["id"],))
+            assert retained is not None
+            idle_since = retained["resource_idle_since"]
+            due = False
+            if idle_since:
+                due = datetime.fromisoformat(
+                    idle_since.replace("Z", "+00:00")
+                ) + RESOURCE_RECLAIM_DELAY <= datetime.fromisoformat(
+                    now.replace("Z", "+00:00")
+                )
+            if not pressured and not due and excess_idle == 0:
+                continue
+            try:
+                await self._park_task(retained, now=now)
+            except Exception as error:
+                self.store.event(
+                    "resource_reclamation_failed",
+                    str(error)[:500],
+                    entity_type="task",
+                    entity_id=task["id"],
+                )
+                continue
+            if excess_idle > 0:
+                excess_idle -= 1
+            if pressured:
+                snapshot = await self._observe_app_server_resources()
+                pressured = snapshot is None or not snapshot.admits_start()
+                if not pressured and excess_idle == 0:
+                    self._set_resource_admission_condition(None)
+        active_row = self.store.row("""SELECT COUNT(*) AS count FROM tasks
+               WHERE (state = 'active' OR resource_orphan_active = 1)
+                 AND archived = 0""")
+        assert active_row is not None
+        if (
+            snapshot is not None
+            and not pressured
+            and excess_idle == 0
+            and int(active_row["count"]) < MAX_ACTIVE_CONVERSATIONS
+        ):
+            self._set_resource_admission_condition(None)
+
+    async def _park_task(
+        self, task: dict[str, Any], *, now: str, reconciliation: bool = False
+    ) -> None:
+        operation = self.store.create_operation(
+            "thread_park", str(task["id"]), {"thread_id": task["native_thread_id"]}
+        )
+        attempt = self.store.begin_operation_attempt(operation)
+        started = time.monotonic()
+        try:
+            await self.runtime.archive(task["native_thread_id"])
+            self.store.execute(
+                """UPDATE tasks SET resource_reclaimed_at = ?,
+                   resource_idle_since = NULL, runtime_status = 'notLoaded',
+                   updated_at = ? WHERE id = ?""",
+                (now, now, task["id"]),
+            )
+            self.store.finish_operation_attempt(
+                operation,
+                attempt,
+                state="complete",
+                result={"parked": True},
+                native_id=str(task["native_thread_id"]),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            self.store.event(
+                "conversation_resources_reclaimed",
+                "archived safely idle worker conversation to release native resources",
+                entity_type="task",
+                entity_id=task["id"],
+                detail={
+                    "thread_id": task["native_thread_id"],
+                    "reconciliation": reconciliation,
+                },
+            )
+        except Exception as error:
+            self._operation_failed(
+                operation, error, attempt=attempt, started=started, mutation=True
+            )
+            raise
 
     async def _run_advancement_step(self, name: str, step: Any) -> None:
         try:
@@ -2733,6 +3307,8 @@ class Controller:
     async def _lineage_task_is_available(
         self, task: dict[str, Any], *, allow_active: bool = False
     ) -> bool:
+        if task.get("resource_reclaimed_at"):
+            return bool(task["last_turn_terminal"] and task["helpers_terminal"])
         try:
             thread = await self.runtime.read_thread(
                 str(task["native_thread_id"]), include_turns=False
@@ -2851,10 +3427,12 @@ class Controller:
             recovered = await self._recover_lineage_thread_start(role, lineage_number)
             if recovered is not None:
                 return recovered
+            await self._admit_runtime_start("thread start", role)
             role_number, lineage_suffix, title = self.store.allocate_lineage_name(
                 role, lineage_number, description
             )
         else:
+            await self._admit_runtime_start("thread start", role)
             role_number, title = self.store.allocate_name(role, description)
             lineage_suffix = ""
         inputs = {
@@ -3504,16 +4082,52 @@ class Controller:
                     include_cost=not mixed,
                     exclusion_reason=allocation_exclusion,
                 )
-        if task["archived"]:
+        await self._admit_runtime_start("turn start", str(task["title"]))
+        if task.get("resource_reclaimed_at"):
             await self.runtime.unarchive(task["native_thread_id"])
             await self.runtime.resume_thread(task["native_thread_id"])
             self.store.execute(
-                """UPDATE tasks SET archived = 0, state = 'idle',
+                """UPDATE tasks SET resource_reclaimed_at = NULL, archived = 0,
+                   state = 'idle', runtime_status = 'notLoaded',
                    archive_eligible_at = NULL, archive_idle_turn_id = NULL,
                    updated_at = ? WHERE id = ?""",
                 (utc_now(), task["id"]),
             )
-            task = {**task, "archived": 0, "state": "idle"}
+            task = {
+                **task,
+                "resource_reclaimed_at": None,
+                "archived": 0,
+                "state": "idle",
+                "runtime_status": "notLoaded",
+                "archive_eligible_at": None,
+                "archive_idle_turn_id": None,
+            }
+            self.store.event(
+                "conversation_resources_restored",
+                "restored parked worker conversation for an admitted turn",
+                entity_type="task",
+                entity_id=task["id"],
+            )
+            await self._admit_runtime_start(
+                "turn start after restoring resources", str(task["title"])
+            )
+        elif task["archived"]:
+            await self.runtime.unarchive(task["native_thread_id"])
+            await self.runtime.resume_thread(task["native_thread_id"])
+            self.store.execute(
+                """UPDATE tasks SET archived = 0, state = 'idle',
+                   runtime_status = 'notLoaded', archive_eligible_at = NULL,
+                   archive_idle_turn_id = NULL, updated_at = ? WHERE id = ?""",
+                (utc_now(), task["id"]),
+            )
+            task = {
+                **task,
+                "archived": 0,
+                "state": "idle",
+                "runtime_status": "notLoaded",
+                "archive_eligible_at": None,
+                "archive_idle_turn_id": None,
+            }
         facts = (
             {
                 "last_turn_id": None,
@@ -4683,6 +5297,7 @@ class Controller:
                 thread = await self.runtime.read_thread(obligation["target"])
                 facts = thread_facts(thread)
                 if facts["archived"]:
+                    await self.runtime.unsubscribe(str(obligation["target"]))
                     self.store.execute(
                         "UPDATE obligations SET state = 'complete', updated_at = ? WHERE id = ?",
                         (now, obligation["id"]),
@@ -5285,6 +5900,9 @@ class Controller:
                     "dispatch_enabled": status["dispatch_enabled"],
                     "operative_takeover": status["operative_takeover"],
                     "operative_journal_state": status["operative_journal_state"],
+                    "resource_admission_condition": status[
+                        "resource_admission_condition"
+                    ],
                     "assignments": status["assignments"],
                     "pending_updates": status["pending_updates"],
                     "holds": status["holds"],
@@ -5295,6 +5913,10 @@ class Controller:
                     "dispatch_enabled": status["dispatch_enabled"],
                     "operative_takeover": status["operative_takeover"],
                     "operative_journal_state": status["operative_journal_state"],
+                    "app_server_resources": status["app_server_resources"],
+                    "resource_admission_condition": status[
+                        "resource_admission_condition"
+                    ],
                     "projects": status["projects"],
                     "slot_usage": status["slot_usage"],
                     "policies": status["policies"],
@@ -8443,6 +9065,9 @@ class Controller:
         )
         if project is None:
             return
+        await self._admit_runtime_start(
+            "setup smoke thread start", str(project["project_id"])
+        )
         operation = self.store.create_operation(
             "setup_runtime_smoke",
             project["project_id"],
@@ -8465,6 +9090,37 @@ class Controller:
                 "UPDATE external_operations SET native_id = ?, updated_at = ? WHERE id = ?",
                 (thread_id, utc_now(), operation),
             )
+            try:
+                await self._admit_runtime_start(
+                    "setup smoke turn start", str(thread_id)
+                )
+            except ResourceAdmissionPaused as error:
+                try:
+                    await self.runtime.archive(thread_id)
+                    partial_archived = True
+                except Exception as archive_error:
+                    try:
+                        await self.runtime.unsubscribe(thread_id)
+                    except Exception as cleanup_error:
+                        raise AppServerError(
+                            "resource admission paused after setup thread creation and "
+                            "partial-thread archive/unsubscribe cleanup failed: "
+                            f"archive={archive_error}; unsubscribe={cleanup_error}"
+                        ) from cleanup_error
+                    partial_archived = False
+                self.store.finish_operation_attempt(
+                    operation,
+                    attempt,
+                    state="failed",
+                    result={
+                        "partial_thread_archived": partial_archived,
+                        "partial_thread_unsubscribed": True,
+                    },
+                    error=str(error),
+                    native_id=str(thread_id),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+                raise
             await self.runtime.set_name(thread_id, "Fulcrum setup visibility check")
             turn_id = await self.runtime.start_turn(
                 thread_id,
@@ -8475,6 +9131,15 @@ class Controller:
                 model=self.config.archon_model or "gpt-5.6-sol",
                 effort=self.config.archon_reasoning_effort or "medium",
                 correlation=f"fulcrum-operation-{operation}",
+            )
+            smoke_inputs = {
+                "cwd": project["repo_path"],
+                "project_id": project["codex_project_id"],
+                "smoke_turn_id": turn_id,
+            }
+            self.store.execute(
+                "UPDATE external_operations SET input_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(smoke_inputs, sort_keys=True), utc_now(), operation),
             )
             deadline = asyncio.get_running_loop().time() + 180
             observed: dict[str, Any] | None = None
@@ -8521,7 +9186,11 @@ class Controller:
             current = self.store.row(
                 "SELECT state FROM external_operations WHERE id = ?", (operation,)
             )
-            if current is not None and current["state"] != "complete":
+            if current is not None and current["state"] in {
+                "intent",
+                "sent",
+                "uncertain",
+            }:
                 self._operation_failed(
                     operation,
                     error,

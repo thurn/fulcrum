@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
   archive_eligible_at TEXT,
   archive_idle_turn_id TEXT,
+  resource_idle_since TEXT,
+  resource_reclaimed_at TEXT,
+  resource_orphan_active INTEGER NOT NULL DEFAULT 0 CHECK (resource_orphan_active IN (0, 1)),
   lineage_number INTEGER,
   lineage_suffix TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -921,6 +924,9 @@ class Store:
             "tasks": {
                 "archive_eligible_at": "TEXT",
                 "archive_idle_turn_id": "TEXT",
+                "resource_idle_since": "TEXT",
+                "resource_reclaimed_at": "TEXT",
+                "resource_orphan_active": "INTEGER NOT NULL DEFAULT 0 CHECK (resource_orphan_active IN (0, 1))",
                 "lineage_number": "INTEGER",
                 "lineage_suffix": "TEXT NOT NULL DEFAULT ''",
             },
@@ -4002,6 +4008,12 @@ class Store:
             "projects": self.rows("SELECT * FROM projects ORDER BY project_id"),
             "last_reconciliation": self.row(
                 "SELECT value FROM meta WHERE key = 'last_reconciliation'"
+            ),
+            "app_server_resources": self.row(
+                "SELECT value FROM meta WHERE key = 'app_server_resources'"
+            ),
+            "resource_admission_condition": self.row(
+                "SELECT value FROM meta WHERE key = 'resource_admission_condition'"
             ),
             "tasks": tasks,
             "runs": self.rows("SELECT * FROM runs ORDER BY id"),

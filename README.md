@@ -335,6 +335,29 @@ publish specialist reports and findings; drive Tollgate delivery; close beads; a
 archive completed managed conversations after 10 continuous minutes of confirmed
 native-thread idleness when their lineage has no pending or active work.
 
+The controller also protects the shared app-server's file-descriptor budget. It
+records the supervised app-server PID, descriptor/type counts, direct-child count,
+and soft limit in status. On the supported 256-descriptor soft limit it keeps 64
+descriptors free, plus an eight-descriptor start allowance. Admission pauses with
+a bounded actionable condition before crossing that line. At that limit Fulcrum
+supports at most four simultaneous active role conversations and keeps at most four
+safe idle worker conversations resident. That maximum mix is covered by the stress
+regression, including 100 consecutive process starts while the reserve is held.
+
+Safely idle Executor, Overseer, Sage, and Inquisitor conversations are natively
+archived after ten minutes (and immediately under descriptor pressure), releasing
+and unsubscribed so their helper children, pipes, sockets, session files, and
+writer locks are unloaded. Native retirement has a ten-second reclamation bound:
+the opt-in disposable app-server regression warms global pools, exercises four
+active plus four idle conversations and 100 native commands at a 256-descriptor
+limit, then requires child and descriptor/type counts to return exactly to that
+warmed baseline. Run it with `FULCRUM_NATIVE_APP_SERVER_TEST=1 python -m unittest
+tests.test_resources_native`. This is a reversible resource park: Fulcrum restores
+the same conversation if later lineage work needs it. Restart reconciliation
+confirms parked, retired, and archived native threads; if a supposedly parked
+thread is active, Fulcrum durably tracks it without interruption until terminal
+cleanup. Archon and human-driven Weaver conversations are never resource-parked.
+
 Fulcrum does not automatically invent approval. Pending work waits for Archon,
 and a reviewed candidate waits for successful Tollgate certification and
 promotion before it counts as delivered.

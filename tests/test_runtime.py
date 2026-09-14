@@ -4,7 +4,7 @@ import asyncio
 import json
 import unittest
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 from websockets.asyncio.server import serve
 
@@ -12,6 +12,20 @@ from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
 
 
 class RuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_archive_unsubscribes_thread_resources(self) -> None:
+        runtime = CodexRuntime("ws://unused")
+        runtime.request = AsyncMock(side_effect=[{}, {"status": "unsubscribed"}])
+
+        await runtime.archive("thread-1")
+
+        self.assertEqual(
+            runtime.request.await_args_list,
+            [
+                call("thread/archive", {"threadId": "thread-1"}),
+                call("thread/unsubscribe", {"threadId": "thread-1"}),
+            ],
+        )
+
     async def test_read_thread_retries_temporarily_empty_rollout(self) -> None:
         runtime = CodexRuntime("ws://unused")
         runtime.request = AsyncMock(
