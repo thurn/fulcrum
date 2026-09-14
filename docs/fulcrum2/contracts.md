@@ -10,12 +10,16 @@ No CLI, record, or adapter compatibility/version negotiation is introduced.
 An instance is selected by `--instance ABSOLUTE_PATH`, then `FULCRUM_INSTANCE`,
 then `~/Library/Application Support/Fulcrum`. All commands accept the option;
 tests always pass it. One instance owns one ledger and one controller writer lock.
+An isolated test setup must supply a disposable `brain.root` and a disposable
+Git/Dolt remote; it must never inherit `~/brain` or its production remote.
 Production Codex attachment is shared with Desktop; test instances explicitly
 choose a deterministic adapter or a disposable native namespace.
 
 ```text
 <instance>/config.toml         configuration and project registration
-<instance>/ledger/.beads/      stock Beads workspace, its Dolt data/config
+<brain.root>/.beads/           shared stock Beads workspace (default ~/brain/.beads)
+<brain.root>/.beads/dolt/       live server data, excluded from ordinary Git tracking
+<brain.root>/plans/            default Markdown plan publication destination
 <instance>/controller.sock     ephemeral IPC endpoint
 <instance>/controller.lock     OS advisory lock; contents are not workflow truth
 <instance>/threads/            native-task creation locator directories
@@ -23,7 +27,6 @@ choose a deterministic adapter or a disposable native namespace.
 <instance>/logs/               rotated diagnostics, never replayed as state
 <instance>/runtime/            installed controller environment and role assets
 <instance>/recovery/           independently installed emergency launcher
-<instance>/knowledge/          optional Markdown/Git exports; not workflow authority
 ```
 
 Configuration holds executable paths, provider endpoints, project paths/provider
@@ -149,9 +152,14 @@ accept `--limit N` (default 20, `0` means all) and `--cursor CURSOR` and return
 | `reset --hard --yes [--input FILE]` | Reset the enumerated Fulcrum-owned instance and bootstrap clean state |
 
 Setup input has `runtime` (`kind`, `endpoint`, `executable`), `delivery` defaults,
-`beads` (`executable`, `host`, `port`, `database`, optional `remote`), `projects`,
-`models`, and optional `knowledge` (`root`, `remote`, `branch`,
-`require_remote_sync`) maps. Model maps key role to `{model, effort}`. Projects
+`beads` (`executable`, `host`, `port`, `database`), `brain` (`root`, `remote`,
+`branch`, `push_interval_seconds`), `projects`, `models`, and optional `knowledge`
+(`root`, `remote`, `branch`, `require_remote_sync`) maps. Production `brain.root`
+defaults to `~/brain`; `remote` defaults to its existing `origin`, `branch` to its
+configured branch, and `push_interval_seconds` to 300. Setup verifies that remote
+is the intended GitHub repository. Knowledge defaults to the brain root/remote/
+branch with required synchronization. A different knowledge destination never
+changes where the shared Beads ledger lives. Model maps key role to `{model, effort}`. Projects
 default `source_remote=null`, `require_source_sync=false`; enrollment of a project
 with a source remote asks or requires an explicit synchronization choice. A true
 requirement needs a configured remote; it is never inferred from a successful CI
@@ -590,18 +598,22 @@ bd -C "$PROJECT_ROOT" init --server --external \
   --prefix fc --non-interactive --skip-agents --skip-hooks
 ```
 
-Keep `.beads` local via Git's local exclude. Write project-local config with
-`actor: project:<id>`, with scheduled auto-export/backup jobs disabled,
+In enrolled product repositories/worktrees, keep their connection-only `.beads`
+configuration local via Git's local exclude. In the brain repository, track safe
+shared configuration and authored documents, while excluding live Dolt data,
+credentials, locks, and other runtime files. Write project-local config with
+`actor: project:<id>`, with per-project auto-push/export jobs disabled,
 and the shared backend connection. Do not change Git author identity. The central
 workspace also uses this database, but its actor is `fulcrum-controller`. Agent
 thread environments may use `BEADS_ACTOR=project:<id>/thread:<threadId>`; parsing is
 exact, not substring inference. Enrollment validates the effective backend and
 actor via read-only context/config inspection. Project enrollment does not replace
-unrelated Beads workspaces without explicit reset/move intent. A configured Beads
-remote remains usable through stock sync operations after user-initiated durable
-mutations or `ledger sync`; remote copies do not form another local authority.
-Local intake succeeds independently of a sync outage, which has its own receipt
-and visible waiting reason. No periodic remote-sync job is created.
+unrelated Beads workspaces without explicit reset/move intent. Only the central
+controller publishes this shared database to the brain GitHub remote on the
+five-minute cadence or `ledger sync`. Native project shells create no competing
+pushers. Remote copies are persistence, not another active local authority. Local
+intake succeeds independently of a sync outage, which has its own receipt and
+visible waiting reason.
 
 Formula assets are named `fulcrum-<role>.formula.json`. The following is a minimal
 valid shape; the installed role assets contain the full static role instructions
@@ -852,7 +864,7 @@ as a subprocess; it does not import controller internals or patch `_request`.
 ```sh
 export FC_INSTANCE="$(mktemp -d /tmp/fulcrum-cli.XXXXXX)"
 fulcrum --instance "$FC_INSTANCE" setup --input - --json <<'JSON'
-{"runtime":{"kind":"deterministic"},"delivery":{"kind":"deterministic"},"beads":{"database":"fulcrum"},"projects":[{"id":"sample","root":"/tmp/fulcrum-sample","codex_project_id":"sample","delivery":{"kind":"deterministic"},"integration_branch":"main","prepare_argv":[],"validate_argv":[]}]}
+{"runtime":{"kind":"deterministic"},"delivery":{"kind":"deterministic"},"beads":{"database":"fulcrum"},"brain":{"root":"/tmp/fulcrum-sample-brain","remote":"origin","branch":"main","push_interval_seconds":300},"projects":[{"id":"sample","root":"/tmp/fulcrum-sample","codex_project_id":"sample","delivery":{"kind":"deterministic"},"integration_branch":"main","prepare_argv":[],"validate_argv":[]}]}
 JSON
 
 created=$(fulcrum --instance "$FC_INSTANCE" work create --json --input - <<'JSON'
@@ -870,7 +882,11 @@ fulcrum --instance "$FC_INSTANCE" trace --bead "$bead" --json
 ```
 
 The test harness creates `/tmp/fulcrum-sample` as a disposable committed Git
-fixture before setup; it must not reuse an existing real repository. Test setup
+fixture before setup; it also creates `/tmp/fulcrum-sample-brain` with an `origin`
+pointing to a disposable Git remote served through the supported Git transport.
+The test harness supplies this endpoint and its isolated credentials. These fixture paths must be reserved
+for this isolated run; fail if they already belong to other work. No real
+repository or production remote is reused. Test setup
 provisions an isolated **real stock Beads** backend on a free local port.
 Deterministic providers use native-looking opaque IDs only inside that instance.
 They cannot attach to the production runtime or integration branch.
@@ -994,7 +1010,8 @@ never create analytics or memory issues merely to display a report.
 | `memory show ID` | Canonical text, scope, owner, and update attribution |
 | `memory set [--id ID] --input FILE` | Create/replace `{scope, title, text, references}`; retain previous text in the mutation receipt |
 | `knowledge publish --bead ID` | Export current plan/memory to configured Git destination and inspect synchronization |
-| `ledger sync` | Run configured stock Beads remote synchronization and return observed result |
+| `ledger sync` | Commit and push pending Beads history to the brain Git remote immediately; return observed publication results |
+| `ledger status` | Local commit, last pushed state/time, pending age, cadence, operation ID, and any remote error |
 
 `plan publish/refine` input is `{text, activation, approved_by, approval_evidence,
 reviews, tasks, publication}`. Activation is `active` or `future`; `approved_by`
@@ -1198,6 +1215,91 @@ Caller-owned input/evidence files are never deleted by ordinary commands. Parse
 and retain accepted payloads in receipts, keeping diagnostic references for
 rejected inputs. Only explicitly recorded Fulcrum-created temporary artifacts
 are eligible for cleanup; cleanup failure never revokes an accepted outcome.
+
+### Brain Git publication and cadence
+
+The production brain remains `~/brain`, currently backed by
+`git@github.com:thurn/brain.git`. Preserve the configured repository rather than
+creating a new local-only ledger. These paths/remotes are deployment configuration,
+not hardcoded adapter assumptions. The Dolt server's data directory is inside the
+brain's excluded `.beads/dolt`; enrolled projects all connect to that one database.
+
+Configure stock Beads' `origin` with the Git transport form of the brain remote.
+For the current deployment, the setup operation uses:
+
+```sh
+bd -C "$BRAIN_ROOT" dolt remote add origin git+ssh://git@github.com/thurn/brain.git
+```
+
+Setup inspects existing configuration before adding it. Git's ordinary `origin`
+remains unchanged. Stock Beads stores its committed database/history under the
+Git remote's `refs/dolt/data`, separately from the brain's normal branch. No
+issue export is produced. Authored plans/knowledge use their existing ordinary Git
+publication path. See [Beads' Git remote documentation](https://raw.githubusercontent.com/steveyegge/beads/6c124203e771433a3550c348771a5b5e27fd3c21/docs/DOLT.md).
+
+Every 300 seconds while running, the controller checks for unpublished changes;
+when present it runs the same application operation as `ledger sync`. The check
+uses existing reconciliation plus stock `bd vc status`/issue observations, so
+native `bd` writes are included. Coalesce changes into one batch; the next tick
+is not postponed by new writes. On startup, inspect retained pending publication
+and flush overdue work. On clean shutdown attempt one final flush with a 30-second
+budget; inability to push never destroys accepted local work or prevents stopping.
+No service means no background push; CLI-only users run `ledger sync` explicitly.
+No cron job, recurring model invocation, or second publication daemon is needed.
+
+Persist publication state on `fc-system.fc.publication`: `pending_since`,
+`last_success_at`, `operation_id`, `last_dolt_commit`,
+`remote_data_ref`, and `failure`. `remote_data_ref` is the observed Git ref OID,
+not the Dolt commit ID; never equate those identities. One `ledger.sync` receipt
+records each batch's target commits, completed steps, and errors. The check ignores
+changes made solely to these sync bookkeeping fields and `ledger.sync` receipts
+when deciding whether new work is pending; otherwise recording a successful push
+would cause endless new pushes. Those records are included with the next real
+batch. No newly computed content hashes or separate sync-state files are needed.
+
+A batch performs these steps under the normal writer, releasing its short
+critical section before network waits:
+
+1. Record intent, commit the Beads working set with `bd dolt commit`, and retain
+   the resulting native commit identity. No-op commits are successful no-ops.
+2. Push native history with `bd dolt push --remote origin`. Do not stage live
+   `.beads/dolt` files in ordinary Git or generate an issue export.
+3. Inspect the outcome and record completion. For an uncertain push, inspect the
+   remote history through the supported Dolt Git transport in an isolated scratch
+   checkout; prove the recorded native commit is present before settling it. A
+   changed `refs/dolt/data` value alone is insufficient. Preserve the same receipt
+   across response loss rather than generating a second publication operation.
+
+Native concurrent `bd` writes may appear in a later batch. The receipt identifies
+the actual committed database state, not a promise to include writes that happened
+after its commit boundary. The native commit is the durable recovery point for
+that push. Ordinary plan/knowledge Git publication remains separately observable
+through its existing receipt and may be flushed by the same maintenance tick.
+
+A definitive transient failure uses the existing three-send retry limit. After
+exhaustion, leave the operation visible and stop automatic replays; a timer tick
+or another unrelated bead write is not fresh retry authorization. `ledger sync`
+or `operation reconcile`, or a proved relevant connectivity/configuration
+recovery, resumes the same unresolved operation with an explicitly recorded retry
+budget. Local work can continue. Marshal receives one compact notice when a push
+has failed through that budget; unresolved remote divergence goes to scoped
+Justiciar recovery. Routine publication never force-pushes. Do not automatically
+pull remote workflow ownership changes into a running fleet: divergence requires
+controlled reconciliation with stopped conflicting writers.
+
+The hard reset remains a separate explicit cutover: clear only enumerated old
+Fulcrum Beads data on the brain remote and publish the clean native database.
+Preserve the repository and unrelated documents; never resurrect old data from
+a historical issue export during startup. Existing Git history is not automatically
+rewritten by a normal push or this maintenance cadence. A historical purge, if
+needed for the separately authorized reset inventory, must be a narrowly scoped
+reset action, never inferred by ordinary synchronization.
+
+Extend the deterministic restart/duplicate scenario with a disposable Git
+remote fixture and the same stock Beads Git transport. With an injected clock, prove a
+native `bd` change is pushed by the next five-minute tick, an idle tick produces
+no new commit, and an applied-but-unacknowledged push is reconciled without a
+duplicate operation. This requires no native model calls or wall-clock five-minute wait.
 
 ## Source notes
 

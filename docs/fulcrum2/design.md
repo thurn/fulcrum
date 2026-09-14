@@ -51,7 +51,9 @@ model-powered patrol.
 
 User initiation governs the origin of work, not every subsequent controller
 action. Operational polling, retry deadlines, inactivity detection, and one-time
-archival timers maintain that work. There are no cron or heartbeat agent jobs,
+archival timers and periodic Git publication maintain that work. Pending Beads
+changes are committed and pushed to the brain remote every five minutes by
+default; this mechanical maintenance does not start an agent. There are no cron or heartbeat agent jobs,
 recurring Sage/Mason reviews, calendar dispatch, or periodic self-improvement
 assignments. `serve --once` and `reconcile` expose the same supervisory processing
 to tests and terminal users. Section 6 specifies the polling and escalation rules.
@@ -144,8 +146,12 @@ environment. No new release-version scheme or source-content hashes are added.
 
 ### One ledger
 
-The canonical workspace is `<instance>/ledger`; Beads uses one externally served
-Dolt database named `fulcrum`. Enrolled repositories and managed worktrees have
+The shared Beads workspace is the existing Git repository at `~/brain`
+(configurable as `brain.root`), with Beads under `~/brain/.beads`. Keep its GitHub
+remote; moving workflow authority to Beads does not move beads out of the brain
+or remove their version control. Beads uses one externally served Dolt database
+named `fulcrum`, physically rooted under `brain.root/.beads/dolt`. Enrolled
+repositories and managed worktrees have
 local Beads configuration pointing to that same database, rather than separate
 databases that need hydration. All issue IDs start `fc-`. Do not add role prefixes
 to bead IDs or rename a bead on handoff.
@@ -169,6 +175,30 @@ project label, or the configured `created_by` project, in that order. Conflictin
 evidence is a Marshal clarification item, never a guess based on the controller's
 current directory. Native callers that override the actor can use an ordinary
 project label. Enrollment adds short Beads guidance explaining that convention.
+
+### Brain Git persistence and push cadence
+
+Persist Beads history to the brain's existing GitHub repository through stock
+Beads' Git-backed Dolt remote. Native Beads history is the database persistence
+path. Do not create issue exports or Git-track the live Dolt database directory.
+Plans and curated knowledge documents retain their ordinary Git publication path.
+
+Default cadence is **one commit/push batch every five minutes when changes are
+pending**, with no empty commits or idle model turns. The clock does not slide
+forward each time another bead changes. Include native `bd` changes as well as
+Fulcrum changes. `ledger sync` flushes immediately, and graceful shutdown attempts
+one bounded final flush. An explicitly requested plan publication may also flush
+so its result can report remote completion. A durable local intake need not wait
+for GitHub; status distinguishes local acceptance from remote publication.
+
+Keep one pending publication operation across retries. A remote outage retains
+local data and exposes the last successful push, pending age, and exact failure.
+Use the normal bounded retry policy, then suspend automatic retries until explicit
+reconciliation or a relevant connectivity/configuration recovery. Timer ticks
+must not reset exhausted retries. Conflicting remote state is retained for repair,
+never force-pushed away by routine maintenance. All publication state lives in
+Beads, not a separate Git-sync journal. See the concrete
+[publication contract](contracts.md#brain-git-publication-and-cadence).
 
 ### Context belongs with the work
 
@@ -536,6 +566,8 @@ worktrees and their local branches; delete the old ledger, operational stores,
 logs, and generated runtime state; then initialize the clean replacement.
 Preserve project source repositories, the design documents, credentials, installed
 executables, unrelated Codex tasks, and unrelated delivery-provider history.
+Reset clears old Fulcrum data from the configured brain and its enumerated remote
+ledger; the clean replacement continues to use that same Git repository.
 Delete only enumerated Fulcrum-owned resources, never `~/.codex` or the whole brain
 repository because it contains a ledger. Do not take a historical backup or import
 old data as part of this reset. See the exact restart-safe reset contract.
@@ -544,7 +576,8 @@ Implementation order:
 
 1. **CLI/application spine and ledger:** Result envelopes, request identities,
    writer lock, offline execution, stock Beads records, project enrollment, and
-   native intake. Demonstrate terminal-only creation/adoption/status using an
+   native intake, brain Git persistence, and five-minute publication maintenance.
+   Demonstrate terminal-only creation/adoption/status using an
    isolated real Beads ledger.
 2. **Runtime and context:** Shared Codex adapter, recorded task creation intent,
    context formulas, all microskill entry paths, role naming, explicit task IDs,
@@ -606,15 +639,15 @@ capability, not grounds to pretend registration succeeded.
 
 Retain human-readable plan publication and durable curated global/project memory.
 Canonical plan scope, task state, and memory are Beads data. Markdown plans may be
-exported to a configured private knowledge repository or project documentation;
+exported to `~/brain` by default or to explicitly selected project documentation;
 Git copies are published artifacts, never an independent editable workflow ledger.
 Record path, local commit, observed remote commit, and originating task on the
 publication receipt. Replacements retrieve current policy, concise memory, and
 relevant plans without replaying transcripts. This preserves the older documented
 Vizier memory capability; the audit does not claim it was fully implemented.
 
-Configured publication synchronizes on an explicit publish/finish operation, not
-a schedule. Preserve remote changes and local unsent work; a conflict is a repair
+Brain publication synchronizes on the five-minute maintenance cadence or an
+explicit publish/finish operation. Preserve remote changes and local unsent work; a conflict is a repair
 item. Required publication is not complete until the remote result is inspected.
 Unrelated delivery may proceed while knowledge publication needs repair. Git
 source publication separately follows each project's configured source remote;

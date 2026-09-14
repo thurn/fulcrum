@@ -218,7 +218,9 @@ not automatically to delete the capability:
   `usage` and `cost` reporting surfaces.
 - Publication failures call for independent receipts and inspected remote results.
   Plans, incremental graph refinement, future plans, and curated knowledge still
-  need a durable authoring/publication path.
+  need a durable authoring/publication path. Keep the shared ledger in `~/brain`
+  and push pending changes to its GitHub remote every five minutes; failed remote
+  publication remains visible without revoking accepted local work.
 - Fragile source reload and recovery require a quiescent installed-package swap
   and a separately installed emergency launcher. A recovery command that cannot
   import when the main environment breaks is insufficient.

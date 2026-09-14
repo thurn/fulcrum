@@ -18,13 +18,13 @@ research remains in [failure-analysis.md](failure-analysis.md).
 | --- | --- |
 | Ground-up Python redesign around observability, robustness, recovery, speed, and cost | Design §§1–2, 6–7; finite operations, small controller, compact decision inputs, durable usage/cost facts. Existing failure evidence informs these decisions rather than being treated as proof that Python was the cause. |
 | Stock Beads is the sole durable Fulcrum workflow store; no Fulcrum SQLite or parallel ledger | Design §3; contracts §3. Native Git and Codex remain authoritative for their own resources. Config, diagnostics, and exported documents do not become workflow stores. |
-| One ledger across projects, every bead uses `fc-` | Design §3; contracts §4 gives project-local stock Beads configuration against the shared backend. No project-specific ID prefix. |
+| One ledger across projects, every bead uses `fc-`, retained in `~/brain` and GitHub | Design §3; contracts §§4, 9 keep the shared Beads workspace under the brain Git repository, publish native Beads history without issue exports, and push pending changes every five minutes. Project-local configuration connects to that shared backend. |
 | Ordinary `bd create --assignee executor …` is sufficient | Contracts §§3–4: role alias is an intake request; enrolled project context and the standing Marshal establish accountable routing before actual task ownership. |
 | An unfamiliar agent can implement a bead; use Beads workflows instead of elaborate Python prompt generation | Design §3; contracts §4 gives the inspected stock formula shape and fixed bootstrap prompt. Role transitions update the same bead; no synthetic stage-bead graph. |
 | Corrected task naming: role prefix plus suffix from bead ID | Design §4 now specifies all eight exact titles. `fc-51o` becomes `[wvr-51o]`, `[exe-51o]`, or `[war-51o]`; `fc-` is not displayed inside the brackets and role codes do not alter the bead ID. |
 | Same bead across implementation/review and scoped investigations; true plan children get their own beads | Design §§3–4; contracts work/plan representations and permanent introspection transitions. |
 | Golden rule: actual responsible task ID, HUMAN only when external intervention is necessary | Design §4; contracts ownership/claims and HUMAN commands. Raw intake, transfer intervals, backlog deferral, and completed records have explicit semantics. |
-| User-initiated work, continuous supervision, no recurring agent jobs | Design §1 clarifies the agreed boundary: Python continuously watches existing work and periodically checks for stalled agents, with automatic recovery and Marshal/Justiciar escalation. No recurring model patrol, Sage/Mason reviews, interviews, calendar work, or periodic self-improvement assignments. Future plans activate explicitly. |
+| User-initiated work, continuous supervision, no recurring agent jobs | Design §1 clarifies the agreed boundary: Python continuously watches existing work and periodically checks for stalled agents, with automatic recovery and Marshal/Justiciar escalation. Periodic brain Git pushes are also mechanical maintenance. No recurring model patrol, Sage/Mason reviews, interviews, calendar work, or periodic self-improvement assignments. Future plans activate explicitly. |
 | Microskills; every role manually invocable; no implicit invocation | Contracts §§2, 4: same CLI entry, explicit task IDs, `allow_implicit_invocation: false`. All eight roles have degraded entry guidance when registration cannot succeed. |
 | Direct human entry begins immediately and overrides queue/admission | Design §§4–5; contracts role entry applies this to every role. Physical runtime failure remains a truthful limitation, not fake task registration. |
 | Vizier is one persistent human liaison with supreme policy authority and no system messages | Design §4; policy/leader/task-send contracts. Replacement retains policy/memory; bootstrap/replacement do not send unsolicited Vizier turns. |
@@ -59,7 +59,7 @@ documents were committed as `8aca63a` before this audit.
 | Substantial plans, direct small-task intake, future activation, stable-key refinement | Implemented CLI/intake/controller paths and [Weaver prompt](../../src/fulcrum/prompts/weaver.md). | Contracts §9 adds publish/refine/show/activate. Scope changes are explicit; interrupted graph creation resumes without duplicating children. |
 | Independent cold-reader and requirements reviews of substantial plans | Existing [Weaver instructions](../../src/fulcrum/prompts/weaver.md). | Design §9 retains both authoring perspectives and explicit waiver evidence if unavailable. These do not become routine live-role execution tests. |
 | Plan Mode remains read-only | Existing Weaver instructions and CLI `--plan-mode`. | Design §9 respects actual platform capability; unavailable registration is reported honestly. No fabricated bead or hidden writes. |
-| Plans/knowledge committed and synchronized without discarding local or remote work | Implemented [brain publication](../../src/fulcrum/brain.py) and controller publication. | Contracts §9 retains Git publication with inspected remote success, resumable receipts, and retained conflicts. Canonical scope remains Beads; Git is an artifact destination. |
+| Plans/knowledge committed and synchronized without discarding local or remote work | Implemented [brain publication](../../src/fulcrum/brain.py) and controller publication. | Contracts §9 retains `~/brain`, its GitHub remote, native Beads history, inspected success, resumable receipts, and retained conflicts. Pending changes push every five minutes. Canonical live scope remains Beads. |
 | Curated shared/project knowledge and persistent Vizier memory | [README](../../README.md), [Vizier design](../vizier.md). Full Vizier behavior is a prior contract, not established live implementation. | Design §9 and memory CLI/Beads schema preserve curated durable knowledge and selective reload after replacement. Old restrictions on Vizier policy authority are superseded by the user's new supreme authority. |
 | Soft/draining and hard/interrupting fleet replacement without deleting work | Implemented [CLI](../../src/fulcrum/cli.py), controller, [operations](../operations.md). | `fleet replace --mode drain|interrupt`, distinct from destructive `reset --hard`. Preserve policy, worktrees, ownership history, and explicit old/new task mapping. |
 | Safe native task continuity and reuse across restart | Implemented lineage provisioning in controller, [contracts](../contracts.md). | Same-bead/same-role compatible task reuse remains. Numeric lineage pools and overflow suffixes are replaced by stable bead titles and native task IDs. |
@@ -90,7 +90,7 @@ These are justified by the approved redesign, rather than accidental feature los
 - Executor correction loops, read-only Overseer restrictions, frozen obsolete
   review scope, and human-only Operative creation are replaced by Warden-owned
   fixes and autonomous scoped Justiciar recovery.
-- Scheduled specialists, interviews, cadence policies, timed future-work
+- Scheduled specialists, interviews, specialist cadence policies, timed future-work
   activation, and setup's initial recurring-policy gate are removed.
 - Caller-only context lookup, action-scoped mandatory input-file locations,
   role-binding refusal conditions, and the Weaver question-punctuation gate are
@@ -105,6 +105,18 @@ These are justified by the approved redesign, rather than accidental feature los
 - No new dashboard, historical-data preservation, broad manual validation matrix,
   or prolonged live stress suite is introduced. The older full assembled-product
   checklist is not a promotion gate for the replacement.
+
+## Follow-up correction: brain location and remote cadence
+
+The user identified that the first audit still moved the live ledger out of
+`~/brain` and made GitHub persistence optional. That was an unintended removal,
+not an agreed consequence of Beads-only storage. The corrected design keeps
+Beads in the existing brain Git repository, preserves remote database history
+with stock Beads Git transport. The user explicitly excluded issue exports; none
+are generated or required.
+A five-minute dirty-only push cadence is required mechanical maintenance; the
+ban on recurring agent jobs does not prohibit it. `ledger sync` exposes immediate
+publication and `ledger status` exposes pending/failed publication.
 
 ## Remaining qualifications
 
