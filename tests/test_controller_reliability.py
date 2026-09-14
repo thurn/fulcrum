@@ -3073,6 +3073,349 @@ print(json.dumps({
         )
         self.assertEqual(event["entity_id"], str(self.executor["id"]))
 
+    async def test_restart_replaces_bound_terminal_overseer_before_real_advancement(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+        )
+        unrelated = self.controller.store.register_task(
+            native_thread_id="unrelated-active",
+            role="inquisitor",
+            description="Unrelated active audit",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'idle' WHERE id = ?", (archon["id"],)
+        )
+        self.controller.store.execute(
+            "UPDATE tasks SET runtime_status = 'idle' WHERE id IN (?, ?)",
+            (self.executor["id"], self.overseer["id"]),
+        )
+        self.controller.store.execute(
+            """UPDATE tasks SET state = 'active', runtime_status = 'active',
+               last_turn_terminal = 0, helpers_terminal = 0 WHERE id = ?""",
+            (unrelated["id"],),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'review_pending',
+               candidate_id = 'candidate-1', source_oid = 'source-1',
+               tested_oid = 'tested-1' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'processed',
+                         'ready_for_review', '{}', 'now', 'now')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'implementation_evidence', '{}', 'now')""",
+            (self.assignment["id"], implementation.lastrowid),
+        )
+        apply_archon_decisions(
+            self.controller.store,
+            {
+                "recurring_policies": [
+                    {"kind": "sage", "scope": None},
+                    {"kind": "inquisitor", "scope": "p"},
+                ]
+            },
+        )
+        stale_overseer_id = int(self.overseer["id"])
+        self._restart_controller()
+        runtime = AsyncMock()
+        runtime.ready = True
+
+        async def read_thread(
+            thread_id: str, *, include_turns: bool = True
+        ) -> dict[str, Any]:
+            if thread_id == "overseer":
+                return {
+                    "id": thread_id,
+                    "projectId": "codex-p",
+                    "status": {"type": "notLoaded"},
+                    "archived": False,
+                    "turns": [],
+                }
+            return {
+                "id": thread_id,
+                "projectId": "codex-p",
+                "status": {
+                    "type": "active" if thread_id == "unrelated-active" else "idle"
+                },
+                "archived": False,
+                "turns": (
+                    [{"id": "active-turn", "status": "inProgress", "items": []}]
+                    if include_turns and thread_id == "unrelated-active"
+                    else []
+                ),
+            }
+
+        async def resume_thread(thread_id: str) -> None:
+            if thread_id == "overseer":
+                raise AppServerError(
+                    "app-server error: no rollout found for thread overseer"
+                )
+
+        runtime.read_thread.side_effect = read_thread
+        runtime.resume_thread.side_effect = resume_thread
+        runtime.create_thread.return_value = {
+            "thread": {
+                "id": "replacement-overseer",
+                "projectId": "codex-p",
+                "status": {"type": "idle"},
+                "archived": False,
+                "turns": [],
+            }
+        }
+        runtime.start_turn.return_value = "replacement-review-turn"
+        self.controller.runtime = runtime
+
+        async def wait_for_stop() -> None:
+            await self.controller.stop_event.wait()
+
+        with (
+            patch("fulcrum.controller.Tollgate", return_value=AsyncMock()),
+            patch.object(self.controller, "_verify_projects", new=AsyncMock()),
+            patch.object(self.controller, "_source_watch_loop", new=wait_for_stop),
+        ):
+            controller_task = asyncio.create_task(self.controller.start())
+            try:
+                for _ in range(500):
+                    if controller_task.done():
+                        await controller_task
+                    workers = {
+                        row["worker_name"]
+                        for row in self.controller.store.rows(
+                            "SELECT worker_name FROM worker_heartbeats WHERE state = 'running'"
+                        )
+                    }
+                    if workers == self.controller.critical_workers:
+                        self.controller.advance_requested.set()
+                        break
+                    await asyncio.sleep(0.001)
+                else:
+                    self.fail("critical workers did not start")
+
+                for _ in range(500):
+                    review = self.controller.store.row(
+                        """SELECT * FROM actions WHERE assignment_id = ?
+                           AND kind = 'review'""",
+                        (self.assignment["id"],),
+                    )
+                    if review is not None and review["state"] == "active":
+                        break
+                    if controller_task.done():
+                        await controller_task
+                    await asyncio.sleep(0.001)
+                else:
+                    self.fail("real advancement did not start replacement review")
+
+                assignment = self.controller.store.row(
+                    "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+                )
+                run = self.controller.store.row(
+                    "SELECT * FROM runs WHERE id = ?", (self.assignment["run_id"],)
+                )
+                replacement = self.controller.store.row(
+                    "SELECT * FROM tasks WHERE id = ?",
+                    (assignment["overseer_task_id"],),
+                )
+                self.assertNotEqual(assignment["overseer_task_id"], stale_overseer_id)
+                self.assertEqual(run["overseer_task_id"], replacement["id"])
+                self.assertEqual(
+                    replacement["native_thread_id"], "replacement-overseer"
+                )
+                self.assertEqual(review["task_id"], replacement["id"])
+                self.assertEqual(review["native_turn_id"], "replacement-review-turn")
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT state, pair_id FROM tasks WHERE id = ?",
+                        (stale_overseer_id,),
+                    ),
+                    {"state": "retired", "pair_id": None},
+                )
+                self.assertEqual(
+                    self.controller.store.row(
+                        """SELECT state, runtime_status, last_turn_terminal,
+                                  helpers_terminal FROM tasks WHERE id = ?""",
+                        (unrelated["id"],),
+                    ),
+                    {
+                        "state": "active",
+                        "runtime_status": "active",
+                        "last_turn_terminal": 0,
+                        "helpers_terminal": 0,
+                    },
+                )
+                event = self.controller.store.row(
+                    """SELECT detail_json FROM events
+                       WHERE kind = 'stale_terminal_task_retired'
+                         AND entity_id = ?""",
+                    (str(stale_overseer_id),),
+                )
+                detail = json.loads(event["detail_json"])
+                self.assertEqual(
+                    detail["detached_assignment_ids"], [self.assignment["id"]]
+                )
+                self.assertEqual(
+                    detail["detached_run_ids"], [self.assignment["run_id"]]
+                )
+                self.assertEqual(
+                    self.controller.store.row(
+                        "SELECT value FROM meta WHERE key = 'dispatch_enabled'"
+                    )["value"],
+                    "1",
+                )
+                runtime.start_turn.assert_awaited_once()
+                self.assertEqual(
+                    runtime.start_turn.await_args.args[0], "replacement-overseer"
+                )
+            finally:
+                self.controller.stop_event.set()
+                await controller_task
+
+    async def test_startup_does_not_retire_missing_task_with_open_action(self) -> None:
+        now = "2026-01-01T00:00:00Z"
+        self.controller.store.execute(
+            """INSERT INTO actions(task_id, assignment_id, kind, payload, state,
+               created_at, updated_at) VALUES (?, ?, 'implement', '{}', 'pending', ?, ?)""",
+            (self.executor["id"], self.assignment["id"], now, now),
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.side_effect = AppServerError(
+            "app-server error: no rollout found for thread executor"
+        )
+        self.controller.runtime = runtime
+
+        with self.assertRaisesRegex(AppServerError, "no rollout found"):
+            await self.controller._repair_task_project_bindings()
+
+        retained = self.controller.store.row(
+            "SELECT state, archived FROM tasks WHERE id = ?", (self.executor["id"],)
+        )
+        self.assertEqual(retained, {"state": "idle", "archived": 0})
+        self.assertIsNone(
+            self.controller.store.row(
+                "SELECT id FROM events WHERE kind = 'stale_terminal_task_retired'"
+            )
+        )
+
+    async def test_correction_replaces_retired_executor_before_acquiring_lease(
+        self,
+    ) -> None:
+        self.controller.store.execute(
+            "UPDATE tasks SET state = 'retired', pair_id = NULL WHERE id = ?",
+            (self.executor["id"],),
+        )
+        self.controller.store.execute(
+            """UPDATE assignments SET stage = 'correcting',
+               candidate_id = 'candidate-1', source_oid = 'source-1',
+               tested_oid = 'tested-1' WHERE id = ?""",
+            (self.assignment["id"],),
+        )
+        implementation = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'processed',
+                         'ready_for_review', '{}', 'now', 'now')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'implementation_evidence', '{}', 'now')""",
+            (self.assignment["id"], implementation.lastrowid),
+        )
+        review = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state,
+                   outcome_kind, outcome_payload, created_at, updated_at
+               ) VALUES (?, ?, 'review', '{}', 'processed',
+                         'changes_requested', '{}', 'now', 'now')""",
+            (self.overseer["id"], self.assignment["id"]),
+        )
+        self.controller.store.execute(
+            """INSERT INTO handoffs(
+                   assignment_id, source_action_id, kind, content_json, created_at
+               ) VALUES (?, ?, 'review_findings', ?, 'now')""",
+            (
+                self.assignment["id"],
+                review.lastrowid,
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "problem": "Retained correction",
+                                "required_change": "Apply the bounded fix",
+                            }
+                        ]
+                    }
+                ),
+            ),
+        )
+        runtime = AsyncMock()
+        runtime.ready = True
+        runtime.create_thread.return_value = {
+            "thread": {
+                "id": "replacement-executor",
+                "projectId": "codex-p",
+                "status": {"type": "idle"},
+                "turns": [],
+            }
+        }
+        runtime.start_turn.return_value = "replacement-correction-turn"
+        self.controller.runtime = runtime
+        assignment = self.controller.store.row(
+            """SELECT a.*, r.project_id FROM assignments a JOIN runs r ON r.id = a.run_id
+               WHERE a.id = ?""",
+            (self.assignment["id"],),
+        )
+
+        await self.controller._start_assignment_action(assignment)
+
+        retained = self.controller.store.row(
+            "SELECT * FROM assignments WHERE id = ?", (self.assignment["id"],)
+        )
+        correction = self.controller.store.row(
+            """SELECT * FROM actions WHERE assignment_id = ? AND kind = 'correct'
+               AND state IN ('pending','starting','active','terminal','uncertain')""",
+            (self.assignment["id"],),
+        )
+        replacement = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?", (retained["executor_task_id"],)
+        )
+        self.assertEqual(replacement["native_thread_id"], "replacement-executor")
+        self.assertEqual(correction["task_id"], replacement["id"])
+        self.assertEqual(correction["native_turn_id"], "replacement-correction-turn")
+        self.assertEqual(
+            self.controller.store.rows(
+                """SELECT id FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')""",
+                (self.executor["id"],),
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.controller.store.row(
+                "SELECT action_id FROM reservations WHERE action_id = ?",
+                (correction["id"],),
+            ),
+            {"action_id": correction["id"]},
+        )
+
     async def test_dispatch_resumes_a_not_loaded_thread_before_starting(self) -> None:
         self.controller.store.execute(
             "UPDATE tasks SET runtime_status = 'notLoaded' WHERE id = ?",

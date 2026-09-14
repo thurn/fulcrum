@@ -1191,12 +1191,156 @@ class Controller:
         for task in self.store.rows(
             """SELECT t.* FROM tasks t JOIN projects p ON p.project_id = t.project_id
                WHERE t.archived = 0 AND p.enabled = 1
+                 AND t.state NOT IN ('retired','archived')
                  AND p.codex_project_id IS NOT NULL ORDER BY t.id"""
         ):
-            thread = await self.runtime.read_thread(
-                task["native_thread_id"], include_turns=False
-            )
+            thread = await self._read_thread_for_project_repair(task)
+            if thread is None:
+                continue
             await self._ensure_task_project(task, thread)
+
+    async def _read_thread_for_project_repair(
+        self, task: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Load a startup task or retire a provably inert missing identity."""
+
+        thread_id = str(task["native_thread_id"])
+        try:
+            thread = await self.runtime.read_thread(thread_id, include_turns=False)
+        except AppServerError as error:
+            if "thread not loaded" not in str(error).lower():
+                if self._retire_missing_terminal_task(task, error):
+                    return None
+                raise
+            if not self._terminal_task_has_no_open_action(task):
+                raise
+            try:
+                await self.runtime.resume_thread(thread_id)
+                thread = await self.runtime.read_thread(thread_id, include_turns=False)
+            except AppServerError as resume_error:
+                if self._retire_missing_terminal_task(task, resume_error):
+                    return None
+                raise
+        status = thread.get("status")
+        status_name = status.get("type") if isinstance(status, dict) else status
+        if status_name != "notLoaded" or not self._terminal_task_has_no_open_action(
+            task
+        ):
+            return thread
+        try:
+            await self.runtime.resume_thread(thread_id)
+            return await self.runtime.read_thread(thread_id, include_turns=False)
+        except AppServerError as error:
+            if self._retire_missing_terminal_task(task, error):
+                return None
+            raise
+
+    def _terminal_task_has_no_open_action(self, task: dict[str, Any]) -> bool:
+        return bool(
+            task["role"] in COMPLETION_ARCHIVE_ROLES
+            and not task["archived"]
+            and task["last_turn_terminal"]
+            and task["helpers_terminal"]
+            and self.store.row(
+                """SELECT 1 FROM actions WHERE task_id = ?
+                   AND state IN ('pending','starting','active','terminal','uncertain')
+                   LIMIT 1""",
+                (task["id"],),
+            )
+            is None
+        )
+
+    def _retire_missing_terminal_task(
+        self, task: dict[str, Any], error: AppServerError
+    ) -> bool:
+        condition = str(error)
+        normalized = condition.lower()
+        if not (
+            self._terminal_task_has_no_open_action(task)
+            and (
+                "thread not loaded" in normalized
+                or "no rollout found" in normalized
+                or ("rollout" in normalized and "not found" in normalized)
+            )
+        ):
+            return False
+        timestamp = utc_now()
+        assignment_column = (
+            f"{task['role']}_task_id"
+            if task["role"] in {"executor", "overseer"}
+            else None
+        )
+        with self.store.transaction() as connection:
+            detached_assignments = (
+                [
+                    int(row["id"])
+                    for row in connection.execute(
+                        f"""SELECT id FROM assignments WHERE {assignment_column} = ?
+                            AND stage NOT IN ('completed','canceled') ORDER BY id""",
+                        (task["id"],),
+                    ).fetchall()
+                ]
+                if assignment_column is not None
+                else []
+            )
+            detached_runs = (
+                [
+                    int(row["id"])
+                    for row in connection.execute(
+                        f"""SELECT id FROM runs WHERE {assignment_column} = ?
+                            AND state NOT IN ('completed','canceled') ORDER BY id""",
+                        (task["id"],),
+                    ).fetchall()
+                ]
+                if assignment_column is not None
+                else []
+            )
+            if assignment_column is not None:
+                connection.execute(
+                    f"""UPDATE assignments SET {assignment_column} = NULL,
+                        updated_at = ? WHERE {assignment_column} = ?
+                        AND stage NOT IN ('completed','canceled')""",
+                    (timestamp, task["id"]),
+                )
+                connection.execute(
+                    f"""UPDATE runs SET {assignment_column} = NULL, updated_at = ?
+                        WHERE {assignment_column} = ?
+                        AND state NOT IN ('completed','canceled')""",
+                    (timestamp, task["id"]),
+                )
+            connection.execute(
+                """UPDATE tasks SET state = 'retired', runtime_status = 'notFound',
+                   pair_id = NULL, archive_eligible_at = NULL,
+                   archive_idle_turn_id = NULL,
+                   updated_at = ? WHERE id = ?""",
+                (timestamp, task["id"]),
+            )
+            connection.execute(
+                """UPDATE obligations SET state = 'canceled',
+                   detail = 'native conversation rollout is unavailable', updated_at = ?
+                   WHERE kind = 'archive' AND target = ?
+                     AND state IN ('pending','failed')""",
+                (timestamp, task["native_thread_id"]),
+            )
+            self.store.event(
+                "stale_terminal_task_retired",
+                f"retired unavailable terminal {task['role']} conversation",
+                entity_type="task",
+                entity_id=task["id"],
+                detail={
+                    "native_thread_id": task["native_thread_id"],
+                    "condition": condition,
+                    "prior_state": task["state"],
+                    "prior_runtime_status": task["runtime_status"],
+                    "last_turn_terminal": bool(task["last_turn_terminal"]),
+                    "helpers_terminal": bool(task["helpers_terminal"]),
+                    "recovery": "retired",
+                    "detached_assignment_ids": detached_assignments,
+                    "detached_run_ids": detached_runs,
+                },
+                now=timestamp,
+            )
+        return True
 
     async def _fallback_loop(self) -> None:
         while True:
@@ -2949,13 +3093,24 @@ class Controller:
             if kind in {"implement", "correct"}
             else "overseer_task_id"
         )
-        if kind == "review" and not assignment.get("overseer_task_id"):
-            await self._ensure_pair(assignment, include_overseer=True)
-        task = self.store.row(
-            "SELECT * FROM tasks WHERE id = ?", (assignment[task_key],)
+        task_id = assignment.get(task_key)
+        task = (
+            self.store.row("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            if task_id is not None
+            else None
         )
-        if task is None:
-            return
+        if task is None or task["state"] in {"retired", "archived"} or task["archived"]:
+            await self._ensure_pair(assignment, include_overseer=kind == "review")
+            task_id = assignment.get(task_key)
+            task = (
+                self.store.row("SELECT * FROM tasks WHERE id = ?", (task_id,))
+                if task_id is not None
+                else None
+            )
+        if task is None or task["state"] in {"retired", "archived"} or task["archived"]:
+            raise StoreError(
+                f"assignment has no usable {task_key.removesuffix('_task_id')}"
+            )
         existing = self.store.row(
             """SELECT * FROM actions WHERE task_id = ?
                AND state IN ('pending','starting','active','terminal','uncertain')""",
