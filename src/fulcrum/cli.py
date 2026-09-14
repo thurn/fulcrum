@@ -1,4 +1,8 @@
-"""Local command-line entry point for the Python-owned Fulcrum runtime."""
+"""Installed Fulcrum command line.
+
+The parser is declarative so the complete public command tree is visible in one
+place. Workflow behavior lives behind :mod:`fulcrum.application`, never here.
+"""
 
 from __future__ import annotations
 
@@ -6,751 +10,877 @@ import argparse
 import asyncio
 import json
 import os
-import re
-import stat
-import subprocess
 import sys
-from collections.abc import Sequence
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn, Sequence
 
-from fulcrum.config import RuntimePaths, load_installation, resolve_paths
-from fulcrum.controller import run_controller
-from fulcrum.doctor import doctor
-from fulcrum.ipc import ControllerUnavailable, request_sync
-from fulcrum.operative import read_journal
-from fulcrum.setup import require_setup_unfenced, run_setup
-from fulcrum.store import Store
-
-FINISH_REPORT_HINT = (
-    "If you encountered pre-existing issues or tooling errors this session, invoke "
-    "fulcrum report --help for filing instructions."
+from fulcrum.application import default_application
+from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
+from fulcrum.instance import WriterLock, resolve_instance
+from fulcrum.ipc import (
+    ControllerUnavailable,
+    IpcServer,
+    MAX_MESSAGE_BYTES,
+    request_sync,
 )
 
-REPORT_DESCRIPTION = """File exactly one small, understood, implementation-ready follow-up Bead.
+ROLES = (
+    "vizier",
+    "marshal",
+    "weaver",
+    "executor",
+    "warden",
+    "sage",
+    "mason",
+    "justiciar",
+)
+READ_ONLY_COMMANDS = {
+    ("config", "show"),
+    ("config", "validate"),
+    ("policy", "show"),
+    ("project", "list"),
+    ("project", "show"),
+    ("service", "status"),
+    ("runtime", "capabilities"),
+    ("runtime", "status"),
+    ("context",),
+    ("hook", "context"),
+    ("work", "show"),
+    ("work", "list"),
+    ("work", "children"),
+    ("leader", "show"),
+    ("marshal", "brief"),
+    ("backlog", "list"),
+    ("human", "list"),
+    ("task", "list"),
+    ("task", "show"),
+    ("task", "output"),
+    ("task", "wait"),
+    ("task", "requests"),
+    ("task", "terminals"),
+    ("worktree", "inspect"),
+    ("validation", "show"),
+    ("promotion", "show"),
+    ("operation", "show"),
+    ("operation", "list"),
+    ("operation", "wait"),
+    ("status",),
+    ("doctor",),
+    ("logs",),
+    ("trace",),
+    ("wait",),
+    ("recover", "inspect"),
+    ("plan", "show"),
+    ("plan", "complete"),
+    ("memory", "list"),
+    ("memory", "show"),
+    ("ledger", "status"),
+    ("usage",),
+    ("cost",),
+    ("rates", "list"),
+    ("rates", "show"),
+    ("fixture", "show"),
+    ("fixture", "barrier", "show"),
+}
+BROKEN_CONFIG_COMMANDS = {("service", "status"), ("recover", "inspect")}
 
-Use this for an incidental discovery from the current session: a pre-existing
-defect, tooling failure, workflow friction, or another concrete problem outside
-the assigned work. Do not use it to expand or replace the assigned work. File
-independent problems with separate report invocations. If the work needs
-substantial planning, multiple dependent tasks, or material clarification, use
-$weaver instead. The installed $bead skill is the guided convenience path."""
 
-REPORT_EPILOG = """Accepted stdin JSON schema (no other fields are accepted):
-{
-  "report_key": "new stable UUID for this one report and its exact retries",
-  "project": "required only when Fulcrum cannot infer one project",
-  "title": "concise implementation title",
-  "problem": "the bounded problem",
-  "observed_evidence": "specific repository or command evidence",
-  "required_change": "the bounded change required",
-  "acceptance_checks": ["observable validation check"],
-  "dependencies": ["relevant existing Bead ID"],
-  "context": ["other concise implementation context"]
+@dataclass(frozen=True)
+class CommandDefinition:
+    path: tuple[str, ...]
+    help: str
+
+
+COMMANDS = (
+    CommandDefinition(("setup",), "install or repair a Fulcrum instance"),
+    CommandDefinition(("config", "show"), "show authoritative configuration"),
+    CommandDefinition(("config", "validate"), "validate authoritative configuration"),
+    CommandDefinition(("config", "set"), "update authorized configuration fields"),
+    CommandDefinition(("config", "sync"), "publish authoritative configuration"),
+    CommandDefinition(("policy", "show"), "show dispatch policy"),
+    CommandDefinition(("policy", "set"), "update dispatch policy"),
+    CommandDefinition(("project", "add"), "enroll a project"),
+    CommandDefinition(("project", "list"), "list enrolled projects"),
+    CommandDefinition(("project", "show"), "show an enrolled project"),
+    CommandDefinition(("project", "enable"), "enable automatic project work"),
+    CommandDefinition(("project", "disable"), "disable automatic project work"),
+    CommandDefinition(("project", "remove"), "remove an enrolled project"),
+    CommandDefinition(("service", "start"), "start the controller service"),
+    CommandDefinition(("service", "stop"), "stop the controller service"),
+    CommandDefinition(("service", "restart"), "restart the controller service"),
+    CommandDefinition(("service", "status"), "inspect controller service artifacts"),
+    CommandDefinition(("service", "update"), "build and activate installed source"),
+    CommandDefinition(("serve",), "run the foreground controller"),
+    CommandDefinition(("reconcile",), "run one bounded reconciliation pass"),
+    CommandDefinition(("skills", "reconcile"), "repair owned role skill links"),
+    CommandDefinition(
+        ("runtime", "launch-desktop"), "launch Desktop on the configured runtime"
+    ),
+    CommandDefinition(
+        ("runtime", "capabilities"), "inspect native runtime capabilities"
+    ),
+    CommandDefinition(("runtime", "status"), "inspect native runtime state"),
+    CommandDefinition(("enter",), "enter one of the eight Fulcrum roles"),
+    CommandDefinition(("context",), "show current work or role context"),
+    CommandDefinition(("hook", "context"), "provide compact managed-task context"),
+    CommandDefinition(("work", "create"), "create a work root or graph"),
+    CommandDefinition(("work", "show"), "show work"),
+    CommandDefinition(("work", "list"), "list work"),
+    CommandDefinition(("work", "adopt"), "adopt existing work"),
+    CommandDefinition(("work", "update"), "update work scope"),
+    CommandDefinition(("work", "transfer"), "transfer work ownership"),
+    CommandDefinition(("work", "children"), "show work children"),
+    CommandDefinition(("work", "dependencies"), "change work dependencies"),
+    CommandDefinition(("work", "close"), "close work with a disposition"),
+    CommandDefinition(("work", "reopen"), "reopen work under a new acquisition"),
+    CommandDefinition(("finish",), "finish the current role responsibility"),
+    CommandDefinition(("progress",), "record substantive progress"),
+    CommandDefinition(("report",), "file an independently attributed follow-up"),
+    CommandDefinition(("leader", "show"), "show standing leadership"),
+    CommandDefinition(("leader", "replace"), "replace a standing leader"),
+    CommandDefinition(("marshal", "brief"), "preview a decision-focused brief"),
+    CommandDefinition(("marshal", "request"), "request a recorded Marshal decision"),
+    CommandDefinition(("marshal", "decide"), "apply a retained Marshal decision"),
+    CommandDefinition(("backlog", "list"), "list actionable and waiting work"),
+    CommandDefinition(("dispatch",), "authorize or execute admitted work"),
+    CommandDefinition(("human", "list"), "list irreducible human blockers"),
+    CommandDefinition(("human", "resolve"), "resolve one human blocker"),
+    CommandDefinition(("task", "list"), "list managed native tasks"),
+    CommandDefinition(("task", "show"), "show a managed native task"),
+    CommandDefinition(("task", "start"), "create and start a native task"),
+    CommandDefinition(("task", "send"), "send a managed native turn"),
+    CommandDefinition(("task", "output"), "read bounded native output"),
+    CommandDefinition(("task", "wait"), "wait for an observed native condition"),
+    CommandDefinition(("task", "requests"), "list pending native requests"),
+    CommandDefinition(("task", "respond"), "respond to one native request"),
+    CommandDefinition(("task", "interrupt"), "interrupt a native turn"),
+    CommandDefinition(("task", "terminals"), "list a task's owned terminals"),
+    CommandDefinition(
+        ("task", "terminal", "stop"), "stop selected owned terminal resources"
+    ),
+    CommandDefinition(("task", "release"), "release Fulcrum's native subscription"),
+    CommandDefinition(("task", "archive"), "archive a managed native task"),
+    CommandDefinition(
+        ("task", "unarchive"), "unarchive and suppress automatic rearchive"
+    ),
+    CommandDefinition(("task", "delete"), "delete an exact owned native task"),
+    CommandDefinition(("worktree", "prepare"), "prepare a managed delivery workspace"),
+    CommandDefinition(("worktree", "inspect"), "inspect a managed delivery workspace"),
+    CommandDefinition(("worktree", "cleanup"), "clean a settled managed workspace"),
+    CommandDefinition(("validation", "start"), "submit exact source for validation"),
+    CommandDefinition(("validation", "show"), "show provider validation facts"),
+    CommandDefinition(("review", "approve"), "approve exact Warden source"),
+    CommandDefinition(("promotion", "start"), "start nonblocking promotion"),
+    CommandDefinition(("promotion", "show"), "show promotion facts"),
+    CommandDefinition(("source", "sync"), "synchronize recorded promoted source"),
+    CommandDefinition(("operation", "show"), "show one operation receipt"),
+    CommandDefinition(("operation", "list"), "list operation receipts"),
+    CommandDefinition(("operation", "wait"), "wait for an operation observation"),
+    CommandDefinition(("operation", "cancel"), "cancel and inspect an operation"),
+    CommandDefinition(("operation", "reconcile"), "reconcile an operation"),
+    CommandDefinition(("status",), "show machine-readable instance status"),
+    CommandDefinition(("doctor",), "diagnose installation components and loops"),
+    CommandDefinition(("logs",), "read structured diagnostic logs"),
+    CommandDefinition(("logs", "prune"), "prune logs within retention policy"),
+    CommandDefinition(("trace",), "trace durable work and operation evidence"),
+    CommandDefinition(("wait",), "wait for a work observation"),
+    CommandDefinition(("recover", "inspect"), "inspect an exact repair scope"),
+    CommandDefinition(("recover", "takeover"), "fence and take over a repair scope"),
+    CommandDefinition(("recover", "repair"), "perform typed scoped repair actions"),
+    CommandDefinition(("recover", "release"), "release a settled repair fence"),
+    CommandDefinition(("plan", "draft"), "save a complete unpublished plan draft"),
+    CommandDefinition(("plan", "show"), "show retained plan facts"),
+    CommandDefinition(("plan", "review", "start"), "start an independent review task"),
+    CommandDefinition(
+        ("plan", "review", "finish"), "submit typed independent findings"
+    ),
+    CommandDefinition(("plan", "approve"), "approve retained plan scope"),
+    CommandDefinition(("plan", "publish"), "publish approved plan scope"),
+    CommandDefinition(("plan", "refine"), "refine approved plan scope"),
+    CommandDefinition(("plan", "activate"), "activate authorized future scope"),
+    CommandDefinition(
+        ("plan", "complete"), "mechanically inspect and close a plan root"
+    ),
+    CommandDefinition(("memory", "list"), "list curated memory"),
+    CommandDefinition(("memory", "show"), "show curated memory"),
+    CommandDefinition(("memory", "set"), "set curated memory"),
+    CommandDefinition(("knowledge", "publish"), "publish selected knowledge documents"),
+    CommandDefinition(("ledger", "sync"), "flush native Beads history"),
+    CommandDefinition(("ledger", "status"), "show native publication status"),
+    CommandDefinition(("usage",), "query unique managed native usage"),
+    CommandDefinition(("usage", "reconcile"), "reconcile native usage observations"),
+    CommandDefinition(("cost",), "query API-equivalent workflow cost"),
+    CommandDefinition(("rates", "list"), "list retained rate cards"),
+    CommandDefinition(("rates", "show"), "show a retained rate card"),
+    CommandDefinition(("rates", "add"), "add an immutable documented rate card"),
+    CommandDefinition(("fleet", "replace"), "replace a scoped managed task fleet"),
+    CommandDefinition(("reset",), "perform an explicitly authorized hard reset"),
+    CommandDefinition(("fixture", "create"), "create an isolated test fixture"),
+    CommandDefinition(("fixture", "show"), "show retained fixture inventory"),
+    CommandDefinition(("fixture", "cleanup"), "clean an exact disposable fixture"),
+    CommandDefinition(("fixture", "barrier", "prepare"), "prepare a fixture barrier"),
+    CommandDefinition(("fixture", "barrier", "arrive"), "arrive at a fixture barrier"),
+    CommandDefinition(("fixture", "barrier", "show"), "show a fixture barrier"),
+    CommandDefinition(("fixture", "barrier", "release"), "release a fixture barrier"),
+    CommandDefinition(("scenario", "emit"), "emit a deterministic provider event"),
+    CommandDefinition(("scenario", "advance"), "advance the deterministic clock"),
+    CommandDefinition(("scenario", "fault"), "arm a deterministic provider fault"),
+    CommandDefinition(
+        ("scenario", "crash"), "arm a persisted controller crash boundary"
+    ),
+    CommandDefinition(
+        ("smoke", "concurrency"), "run bounded native concurrency validation"
+    ),
+)
+
+
+POSITIONAL_ID: set[tuple[str, ...]] = {
+    path
+    for path in (definition.path for definition in COMMANDS)
+    if path
+    in {
+        ("project", "show"),
+        ("project", "enable"),
+        ("project", "disable"),
+        ("project", "remove"),
+        ("work", "show"),
+        ("work", "adopt"),
+        ("work", "update"),
+        ("work", "transfer"),
+        ("work", "children"),
+        ("work", "dependencies"),
+        ("work", "close"),
+        ("work", "reopen"),
+        ("task", "show"),
+        ("task", "start"),
+        ("task", "send"),
+        ("task", "output"),
+        ("task", "wait"),
+        ("task", "requests"),
+        ("task", "respond"),
+        ("task", "interrupt"),
+        ("task", "terminals"),
+        ("task", "terminal", "stop"),
+        ("task", "release"),
+        ("task", "archive"),
+        ("task", "unarchive"),
+        ("task", "delete"),
+        ("operation", "show"),
+        ("operation", "wait"),
+        ("operation", "cancel"),
+        ("operation", "reconcile"),
+        ("plan", "show"),
+        ("plan", "activate"),
+        ("plan", "complete"),
+        ("memory", "show"),
+        ("rates", "show"),
+        ("fixture", "show"),
+        ("fixture", "cleanup"),
+    }
 }
 
-Complete example:
-  fulcrum report --input - <<'JSON'
-  {
-    "report_key": "7d42dd03-c8e6-4dd2-a4d7-642bbc349a37",
-    "project": "fulcrum",
-    "title": "Handle missing formatter binary",
-    "problem": "scripts/check crashes when black is unavailable",
-    "observed_evidence": "Running scripts/check exited 127 at the black command",
-    "required_change": "Detect the missing tool and print the setup command",
-    "acceptance_checks": [
-      "A missing black executable produces an actionable nonzero diagnostic",
-      "The normal scripts/check path still passes"
-    ],
-    "dependencies": [],
-    "context": ["Discovered while validating unrelated assigned work"]
-  }
-  JSON
 
-Reuse the same report_key and exact payload only when retrying the same
-invocation. A separately discovered problem needs a new report_key and a separate
-invocation. Fulcrum publishes through its controller-owned durable Beads path and
-returns the actual Bead ID and publication state."""
+class ContractParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise FulcrumError.invalid("INVALID_COMMAND", message)
 
 
-def _nonempty_description(value: str) -> str:
-    description = value.strip()
-    if not description:
-        raise argparse.ArgumentTypeError("description must not be empty")
-    return description
+def _add_common(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--instance", default=argparse.SUPPRESS)
+    parser.add_argument("--config", default=argparse.SUPPRESS)
+    parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--input", default=argparse.SUPPRESS)
+    parser.add_argument("--project", default=argparse.SUPPRESS)
+    parser.add_argument("--thread-id", default=argparse.SUPPRESS)
+    parser.add_argument("--actor", default=argparse.SUPPRESS)
+    parser.add_argument("--request-id", default=argparse.SUPPRESS)
+    parser.add_argument("--wait", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--timeout", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--offline", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--model", default=argparse.SUPPRESS)
+    parser.add_argument("--effort", default=argparse.SUPPRESS)
+    parser.add_argument("--ownership-operation", default=argparse.SUPPRESS)
 
 
-def _safe_sage_description(value: str) -> str:
-    description = _nonempty_description(value)
-    if not re.fullmatch(r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*", description):
-        raise argparse.ArgumentTypeError(
-            "description may contain only letters, numbers, spaces, and hyphens"
+def _option(parser: argparse.ArgumentParser, *names: str, **kwargs: Any) -> None:
+    kwargs.setdefault("default", argparse.SUPPRESS)
+    parser.add_argument(*names, **kwargs)
+
+
+def _add_command_options(
+    parser: argparse.ArgumentParser, path: tuple[str, ...]
+) -> None:
+    if path in POSITIONAL_ID:
+        parser.add_argument("id")
+    if path == ("serve",):
+        _option(parser, "--once", action="store_true")
+    elif path == ("setup",):
+        _option(parser, "--non-interactive", action="store_true")
+    elif path == ("enter",):
+        parser.add_argument("role", choices=ROLES)
+        _option(parser, "--description")
+        _option(parser, "--bead")
+    elif path in {("finish",), ("progress",), ("report",)}:
+        _option(parser, "--bead")
+        if path == ("finish",):
+            _option(parser, "--outcome")
+        if path == ("progress",):
+            _option(parser, "--category")
+            _option(parser, "--summary")
+            _option(parser, "--evidence", action="append")
+    elif path[:1] == ("marshal",) and path[-1] in {"brief", "request"}:
+        _option(parser, "--kind", choices=("auto", "groom", "dispatch", "recover"))
+        _option(parser, "--bead")
+    elif path == ("dispatch",):
+        _option(parser, "--bead", required=True)
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument(
+            "--authorize", action="store_true", default=argparse.SUPPRESS
         )
-    if not 3 <= len(description.split()) <= 8:
-        raise argparse.ArgumentTypeError("description must contain 3-8 words")
-    return description
-
-
-def _sage_item_id(value: str) -> str:
-    item = value.strip()
-    if not re.fullmatch(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+", item):
-        raise argparse.ArgumentTypeError(
-            "item must be an exact Bead ID containing letters, numbers, and hyphens"
+        group.add_argument("--human", action="store_true", default=argparse.SUPPRESS)
+    elif path == ("leader", "replace"):
+        parser.add_argument("role", choices=("vizier", "marshal"))
+        _option(parser, "--reason", required=True)
+    elif path == ("task", "output"):
+        _option(parser, "--turn-id")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+        _option(parser, "--max-bytes", type=int)
+    elif path == ("task", "wait"):
+        _option(parser, "--turn-id")
+        _option(parser, "--until", choices=("idle", "terminal"), required=True)
+    elif path == ("task", "respond"):
+        _option(parser, "--request", required=True)
+    elif path == ("task", "terminal", "stop"):
+        group = parser.add_mutually_exclusive_group(required=True)
+        group.add_argument("--terminal", default=argparse.SUPPRESS)
+        group.add_argument(
+            "--all-owned", action="store_true", default=argparse.SUPPRESS
         )
-    return item
-
-
-def _thread_id() -> str | None:
-    for name in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TASK_ID"):
-        value = os.environ.get(name)
-        if value:
-            return value
-    return None
+        _option(parser, "--reason", required=True)
+    elif path in {("validation", "start"), ("review", "approve")}:
+        _option(parser, "--bead", required=True)
+        _option(parser, "--source", required=path == ("validation", "start"))
+    elif path in {
+        ("validation", "show"),
+        ("promotion", "start"),
+        ("promotion", "show"),
+        ("source", "sync"),
+        ("knowledge", "publish"),
+    }:
+        _option(parser, "--bead", required=True)
+    elif path in {("status",), ("trace",)}:
+        _option(parser, "--bead")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+    elif path == ("logs",):
+        _option(parser, "--follow", action="store_true")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+    elif path == ("wait",):
+        _option(parser, "--bead", required=True)
+        _option(parser, "--until", required=True)
+    elif path[:1] == ("recover",):
+        _option(parser, "--scope", required=True)
+    elif path == ("plan", "draft") or path in {
+        ("plan", "approve"),
+        ("plan", "publish"),
+        ("plan", "refine"),
+    }:
+        _option(parser, "--bead", required=True)
+    elif path == ("plan", "review", "start"):
+        _option(parser, "--bead", required=True)
+        _option(
+            parser,
+            "--perspective",
+            choices=("cold_reader", "requirements"),
+            required=True,
+        )
+    elif path == ("plan", "review", "finish"):
+        _option(parser, "--task", required=True)
+    elif path in {("memory", "list"), ("usage",), ("cost",)}:
+        for name in ("scope", "workflow", "role", "task", "turn", "root"):
+            _option(parser, f"--{name}")
+        _option(parser, "--group-by")
+    elif path == ("fleet", "replace"):
+        _option(parser, "--mode", choices=("drain", "interrupt"), required=True)
+        _option(parser, "--reason", required=True)
+    elif path == ("reset",):
+        _option(parser, "--hard", action="store_true", required=True)
+        _option(parser, "--yes", action="store_true", required=True)
+    elif path in {
+        ("fixture", "cleanup"),
+    }:
+        _option(parser, "--yes", action="store_true", required=True)
+    elif path[:3] == ("fixture", "barrier", "prepare"):
+        parser.add_argument("id")
+        _option(parser, "--name", required=True)
+    elif path[:3] == ("fixture", "barrier", "arrive"):
+        parser.add_argument("id")
+        _option(parser, "--name", required=True)
+        _option(parser, "--participant", required=True)
+    elif path[:3] in {
+        ("fixture", "barrier", "show"),
+        ("fixture", "barrier", "release"),
+    }:
+        parser.add_argument("id")
+        _option(parser, "--name", required=True)
+    elif path == ("scenario", "crash"):
+        _option(parser, "--operation", required=True)
+        _option(parser, "--boundary", required=True)
+    elif path == ("smoke", "concurrency"):
+        _option(parser, "--workers", type=int, default=30)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="fulcrum",
-        description="Coordinate work through one local Python controller.",
+    parser = ContractParser(
+        prog="fulcrum", description="Durable local agent workflow coordination"
     )
-    parser.add_argument("--brain-root")
-    parser.add_argument("--state-root")
-    commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("serve", help="run the foreground controller")
-    setup = commands.add_parser(
-        "setup", help="install or resume the complete local runtime"
-    )
-    setup.add_argument("--config")
-    setup.add_argument("--non-interactive", action="store_true")
-    doctor_parser = commands.add_parser(
-        "doctor", help="inspect actual installation capabilities"
-    )
-    doctor_parser.add_argument("--json", action="store_true")
-    status = commands.add_parser("status", help="read current controller state")
-    status.add_argument("--json", action="store_true")
-    status.add_argument("--events", type=int, default=20)
-    status.add_argument("--queue", action="store_true")
-    status.add_argument("--capabilities", action="store_true")
-    status.add_argument("--run", type=int)
-    usage = commands.add_parser("usage", help="query durable action token usage")
-    usage.add_argument("--action", type=int)
-    usage.add_argument("--task", type=int)
-    usage.add_argument("--assignment", type=int)
-    usage.add_argument("--run", type=int)
-    usage.add_argument(
-        "--role",
-        choices=(
-            "archon",
-            "operative",
-            "weaver",
-            "executor",
-            "overseer",
-            "sage",
-            "inquisitor",
-        ),
-    )
-    usage.add_argument("--project")
-    usage.add_argument(
-        "--group-by",
-        choices=("action", "task", "assignment", "run", "role", "project"),
-        default="action",
-    )
-    cost = commands.add_parser(
-        "cost", help="query frozen API-equivalent workflow cost estimates"
-    )
-    cost.add_argument("--action", type=int)
-    cost.add_argument("--task", type=int)
-    cost.add_argument("--assignment", type=int)
-    cost.add_argument("--run", type=int)
-    cost.add_argument(
-        "--role",
-        choices=(
-            "archon",
-            "operative",
-            "weaver",
-            "executor",
-            "overseer",
-            "sage",
-            "inquisitor",
-        ),
-    )
-    cost.add_argument("--project")
-    cost.add_argument("--workflow")
-    cost.add_argument(
-        "--group-by",
-        choices=("action", "task", "assignment", "run", "role", "project", "workflow"),
-        default="action",
-    )
-    commands.add_parser(
-        "context", help="show the current managed action's authoritative context"
-    )
-    commands.add_parser("archon", help="locate the current Archon task")
-    resolve_operation = commands.add_parser(
-        "resolve-operation",
-        help="resolve an exhausted external operation without an Archon turn",
-    )
-    resolve_operation.add_argument("--operation-id", type=int, required=True)
-    resolve_operation.add_argument(
-        "--resolution",
-        choices=("observed_success", "observed_failure", "confirmed_unsent"),
-        required=True,
-    )
-    resolve_operation.add_argument("--evidence", required=True)
-    resolve_operation.add_argument("--native-id")
-    resolve_operation.add_argument(
-        "--result", help="path to a JSON object with kind-specific observed results"
-    )
-    weaver = commands.add_parser("weaver", help="register a human-created Weaver task")
-    weaver_sub = weaver.add_subparsers(dest="weaver_command", required=True)
-    register = weaver_sub.add_parser("register")
-    register.add_argument("--project")
-    register.add_argument("--description", required=True, type=_nonempty_description)
-    register.add_argument("--model", default="gpt-5.6-sol")
-    register.add_argument("--effort", default="high")
-    register.add_argument("--plan-mode", action="store_true")
-    operative = commands.add_parser(
-        "operative", help="manage a human-authorized emergency takeover"
-    )
-    operative_sub = operative.add_subparsers(dest="operative_command", required=True)
-    operative_register = operative_sub.add_parser("register")
-    operative_register.add_argument("--input", required=True)
-    operative_sub.add_parser("probe")
-    operative_sub.add_parser("status")
-    operative_sub.add_parser("dossier")
-    for name in (
-        "wind-down",
-        "reconcile",
-        "worktree",
-        "reinstall",
-        "quarantine",
-        "store-repair",
-    ):
-        control = operative_sub.add_parser(name)
-        control.add_argument("--input", required=True)
-    operative_sub.add_parser("repair-check")
-    operative_sub.add_parser("service-check")
-    operative_finish = operative_sub.add_parser("finish")
-    operative_finish.add_argument("--input", required=True)
-    operative_abort = operative_sub.add_parser("abort")
-    operative_abort.add_argument("--input", required=True)
-    operative_recover = operative_sub.add_parser("recover")
-    operative_recover.add_argument("--input", required=True)
-    intake = commands.add_parser(
-        "intake", help="file one task or a complete task graph"
-    )
-    intake.add_argument("--project")
-    intake.add_argument("--title")
-    intake.add_argument("--description")
-    intake.add_argument("--input")
-    intake.add_argument("--intake-key")
-    intake.add_argument("--depends-on", action="append", default=[])
-    intake.add_argument("--context", action="append", default=[])
-    intake.add_argument(
-        "--activation", choices=("pending", "future"), default="pending"
-    )
-    for role in ("executor", "overseer"):
-        intake.add_argument(f"--{role}-model")
-        intake.add_argument(f"--{role}-reasoning-effort")
-    report = commands.add_parser(
-        "report",
-        help="file one small implementation-ready follow-up",
-        description=REPORT_DESCRIPTION,
-        epilog=REPORT_EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    report.add_argument(
-        "--input",
-        choices=("-",),
-        help="read the report JSON object from stdin",
-    )
-    report.set_defaults(_report_parser=report)
-    finish = commands.add_parser("finish", help="submit the bound action's result")
-    finish_sub = finish.add_subparsers(dest="outcome", required=True)
-    for name in ("ready_for_review", "checkpointed", "future_plan"):
-        item = finish_sub.add_parser(name)
-        item.add_argument("--evidence", required=True)
-    repair = finish_sub.add_parser("permitted_repair_complete")
-    repair.add_argument("--repair-category", required=True)
-    repair.add_argument("--repair-rationale", required=True)
-    repair.add_argument("--evidence", required=True)
-    for name in ("blocked", "exception"):
-        item = finish_sub.add_parser(name)
-        item.add_argument("--reason", required=True)
-    approved = finish_sub.add_parser("approved")
-    approved.add_argument("--input", required=True)
-    for name in (
-        "changes_requested",
-        "incomplete",
-        "decisions",
-        "report",
-        "evidence_needed",
-        "interview_answer",
-    ):
-        item = finish_sub.add_parser(name)
-        item.add_argument("--input", required=True)
-    deferred = finish_sub.add_parser("deferred")
-    deferred.add_argument("--reason", required=True)
-    deferred.add_argument("--input", required=True)
-    finish_sub.add_parser("intake_complete")
-    sage = commands.add_parser("sage", help="register or request a Sage investigation")
-    sage_sub = sage.add_subparsers(dest="sage_command", required=True)
-    sage_register = sage_sub.add_parser(
-        "register", help="adopt this task for one retained work-item investigation"
-    )
-    sage_register.add_argument("--item", required=True, type=_sage_item_id)
-    sage_register.add_argument(
-        "--description", required=True, type=_safe_sage_description
-    )
-    sage_request = sage_sub.add_parser(
-        "request", help="queue the existing one-off Sage specialist"
-    )
-    sage_request.add_argument("--project")
-    sage_request.add_argument("--scope")
-    inquisitor = commands.add_parser(
-        "inquisitor", help="request a one-off inquisitor run"
-    )
-    inquisitor.add_argument("--project")
-    inquisitor.add_argument("--scope")
-    reboot = commands.add_parser("reboot", help="replace the managed fleet")
-    reboot_modes = reboot.add_mutually_exclusive_group(required=True)
-    reboot_modes.add_argument("--soft", action="store_true")
-    reboot_modes.add_argument("--hard", action="store_true")
-    reboot_modes.add_argument("--reset", action="store_true")
+    _add_common(parser)
+    parsers: dict[tuple[str, ...], argparse.ArgumentParser] = {(): parser}
+    children: dict[
+        tuple[str, ...], argparse._SubParsersAction[argparse.ArgumentParser]
+    ] = {}
+    full_paths = {definition.path for definition in COMMANDS}
+    for definition in COMMANDS:
+        for depth, name in enumerate(definition.path, start=1):
+            path = definition.path[:depth]
+            if path in parsers:
+                continue
+            parent_path = path[:-1]
+            parent = parsers[parent_path]
+            if parent_path not in children:
+                required = not (parent_path in full_paths)
+                children[parent_path] = parent.add_subparsers(
+                    dest=f"_level_{len(parent_path)}", required=required
+                )
+            help_text = next(
+                (item.help for item in COMMANDS if item.path == path),
+                f"{name} commands",
+            )
+            child = children[parent_path].add_parser(
+                name, help=help_text, description=help_text
+            )
+            _add_common(child)
+            parsers[path] = child
+    for definition in COMMANDS:
+        command_parser = parsers[definition.path]
+        command_parser.set_defaults(_command_path=definition.path)
+        _add_command_options(command_parser, definition.path)
     return parser
 
 
-def _request(paths: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    payload.setdefault("thread_id", _thread_id())
-    response = request_sync(paths.socket, payload)
-    data = response.get("data")
-    return data if isinstance(data, dict) else {"result": data}
+INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
+    ("setup",): {
+        "brain",
+        "runtime",
+        "delivery",
+        "models",
+        "projects",
+        "knowledge",
+        "source_watch_root",
+        "timing",
+        "diagnostics",
+        "resources",
+        "policy",
+    },
+    ("config", "set"): {
+        "brain",
+        "runtime",
+        "delivery",
+        "models",
+        "projects",
+        "knowledge",
+        "source_watch_root",
+        "timing",
+        "diagnostics",
+        "resources",
+        "policy",
+    },
+    ("policy", "set"): {"automatic_capacity", "project_capacity"},
+    ("project", "add"): {
+        "id",
+        "root",
+        "codex_project_id",
+        "tollgate_repo_id",
+        "enabled",
+        "validation",
+        "source_remote",
+        "source_sync",
+    },
+    ("work", "create"): {
+        "title",
+        "outcome",
+        "acceptance",
+        "summary",
+        "tasks",
+        "dependencies",
+        "priority",
+        "size",
+        "overlap_tags",
+        "context",
+        "intake",
+        "future",
+    },
+    ("work", "update"): {
+        "title",
+        "outcome",
+        "acceptance",
+        "summary",
+        "size",
+        "overlap_tags",
+        "context",
+        "priority",
+        "intake",
+    },
+    ("work", "dependencies"): {"add", "remove"},
+    ("finish",): {
+        "summary",
+        "source_oid",
+        "checks",
+        "evidence",
+        "findings",
+        "known_defects",
+        "waived_requirements",
+        "answer",
+    },
+    ("progress",): {"category", "summary", "evidence"},
+    ("report",): {
+        "title",
+        "outcome",
+        "acceptance",
+        "summary",
+        "dependencies",
+        "context",
+        "intake",
+        "project",
+    },
+    ("marshal", "decide"): {"decision_operation", "decisions"},
+    ("human", "resolve"): {"reason_id", "answer", "scope_change"},
+    ("task", "start"): {"instructions", "cwd", "purpose", "role", "associated_beads"},
+    ("task", "send"): {"input"},
+    ("task", "respond"): {"response"},
+    ("recover", "repair"): {"actions"},
+    ("plan", "draft"): {"text", "tasks", "summary", "publication", "validation"},
+    ("plan", "review", "finish"): {"review_operation", "findings", "summary"},
+    ("plan", "approve"): {"reason", "resolutions", "waivers"},
+    ("plan", "publish"): {
+        "approval_operation",
+        "approved_by",
+        "approval_evidence",
+        "tasks",
+        "publication",
+    },
+    ("plan", "refine"): {
+        "approval_operation",
+        "tasks",
+        "publication",
+        "dispositions",
+        "cosmetic_changes",
+    },
+    ("memory", "set"): {"id", "scope", "title", "text", "references"},
+    ("rates", "add"): {
+        "model",
+        "currency",
+        "effective_at",
+        "retrieved_at",
+        "source",
+        "prices",
+    },
+    ("fixture", "create"): {
+        "root",
+        "runtime",
+        "delivery",
+        "model",
+        "effort",
+        "capacity",
+        "source_sync",
+    },
+    ("fixture", "barrier", "prepare"): {"participants"},
+    ("scenario", "emit"): {"provider", "event", "facts"},
+    ("scenario", "advance"): {"seconds"},
+    ("scenario", "fault"): {"provider", "method", "occurrence", "applied", "outcome"},
+}
 
 
-def _intake_payload(args: argparse.Namespace) -> dict[str, Any]:
-    if args.input:
-        value = (
-            json.load(sys.stdin)
-            if args.input == "-"
-            else json.loads(Path(args.input).read_text(encoding="utf-8"))
-        )
-        if not isinstance(value, dict):
-            raise ValueError("intake input must contain an object")
-        return value
-    if not args.title or not args.description:
-        raise ValueError("single-task intake requires --title and --description")
-    result: dict[str, Any] = {
-        "project": args.project,
-        "title": args.title,
-        "description": args.description,
-        "activation": args.activation,
-        "depends_on": args.depends_on,
-        "context": args.context,
-    }
-    for name in (
-        "executor_model",
-        "executor_reasoning_effort",
-        "overseer_model",
-        "overseer_reasoning_effort",
-    ):
-        value = getattr(args, name)
-        if value:
-            result[name] = value
-    return result
+DIRECT_INPUTS: dict[tuple[str, ...], dict[str, str]] = {
+    ("enter",): {"description": "description", "bead": "bead"},
+    ("finish",): {"outcome": "outcome", "bead": "bead"},
+    ("progress",): {
+        "category": "category",
+        "summary": "summary",
+        "evidence": "evidence",
+        "bead": "bead",
+    },
+}
 
 
-def _file_identity(value: os.stat_result) -> dict[str, int]:
-    return {
-        "device": value.st_dev,
-        "inode": value.st_ino,
-        "size": value.st_size,
-        "mtime_ns": value.st_mtime_ns,
-        "ctime_ns": value.st_ctime_ns,
-    }
-
-
-def _finish_options(args: argparse.Namespace, paths: RuntimePaths) -> dict[str, Any]:
-    """Snapshot structured finish input before contacting the controller."""
-
-    options = {
-        key: value
-        for key, value in vars(args).items()
-        if key not in {"command", "outcome", "brain_root", "state_root"}
-        and value is not None
-    }
-    input_path = options.get("input")
-    if input_path is None:
-        return options
-    supplied = Path(str(input_path))
-    if not supplied.is_absolute():
-        raise ValueError("structured finish --input must be an absolute path")
-    path = supplied.resolve(strict=False)
-    handoff_root = paths.handoff_root.resolve(strict=False)
-    if not path.is_relative_to(handoff_root):
-        raise ValueError(f"structured finish --input must be beneath {handoff_root}")
+def _read_input(path: str | None) -> dict[str, Any]:
+    if path is None:
+        return {}
     try:
-        path_status = supplied.lstat()
-    except FileNotFoundError:
-        options.pop("input", None)
-        options["input_path"] = str(path)
-        options["input_missing"] = True
-        return options
+        if path == "-":
+            raw = sys.stdin.buffer.read(MAX_MESSAGE_BYTES + 1)
+        else:
+            with Path(path).open("rb") as handle:
+                raw = handle.read(MAX_MESSAGE_BYTES + 1)
     except OSError as error:
-        raise ValueError(
-            f"cannot inspect structured finish input {path}: {error}"
+        raise FulcrumError.invalid(
+            "INPUT_UNREADABLE", f"cannot read input: {error}"
         ) from error
-    if stat.S_ISLNK(path_status.st_mode):
-        raise ValueError(f"structured finish --input must not be a symlink: {path}")
-    if not stat.S_ISREG(path_status.st_mode):
-        raise ValueError(f"structured finish --input must be a regular file: {path}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(supplied, flags)
-        with os.fdopen(descriptor, "rb") as handle:
-            before = os.fstat(handle.fileno())
-            raw = handle.read()
-            after = os.fstat(handle.fileno())
-        if _file_identity(before) != _file_identity(after):
-            raise ValueError(
-                f"structured finish input changed while being read: {path}"
-            )
-        payload = json.loads(raw.decode("utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read valid JSON from {path}: {error}") from error
-    except UnicodeDecodeError as error:
-        raise ValueError(f"cannot read UTF-8 JSON from {path}: {error}") from error
-    if not isinstance(payload, dict):
-        raise ValueError(f"{path} must contain a JSON object")
-    options["input"] = payload
-    options["input_path"] = str(path)
-    options["input_identity"] = _file_identity(after)
-    return options
-
-
-def _report_payload(args: argparse.Namespace) -> dict[str, Any]:
-    value = json.load(sys.stdin)
-    if not isinstance(value, dict):
-        raise ValueError("report input must contain a JSON object")
-    return value
-
-
-def _operative_control_input(path_value: str) -> tuple[dict[str, Any], str]:
-    supplied = Path(path_value)
-    if not supplied.is_absolute():
-        raise ValueError("operative --input must be an absolute path")
-    status = supplied.lstat()
-    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
-        raise ValueError("operative --input must be a regular non-symlink file")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(supplied, flags)
-    with os.fdopen(descriptor, "rb") as handle:
-        before = os.fstat(handle.fileno())
-        raw = handle.read(1_000_001)
-        after = os.fstat(handle.fileno())
-    if _file_identity(before) != _file_identity(after):
-        raise ValueError("operative --input changed while being read")
-    if len(raw) > 1_000_000:
-        raise ValueError("operative --input exceeds the retained artifact bound")
+    if len(raw) > MAX_MESSAGE_BYTES:
+        raise FulcrumError.invalid(
+            "INPUT_TOO_LARGE",
+            "input exceeds the 4 MiB limit",
+            details={"limit": MAX_MESSAGE_BYTES},
+        )
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError(
-            f"operative --input must contain UTF-8 JSON: {error}"
+        raise FulcrumError.invalid(
+            "INVALID_JSON", f"input is not valid UTF-8 JSON: {error}"
         ) from error
     if not isinstance(value, dict):
-        raise ValueError("operative --input must contain a JSON object")
-    return value, str(supplied.resolve(strict=True))
+        raise FulcrumError.invalid("INVALID_INPUT", "input must be a JSON object")
+    return value
 
 
-def _recovery_request(
-    paths: RuntimePaths, command: str, input_path: str | None
-) -> dict[str, Any]:
-    launcher = paths.recovery_launcher
-    if not os.access(launcher, os.X_OK):
-        raise RuntimeError(
-            f"controller request failed and recovery launcher is unavailable: {launcher}"
+def _payload(namespace: argparse.Namespace, command: tuple[str, ...]) -> dict[str, Any]:
+    values = vars(namespace)
+    supplied = _read_input(values.get("input"))
+    direct: dict[str, Any] = {}
+    for destination, field in DIRECT_INPUTS.get(command, {}).items():
+        if destination in values:
+            direct[field] = values[destination]
+    duplicates = sorted(set(supplied).intersection(direct))
+    if duplicates:
+        raise FulcrumError.invalid(
+            "DUPLICATE_INPUT",
+            "fields were supplied both directly and through --input",
+            details={"fields": duplicates},
         )
-    arguments = [str(launcher), command]
-    if input_path is not None:
-        arguments.extend(["--input", input_path])
-    completed = subprocess.run(
-        arguments, capture_output=True, text=True, check=False, timeout=300
+    merged = {**supplied, **direct}
+    allowed = INPUT_FIELDS.get(command, set()).union(
+        DIRECT_INPUTS.get(command, {}).values()
     )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
-        raise RuntimeError(f"recovery launcher failed: {detail}")
+    unknown = sorted(set(merged).difference(allowed))
+    if unknown:
+        raise FulcrumError.invalid(
+            "UNKNOWN_FIELDS",
+            "input contains unknown fields",
+            details={"fields": unknown},
+        )
+    return merged
+
+
+def _request_id(value: str | None, mutation: bool) -> str | None:
+    if value is None:
+        if not mutation:
+            return None
+        generated = str(uuid.uuid4())
+        print(f"request_id={generated}", file=sys.stderr)
+        return generated
     try:
-        result = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise RuntimeError("recovery launcher returned invalid JSON") from error
-    if not isinstance(result, dict):
-        raise RuntimeError("recovery launcher returned a non-object result")
-    return result
+        parsed = uuid.UUID(value)
+    except ValueError as error:
+        raise FulcrumError.invalid(
+            "INVALID_REQUEST_ID", "request ID must be a UUID"
+        ) from error
+    return str(parsed)
+
+
+def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
+    values = vars(namespace)
+    command = tuple(values["_command_path"])
+    mutation = command not in READ_ONLY_COMMANDS and command != ("serve",)
+    timeout = float(values.get("timeout", 30.0))
+    if timeout <= 0:
+        raise FulcrumError.invalid("INVALID_TIMEOUT", "timeout must be positive")
+    allow_broken = command in BROKEN_CONFIG_COMMANDS
+    instance = resolve_instance(
+        instance=values.get("instance"),
+        config=values.get("config"),
+        allow_broken_config=allow_broken,
+    )
+    environment_task = os.environ.get("CODEX_THREAD_ID")
+    thread_id = values.get("thread_id") or environment_task
+    actor_text = values.get("actor") or (f"task:{thread_id}" if thread_id else "human")
+    actor = ActorContext.parse(actor_text)
+    common = {
+        "_command_path",
+        "instance",
+        "config",
+        "json",
+        "input",
+        "project",
+        "thread_id",
+        "actor",
+        "request_id",
+        "wait",
+        "timeout",
+        "offline",
+        "model",
+        "effort",
+        "ownership_operation",
+    }
+    arguments = {
+        key: value
+        for key, value in values.items()
+        if key not in common
+        and not key.startswith("_level_")
+        and key not in DIRECT_INPUTS.get(command, {})
+    }
+    if "model" in values:
+        arguments["model"] = values["model"]
+    if "effort" in values:
+        arguments["effort"] = values["effort"]
+    return ParsedRequest(
+        command=command,
+        arguments=arguments,
+        input=_payload(namespace, command),
+        actor=actor,
+        instance=instance,
+        request_id=_request_id(values.get("request_id"), mutation),
+        project=values.get("project"),
+        thread_id=thread_id,
+        ownership_operation=values.get("ownership_operation"),
+        wait=bool(values.get("wait", False)),
+        timeout=timeout,
+        offline=bool(values.get("offline", False)),
+    )
+
+
+def _serve(request: ParsedRequest) -> CommandResult:
+    if request.instance.lock_path is None:
+        raise FulcrumError(
+            "CONFIG_INVALID", "a brain root is required to serve", exit_code=4
+        )
+    application = default_application()
+    with WriterLock(request.instance.lock_path):
+        server = IpcServer(
+            request.instance.socket_path,
+            application.dispatch,
+            once=bool(request.arguments.get("once", False)),
+        )
+        asyncio.run(server.run())
+    return CommandResult.query({"stopped": True})
+
+
+def _execute(request: ParsedRequest) -> dict[str, Any]:
+    if request.command == ("serve",):
+        return _serve(request).to_dict()
+    application = default_application()
+    is_read = request.command in READ_ONLY_COMMANDS
+    if request.offline or is_read:
+        if is_read:
+            try:
+                return request_sync(
+                    request.instance.socket_path,
+                    request.to_wire(),
+                    timeout=request.timeout,
+                )
+            except ControllerUnavailable:
+                return application.dispatch(request).to_dict()
+        if request.instance.lock_path is None:
+            raise FulcrumError(
+                "CONFIG_INVALID",
+                "offline mutation requires a valid brain root",
+                exit_code=4,
+            )
+        with WriterLock(request.instance.lock_path):
+            return application.dispatch(request).to_dict()
+    try:
+        return request_sync(
+            request.instance.socket_path, request.to_wire(), timeout=request.timeout
+        )
+    except ControllerUnavailable as error:
+        raise FulcrumError(
+            "CONTROLLER_UNAVAILABLE",
+            str(error),
+            exit_code=4,
+            retryable=True,
+            request_id=request.request_id,
+            next_command=(
+                "fulcrum",
+                *request.command,
+                "--offline",
+                "--request-id",
+                str(request.request_id),
+            ),
+        ) from error
+
+
+def _exit_code(result: dict[str, Any]) -> int:
+    if result.get("ok"):
+        return 0
+    error = result.get("error") or {}
+    code = error.get("code")
+    if code == "WAIT_TIMEOUT":
+        return 3
+    if code in {
+        "OWNERSHIP_CONFLICT",
+        "STALE_DECISION",
+        "REQUEST_CONFLICT",
+        "FINISH_SEALED",
+        "STALE_REVIEW",
+        "APPROVAL_CONFLICT",
+        "ACTIVATION_NOT_AUTHORIZED",
+    }:
+        return 5
+    if result.get("state") == "degraded":
+        return 6
+    if result.get("state") == "uncertain" or code in {
+        "CONTROLLER_UNAVAILABLE",
+        "WRITER_BUSY",
+        "CAPABILITY_UNAVAILABLE",
+        "CONFIG_NOT_FOUND",
+        "CONFIG_INVALID",
+        "DEPENDENCY_UNAVAILABLE",
+    }:
+        return 4
+    return 2
+
+
+def _emit(result: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(result, separators=(",", ":"), ensure_ascii=False))
+        return
+    if result.get("ok"):
+        print(result.get("state", "completed"))
+        if result.get("result") is not None:
+            print(json.dumps(result["result"], indent=2, ensure_ascii=False))
+    else:
+        error = result.get("error") or {}
+        print(
+            f"{error.get('code', 'ERROR')}: {error.get('message', 'command failed')}",
+            file=sys.stderr,
+        )
+        if error.get("next_command"):
+            print("next: " + " ".join(error["next_command"]), file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "report" and args.input is None:
-        print(args._report_parser.format_help(), end="")
-        return 0
-    paths = resolve_paths(
-        brain_override=args.brain_root, state_override=args.state_root
-    )
+    namespace: argparse.Namespace | None = None
     try:
-        if args.command == "serve":
-            config = load_installation(paths.config_file)
-            asyncio.run(run_controller(paths, config))
-            return 0
-        if args.command == "setup":
-            require_setup_unfenced(paths)
-            result = run_setup(
-                paths,
-                input_path=Path(args.config) if args.config else None,
-                non_interactive=args.non_interactive,
-            )
-        elif args.command == "doctor":
-            result = doctor(paths)
-        elif args.command == "status" and not paths.socket.exists():
-            with Store(paths.database, readonly=True) as store:
-                result = store.status(event_limit=args.events)
-            try:
-                journal = read_journal(paths.operative_journal)
-                result["operative_journal_state"] = (
-                    journal.get("state") if journal is not None else None
-                )
-                if journal is None and result.get("operative_takeover") is not None:
-                    result["operative_journal_error"] = (
-                        "unfinished SQLite takeover has no authoritative journal"
-                    )
-            except Exception as error:
-                result["operative_journal_state"] = None
-                result["operative_journal_error"] = str(error)
-            result["stale"] = True
-            result = _status_view(result, args)
-        elif args.command == "status":
-            result = _request(
-                paths,
-                {
-                    "command": "status",
-                    "events": args.events,
-                    "view": (
-                        "queue"
-                        if args.queue
-                        else "capabilities" if args.capabilities else "full"
-                    ),
-                    "run": args.run,
-                },
-            )
-        elif args.command == "usage":
-            query = {
-                "command": "usage",
-                "action_id": args.action,
-                "task_id": args.task,
-                "assignment_id": args.assignment,
-                "run_id": args.run,
-                "role": args.role,
-                "project_id": args.project,
-                "group_by": args.group_by,
-            }
-            if paths.socket.exists():
-                result = _request(paths, query)
-            else:
-                with Store(paths.database, readonly=True) as store:
-                    result = store.usage_report(
-                        action_id=args.action,
-                        task_id=args.task,
-                        assignment_id=args.assignment,
-                        run_id=args.run,
-                        role=args.role,
-                        project_id=args.project,
-                        group_by=args.group_by,
-                    )
-        elif args.command == "cost":
-            query = {
-                "command": "cost",
-                "action_id": args.action,
-                "task_id": args.task,
-                "assignment_id": args.assignment,
-                "run_id": args.run,
-                "role": args.role,
-                "project_id": args.project,
-                "workflow_id": args.workflow,
-                "group_by": args.group_by,
-            }
-            if paths.socket.exists():
-                result = _request(paths, query)
-            else:
-                with Store(paths.database, readonly=True) as store:
-                    result = store.cost_report(
-                        action_id=args.action,
-                        task_id=args.task,
-                        assignment_id=args.assignment,
-                        run_id=args.run,
-                        role=args.role,
-                        project_id=args.project,
-                        workflow_id=args.workflow,
-                        group_by=args.group_by,
-                    )
-        elif args.command == "context":
-            result = _request(paths, {"command": "context"})
-        elif args.command == "archon":
-            result = _request(paths, {"command": "archon"})
-        elif args.command == "resolve-operation":
-            decision: dict[str, Any] = {
-                "operation_id": args.operation_id,
-                "resolution": args.resolution,
-                "evidence": args.evidence,
-            }
-            if args.native_id:
-                decision["native_id"] = args.native_id
-            if args.result:
-                observed_result = json.loads(
-                    Path(args.result).read_text(encoding="utf-8")
-                )
-                if not isinstance(observed_result, dict):
-                    raise ValueError("--result must contain a JSON object")
-                decision["result"] = observed_result
-            result = _request(
-                paths, {"command": "resolve_operation", "decision": decision}
-            )
-        elif args.command == "weaver":
-            result = _request(
-                paths,
-                {
-                    "command": "weaver_register",
-                    "project": args.project,
-                    "description": args.description,
-                    "model": args.model,
-                    "effort": args.effort,
-                    "writable": not args.plan_mode,
-                },
-            )
-        elif args.command == "operative":
-            command = args.operative_command
-            wire_command = command.replace("-", "_")
-            payload: dict[str, Any] = {"command": f"operative_{wire_command}"}
-            input_path: str | None = None
-            if hasattr(args, "input"):
-                supplied, input_path = _operative_control_input(args.input)
-                payload["input"] = supplied
-                payload["input_path"] = input_path
-                if command in {"register", "finish", "abort", "recover"}:
-                    payload.update(supplied)
-            try:
-                if command in {"probe", "quarantine", "store-repair"}:
-                    raise ControllerUnavailable(
-                        "direct recovery control requires the controller fence"
-                    )
-                result = _request(paths, payload)
-            except ControllerUnavailable:
-                result = _recovery_request(paths, command, input_path)
-        elif args.command == "intake":
-            payload = _intake_payload(args)
-            if "tasks" in payload:
-                result = _request(
-                    paths,
-                    {
-                        "command": "intake_graph",
-                        "graph": payload,
-                        "intake_key": args.intake_key,
-                    },
-                )
-            else:
-                result = _request(
-                    paths,
-                    {
-                        "command": "intake",
-                        "task": payload,
-                        "intake_key": args.intake_key,
-                    },
-                )
-        elif args.command == "report":
-            result = _request(
-                paths,
-                {"command": "report", "report": _report_payload(args)},
-            )
-        elif args.command == "finish":
-            options = _finish_options(args, paths)
-            result = _request(
-                paths,
-                {"command": "finish", "outcome": args.outcome, "options": options},
-            )
-        elif args.command == "sage" and args.sage_command == "register":
-            result = _request(
-                paths,
-                {
-                    "command": "sage_register",
-                    "item": args.item,
-                    "description": args.description,
-                },
-            )
-        elif args.command == "inquisitor" or (
-            args.command == "sage" and args.sage_command == "request"
-        ):
-            kind = args.command
-            scope = {
-                "global": args.project is None,
-                "projects": [args.project] if args.project else [],
-            }
-            result = _request(
-                paths,
-                {
-                    "command": "specialist",
-                    "kind": kind,
-                    "scope": json.dumps(scope),
-                    "prompt": args.scope,
-                },
-            )
-        elif args.command == "reboot":
-            mode = "soft" if args.soft else "hard" if args.hard else "reset"
-            result = _request(paths, {"command": "reboot", "mode": mode})
-        else:
-            parser.error("unsupported command")
-            return 2
-        print(json.dumps(result, indent=2, sort_keys=True))
-        if args.command == "finish" and result.get("ok") is True:
-            print(FINISH_REPORT_HINT)
-        if args.command == "reboot" and result.get("complete") is True:
-            return 0
-        return 0 if result.get("ready", result.get("ok", True)) else 2
-    except Exception as error:
-        print(f"fulcrum: {error}", file=sys.stderr)
-        return 2
-
-
-def _status_view(result: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    if args.queue:
-        return {
-            "dispatch_enabled": result.get("dispatch_enabled"),
-            "operative_takeover": result.get("operative_takeover"),
-            "operative_journal_state": result.get("operative_journal_state"),
-            "resource_admission_condition": result.get("resource_admission_condition"),
-            "assignments": result.get("assignments", []),
-            "pending_updates": result.get("pending_updates", []),
-            "holds": result.get("holds", []),
-        }
-    if args.capabilities:
-        return {
-            "controller_state": result.get("controller_state"),
-            "dispatch_enabled": result.get("dispatch_enabled"),
-            "operative_takeover": result.get("operative_takeover"),
-            "operative_journal_state": result.get("operative_journal_state"),
-            "app_server_resources": result.get("app_server_resources"),
-            "resource_admission_condition": result.get("resource_admission_condition"),
-            "projects": result.get("projects", []),
-            "slot_usage": result.get("slot_usage", {}),
-            "policies": result.get("policies", []),
-        }
-    if args.run is not None:
-        result["runs"] = [
-            row for row in result.get("runs", []) if row.get("id") == args.run
-        ]
-        result["assignments"] = [
-            row
-            for row in result.get("assignments", [])
-            if row.get("run_id") == args.run
-        ]
-    return result
+        namespace = parser.parse_args(argv)
+        request = _build_request(namespace)
+        result = _execute(request)
+        _emit(result, json_output=bool(getattr(namespace, "json", False)))
+        return _exit_code(result)
+    except FulcrumError as error:
+        result = error.to_result().to_dict()
+        json_output = (
+            bool(getattr(namespace, "json", False))
+            if namespace
+            else ("--json" in (argv or sys.argv[1:]))
+        )
+        _emit(result, json_output=json_output)
+        return error.exit_code
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":
