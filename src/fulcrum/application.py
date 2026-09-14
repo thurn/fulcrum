@@ -16,6 +16,7 @@ from fulcrum.ledger import (
     OperationService,
     operation_view,
 )
+from fulcrum.work import WorkService, work_view
 
 Handler = Callable[[ParsedRequest], CommandResult]
 
@@ -38,6 +39,19 @@ class Application:
         self.register(("project", "enable"), projects.enable)
         self.register(("project", "disable"), projects.disable)
         self.register(("project", "remove"), projects.remove)
+        work = WorkService()
+        self.register(("work", "create"), work.create)
+        self.register(("work", "show"), work.show)
+        self.register(("work", "list"), work.list)
+        self.register(("work", "children"), work.children)
+        self.register(("work", "adopt"), work.adopt)
+        self.register(("work", "update"), work.update)
+        self.register(("work", "dependencies"), work.dependencies)
+        self.register(("work", "close"), work.close)
+        self.register(("work", "reopen"), work.reopen)
+        self.register(("progress",), work.progress)
+        self.register(("report",), work.report)
+        self.register(("context",), work.context)
         self.register(("operation", "show"), self._operation_show)
         self.register(("operation", "list"), self._operation_list)
         self.register(("operation", "wait"), self._operation_wait)
@@ -82,6 +96,7 @@ class Application:
 
     def _status(self, request: ParsedRequest) -> CommandResult:
         operations: list[dict[str, Any]] = []
+        work: list[dict[str, Any]] = []
         gaps: list[dict[str, Any]] = []
         try:
             service = self._operations(request)
@@ -89,13 +104,19 @@ class Application:
                 operation_view(OperationRecord.from_record(item))
                 for item in service.ledger.list_records(kind="operation", limit=20)
             ]
+            work = [
+                work_view(service.ledger, item)
+                for item in service.ledger.list_records(limit=20)
+                if item.kind
+                not in {"control", "task", "memory", "analytics", "operation"}
+            ]
         except (FulcrumError, LedgerFailure) as error:
             gaps.append({"component": "ledger", "reason": str(error)})
         return CommandResult.query(
             {
                 "observed_at": datetime.now(timezone.utc).isoformat(),
                 "instance": request.instance.to_dict(),
-                "work": [],
+                "work": work,
                 "operations": operations,
                 "capacity": None,
                 "publication": None,

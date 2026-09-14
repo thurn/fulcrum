@@ -58,8 +58,7 @@ class Fulcrum2SpineTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 4)
         envelope = json.loads(result.stdout)
-        self.assertEqual(envelope["error"]["code"], "CAPABILITY_UNAVAILABLE")
-        self.assertEqual(envelope["error"]["details"]["command"], ["work", "show"])
+        self.assertEqual(envelope["error"]["code"], "LEDGER_UNAVAILABLE")
 
     def test_input_errors_are_clean_envelopes_and_name_fields(self) -> None:
         malformed = self.invoke(
@@ -130,7 +129,14 @@ class Fulcrum2SpineTest(unittest.TestCase):
         self.assertEqual(restored.request_id, request_id)
 
         generated = self.invoke(
-            "work", "create", "--instance", str(self.instance), "--offline", "--json"
+            "enter",
+            "weaver",
+            "--description",
+            "Generate a request identity",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--json",
         )
         self.assertEqual(generated.returncode, 4)
         emitted = generated.stderr.strip().removeprefix("request_id=")

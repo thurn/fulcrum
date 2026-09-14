@@ -295,6 +295,10 @@ class Ledger:
         issue_type: str = "chore",
         status: str = "open",
         priority: int = 2,
+        acceptance: str | None = None,
+        labels: Sequence[str] = (),
+        parent: str | None = None,
+        external_ref: str | None = None,
     ) -> LedgerRecord:
         if fc.get("kind") != kind:
             raise ValueError("record kind and metadata.fc.kind must agree")
@@ -313,10 +317,14 @@ class Ledger:
             "--assignee",
             owner,
             "--labels",
-            f"fc:{kind}",
+            ",".join((f"fc:{kind}", *labels)),
             "--metadata",
             json.dumps({"fc": dict(fc)}, separators=(",", ":")),
         ]
+        if acceptance is not None:
+            arguments.extend(("--acceptance", acceptance))
+        if external_ref is not None:
+            arguments.extend(("--external-ref", external_ref))
         if status != "open":
             arguments.extend(("--status", status))
         try:
@@ -336,8 +344,9 @@ class Ledger:
                     exit_code=5,
                     details={"id": record_id},
                 ) from error
-            return existing
-        created = self.show(record_id)
+            created = existing
+        else:
+            created = self.show(record_id)
         if created is None:
             raise LedgerFailure(
                 f"created record {record_id} could not be observed",
@@ -345,7 +354,38 @@ class Ledger:
                 retryable=True,
                 uncertain=True,
             )
+        if parent is not None:
+            created = self.set_parent(record_id, parent)
         return created
+
+    def set_parent(self, record_id: str, parent: str) -> LedgerRecord:
+        if any(item.id == record_id for item in self.children(parent)):
+            existing = self.show(record_id)
+            if existing is not None:
+                return existing
+        try:
+            self.run(("update", record_id, "--parent", parent), mutating=True)
+        except LedgerFailure as error:
+            if not error.uncertain or not any(
+                item.id == record_id for item in self.children(parent)
+            ):
+                raise
+        if not any(item.id == record_id for item in self.children(parent)):
+            raise LedgerFailure(
+                f"parent assignment for {record_id} could not be verified",
+                category="uncertain",
+                retryable=True,
+                uncertain=True,
+            )
+        observed = self.show(record_id)
+        if observed is None:
+            raise LedgerFailure(
+                f"parent assignment for {record_id} could not be observed",
+                category="uncertain",
+                retryable=True,
+                uncertain=True,
+            )
+        return observed
 
     def update_fc(
         self,
@@ -356,6 +396,8 @@ class Ledger:
         status: str | None = None,
         title: str | None = None,
         priority: int | None = None,
+        description: str | None = None,
+        acceptance: str | None = None,
     ) -> LedgerRecord:
         with self._lock_for(record_id):
             existing = self.show(record_id)
@@ -374,6 +416,8 @@ class Ledger:
                 ("--status", status),
                 ("--title", title),
                 ("--priority", priority),
+                ("--description", description),
+                ("--acceptance", acceptance),
             ):
                 if value is not None:
                     arguments.extend((flag, str(value)))
@@ -387,6 +431,45 @@ class Ledger:
                     uncertain=True,
                 )
             return observed
+
+    def add_labels(self, record_id: str, labels: Sequence[str]) -> LedgerRecord:
+        if labels:
+            self.run(
+                ("update", record_id, "--add-label", ",".join(labels)),
+                mutating=True,
+            )
+        observed = self.show(record_id)
+        if observed is None or any(label not in observed.labels for label in labels):
+            raise LedgerFailure(
+                f"label update for {record_id} could not be verified",
+                category="uncertain",
+                retryable=True,
+                uncertain=True,
+            )
+        return observed
+
+    def dependencies(self, record_id: str) -> list[str]:
+        value = self.run(("dep", "list", record_id)).value
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            identifier = (
+                item.get("id") or item.get("depends_on_id") or item.get("dependency_id")
+            )
+            if isinstance(identifier, str):
+                result.append(identifier)
+        return result
+
+    def children(self, record_id: str) -> list[LedgerRecord]:
+        value = self.run(("children", record_id)).value
+        return (
+            [LedgerRecord.from_native(item) for item in value if isinstance(item, dict)]
+            if isinstance(value, list)
+            else []
+        )
 
     def create_operation(
         self,

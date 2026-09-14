@@ -324,12 +324,34 @@ def _add_command_options(
         parser.add_argument("role", choices=ROLES)
         _option(parser, "--description")
         _option(parser, "--bead")
+    elif path == ("context",):
+        group = parser.add_mutually_exclusive_group()
+        group.add_argument("--bead", default=argparse.SUPPRESS)
+        group.add_argument("--role", choices=ROLES, default=argparse.SUPPRESS)
+    elif path == ("work", "list"):
+        _option(parser, "--role", choices=ROLES)
+        _option(parser, "--owner")
+        _option(parser, "--phase")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+    elif path == ("work", "adopt"):
+        _option(parser, "--role", choices=ROLES, required=True)
+    elif path == ("work", "transfer"):
+        _option(parser, "--to-thread", required=True)
+        _option(parser, "--role", choices=ROLES, required=True)
+        _option(parser, "--reason", required=True)
+    elif path == ("work", "close"):
+        _option(parser, "--outcome", required=True)
+        _option(parser, "--summary", required=True)
+    elif path == ("work", "reopen"):
+        _option(parser, "--reason", required=True)
+        _option(parser, "--role", choices=ROLES)
     elif path in {("finish",), ("progress",), ("report",)}:
         _option(parser, "--bead")
         if path == ("finish",):
             _option(parser, "--outcome")
         if path == ("progress",):
-            _option(parser, "--category")
+            _option(parser, "--kind")
             _option(parser, "--summary")
             _option(parser, "--evidence", action="append")
     elif path[:1] == ("marshal",) and path[-1] in {"brief", "request"}:
@@ -527,16 +549,18 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     ("work", "create"): {
         "title",
         "outcome",
+        "project",
         "acceptance",
+        "requested_role",
         "summary",
-        "tasks",
         "dependencies",
         "priority",
         "size",
         "overlap_tags",
         "context",
         "intake",
-        "future",
+        "models",
+        "children",
     },
     ("work", "update"): {
         "title",
@@ -548,8 +572,14 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "context",
         "priority",
         "intake",
+        "models",
     },
     ("work", "dependencies"): {"add", "remove"},
+    ("work", "close"): {
+        "waived_requirements",
+        "known_defects",
+        "canonical_bead",
+    },
     ("finish",): {
         "summary",
         "source_oid",
@@ -560,16 +590,17 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "waived_requirements",
         "answer",
     },
-    ("progress",): {"category", "summary", "evidence"},
+    ("progress",): {"kind", "summary", "evidence", "bead"},
     ("report",): {
         "title",
-        "outcome",
-        "acceptance",
-        "summary",
-        "dependencies",
+        "problem",
+        "observed_evidence",
+        "required_change",
+        "acceptance_checks",
+        "project",
+        "discovered_from",
         "context",
         "intake",
-        "project",
     },
     ("marshal", "decide"): {"decision_operation", "decisions"},
     ("human", "resolve"): {"reason_id", "answer", "scope_change"},
@@ -623,7 +654,7 @@ DIRECT_INPUTS: dict[tuple[str, ...], dict[str, str]] = {
     ("enter",): {"description": "description", "bead": "bead"},
     ("finish",): {"outcome": "outcome", "bead": "bead"},
     ("progress",): {
-        "category": "category",
+        "kind": "kind",
         "summary": "summary",
         "evidence": "evidence",
         "bead": "bead",
