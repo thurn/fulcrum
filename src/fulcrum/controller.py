@@ -8094,12 +8094,7 @@ class Controller:
                WHERE bead.bead_id = ? ORDER BY boundary.workflow_id""",
             (item_id,),
         )
-        if not workflows:
-            raise StoreError(
-                f"Sage target {item_id!r} has no retained causal workflow; "
-                "the Bead must be linked from its Weaver intake before investigation"
-            )
-        if len(workflows) != 1:
+        if len(workflows) > 1:
             identities = ", ".join(str(row["workflow_id"]) for row in workflows)
             raise StoreError(
                 f"Sage target {item_id!r} is ambiguous across retained causal "
@@ -8146,27 +8141,39 @@ class Controller:
             pair[role] = task
         return {
             "bead": bead,
-            "workflow": workflows[0],
+            "workflow": workflows[0] if workflows else None,
             "assignment": assignment,
             **pair,
         }
 
     def _direct_sage_evidence(self, target: dict[str, Any]) -> dict[str, Any]:
-        """Freeze a bounded snapshot selected only by retained causal joins."""
+        """Freeze a bounded snapshot selected by exact retained task relations."""
 
         item_id = str(target["bead"]["bead_id"])
-        workflow_id = str(target["workflow"]["workflow_id"])
-        action_rows = self.store.rows(
-            """SELECT action.*, task.role, task.title, task.native_thread_id,
-                      task.role_number, task.project_id, task.model,
-                      task.reasoning_effort, causal.causal_role,
-                      causal.include_cost, causal.exclusion_reason
-               FROM workflow_cost_actions causal
-               JOIN actions action ON action.id = causal.action_id
-               JOIN tasks task ON task.id = action.task_id
-               WHERE causal.workflow_id = ? ORDER BY action.id LIMIT 201""",
-            (workflow_id,),
-        )
+        workflow = target.get("workflow")
+        workflow_id = str(workflow["workflow_id"]) if workflow is not None else None
+        if workflow_id is not None:
+            action_rows = self.store.rows(
+                """SELECT action.*, task.role, task.title, task.native_thread_id,
+                          task.role_number, task.project_id, task.model,
+                          task.reasoning_effort, causal.causal_role,
+                          causal.include_cost, causal.exclusion_reason
+                   FROM workflow_cost_actions causal
+                   JOIN actions action ON action.id = causal.action_id
+                   JOIN tasks task ON task.id = action.task_id
+                   WHERE causal.workflow_id = ? ORDER BY action.id LIMIT 201""",
+                (workflow_id,),
+            )
+        else:
+            action_rows = self.store.rows(
+                """SELECT action.*, task.role, task.title, task.native_thread_id,
+                          task.role_number, task.project_id, task.model,
+                          task.reasoning_effort, task.role AS causal_role,
+                          1 AS include_cost, NULL AS exclusion_reason
+                   FROM actions action JOIN tasks task ON task.id = action.task_id
+                   WHERE action.assignment_id = ? ORDER BY action.id LIMIT 201""",
+                (target["assignment"]["id"],),
+            )
         selected_actions = action_rows[:200]
         action_ids = [int(row["id"]) for row in selected_actions]
         action_records: list[dict[str, Any]] = []
@@ -8242,21 +8249,25 @@ class Controller:
             for turn in report["turns"]:
                 all_turns[(turn["native_thread_id"], turn["native_turn_id"])] = turn
 
-        workflow_beads = self.store.rows(
-            """SELECT bead.bead_id, bead.intake_key, bead.title, bead.project_id,
-                      bead.activation, bead.publication_state
-               FROM workflow_cost_beads causal JOIN beads bead
-                 ON bead.bead_id = causal.bead_id
-               WHERE causal.workflow_id = ? ORDER BY bead.bead_id LIMIT 101""",
-            (workflow_id,),
-        )
-        assignment_rows = self.store.rows(
-            """SELECT assignment.*, run.project_id, run.state AS run_state
-               FROM assignments assignment JOIN runs run ON run.id = assignment.run_id
-               JOIN workflow_cost_beads causal ON causal.bead_id = assignment.bead_id
-               WHERE causal.workflow_id = ? ORDER BY assignment.id LIMIT 101""",
-            (workflow_id,),
-        )
+        if workflow_id is not None:
+            workflow_beads = self.store.rows(
+                """SELECT bead.bead_id, bead.intake_key, bead.title, bead.project_id,
+                          bead.activation, bead.publication_state
+                   FROM workflow_cost_beads causal JOIN beads bead
+                     ON bead.bead_id = causal.bead_id
+                   WHERE causal.workflow_id = ? ORDER BY bead.bead_id LIMIT 101""",
+                (workflow_id,),
+            )
+            assignment_rows = self.store.rows(
+                """SELECT assignment.*, run.project_id, run.state AS run_state
+                   FROM assignments assignment JOIN runs run ON run.id = assignment.run_id
+                   JOIN workflow_cost_beads causal ON causal.bead_id = assignment.bead_id
+                   WHERE causal.workflow_id = ? ORDER BY assignment.id LIMIT 101""",
+                (workflow_id,),
+            )
+        else:
+            workflow_beads = [target["bead"]]
+            assignment_rows = [target["assignment"]]
         assignment_ids = sorted(
             {int(row["id"]) for row in assignment_rows[:100]}
             | {int(target["assignment"]["id"])}
@@ -8480,14 +8491,24 @@ class Controller:
             }
             for row in existing_beads[:50]
         ]
-        frozen = self.store.cost_report(workflow_id=workflow_id, group_by="workflow")
+        frozen = (
+            self.store.cost_report(workflow_id=workflow_id, group_by="workflow")
+            if workflow_id is not None
+            else self.store.usage_report(
+                assignment_id=int(target["assignment"]["id"]),
+                group_by="assignment",
+            )
+        )
         return {
             "target": {
                 "item": item_id,
                 "title": target["bead"]["title"],
                 "project": target["bead"]["project_id"],
                 "workflow_id": workflow_id,
-                "workflow_state": target["workflow"]["state"],
+                "workflow_state": workflow.get("state") if workflow else None,
+                "selection_mode": (
+                    "causal_workflow" if workflow_id is not None else "assignment"
+                ),
                 "assignment_id": target["assignment"]["id"],
                 "assignment_stage": target["assignment"]["stage"],
                 "run_id": target["assignment"]["run_id"],
@@ -8497,7 +8518,11 @@ class Controller:
             },
             "captured_at": utc_now(),
             "coverage": {
-                "selection": "exact workflow_cost_beads/workflow_cost_actions causal joins",
+                "selection": (
+                    "exact workflow_cost_beads/workflow_cost_actions causal joins"
+                    if workflow_id is not None
+                    else "exact Bead assignment and Executor/Overseer task relations"
+                ),
                 "project_time_window_used": False,
                 "workflow_beads": {
                     "count": len(workflow_beads[:100]),
@@ -8528,7 +8553,11 @@ class Controller:
                     "count": len(selected_assignments),
                     "limit": 100,
                     "truncated": len(assignment_rows) > 100,
-                    "selection": "assignments joined through causal workflow Beads",
+                    "selection": (
+                        "assignments joined through causal workflow Beads"
+                        if workflow_id is not None
+                        else "exact retained assignment for the named Bead"
+                    ),
                 },
                 "controller_events": {
                     "limit": 200,
@@ -8587,22 +8616,31 @@ class Controller:
                 "contributing_turns": turn_records,
             },
             "frozen_accounting": {
-                "boundary": {
-                    key: target["workflow"].get(key)
-                    for key in (
-                        "workflow_id",
-                        "state",
-                        "origin_action_id",
-                        "frozen_amount",
-                        "currency",
-                        "frozen_summary",
-                        "coverage",
-                        "assumptions",
-                        "exclusions",
-                        "closed_at",
-                    )
-                },
+                "boundary": (
+                    {
+                        key: workflow.get(key)
+                        for key in (
+                            "workflow_id",
+                            "state",
+                            "origin_action_id",
+                            "frozen_amount",
+                            "currency",
+                            "frozen_summary",
+                            "coverage",
+                            "assumptions",
+                            "exclusions",
+                            "closed_at",
+                        )
+                    }
+                    if workflow is not None
+                    else None
+                ),
                 "cost_report": frozen,
+                "limitation": (
+                    None
+                    if workflow is not None
+                    else "no workflow cost boundary was retained for this assignment"
+                ),
             },
             "existing_beads": existing_bead_records,
         }
@@ -8611,7 +8649,7 @@ class Controller:
         self,
         *,
         item_id: str,
-        workflow_id: str,
+        workflow_id: str | None,
         action_ids: list[int],
         assignment_ids: list[int],
         task_ids: list[int],
@@ -8632,14 +8670,16 @@ class Controller:
             marks = ",".join("?" for _ in identifiers)
             relations.append(f"(entity_type = ? AND entity_id IN ({marks}))")
             values.extend([entity_type, *(str(value) for value in identifiers)])
-        relations.extend(
-            [
-                "(entity_type = 'workflow' AND entity_id = ?)",
-                "detail_json LIKE ?",
-                "detail_json LIKE ?",
-            ]
-        )
-        values.extend([workflow_id, f"%{item_id}%", f"%{workflow_id}%"])
+        if workflow_id is not None:
+            relations.extend(
+                [
+                    "(entity_type = 'workflow' AND entity_id = ?)",
+                    "detail_json LIKE ?",
+                ]
+            )
+            values.extend([workflow_id, f"%{workflow_id}%"])
+        relations.append("detail_json LIKE ?")
+        values.append(f"%{item_id}%")
         rows = self.store.rows(
             f"""SELECT id, kind, entity_type, entity_id, message, detail_json,
                        created_at FROM events WHERE {' OR '.join(relations)}
@@ -8735,7 +8775,11 @@ class Controller:
                 "projects": [project_id],
                 "direct_item": True,
                 "item": item_id,
-                "workflow_id": target["workflow"]["workflow_id"],
+                "workflow_id": (
+                    target["workflow"]["workflow_id"]
+                    if target["workflow"] is not None
+                    else None
+                ),
                 "assignment_id": target["assignment"]["id"],
                 "executor_task_id": target["executor"]["id"],
                 "overseer_task_id": target["overseer"]["id"],
@@ -8765,9 +8809,10 @@ class Controller:
                         "direct_item": True,
                         "scope": scope,
                         "prompt": (
-                            f"Investigate only {item_id} and its exact retained causal "
-                            "workflow. The invoking human request is current context, "
-                            "not historical evidence."
+                            f"Investigate only {item_id} and its exact retained task "
+                            "relations. Use a causal workflow when retained, otherwise "
+                            "use its assignment and Executor/Overseer pair. The invoking "
+                            "human request is current context, not historical evidence."
                         ),
                         "retained_evidence": evidence,
                         "required_interviews": {
@@ -8830,7 +8875,11 @@ class Controller:
             "target": {
                 "item": item_id,
                 "project": project_id,
-                "workflow_id": target["workflow"]["workflow_id"],
+                "workflow_id": (
+                    target["workflow"]["workflow_id"]
+                    if target["workflow"] is not None
+                    else None
+                ),
                 "assignment_id": target["assignment"]["id"],
                 "executor": _task_identity(target["executor"]),
                 "overseer": _task_identity(target["overseer"]),

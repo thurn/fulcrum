@@ -8,13 +8,15 @@ records are a starting point, not proof of complete coverage. Fleet-level events
 may provide context for a project review but do not expand its authorized scope.
 
 For a direct work-item investigation, stay strictly within the named item and its
-retained causal workflow. Reconstruct it end to end: Weaver intake; relevant Archon
-proposal, approval, coordination, recovery, and completion acknowledgement; every
-Executor implementation or correction attempt and observed helper; every Overseer
-review; delivery and Tollgate activity; and the terminal state or explicit cutoff.
-Never replace the retained causal workflow identity with a project timestamp window.
-The invoking prompt is current context, not historical evidence, unless the
-controller supplies a retained dispatched prompt.
+exact retained relations. When a causal workflow exists, use it. For a task that
+was not initiated by Weaver, use the exact Bead assignment and retained
+Executor/Overseer pair instead. Reconstruct every applicable stage end to end:
+intake when present; relevant Archon proposal, approval, coordination, recovery,
+and completion acknowledgement; every Executor implementation or correction
+attempt and observed helper; every Overseer review; delivery and Tollgate activity;
+and the terminal state or explicit cutoff. Never replace those exact identities
+with a project timestamp window. The invoking prompt is current context, not
+historical evidence, unless the controller supplies a retained dispatched prompt.
 
 Use retained action payloads and handoffs, historical dispatched prompts when
 available, controller events, external-operation failures and latency, candidate

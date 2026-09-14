@@ -246,8 +246,10 @@ fulcrum inquisitor --project fulcrum --scope "Review the indexing architecture"
 ```
 
 `sage register` is the command used by the installed `$sage` skill. It adopts the
-calling task and returns the complete instructions and exact causal evidence for
-the named retained item. `sage request` retains the existing queued fleet or
+calling task and returns the complete instructions and exact retained evidence for
+the named retained item. For non-Weaver work without a causal workflow boundary,
+it uses the exact Bead assignment and retained Executor/Overseer pair. `sage request`
+retains the existing queued fleet or
 project review behavior. `inquisitor` reviews all enabled projects by default.
 `--project <id>` limits a queued request, and `--scope <prompt>` supplies a focus.
 A queued command returns its request ID without waiting for the report. Direct-item

@@ -3168,6 +3168,50 @@ print(json.dumps({
         )
         runtime.set_name.assert_not_awaited()
 
+    async def test_human_sage_accepts_non_weaver_assignment(self) -> None:
+        historical = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, native_turn_id,
+                   created_at, updated_at
+               ) VALUES (?, ?, 'implement', ?, 'processed', 'executor-turn',
+                         'earlier', 'earlier')""",
+            (self.executor["id"], self.assignment["id"], json.dumps({"scope": "p-1"})),
+        )
+        runtime = AsyncMock()
+        runtime.read_thread.return_value = {
+            "id": "non-weaver-sage",
+            "name": "temporary",
+            "projectId": "codex-p",
+            "status": {"type": "active"},
+            "turns": [{"id": "sage-turn", "status": "inProgress", "items": []}],
+        }
+        self.controller.runtime = runtime
+
+        registered = await self.controller._register_sage(
+            {
+                "thread_id": "non-weaver-sage",
+                "item": "p-1",
+                "description": "Review non Weaver assignment",
+            }
+        )
+
+        self.assertIsNone(registered["target"]["workflow_id"])
+        self.assertEqual(registered["target"]["assignment_id"], self.assignment["id"])
+        occurrence = self.controller.store.row(
+            "SELECT * FROM occurrences WHERE id = ?", (registered["occurrence_id"],)
+        )
+        evidence = json.loads(occurrence["evidence_json"])
+        self.assertEqual(evidence["target"]["selection_mode"], "assignment")
+        self.assertEqual(
+            [row["id"] for row in evidence["workflow_actions"]],
+            [historical.lastrowid],
+        )
+        self.assertIn("exact Bead assignment", evidence["coverage"]["selection"])
+        self.assertIsNone(evidence["frozen_accounting"]["boundary"])
+        self.assertIn(
+            "no workflow cost boundary", evidence["frozen_accounting"]["limitation"]
+        )
+
     async def test_human_sage_rejects_ambiguous_causal_workflow(self) -> None:
         self.controller.store.link_bead_to_workflow("weaver-action:8", "p-1")
         self.controller.store.link_bead_to_workflow("weaver-action:9", "p-1")

@@ -470,10 +470,11 @@ class PromptsTest(unittest.TestCase):
             with self.assertRaises(SystemExit), patch("sys.stderr", new=io.StringIO()):
                 parser.parse_args(arguments)
 
-    def test_direct_sage_prompt_requires_exact_pair_and_causal_evidence(self) -> None:
+    def test_direct_sage_prompt_requires_exact_pair_and_retained_evidence(self) -> None:
         text = role_instructions("specialist", role="sage")
         for required in (
-            "retained causal workflow",
+            "not initiated by Weaver",
+            "exact Bead assignment",
             "exactly one interview round",
             "supplied Executor and Overseer",
             "unknown or partial",
