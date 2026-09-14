@@ -258,7 +258,6 @@ POSITIONAL_ID: set[tuple[str, ...]] = {
         ("work", "close"),
         ("work", "reopen"),
         ("task", "show"),
-        ("task", "start"),
         ("task", "send"),
         ("task", "output"),
         ("task", "wait"),
@@ -379,8 +378,18 @@ def _add_command_options(
     elif path == ("task", "wait"):
         _option(parser, "--turn-id")
         _option(parser, "--until", choices=("idle", "terminal"), required=True)
+    elif path == ("task", "start"):
+        _option(parser, "--role", choices=ROLES, required=True)
+        _option(parser, "--bead", required=True)
+    elif path == ("task", "list"):
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+    elif path == ("task", "interrupt"):
+        _option(parser, "--turn-id")
     elif path == ("task", "respond"):
         _option(parser, "--request", required=True)
+    elif path == ("task", "delete"):
+        _option(parser, "--yes", action="store_true", required=True)
     elif path == ("task", "terminal", "stop"):
         group = parser.add_mutually_exclusive_group(required=True)
         group.add_argument("--terminal", default=argparse.SUPPRESS)
@@ -612,8 +621,14 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     },
     ("marshal", "decide"): {"decision_operation", "decisions"},
     ("human", "resolve"): {"reason_id", "answer", "scope_change"},
-    ("task", "start"): {"instructions", "cwd", "purpose", "role", "associated_beads"},
-    ("task", "send"): {"input"},
+    ("task", "start"): {
+        "instructions",
+        "title",
+        "developer_instructions",
+        "purpose",
+        "associated_beads",
+    },
+    ("task", "send"): {"text"},
     ("task", "respond"): {"response"},
     ("recover", "repair"): {"actions"},
     ("plan", "draft"): {"text", "tasks", "summary", "publication", "validation"},

@@ -15,6 +15,7 @@ from fulcrum.ledger import (
     LedgerFailure,
     OperationService,
 )
+from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.work import WorkService
 
 Handler = Callable[[ParsedRequest], CommandResult]
@@ -44,6 +45,21 @@ class Application:
         self.register(("project", "enable"), projects.enable)
         self.register(("project", "disable"), projects.disable)
         self.register(("project", "remove"), projects.remove)
+        runtime = RuntimeService()
+        self.register(("runtime", "capabilities"), runtime.capabilities)
+        self.register(("runtime", "status"), runtime.status)
+        tasks = TaskService()
+        self.register(("task", "list"), tasks.list)
+        self.register(("task", "show"), tasks.show)
+        self.register(("task", "start"), tasks.start)
+        self.register(("task", "send"), tasks.send)
+        self.register(("task", "interrupt"), tasks.interrupt)
+        self.register(("task", "requests"), tasks.requests)
+        self.register(("task", "respond"), tasks.respond)
+        self.register(("task", "release"), tasks.release)
+        self.register(("task", "archive"), tasks.archive)
+        self.register(("task", "unarchive"), tasks.unarchive)
+        self.register(("task", "delete"), tasks.delete)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

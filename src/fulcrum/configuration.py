@@ -510,17 +510,15 @@ class ProjectService:
         project.setdefault("require_source_sync", False)
         project.setdefault("models", {})
         _validate_project(project_id, project)
-        if (
-            not project.get("codex_project_id")
-            or not isinstance(project.get("delivery"), Mapping)
-            or not project["delivery"].get("id")
-        ):
+        if not isinstance(project.get("delivery"), Mapping) or not project[
+            "delivery"
+        ].get("id"):
             raise FulcrumError(
                 "CAPABILITY_UNAVAILABLE",
-                "project provider IDs must be supplied until runtime and delivery creation adapters are available",
+                "the delivery provider ID must be supplied until its creation adapter is available",
                 exit_code=4,
                 request_id=request.request_id,
-                details={"required": ["codex_project_id", "delivery.id"]},
+                details={"required": ["delivery.id"]},
             )
         manager = ConfigurationManager(request.instance.config_path)
         document, original = manager.load()
@@ -538,6 +536,28 @@ class ProjectService:
             "cancelled",
         }:
             return _operation_command_result(operation)
+        if not project.get("codex_project_id"):
+            from fulcrum.runtime_service import _runtime_call
+
+            native_project = _runtime_call(
+                request,
+                lambda runtime: runtime.ensure_project(
+                    name=project_id,
+                    root=str(project["root"]),
+                    operation_id=operation.id,
+                ),
+            )
+            project["codex_project_id"] = str(native_project["id"])
+            operation = ledger.update_operation(
+                operation,
+                step="codex_project_verified",
+                external={
+                    "adapter": "codex",
+                    "project_id": project["codex_project_id"],
+                },
+                result={"codex_project": native_project},
+                next_action="Enroll the project in the shared Beads backend.",
+            )
         _enroll_project_beads(project_id, project, effective, ledger.executable)
         projects = document.get("projects")
         if projects is None:

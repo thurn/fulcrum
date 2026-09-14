@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, call, patch
 
 from websockets.asyncio.server import serve
 
-from fulcrum.runtime import AppServerError, CodexRuntime, thread_facts
+from fulcrum.runtime import (
+    SOURCE_KINDS,
+    AppServerError,
+    CodexRuntime,
+    RuntimeEvent,
+    thread_facts,
+)
 
 
 class RuntimeTest(unittest.IsolatedAsyncioTestCase):
@@ -41,11 +47,11 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread["id"], "thread-1")
         sleep.assert_awaited_once_with(0.05)
 
-    async def test_protocol_handshake_methods_and_server_request_rejection(
+    async def test_protocol_handshake_methods_and_server_request_queue(
         self,
     ) -> None:
         received: list[dict[str, Any]] = []
-        rejection: asyncio.Future[dict[str, Any]] = (
+        server_response: asyncio.Future[dict[str, Any]] = (
             asyncio.get_running_loop().create_future()
         )
         thread = {
@@ -60,8 +66,8 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
             async for raw in connection:
                 message = json.loads(raw)
                 received.append(message)
-                if message.get("id") == 99 and "error" in message:
-                    rejection.set_result(message)
+                if message.get("id") == 99 and "result" in message:
+                    server_response.set_result(message)
                     continue
                 method = message.get("method")
                 identifier = message.get("id")
@@ -141,7 +147,10 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 item for item in received if item.get("method") == "thread/list"
             ]
             self.assertTrue(
-                all("sourceKinds" not in item["params"] for item in listing_requests)
+                any(
+                    item["params"].get("sourceKinds") == list(SOURCE_KINDS)
+                    for item in listing_requests
+                )
             )
             created = await runtime.create_thread(
                 cwd="/tmp",
@@ -197,7 +206,6 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "threadId": "thread-1",
                     "cwd": "/tmp",
-                    "runtimeWorkspaceRoots": ["/workspace"],
                     "model": "sol",
                     "effort": "high",
                     "summary": "concise",
@@ -221,8 +229,12 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertLess(
                 received.index(settings_request), received.index(turn_request)
             )
-            rejected = await asyncio.wait_for(rejection, 1)
-            self.assertEqual(rejected["error"]["code"], -32601)
+            event = await anext(runtime.events())
+            self.assertEqual(event.request_id, "99")
+            self.assertEqual(event.method, "unsupported/request")
+            await runtime.respond_server_request("99", {"accepted": False})
+            response = await asyncio.wait_for(server_response, 1)
+            self.assertEqual(response["result"], {"accepted": False})
             self.assertTrue(all("jsonrpc" not in item for item in received))
             await runtime.close()
 
@@ -278,6 +290,112 @@ class RuntimeTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(runtime.websocket)
             await runtime.connect()
             await runtime.close()
+
+    async def test_connection_loss_reconnects_with_backoff(self) -> None:
+        connections = 0
+        reconnected = asyncio.Event()
+
+        async def event_handler(method: str, params: dict[str, Any]) -> None:
+            if method == "fulcrum/runtime/reconnected":
+                reconnected.set()
+
+        async def handler(connection: Any) -> None:
+            nonlocal connections
+            connections += 1
+            this_connection = connections
+            async for raw in connection:
+                message = json.loads(raw)
+                if message.get("method") == "initialize":
+                    await connection.send(
+                        json.dumps({"id": message["id"], "result": {}})
+                    )
+                elif message.get("method") == "initialized" and this_connection == 1:
+                    await connection.close()
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            runtime = CodexRuntime(
+                f"ws://127.0.0.1:{port}",
+                event_handler=event_handler,
+                reconnect_waits=(0.01,),
+            )
+            await runtime.connect()
+            await asyncio.wait_for(reconnected.wait(), 1)
+            self.assertGreaterEqual(connections, 2)
+            self.assertTrue(runtime.ready)
+            await runtime.close()
+
+    async def test_event_handler_can_await_rpc_without_deadlocking_reader(self) -> None:
+        handled = asyncio.Event()
+        runtime: CodexRuntime
+
+        async def event_handler(method: str, params: dict[str, Any]) -> None:
+            if method == "thread/status/changed":
+                self.assertEqual(await runtime.list_models(), [{"model": "luna"}])
+                handled.set()
+
+        async def handler(connection: Any) -> None:
+            async for raw in connection:
+                message = json.loads(raw)
+                if message.get("method") == "initialize":
+                    await connection.send(
+                        json.dumps({"id": message["id"], "result": {}})
+                    )
+                elif message.get("method") == "initialized":
+                    await connection.send(
+                        json.dumps(
+                            {
+                                "method": "thread/status/changed",
+                                "params": {"threadId": "thread-1"},
+                            }
+                        )
+                    )
+                elif message.get("method") == "model/list":
+                    await connection.send(
+                        json.dumps(
+                            {
+                                "id": message["id"],
+                                "result": {"data": [{"model": "luna"}]},
+                            }
+                        )
+                    )
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            runtime = CodexRuntime(
+                f"ws://127.0.0.1:{port}", event_handler=event_handler
+            )
+            await runtime.connect()
+            await asyncio.wait_for(handled.wait(), 1)
+            await runtime.close()
+
+    async def test_bounded_events_retain_native_request_and_require_reconcile(
+        self,
+    ) -> None:
+        runtime = CodexRuntime("ws://unused", event_capacity=2)
+        for index in range(2):
+            runtime._enqueue(
+                RuntimeEvent(
+                    method="item/agentMessage/delta",
+                    params={"index": index},
+                    request_id=None,
+                    observed_at="now",
+                )
+            )
+        runtime._enqueue(
+            RuntimeEvent(
+                method="item/tool/requestUserInput",
+                params={"threadId": "thread-1"},
+                request_id="42",
+                observed_at="now",
+            )
+        )
+
+        overflow = await anext(runtime.events())
+        retained = [await anext(runtime.events()), await anext(runtime.events())]
+
+        self.assertEqual(overflow.method, "fulcrum/runtime/event-overflow")
+        self.assertIn("42", {item.request_id for item in retained})
 
 
 if __name__ == "__main__":
