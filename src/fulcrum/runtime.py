@@ -207,10 +207,26 @@ class Runtime(Protocol):
     async def find_turn(
         self, thread_id: str, operation_id: str
     ) -> TurnFacts | None: ...
+    async def inspect_turn(self, thread_id: str, turn_id: str) -> TurnFacts | None: ...
     async def interrupt(self, thread_id: str, turn_id: str) -> TurnFacts: ...
     async def respond(
         self, thread_id: str, request_id: str, response: dict[str, Any]
     ) -> None: ...
+    async def output(
+        self,
+        thread_id: str,
+        *,
+        turn_id: str | None,
+        limit: int,
+        cursor: str | None,
+        max_bytes: int,
+    ) -> Mapping[str, Any]: ...
+    async def terminals(
+        self, thread_id: str, *, limit: int, cursor: str | None
+    ) -> Mapping[str, Any]: ...
+    async def terminate_terminal(
+        self, thread_id: str, process_id: str
+    ) -> Mapping[str, Any]: ...
     async def release(self, thread_id: str) -> ReleaseFacts: ...
     async def archive(self, thread_id: str) -> TaskFacts: ...
     async def unarchive(self, thread_id: str) -> TaskFacts: ...
@@ -930,15 +946,89 @@ class CodexRuntime:
         return [str(item) for item in data] if isinstance(data, list) else []
 
     async def background_terminals(self, thread_id: str) -> list[dict[str, Any]]:
+        cursor: str | None = None
+        terminals: list[dict[str, Any]] = []
+        while True:
+            result = await self.background_terminals_page(
+                thread_id, limit=100, cursor=cursor
+            )
+            terminals.extend(result["items"])
+            cursor = result["next_cursor"]
+            if cursor is None:
+                return terminals
+
+    async def background_terminals_page(
+        self, thread_id: str, *, limit: int, cursor: str | None
+    ) -> dict[str, Any]:
         result = await self.request(
-            "thread/backgroundTerminals/list", {"threadId": thread_id}
+            "thread/backgroundTerminals/list",
+            {"threadId": thread_id, "limit": limit, "cursor": cursor},
         )
         data = result.get("data") or result.get("terminals")
-        return (
-            [dict(item) for item in data if isinstance(item, Mapping)]
-            if isinstance(data, list)
-            else []
+        return {
+            "items": (
+                [dict(item) for item in data if isinstance(item, Mapping)]
+                if isinstance(data, list)
+                else []
+            ),
+            "next_cursor": (
+                str(result["nextCursor"])
+                if isinstance(result.get("nextCursor"), str)
+                and result.get("nextCursor")
+                else None
+            ),
+        }
+
+    async def terminate_background_terminal(
+        self, thread_id: str, process_id: str
+    ) -> bool:
+        result = await self.request(
+            "thread/backgroundTerminals/terminate",
+            {"threadId": thread_id, "processId": process_id},
         )
+        if not isinstance(result.get("terminated"), bool):
+            raise AppServerError(
+                "thread/backgroundTerminals/terminate returned no termination fact",
+                category="uncertain",
+                uncertain=True,
+            )
+        return bool(result["terminated"])
+
+    async def clean_background_terminals(self, thread_id: str) -> None:
+        await self.request("thread/backgroundTerminals/clean", {"threadId": thread_id})
+
+    async def thread_items_page(
+        self,
+        thread_id: str,
+        *,
+        turn_id: str | None,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        result = await self.request(
+            "thread/items/list",
+            {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "limit": limit,
+                "cursor": cursor,
+                "sortDirection": "asc",
+            },
+        )
+        data = result.get("data")
+        return {
+            "items": (
+                [dict(item) for item in data if isinstance(item, Mapping)]
+                if isinstance(data, list)
+                else []
+            ),
+            "next_cursor": (
+                str(result["nextCursor"])
+                if isinstance(result.get("nextCursor"), str)
+                and result.get("nextCursor")
+                else None
+            ),
+        }
 
 
 class AppServerRuntime:
@@ -963,6 +1053,9 @@ class AppServerRuntime:
         "thread/unarchive",
         "thread/delete",
         "thread/backgroundTerminals/list",
+        "thread/backgroundTerminals/terminate",
+        "thread/backgroundTerminals/clean",
+        "thread/items/list",
     )
 
     def __init__(self, endpoint: str, *, transport: CodexRuntime | None = None) -> None:
@@ -1269,6 +1362,25 @@ class AppServerRuntime:
                 return _turn_facts(thread_id, turn, operation_id=operation_id)
         return None
 
+    async def inspect_turn(self, thread_id: str, turn_id: str) -> TurnFacts | None:
+        try:
+            thread = await self.transport.read_thread(thread_id, include_turns=True)
+        except AppServerError as error:
+            if _empty_history_error(error):
+                return None
+            raise
+        turns = thread.get("turns")
+        if not isinstance(turns, list):
+            raise AppServerError(
+                f"thread {thread_id} history is unavailable",
+                category="uncertain",
+                uncertain=True,
+            )
+        for turn in turns:
+            if isinstance(turn, Mapping) and str(turn.get("id")) == turn_id:
+                return _turn_facts(thread_id, turn, operation_id=None)
+        return None
+
     async def interrupt(self, thread_id: str, turn_id: str) -> TurnFacts:
         await self.transport.interrupt(thread_id, turn_id)
         thread = await self.transport.read_thread(thread_id, include_turns=True)
@@ -1300,6 +1412,156 @@ class AppServerRuntime:
             )
         await self.transport.respond_server_request(request_id, response)
 
+    async def output(
+        self,
+        thread_id: str,
+        *,
+        turn_id: str | None,
+        limit: int,
+        cursor: str | None,
+        max_bytes: int,
+    ) -> Mapping[str, Any]:
+        items: list[dict[str, Any]] = []
+        gaps: list[str] = []
+        used = 2
+        current = cursor
+        remaining = limit
+        while remaining != 0:
+            page = await self.transport.thread_items_page(
+                thread_id,
+                turn_id=turn_id,
+                limit=1,
+                cursor=current,
+            )
+            rows = page["items"]
+            next_cursor = page["next_cursor"]
+            if not rows:
+                current = next_cursor
+                break
+            row = dict(rows[0])
+            encoded = json.dumps(
+                row, separators=(",", ":"), ensure_ascii=False, sort_keys=True
+            ).encode("utf-8")
+            delimiter = 1 if items else 0
+            if used + delimiter + len(encoded) > max_bytes:
+                available = max(0, max_bytes - used - delimiter)
+                prefix_size = available
+                truncated: dict[str, Any]
+                while True:
+                    preview = encoded[:prefix_size].decode("utf-8", errors="ignore")
+                    truncated = {
+                        "truncated": True,
+                        "original_bytes": len(encoded),
+                        "json_prefix": preview,
+                    }
+                    truncated_size = len(
+                        json.dumps(
+                            truncated,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ).encode("utf-8")
+                    )
+                    if truncated_size <= available or prefix_size == 0:
+                        break
+                    prefix_size = max(0, prefix_size - (truncated_size - available))
+                if truncated_size <= available:
+                    items.append(truncated)
+                    used += delimiter + truncated_size
+                    gaps.append("one native output item was truncated at the byte cap")
+                else:
+                    gaps.append(
+                        "one native output item could not fit at the byte cap and was skipped"
+                    )
+                current = next_cursor
+                break
+            items.append(row)
+            used += delimiter + len(encoded)
+            current = next_cursor
+            if remaining > 0:
+                remaining -= 1
+            if current is None:
+                break
+        return {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "items": items,
+            "next_cursor": current,
+            "observed_at": _now(),
+            "gaps": gaps,
+            "bytes": used,
+        }
+
+    async def terminals(
+        self, thread_id: str, *, limit: int, cursor: str | None
+    ) -> Mapping[str, Any]:
+        if limit == 0:
+            current = cursor
+            rows: list[dict[str, Any]] = []
+            while True:
+                page = await self.transport.background_terminals_page(
+                    thread_id, limit=100, cursor=current
+                )
+                rows.extend(page["items"])
+                current = page["next_cursor"]
+                if current is None:
+                    break
+            next_cursor = None
+        else:
+            page = await self.transport.background_terminals_page(
+                thread_id, limit=limit, cursor=cursor
+            )
+            rows = page["items"]
+            next_cursor = page["next_cursor"]
+        return {
+            "thread_id": thread_id,
+            "items": [
+                {
+                    **dict(item),
+                    "terminal_id": item.get("processId"),
+                    "status": "running",
+                    "output_reference": item.get("itemId"),
+                }
+                for item in rows
+            ],
+            "next_cursor": next_cursor,
+            "observed_at": _now(),
+            "gaps": [],
+        }
+
+    async def terminate_terminal(
+        self, thread_id: str, process_id: str
+    ) -> Mapping[str, Any]:
+        terminals = await self.transport.background_terminals(thread_id)
+        owned = [item for item in terminals if str(item.get("processId")) == process_id]
+        if len(owned) != 1:
+            raise AppServerError(
+                f"terminal {process_id} is not an exact running terminal owned by {thread_id}",
+                category="rejected",
+            )
+        try:
+            terminated = await self.transport.terminate_background_terminal(
+                thread_id, process_id
+            )
+        except AppServerError as error:
+            if not error.uncertain:
+                raise
+            current = await self.transport.background_terminals(thread_id)
+            if any(str(item.get("processId")) == process_id for item in current):
+                raise
+            terminated = True
+        current = await self.transport.background_terminals(thread_id)
+        still_running = any(
+            str(item.get("processId")) == process_id for item in current
+        )
+        return {
+            "thread_id": thread_id,
+            "terminal_id": process_id,
+            "terminated": terminated and not still_running,
+            "still_running": still_running,
+            "observed_at": _now(),
+        }
+
     async def release(self, thread_id: str) -> ReleaseFacts:
         task = await self.inspect_task(thread_id)
         if task.active_turn is not None or task.runtime_status not in {
@@ -1318,6 +1580,12 @@ class AppServerRuntime:
         except AppServerError as error:
             if error.category != "unsupported":
                 gaps.append(str(error))
+        if not terminals:
+            try:
+                await self.transport.clean_background_terminals(thread_id)
+            except AppServerError as error:
+                if error.category != "unsupported":
+                    gaps.append(str(error))
         status = await self.transport.unsubscribe(thread_id)
         return ReleaseFacts(
             thread_id=thread_id,

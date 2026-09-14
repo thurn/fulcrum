@@ -387,6 +387,9 @@ def _add_command_options(
         _option(parser, "--limit", type=int)
         _option(parser, "--cursor")
         _option(parser, "--max-bytes", type=int)
+    elif path == ("task", "terminals"):
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
     elif path == ("task", "wait"):
         _option(parser, "--turn-id")
         _option(parser, "--until", choices=("idle", "terminal"), required=True)

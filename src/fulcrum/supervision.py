@@ -9,7 +9,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -165,7 +165,6 @@ class ControllerSupervisor:
         clock: Clock | None = None,
         runtime: AppServerRuntime | None = None,
     ) -> None:
-        self.request = request
         self.application = application
         self.clock: Clock = clock or SystemClock()
         manager = ConfigurationManager(request.instance.config_path)
@@ -192,6 +191,9 @@ class ControllerSupervisor:
         self.bead_locks: dict[str, asyncio.Lock] = {}
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self.request: ParsedRequest = replace(
+            request, runtime_submit=self._runtime_submit
+        )
 
     async def run_once(
         self,
@@ -555,7 +557,7 @@ class ControllerSupervisor:
         self._loop = asyncio.get_running_loop()
         self.application.replace_handler(("reconcile",), self.reconcile_from_ipc)
         await self._startup_reconcile()
-        server = IpcServer(self.request.instance.socket_path, self.application.dispatch)
+        server = IpcServer(self.request.instance.socket_path, self._dispatch_from_ipc)
         tasks = [
             asyncio.create_task(server.run(), name="fulcrum-ipc"),
             asyncio.create_task(
@@ -618,6 +620,11 @@ class ControllerSupervisor:
                 retryable=True,
             ) from error
         return CommandResult.query(summary.to_dict())
+
+    def _dispatch_from_ipc(self, request: ParsedRequest) -> CommandResult:
+        return self.application.dispatch(
+            replace(request, runtime_submit=self._runtime_submit)
+        )
 
     async def _startup_reconcile(self) -> None:
         try:
@@ -892,6 +899,26 @@ class ControllerSupervisor:
                 },
                 actions,
             )
+        pending_ids = {
+            str(item.get("request_id"))
+            for item in facts.pending_requests
+            if item.get("request_id") is not None
+        }
+        previously_surfaced = set(fc.get("surfaced_request_ids", []))
+        newly_surfaced = sorted(pending_ids.difference(previously_surfaced))
+        if newly_surfaced:
+            fc["surfaced_request_ids"] = sorted(previously_surfaced.union(pending_ids))
+            fc["pending_native_requests"] = [
+                dict(item) for item in facts.pending_requests
+            ]
+            actions.append(
+                {
+                    "kind": "native_request",
+                    "thread_id": facts.id,
+                    "request_ids": newly_surfaced,
+                    "effect": "surface_only",
+                }
+            )
         event_at = _optional_time(fc.get("last_runtime_event_at")) or _optional_time(
             fc.get("last_inspection_at")
         )
@@ -919,13 +946,57 @@ class ControllerSupervisor:
             progress_at = tool_evidence_at
         progress_age = (now - progress_at).total_seconds() if progress_at else 0.0
         acquisition = fc.get("ownership_operation")
+        terminal = (
+            facts.active_turn is None
+            and facts.last_turn is not None
+            and facts.runtime_status in {"idle", "completed", "failed"}
+        )
+        if fc.get("purpose") == "plan_review" and terminal:
+            if fc.get("review_result_operation"):
+                if fc.get("subscription_state") != "released":
+                    try:
+                        released = await self.runtime.release(facts.id)
+                    except AppServerError as error:
+                        actions.append(
+                            {
+                                "kind": "review_release",
+                                "thread_id": facts.id,
+                                "state": "failed",
+                                "reason": str(error),
+                            }
+                        )
+                    else:
+                        fc["subscription_state"] = "released"
+                        fc["subscription_release"] = released.to_dict()
+                        actions.append(
+                            {
+                                "kind": "review_release",
+                                "thread_id": facts.id,
+                                "state": "completed",
+                            }
+                        )
+            elif not fc.get("missing_finish_reminder"):
+                reminder = await self._send_review_finish_reminder(task, facts)
+                fc["missing_finish_reminder"] = reminder["operation_id"]
+                fc["missing_finish_reminder_turn"] = reminder.get("turn_id")
+                actions.append(reminder)
+            elif (
+                not fc.get("missing_finish_reminder_turn")
+                or (
+                    isinstance(facts.last_turn, Mapping)
+                    and facts.last_turn.get("id")
+                    == fc.get("missing_finish_reminder_turn")
+                )
+            ) and not fc.get("recovery_requested_operation"):
+                recovery = await self._record_review_recovery(task)
+                fc["recovery_requested_operation"] = recovery["operation_id"]
+                actions.append(recovery)
         if (
             work is not None
             and work.status != "closed"
             and work.fc
             and work.fc.get("owner") == facts.id
         ):
-            terminal = facts.active_turn is None and facts.runtime_status == "idle"
             if terminal and fc.get("last_finish_reminder_acquisition") != acquisition:
                 action = await self._send_task_notice(
                     task,
@@ -983,6 +1054,168 @@ class ControllerSupervisor:
             },
             actions,
         )
+
+    async def _send_review_finish_reminder(
+        self, task: Any, facts: TaskFacts
+    ) -> Mapping[str, Any]:
+        fc = task.fc or {}
+        review_operation = str(fc.get("review_operation") or "none")
+        associated = fc.get("associated_beads")
+        bead_id = (
+            str(associated[0]) if isinstance(associated, list) and associated else None
+        )
+        request = ParsedRequest(
+            command=("controller", "review_finish_reminder"),
+            arguments={"task": task.id},
+            input={"bead": bead_id},
+            actor=ActorContext(kind="controller"),
+            instance=self.request.instance,
+            request_id=str(
+                uuid.uuid5(
+                    REMINDER_NAMESPACE,
+                    f"review:{task.id}:{review_operation}:finish",
+                )
+            ),
+            thread_id=facts.id,
+            timeout=self.request.timeout,
+            offline=True,
+            runtime_submit=self._runtime_submit,
+        )
+        operation, reused = await asyncio.to_thread(
+            self.ledger.create_operation,
+            request,
+            bead_id=bead_id,
+            planned={
+                "thread_id": facts.id,
+                "review_operation": review_operation,
+            },
+            next_action="Send one scope-preserving finish reminder.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_OPERATION_STATES:
+            external = operation.operation.get("external")
+            return {
+                "kind": "review_finish_reminder",
+                "operation_id": operation.id,
+                "turn_id": (
+                    external.get("turn_id") if isinstance(external, Mapping) else None
+                ),
+                "reused": True,
+            }
+        try:
+            turn = await self.runtime.start_turn(
+                facts.id,
+                TurnInput(
+                    text=(
+                        "The independent review turn ended without a review result. "
+                        f"Submit it now with `fulcrum plan review finish --task {task.id} "
+                        f"--thread-id {facts.id} --input - --json`, referencing review "
+                        f"operation {review_operation}. Do not change or acquire the plan."
+                    ),
+                    cwd=facts.cwd or str(self.request.instance.instance_root),
+                    workspace_roots=facts.workspace_roots
+                    or (facts.cwd or str(self.request.instance.instance_root),),
+                    model=str(fc.get("model")),
+                    effort=str(fc.get("effort")),
+                    operation_id=operation.id,
+                    ownership_operation=None,
+                ),
+            )
+        except AppServerError as error:
+            state = "uncertain" if error.uncertain else "failed"
+            operation = await asyncio.to_thread(
+                self.ledger.update_operation,
+                operation.id,
+                state=state,
+                step="review_finish_reminder_unresolved",
+                error={
+                    "code": error.category,
+                    "message": str(error),
+                    "retryable": error.category == "transient",
+                },
+                next_action="Request recovery without replaying an unresolved reminder.",
+            )
+            return {
+                "kind": "review_finish_reminder",
+                "operation_id": operation.id,
+                "state": state,
+            }
+        operation = await asyncio.to_thread(
+            self.ledger.update_operation,
+            operation.id,
+            state="completed",
+            step="review_finish_reminder_started",
+            external={"thread_id": facts.id, "turn_id": turn.id},
+            result={"turn": turn.to_dict()},
+            next_action="Wait for the one reminder turn to finish.",
+        )
+        return {
+            "kind": "review_finish_reminder",
+            "operation_id": operation.id,
+            "turn_id": turn.id,
+            "state": "completed",
+        }
+
+    async def _record_review_recovery(self, task: Any) -> Mapping[str, Any]:
+        fc = task.fc or {}
+        review_operation = str(fc.get("review_operation") or "none")
+        associated = fc.get("associated_beads")
+        bead_id = (
+            str(associated[0]) if isinstance(associated, list) and associated else None
+        )
+        request = ParsedRequest(
+            command=("controller", "recovery_request"),
+            arguments={"task": task.id, "kind": "missing_review_finish"},
+            input={"bead": bead_id},
+            actor=ActorContext(kind="controller"),
+            instance=self.request.instance,
+            request_id=str(
+                uuid.uuid5(
+                    REMINDER_NAMESPACE,
+                    f"review:{task.id}:{review_operation}:recovery",
+                )
+            ),
+            timeout=self.request.timeout,
+            offline=True,
+        )
+        operation, reused = await asyncio.to_thread(
+            self.ledger.create_operation,
+            request,
+            bead_id=bead_id,
+            planned={
+                "task_record_id": task.id,
+                "thread_id": fc.get("thread_id"),
+                "review_operation": review_operation,
+                "reason": "review reminder ended without typed findings",
+            },
+            next_action="Marshal must choose scoped review recovery.",
+        )
+        if not reused:
+            operation = await asyncio.to_thread(
+                self.ledger.update_operation,
+                operation.id,
+                state="completed",
+                step="review_recovery_requested",
+                next_action="Marshal must choose scoped review recovery.",
+            )
+            if bead_id is not None:
+                root = await asyncio.to_thread(self.ledger.show, bead_id)
+                if root is not None and root.fc:
+                    root_fc = dict(root.fc)
+                    plan = dict(root_fc.get("plan") or {})
+                    reviews = dict(plan.get("reviews") or {})
+                    perspective = str(fc.get("perspective") or "unknown")
+                    row = dict(reviews.get(perspective) or {})
+                    row["state"] = "recovery_required"
+                    row["recovery_operation"] = operation.id
+                    reviews[perspective] = row
+                    plan["reviews"] = reviews
+                    root_fc["plan"] = plan
+                    await asyncio.to_thread(self.ledger.update_fc, root.id, root_fc)
+        return {
+            "kind": "review_recovery_request",
+            "operation_id": operation.id,
+            "state": operation.operation.get("state"),
+        }
 
     async def _ordered_task_reconcile(
         self,

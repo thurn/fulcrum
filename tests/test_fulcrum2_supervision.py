@@ -18,7 +18,7 @@ from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedR
 from fulcrum.diagnostics import DiagnosticService
 from fulcrum.instance import resolve_instance
 from fulcrum.ledger import Ledger, operation_id
-from fulcrum.runtime import ResourceFacts, TaskFacts, TurnFacts
+from fulcrum.runtime import ReleaseFacts, ResourceFacts, TaskFacts, TurnFacts
 from fulcrum.supervision import ControllerSupervisor
 
 
@@ -83,9 +83,14 @@ class FakeRuntime:
             observed_at="2026-09-14T16:00:00Z",
         )
 
-    async def release(self, thread_id: str) -> Any:
+    async def release(self, thread_id: str) -> ReleaseFacts:
         self.released.append(thread_id)
-        return None
+        return ReleaseFacts(
+            thread_id=thread_id,
+            status="unsubscribed",
+            active_terminals=(),
+            observed_at="2026-09-14T16:00:00Z",
+        )
 
 
 class RetryApplication:
@@ -572,6 +577,111 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         result = await supervisor.run_once()
         self.assertTrue(result.pressure["paused"])
         self.assertEqual(result.pressure["released_idle_subscriptions"], [thread_id])
+
+    async def test_review_gets_one_finish_reminder_then_recovery_and_release(
+        self,
+    ) -> None:
+        root = self.ledger.create_record(
+            record_id="fc-review-root",
+            kind="work",
+            title="Plan under review",
+            description="Review this candidate.",
+            owner="native-author",
+            fc={
+                "kind": "work",
+                "owner": "native-author",
+                "project": "toy",
+                "phase": "planning",
+                "ownership_operation": "author-acquisition",
+                "plan": {
+                    "reviews": {
+                        "cold_reader": {
+                            "state": "running",
+                            "review_operation": "fc-review-start",
+                        }
+                    }
+                },
+            },
+        )
+        thread_id = "native-review-task"
+        task = self.ledger.create_record(
+            record_id="fc-review-task",
+            kind="task",
+            title="Independent review",
+            description="Cold-reader review.",
+            owner=thread_id,
+            external_ref=f"fulcrum:thread:{thread_id}",
+            fc={
+                "kind": "task",
+                "owner": thread_id,
+                "thread_id": thread_id,
+                "role": "weaver",
+                "purpose": "plan_review",
+                "perspective": "cold_reader",
+                "project": "toy",
+                "work_bead": None,
+                "associated_beads": [root.id],
+                "review_operation": "fc-review-start",
+                "model": "luna",
+                "effort": "high",
+            },
+        )
+        self.runtime.facts[thread_id] = TaskFacts(
+            id=thread_id,
+            title="Independent review",
+            cwd=str(self.project),
+            project_id=None,
+            workspace_roots=(str(self.project),),
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="idle",
+            active_turn=None,
+            last_turn={"id": "review-turn", "status": "completed"},
+            pending_requests=(),
+            observed_at="2026-09-14T16:00:00Z",
+        )
+        supervisor = ControllerSupervisor(
+            self.request,
+            RetryApplication(self.ledger),
+            clock=self.clock,
+            runtime=self.runtime,  # type: ignore[arg-type]
+        )
+
+        first = await supervisor.run_once(bead_id=root.id)
+        reminders = [
+            item
+            for item in first.next_actions
+            if item["kind"] == "review_finish_reminder"
+        ]
+        self.assertEqual(len(reminders), 1)
+        self.assertEqual(len(self.runtime.sent), 1)
+        reminder_turn = str(reminders[0]["turn_id"])
+        self.runtime.facts[thread_id] = replace(
+            self.runtime.facts[thread_id],
+            last_turn={"id": reminder_turn, "status": "completed"},
+        )
+
+        second = await supervisor.run_once(bead_id=root.id)
+        self.assertEqual(len(self.runtime.sent), 1)
+        self.assertIn(
+            "review_recovery_request", [item["kind"] for item in second.next_actions]
+        )
+        current_root = self.ledger.show(root.id)
+        assert current_root is not None and current_root.fc
+        self.assertEqual(
+            current_root.fc["plan"]["reviews"]["cold_reader"]["state"],
+            "recovery_required",
+        )
+
+        current_task = self.ledger.show(task.id)
+        assert current_task is not None and current_task.fc
+        task_fc = dict(current_task.fc)
+        task_fc["review_result_operation"] = "fc-review-finish"
+        self.ledger.update_fc(task.id, task_fc)
+        third = await supervisor.run_once(bead_id=root.id)
+        self.assertIn(thread_id, self.runtime.released)
+        self.assertIn("review_release", [item["kind"] for item in third.next_actions])
 
     async def test_three_critical_loop_failures_exit_and_remain_observable(
         self,

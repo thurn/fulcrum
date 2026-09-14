@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 from websockets.asyncio.server import serve
 
+from fulcrum.ledger import Ledger
 from fulcrum.runtime import (
     AppServerError,
     AppServerRuntime,
@@ -163,16 +164,23 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
         runtime.create_task.assert_not_awaited()
 
     async def test_installed_cli_starts_tracked_task_before_native_turn(self) -> None:
-        thread: dict[str, Any] | None = None
+        threads: dict[str, dict[str, Any]] = {}
+        terminals: dict[str, list[dict[str, Any]]] = {}
+        thread_count = 0
+        turn_count = 0
         captured_prompt: str | None = None
+        responded: list[dict[str, Any]] = []
 
         async def handler(connection: Any) -> None:
-            nonlocal thread, captured_prompt
+            nonlocal thread_count, turn_count, captured_prompt
             async for raw in connection:
                 message = json.loads(raw)
                 identifier = message.get("id")
                 method = message.get("method")
                 params = message.get("params", {})
+                if method is None and identifier == "native-request-1":
+                    responded.append(dict(message.get("result") or {}))
+                    continue
                 if method == "initialize":
                     result: dict[str, Any] = {}
                 elif method == "model/list":
@@ -187,20 +195,23 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                         ]
                     }
                 elif method == "thread/list":
-                    data = []
-                    if thread is not None:
-                        requested = params.get("cwd")
-                        requested_cwds = (
-                            requested if isinstance(requested, list) else [requested]
-                        )
-                        if thread["cwd"] in requested_cwds:
-                            data = [thread]
+                    requested = params.get("cwd")
+                    requested_cwds = (
+                        requested if isinstance(requested, list) else [requested]
+                    )
+                    data = [
+                        thread
+                        for thread in threads.values()
+                        if requested is None or thread["cwd"] in requested_cwds
+                    ]
                     result = {"data": data, "nextCursor": None}
                 elif method == "thread/loaded/list":
-                    result = {"data": [thread["id"]] if thread else []}
+                    result = {"data": list(threads)}
                 elif method == "thread/start":
+                    thread_count += 1
+                    thread_id = f"native-thread-{thread_count}"
                     thread = {
-                        "id": "native-thread-1",
+                        "id": thread_id,
                         "name": None,
                         "cwd": params["cwd"],
                         "environments": [
@@ -217,36 +228,89 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                         "archived": False,
                         "turns": [],
                     }
+                    threads[thread_id] = thread
+                    terminals[thread_id] = []
                     result = {"thread": thread}
                 elif method == "thread/name/set":
-                    assert thread is not None
+                    thread = threads[params["threadId"]]
                     thread["name"] = params["name"]
                     result = {}
                 elif method == "thread/settings/update":
-                    assert thread is not None
+                    thread = threads[params["threadId"]]
                     thread["environments"][0]["cwd"] = params["cwd"]
                     result = {}
                 elif method == "thread/read":
-                    assert thread is not None
+                    thread = threads[params["threadId"]]
                     result = {"thread": thread}
                 elif method == "turn/start":
-                    assert thread is not None
+                    thread = threads[params["threadId"]]
+                    turn_count += 1
                     captured_prompt = params["input"][0]["text"]
                     turn = {
-                        "id": "native-turn-1",
+                        "id": f"native-turn-{turn_count}",
                         "status": "completed",
                         "items": [{"type": "userMessage", "text": captured_prompt}],
                     }
                     thread["turns"] = [turn]
                     thread["status"] = {"type": "idle"}
                     result = {"turn": turn}
+                elif method == "thread/items/list":
+                    thread = threads[params["threadId"]]
+                    result = {
+                        "data": [
+                            {
+                                "turnId": thread["turns"][-1]["id"],
+                                "item": {
+                                    "type": "agentMessage",
+                                    "text": "bounded fixture output",
+                                },
+                            }
+                        ],
+                        "nextCursor": None,
+                    }
                 elif method == "thread/backgroundTerminals/list":
-                    result = {"data": []}
+                    result = {
+                        "data": list(terminals.get(params["threadId"], [])),
+                        "nextCursor": None,
+                    }
+                elif method == "thread/backgroundTerminals/terminate":
+                    current = terminals.get(params["threadId"], [])
+                    before = len(current)
+                    terminals[params["threadId"]] = [
+                        item
+                        for item in current
+                        if item.get("processId") != params["processId"]
+                    ]
+                    result = {"terminated": len(terminals[params["threadId"]]) < before}
+                elif method == "thread/backgroundTerminals/clean":
+                    result = {}
                 elif method == "thread/unsubscribe":
                     result = {"status": "notSubscribed"}
                 else:
                     continue
                 await connection.send(json.dumps({"id": identifier, "result": result}))
+                if method == "initialize" and "native-thread-1" in threads:
+                    await connection.send(
+                        json.dumps(
+                            {
+                                "id": "native-request-1",
+                                "method": "item/tool/requestUserInput",
+                                "params": {
+                                    "threadId": "native-thread-1",
+                                    "turnId": "native-turn-1",
+                                    "itemId": "input-item-1",
+                                    "questions": [
+                                        {
+                                            "id": "scope",
+                                            "header": "Scope",
+                                            "question": "Continue?",
+                                            "options": [],
+                                        }
+                                    ],
+                                },
+                            }
+                        )
+                    )
 
         async def run(
             *arguments: str, payload: dict[str, Any] | None = None
@@ -323,6 +387,9 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                             "  executor:",
                             "    model: luna",
                             "    effort: high",
+                            "  weaver:",
+                            "    model: luna",
+                            "    effort: high",
                             "projects:",
                             "  toy:",
                             f"    root: {project}",
@@ -390,9 +457,12 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                     f"FULCRUM_OPERATION={envelope['operation_id']}",
                     captured_prompt or "",
                 )
-                self.assertEqual(thread["projectId"], "fixture-project")
                 self.assertEqual(
-                    thread["environments"][0]["cwd"], str(project.resolve())
+                    threads["native-thread-1"]["projectId"], "fixture-project"
+                )
+                self.assertEqual(
+                    threads["native-thread-1"]["environments"][0]["cwd"],
+                    str(project.resolve()),
                 )
                 code, shown, stderr = await run(
                     "task",
@@ -406,6 +476,111 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(code, 0, stderr + shown)
                 creation_cwd = json.loads(shown)["result"]["creation_cwd"]
                 self.assertIn(envelope["operation_id"], creation_cwd)
+
+                code, output, stderr = await run(
+                    "task",
+                    "output",
+                    "native-thread-1",
+                    "--turn-id",
+                    "native-turn-1",
+                    "--max-bytes",
+                    "256",
+                    "--instance",
+                    str(instance),
+                    "--offline",
+                    "--json",
+                )
+                self.assertEqual(code, 0, stderr + output)
+                output_result = json.loads(output)["result"]
+                self.assertEqual(
+                    output_result["items"][0]["item"]["text"],
+                    "bounded fixture output",
+                )
+                self.assertLessEqual(output_result["bytes"], 256)
+                code, waited, stderr = await run(
+                    "task",
+                    "wait",
+                    "native-thread-1",
+                    "--turn-id",
+                    "native-turn-1",
+                    "--until",
+                    "terminal",
+                    "--instance",
+                    str(instance),
+                    "--offline",
+                    "--json",
+                )
+                self.assertEqual(code, 0, stderr + waited)
+                self.assertTrue(json.loads(waited)["result"]["satisfied"])
+                code, requests, stderr = await run(
+                    "task",
+                    "requests",
+                    "native-thread-1",
+                    "--instance",
+                    str(instance),
+                    "--offline",
+                    "--json",
+                )
+                self.assertEqual(code, 0, stderr + requests)
+                self.assertEqual(
+                    json.loads(requests)["result"]["items"][0]["request_id"],
+                    "native-request-1",
+                )
+                code, response, stderr = await run(
+                    "task",
+                    "respond",
+                    "native-thread-1",
+                    "--request",
+                    "native-request-1",
+                    "--instance",
+                    str(instance),
+                    "--offline",
+                    "--actor",
+                    "human",
+                    "--input",
+                    "-",
+                    "--json",
+                    payload={"response": {"answers": {"scope": {"answers": ["yes"]}}}},
+                )
+                self.assertEqual(code, 0, stderr + response)
+                self.assertEqual(
+                    responded[-1], {"answers": {"scope": {"answers": ["yes"]}}}
+                )
+                terminals["native-thread-1"] = [
+                    {"processId": "process-1", "itemId": "terminal-item-1"}
+                ]
+                code, listed, stderr = await run(
+                    "task",
+                    "terminals",
+                    "native-thread-1",
+                    "--instance",
+                    str(instance),
+                    "--offline",
+                    "--json",
+                )
+                self.assertEqual(code, 0, stderr + listed)
+                self.assertEqual(
+                    json.loads(listed)["result"]["items"][0]["terminal_id"],
+                    "process-1",
+                )
+                code, stopped, stderr = await run(
+                    "task",
+                    "terminal",
+                    "stop",
+                    "native-thread-1",
+                    "--terminal",
+                    "process-1",
+                    "--reason",
+                    "fixture cleanup",
+                    "--instance",
+                    str(instance),
+                    "--offline",
+                    "--actor",
+                    "human",
+                    "--json",
+                )
+                self.assertEqual(code, 0, stderr + stopped)
+                self.assertEqual(terminals["native-thread-1"], [])
                 code, stdout, stderr = await run(
                     "task",
                     "release",
@@ -421,6 +596,84 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     json.loads(stdout)["result"]["result"]["facts"]["status"],
                     "notSubscribed",
+                )
+
+                ledger = Ledger(brain)
+                root_record = ledger.show(bead_id)
+                assert root_record is not None and root_record.fc
+                root_fc = dict(root_record.fc)
+                root_fc["plan"] = {
+                    "draft": {
+                        "text": "Implement the reviewed fixture.",
+                        "tasks": [
+                            {
+                                "key": "fixture",
+                                "outcome": "Deliver the fixture.",
+                                "acceptance": ["The fixture is observed."],
+                                "depends_on": [],
+                            }
+                        ],
+                        "summary": "One reviewed fixture task.",
+                        "publication": {"required": False},
+                        "validation": {
+                            "summary": "Observe the installed CLI.",
+                            "checks": [],
+                        },
+                    },
+                    "reviews": {},
+                }
+                ledger.update_fc(bead_id, root_fc)
+                author = root_fc["owner"]
+                for perspective in ("cold_reader", "requirements"):
+                    code, started, stderr = await run(
+                        "plan",
+                        "review",
+                        "start",
+                        "--bead",
+                        bead_id,
+                        "--perspective",
+                        perspective,
+                        "--instance",
+                        str(instance),
+                        "--offline",
+                        "--actor",
+                        "human",
+                        "--json",
+                    )
+                    self.assertEqual(code, 0, stderr + started)
+                    review = json.loads(started)["result"]["result"]
+                    code, finished, stderr = await run(
+                        "plan",
+                        "review",
+                        "finish",
+                        "--task",
+                        review["task_record_id"],
+                        "--instance",
+                        str(instance),
+                        "--offline",
+                        "--actor",
+                        f"task:{review['thread_id']}",
+                        "--thread-id",
+                        review["thread_id"],
+                        "--input",
+                        "-",
+                        "--json",
+                        payload={
+                            "review_operation": review["review_operation"],
+                            "summary": f"{perspective} fixture review complete.",
+                            "findings": [],
+                        },
+                    )
+                    self.assertEqual(code, 0, stderr + finished)
+                reviewed_root = ledger.show(bead_id)
+                assert reviewed_root is not None and reviewed_root.fc
+                self.assertEqual(reviewed_root.fc["owner"], author)
+                self.assertEqual(
+                    {
+                        key: value["state"]
+                        for key, value in reviewed_root.fc["plan"]["reviews"].items()
+                    },
+                    {"cold_reader": "completed", "requirements": "completed"},
                 )
                 subprocess.run(
                     ["bd", "-C", str(brain), "dolt", "stop"],

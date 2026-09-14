@@ -18,6 +18,7 @@ from fulcrum.ledger import (
 )
 from fulcrum.leadership import LeadershipService
 from fulcrum.runtime_service import RuntimeService, TaskService
+from fulcrum.reviews import ReviewService
 from fulcrum.roles import RoleService
 from fulcrum.supervision import ReconciliationService
 from fulcrum.work import WorkService
@@ -57,9 +58,13 @@ class Application:
         self.register(("task", "show"), tasks.show)
         self.register(("task", "start"), tasks.start)
         self.register(("task", "send"), tasks.send)
+        self.register(("task", "output"), tasks.output)
+        self.register(("task", "wait"), tasks.wait)
         self.register(("task", "interrupt"), tasks.interrupt)
         self.register(("task", "requests"), tasks.requests)
         self.register(("task", "respond"), tasks.respond)
+        self.register(("task", "terminals"), tasks.terminals)
+        self.register(("task", "terminal", "stop"), tasks.terminal_stop)
         self.register(("task", "release"), tasks.release)
         self.register(("task", "archive"), tasks.archive)
         self.register(("task", "unarchive"), tasks.unarchive)
@@ -75,6 +80,9 @@ class Application:
         self.register(("marshal", "decide"), leadership.marshal_decide)
         self.register(("backlog", "list"), leadership.backlog_list)
         self.register(("dispatch",), leadership.dispatch)
+        reviews = ReviewService()
+        self.register(("plan", "review", "start"), reviews.start)
+        self.register(("plan", "review", "finish"), reviews.finish)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

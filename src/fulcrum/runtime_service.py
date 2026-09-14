@@ -408,6 +408,43 @@ class TaskService:
         )
         return _operation_result(operation)
 
+    def output(self, request: ParsedRequest) -> CommandResult:
+        ledger = _ledger(request)
+        record = _find_task(ledger, str(request.arguments["id"]))
+        limit = _limit(request.arguments.get("limit"))
+        max_bytes = int(request.arguments.get("max_bytes", 262144))
+        if max_bytes < 128 or max_bytes > 4 * 1024 * 1024:
+            raise FulcrumError.invalid(
+                "INVALID_LIMIT", "max-bytes must be between 128 and 4194304"
+            )
+        result = _runtime_call(
+            request,
+            lambda runtime: runtime.output(
+                _thread_id(record),
+                turn_id=_optional_string(request.arguments.get("turn_id")),
+                limit=limit,
+                cursor=_optional_string(request.arguments.get("cursor")),
+                max_bytes=max_bytes,
+            ),
+        )
+        return CommandResult.query(dict(result))
+
+    def wait(self, request: ParsedRequest) -> CommandResult:
+        ledger = _ledger(request)
+        record = _find_task(ledger, str(request.arguments["id"]))
+        until = str(request.arguments["until"])
+        result = _runtime_call(
+            request,
+            lambda runtime: _wait_for_task(
+                runtime,
+                _thread_id(record),
+                turn_id=_optional_string(request.arguments.get("turn_id")),
+                until=until,
+                timeout=request.timeout,
+            ),
+        )
+        return CommandResult.query(result)
+
     def interrupt(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -476,12 +513,122 @@ class TaskService:
         )
 
     def respond(self, request: ParsedRequest) -> CommandResult:
-        raise FulcrumError(
-            "CAPABILITY_UNAVAILABLE",
-            "responding requires the controller's live runtime subscription",
-            exit_code=4,
-            next_command=("fulcrum", "service", "start", "--json"),
+        ledger = _ledger(request)
+        record = _find_task(ledger, str(request.arguments["id"]))
+        _authorize_task_message(ledger, request, record)
+        native_request_id = str(request.arguments["request"])
+        response = request.input.get("response")
+        if not isinstance(response, Mapping):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "task respond requires a response object"
+            )
+        operation = _runtime_call(
+            request,
+            lambda runtime: _respond_transaction(
+                runtime,
+                ledger,
+                request,
+                record,
+                native_request_id,
+                dict(response),
+            ),
         )
+        return _operation_result(operation)
+
+    def terminals(self, request: ParsedRequest) -> CommandResult:
+        ledger = _ledger(request)
+        record = _find_task(ledger, str(request.arguments["id"]))
+        limit = _limit(request.arguments.get("limit"))
+        result = _runtime_call(
+            request,
+            lambda runtime: runtime.terminals(
+                _thread_id(record),
+                limit=limit,
+                cursor=_optional_string(request.arguments.get("cursor")),
+            ),
+        )
+        return CommandResult.query(dict(result))
+
+    def terminal_stop(self, request: ParsedRequest) -> CommandResult:
+        ledger = _ledger(request)
+        record = _find_task(ledger, str(request.arguments["id"]))
+        _authorize_task_message(ledger, request, record)
+        listed = _runtime_call(
+            request,
+            lambda runtime: runtime.terminals(_thread_id(record), limit=0, cursor=None),
+        )
+        available = [
+            str(item.get("terminal_id"))
+            for item in listed.get("items", [])
+            if isinstance(item, Mapping) and item.get("terminal_id")
+        ]
+        selected = (
+            available
+            if request.arguments.get("all_owned")
+            else [str(request.arguments["terminal"])]
+        )
+        if not request.arguments.get("all_owned") and selected[0] not in available:
+            raise FulcrumError.invalid(
+                "TERMINAL_NOT_OWNED",
+                "the selected terminal is not a running terminal owned by this task",
+                details={"terminal_id": selected[0], "owned": available},
+            )
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=str((record.fc or {}).get("work_bead") or "") or None,
+            planned={
+                "thread_id": _thread_id(record),
+                "terminal_ids": selected,
+                "all_owned": bool(request.arguments.get("all_owned")),
+                "reason": request.arguments.get("reason"),
+            },
+            next_action="Terminate only the exact retained owned terminal IDs and inspect absence.",
+        )
+        if reused and operation.operation.get("state") in {
+            "completed",
+            "failed",
+            "uncertain",
+            "cancelled",
+        }:
+            return _operation_result(operation)
+        try:
+            results = _runtime_call(
+                request,
+                lambda runtime: _terminate_terminals(
+                    runtime, _thread_id(record), selected
+                ),
+            )
+        except FulcrumError as error:
+            operation = ledger.update_operation(
+                operation,
+                state=(
+                    "uncertain" if error.state is CommandState.UNCERTAIN else "failed"
+                ),
+                step="terminal_stop_unresolved",
+                error={
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                },
+                next_action=(
+                    "Inspect the exact terminal IDs before any retry."
+                    if error.state is CommandState.UNCERTAIN
+                    else "Use --all-owned only if stopping every owned terminal is intended."
+                ),
+            )
+            return _operation_result(operation)
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="owned_terminals_stopped",
+            result={
+                "thread_id": _thread_id(record),
+                "terminals": results,
+                "all_owned": bool(request.arguments.get("all_owned")),
+            },
+            next_action="No selected owned terminal remains running.",
+        )
+        return _operation_result(operation)
 
     def release(self, request: ParsedRequest) -> CommandResult:
         return self._lifecycle(request, "release")
@@ -511,6 +658,28 @@ class TaskService:
     def _lifecycle(self, request: ParsedRequest, action: str) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
+        _authorize_task_message(ledger, request, record)
+        if action in {"archive", "delete"}:
+            snapshot = _runtime_call(
+                request,
+                lambda runtime: _task_lifecycle_snapshot(runtime, _thread_id(record)),
+            )
+            task_facts = snapshot["task"]
+            terminals = snapshot["terminals"]
+            if task_facts.active_turn is not None or terminals:
+                raise FulcrumError(
+                    "TASK_NOT_IDLE",
+                    f"cannot {action} a task with active native work",
+                    exit_code=5,
+                    details={
+                        "active_turn": task_facts.active_turn,
+                        "terminal_ids": [
+                            item.get("terminal_id")
+                            for item in terminals
+                            if isinstance(item, Mapping)
+                        ],
+                    },
+                )
         operation, reused = ledger.create_operation(
             request,
             bead_id=str(record.fc.get("work_bead")) if record.fc else None,
@@ -578,6 +747,241 @@ async def _inspect_many(
         for thread_id, result in zip(thread_ids, results)
         if isinstance(result, TaskFacts)
     }
+
+
+async def _task_lifecycle_snapshot(
+    runtime: AppServerRuntime, thread_id: str
+) -> dict[str, Any]:
+    task = await runtime.inspect_task(thread_id)
+    terminal_page = await runtime.terminals(thread_id, limit=0, cursor=None)
+    terminals = terminal_page.get("items")
+    return {
+        "task": task,
+        "terminals": (
+            [dict(item) for item in terminals if isinstance(item, Mapping)]
+            if isinstance(terminals, list)
+            else []
+        ),
+    }
+
+
+async def _wait_for_task(
+    runtime: AppServerRuntime,
+    thread_id: str,
+    *,
+    turn_id: str | None,
+    until: str,
+    timeout: float,
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout
+    last: TaskFacts | None = None
+    selected_turn: TurnFacts | None = None
+    while True:
+        last = await runtime.inspect_task(thread_id)
+        if turn_id is not None:
+            selected_turn = await runtime.inspect_turn(thread_id, turn_id)
+        if (
+            until == "idle"
+            and last.active_turn is None
+            and last.runtime_status
+            in {
+                "idle",
+                "notLoaded",
+                "completed",
+                "failed",
+            }
+        ):
+            break
+        if until == "terminal":
+            if (
+                turn_id is not None
+                and selected_turn is not None
+                and selected_turn.completed
+            ):
+                break
+            if turn_id is None and last.last_turn is not None:
+                status = str(last.last_turn.get("status") or "")
+                if last.active_turn is None and status in {
+                    "completed",
+                    "failed",
+                    "interrupted",
+                }:
+                    selected_turn = TurnFacts(
+                        id=str(last.last_turn.get("id") or ""),
+                        thread_id=thread_id,
+                        state=status,
+                        operation_id=None,
+                        completed=True,
+                        error=(
+                            dict(last.last_turn["error"])
+                            if isinstance(last.last_turn.get("error"), Mapping)
+                            else None
+                        ),
+                        tools=(),
+                        usage=(
+                            dict(last.last_turn["usage"])
+                            if isinstance(last.last_turn.get("usage"), Mapping)
+                            else None
+                        ),
+                        observed_at=last.observed_at,
+                    )
+                    break
+        if asyncio.get_running_loop().time() >= deadline:
+            raise FulcrumError(
+                "WAIT_TIMEOUT",
+                f"task {thread_id} did not reach {until} before the deadline",
+                exit_code=3,
+                retryable=True,
+                details={
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "last_observation": last.to_dict(),
+                },
+            )
+        await asyncio.sleep(
+            min(
+                0.25,
+                max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+        )
+    assert last is not None
+    return {
+        "thread_id": thread_id,
+        "until": until,
+        "satisfied": True,
+        "turn": selected_turn.to_dict() if selected_turn is not None else None,
+        "task": last.to_dict(),
+        "pending_requests": [dict(item) for item in last.pending_requests],
+        "observed_at": last.observed_at,
+        "gaps": list(last.gaps),
+    }
+
+
+async def _respond_and_observe(
+    runtime: AppServerRuntime,
+    thread_id: str,
+    request_id: str,
+    response: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        await runtime.respond(thread_id, request_id, response)
+    except AppServerError as error:
+        if not error.uncertain:
+            raise
+        facts = await runtime.inspect_task(thread_id)
+        still_pending = any(
+            str(item.get("request_id")) == request_id for item in facts.pending_requests
+        )
+        if still_pending:
+            raise
+        return {
+            "thread_id": thread_id,
+            "request_id": request_id,
+            "resolved": False,
+            "uncertain": True,
+            "gap": "request disappeared after response transport loss",
+            "observed_at": facts.observed_at,
+        }
+    facts = await runtime.inspect_task(thread_id)
+    still_pending = any(
+        str(item.get("request_id")) == request_id for item in facts.pending_requests
+    )
+    return {
+        "thread_id": thread_id,
+        "request_id": request_id,
+        "resolved": not still_pending,
+        "uncertain": still_pending,
+        "gap": (
+            "native request remained pending after response" if still_pending else None
+        ),
+        "observed_at": facts.observed_at,
+    }
+
+
+async def _respond_transaction(
+    runtime: AppServerRuntime,
+    ledger: Ledger,
+    request: ParsedRequest,
+    record: LedgerRecord,
+    request_id: str,
+    response: dict[str, Any],
+) -> OperationRecord:
+    """Retain and answer one live native request without dropping its subscription."""
+
+    thread_id = _thread_id(record)
+    facts = await runtime.inspect_task(thread_id)
+    matches = [
+        item
+        for item in facts.pending_requests
+        if str(item.get("request_id")) == request_id
+    ]
+    if len(matches) != 1:
+        raise FulcrumError(
+            "REQUEST_IDENTITY_LOST",
+            "the native request is no longer present on this live subscription",
+            exit_code=5,
+            retryable=False,
+            details={
+                "thread_id": facts.id,
+                "request_id": request_id,
+                "gaps": list(facts.gaps)
+                + ["reconnect did not recover the in-memory request identity"],
+            },
+        )
+    method = str(matches[0].get("method") or "")
+    _validate_native_response(method, response)
+    operation, reused = await asyncio.to_thread(
+        ledger.create_operation,
+        request,
+        bead_id=str((record.fc or {}).get("work_bead") or "") or None,
+        planned={
+            "thread_id": thread_id,
+            "native_request_id": request_id,
+            "method": method,
+            "response": response,
+        },
+        next_action="Send the typed response once and inspect whether the request remains pending.",
+    )
+    if reused and operation.operation.get("state") in {
+        "completed",
+        "failed",
+        "uncertain",
+        "cancelled",
+    }:
+        return operation
+    observed = await _respond_and_observe(runtime, thread_id, request_id, response)
+    state = "uncertain" if observed["uncertain"] else "completed"
+    return await asyncio.to_thread(
+        ledger.update_operation,
+        operation,
+        state=state,
+        step=(
+            "response_identity_lost"
+            if observed["uncertain"]
+            else "native_request_resolved"
+        ),
+        external={
+            "adapter": "codex",
+            "thread_id": thread_id,
+            "request_id": request_id,
+            "method": method,
+        },
+        result=observed,
+        next_action=(
+            "Inspect the task and request history; do not replay an absent request."
+            if observed["uncertain"]
+            else "Observe the continuing native turn."
+        ),
+    )
+
+
+async def _terminate_terminals(
+    runtime: AppServerRuntime, thread_id: str, terminal_ids: Sequence[str]
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for terminal_id in terminal_ids:
+        results.append(dict(await runtime.terminate_terminal(thread_id, terminal_id)))
+    return results
 
 
 async def _create_and_configure(
@@ -885,6 +1289,148 @@ def _task_view(record: LedgerRecord, facts: TaskFacts | None) -> dict[str, Any]:
     }
 
 
+def _validate_native_response(method: str, response: Mapping[str, Any]) -> None:
+    if method == "item/commandExecution/requestApproval":
+        decision = response.get("decision")
+        if not _valid_command_approval_decision(decision):
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "command approval response does not match the native decision type",
+            )
+        return
+    if method == "item/fileChange/requestApproval":
+        decision = response.get("decision")
+        if not isinstance(decision, str) or decision not in {
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel",
+        }:
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "file-change approval requires a supported native decision",
+            )
+        return
+    if method == "item/permissions/requestApproval":
+        if not isinstance(response.get("permissions"), Mapping):
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "permissions approval requires a permissions object",
+            )
+        scope = response.get("scope", "turn")
+        if not isinstance(scope, str) or scope not in {"turn", "session"}:
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "permissions approval scope must be turn or session",
+            )
+        strict = response.get("strictAutoReview")
+        if strict is not None and not isinstance(strict, bool):
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "strictAutoReview must be boolean or null",
+            )
+        return
+    if method in {"execCommandApproval", "applyPatchApproval"}:
+        if not _valid_legacy_approval_decision(response.get("decision")):
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                f"{method} response does not match the native review decision type",
+            )
+        return
+    if method == "item/tool/requestUserInput":
+        answers = response.get("answers")
+        if not isinstance(answers, Mapping):
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "request-user-input response requires an answers object",
+            )
+        for value in answers.values():
+            if (
+                not isinstance(value, Mapping)
+                or not isinstance(value.get("answers"), list)
+                or not all(isinstance(item, str) for item in value["answers"])
+            ):
+                raise FulcrumError.invalid(
+                    "INVALID_NATIVE_RESPONSE",
+                    "each request-user-input answer must contain a string array",
+                )
+        return
+    if method == "mcpServer/elicitation/request":
+        action = response.get("action")
+        if action not in {"accept", "decline", "cancel"}:
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "elicitation response requires accept, decline, or cancel",
+            )
+        if action == "accept" and "content" not in response:
+            raise FulcrumError.invalid(
+                "INVALID_NATIVE_RESPONSE",
+                "accepted elicitation requires content",
+            )
+        return
+    raise FulcrumError(
+        "RUNTIME_UNSUPPORTED",
+        f"Fulcrum cannot safely validate response type {method}",
+        exit_code=4,
+    )
+
+
+def _valid_command_approval_decision(value: Any) -> bool:
+    if isinstance(value, str) and value in {
+        "accept",
+        "acceptForSession",
+        "decline",
+        "cancel",
+    }:
+        return True
+    if not isinstance(value, Mapping) or len(value) != 1:
+        return False
+    amendment = value.get("acceptWithExecpolicyAmendment")
+    if isinstance(amendment, Mapping):
+        rules = amendment.get("execpolicy_amendment")
+        return isinstance(rules, list) and all(isinstance(rule, str) for rule in rules)
+    amendment = value.get("applyNetworkPolicyAmendment")
+    if not isinstance(amendment, Mapping):
+        return False
+    policy = amendment.get("network_policy_amendment")
+    return (
+        isinstance(policy, Mapping)
+        and isinstance(policy.get("host"), str)
+        and bool(policy.get("host"))
+        and policy.get("action") in {"allow", "deny"}
+    )
+
+
+def _valid_legacy_approval_decision(value: Any) -> bool:
+    if isinstance(value, str) and value in {
+        "approved",
+        "approved_for_session",
+        "approved_mcp_policy_amendment",
+        "timed_out",
+        "abort",
+    }:
+        return True
+    if not isinstance(value, Mapping) or len(value) != 1:
+        return False
+    amendment = value.get("approved_execpolicy_amendment")
+    if isinstance(amendment, Mapping):
+        rules = amendment.get("proposed_execpolicy_amendment")
+        return isinstance(rules, list) and all(isinstance(rule, str) for rule in rules)
+    denied = value.get("denied")
+    if isinstance(denied, Mapping):
+        return isinstance(denied.get("rejection"), str)
+    amendment = value.get("network_policy_amendment")
+    if not isinstance(amendment, Mapping):
+        return False
+    policy = amendment.get("network_policy_amendment")
+    return (
+        isinstance(policy, Mapping)
+        and isinstance(policy.get("host"), str)
+        and bool(policy.get("host"))
+        and policy.get("action") in {"allow", "deny"}
+    )
+
+
 def _authorize_task_message(
     ledger: Ledger, request: ParsedRequest, record: LedgerRecord
 ) -> None:
@@ -927,6 +1473,10 @@ def _limit(value: Any) -> int:
     if result < 0:
         raise FulcrumError.invalid("INVALID_LIMIT", "limit cannot be negative")
     return result
+
+
+def _optional_string(value: Any) -> str | None:
+    return str(value) if isinstance(value, str) and value else None
 
 
 def _operation_result(operation: OperationRecord) -> CommandResult:

@@ -1225,6 +1225,7 @@ def capacity_snapshot(ledger: Ledger, config: Mapping[str, Any]) -> dict[str, An
     project_counts: dict[str, int] = {}
     counted_threads: set[str] = set()
     counted_work: set[str] = set()
+    counted_creation_operations: set[str] = set()
     work_by_id = {record.id: record for record in work_records}
     for task in task_records:
         fc = task.fc or {}
@@ -1267,13 +1268,20 @@ def capacity_snapshot(ledger: Ledger, config: Mapping[str, Any]) -> dict[str, An
         if not active:
             continue
         counted_threads.add(thread_id)
+        creation_operation = _optional_string(fc.get("creation_operation"))
+        if creation_operation is not None:
+            counted_creation_operations.add(creation_operation)
         active_ids.append(thread_id)
         if unknown:
             unknown_ids.append(thread_id)
         work = work_by_id.get(str(fc.get("work_bead")))
         if work is not None:
             counted_work.add(work.id)
-        project = str((work.fc or {}).get("project") if work and work.fc else "")
+        project = str(
+            (work.fc or {}).get("project")
+            if work and work.fc
+            else fc.get("project") or ""
+        )
         project_counts[project] = project_counts.get(project, 0) + 1
         dispatch = (work.fc or {}).get("dispatch") if work and work.fc else None
         if isinstance(dispatch, Mapping) and dispatch.get("human_bypass"):
@@ -1300,6 +1308,25 @@ def capacity_snapshot(ledger: Ledger, config: Mapping[str, Any]) -> dict[str, An
         project_counts[project] = project_counts.get(project, 0) + 1
         if reservation.get("human_bypass"):
             human_bypasses.append(operation_id)
+    for operation_record in ledger.list_records(kind="operation", limit=0):
+        operation_fc = operation_record.fc or {}
+        if (
+            operation_record.id in counted_creation_operations
+            or operation_fc.get("command") != "plan.review.start"
+            or operation_fc.get("state") not in {"accepted", "running"}
+        ):
+            continue
+        planned = operation_fc.get("planned")
+        review_reservation = (
+            planned.get("reservation") if isinstance(planned, Mapping) else None
+        )
+        if not isinstance(review_reservation, Mapping) or review_reservation.get(
+            "state"
+        ) not in {"in_flight", "unknown"}:
+            continue
+        reservations.append(operation_record.id)
+        project = str(planned.get("project") or "")
+        project_counts[project] = project_counts.get(project, 0) + 1
     project_overrides = _mapping(policy.get("project_capacity", {}))
     default_project = int(policy["default_project_capacity"])
     project_rows = {
