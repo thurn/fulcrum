@@ -1,7 +1,9 @@
 # Fulcrum 2.0 technical design
 
-Status: approved design scope, specified for implementation. This document describes
-the replacement; it does not assert that the commands below already exist.
+Status: reviewed replacement specification; implementation and live validation
+remain outstanding. The [implementation plan](plan/README.md) assigns every
+capability and verification obligation. Commands below describe the replacement,
+not the current executable.
 
 Read [contracts.md](contracts.md) for the complete executable interfaces and data
 contracts, and [failure-analysis.md](failure-analysis.md) for the operational
@@ -249,7 +251,9 @@ does not compose nested role prompts or truncate task requirements.
 The resulting description contains: requested outcome; project and worktree;
 scope and acceptance; current role and next action; current evidence and blockers;
 and exact CLI finish/help instructions. Historical logs are linked, not pasted.
-The worker prompt is a fixed instruction to read the named bead and follow it.
+Send the complete cooked role/task prompt directly to the worker at turn start.
+Retain that exact input on the start receipt; do not replace it with a request to
+read the bead. The formula remains the role-instruction source.
 `fulcrum context --bead ...` prints that material plus current ownership and
 operation facts. Compaction recovery uses the same command.
 
@@ -300,9 +304,12 @@ leadership identity is established. This is the explicit external-intervention
 case, not an invisible unowned queue.
 
 Only the admitted task may advance a work bead through ordinary CLI operations.
-Each ownership acquisition gets a random claim token. Transfers invalidate the
-previous token; old finish commands return an ownership-conflict result. Tokens
-are non-secret concurrency identifiers, not authorization credentials or hashes.
+Each ownership acquisition is identified by the operation receipt that established
+it, stored as `fc.ownership_operation`. Check this reference and the acting task
+ID on owner-restricted writes. Transfers replace the reference; old finish calls
+return an ownership conflict. Progress and ordinary updates change
+`last_transition`, not `ownership_operation`. No separate random claim token is
+created. See the exact [ownership contract](contracts.md#ownership-and-native-writes).
 
 | Situation | Accountable progress |
 | --- | --- |
@@ -365,8 +372,8 @@ Marshal instead of repeatedly starting implementations that cannot succeed.
 
 Executor implements, runs relevant checks, and commits. Preserve proportionate
 behavioral verification, including boundary/error cases when material and rendered
-evidence for visible UI changes. Stop owned background tools and finish or stop
-helpers before handoff. Do not impose full end-to-end role execution on every
+evidence for visible UI changes. Stop owned background tools and any associated Fulcrum-managed task still
+writing the same scope before handoff. Do not impose full end-to-end role execution on every
 change. Executor does not push its worktree branch or promote source.
 `finish --outcome ready_for_review` records source and evidence, invokes delivery preparation, and
 arranges Warden ownership. Executor performs no further implementation after its
@@ -395,7 +402,7 @@ task's title and role. Record the preexisting source/worktree and pending delive
 facts. Introspection owns that bead during the investigation; no replacement
 worker runs concurrently on its scope. At completion, unresolved implementation
 returns to Marshal with the preserved worktree. A successor may reuse that
-worktree after confirming the old task and its helpers have stopped editing.
+worktree after confirming all conflicting Fulcrum-managed tasks have stopped editing.
 The introspection task remains Sage/Mason and does not automatically resume its
 previous role. Global investigations create new work beads.
 
@@ -412,7 +419,7 @@ remaining defects, actual delivered source, and cleanup result. Prefer direct
 completion; file a follow-up only when work actually remains. Do not mark a
 reduced-scope result as full acceptance of the original requirements.
 
-Normal takeover first observes termination of conflicting turns and owned helper
+Normal takeover first observes termination of conflicting managed turns and owned background
 processes. If the CLI itself is broken, the role instructions permit direct tool
 use. The resulting external facts must be reconciled afterward; break glass is
 not a pretend transactional guarantee over arbitrary shell operations. Platform
@@ -420,8 +427,8 @@ permissions and the human's assigned scope remain real boundaries.
 
 ## 5. Marshal context and dispatch
 
-The default Marshal brief is at most **2,000 model-input tokens**, implemented as a
-6,000-character textual cap plus compact JSON facts. It contains:
+The default Marshal brief targets **2,000 model-input tokens**, with a hard
+6,000-character bound over the complete serialized brief, including JSON facts. It contains:
 
 - The decision required and why it is needed now.
 - Effective policy, available capacity, and relevant resource pressure.
@@ -451,17 +458,23 @@ Marshal authorizes `dispatch`, `defer`, `clarify`, `duplicate`, `reject`, or
 capacity and dependencies allow. Capacity freed by a routine completion does not
 need another Marshal turn if an approved next task already exists.
 
-Default automatic capacity is 30 active native tasks, including leadership,
-specialists, and recovery; keep one slot available for recovery by admitting at
-most 29 ordinary automatic turns. Active helpers count toward the same ceiling.
-Default project capacity is 30, constrained by the global limit. Helpers use the
-same capacity accounting; there is no additional fixed per-worker helper ceiling
-by default. An optional policy can impose one. Human-started tasks bypass these
-policy limits and are included in observations; do not interrupt them to restore the
-configured count. Unknown helper activity makes capacity conservative rather than
-being counted as zero. Marshal may choose to use fewer slots, but only the human
-or Vizier can change configured limits. No role can create resources the runtime
-lacks.
+Default automatic capacity is **four active Fulcrum-managed tasks**, with all four
+available for ordinary work. Default per-project capacity is also four, constrained
+by the global limit. Count active leadership, independent review tasks, specialists,
+and recovery, plus reservations for starts in flight; count each task once. Idle
+leadership consumes no active slot. There is no reserved recovery slot. At full
+capacity, recovery uses an existing task or terminal repair. Unknown activity for
+a managed task keeps its reservation until inspected; unrelated native tasks are
+not Fulcrum assignments, although shared runtime resource pressure affects starts.
+Human-started tasks bypass policy limits and remain included in observations;
+never interrupt them merely to restore the configured count. Marshal can use fewer
+slots; only human/Vizier can change configured limits.
+
+Thirty simultaneous native tasks is a supported-capacity goal, not a default.
+The explicit concurrency test raises both limits to 30 in its disposable instance.
+Fulcrum coordinates ordinary Codex tasks, including independent review tasks linked
+through Beads. It has no native-subagent orchestration, discovery, or special
+accounting subsystem.
 
 Use declared overlap tags for changes to the same component and a default
 `control-plane` tag for Fulcrum installation/runtime changes. Marshal chooses
@@ -527,7 +540,7 @@ promise immediate process reclamation after unsubscribe.
 
 Use supported resource-pressure errors to stop new automatic admissions. A local
 diagnostic emergency check pauses automatic starts at 85% of the configured FD
-limit and resumes below 70%; it does not classify helpers by process name or
+limit and resumes below 70%; it does not infer task ownership from process names or
 interrupt unrelated/human work. Avoid enabling optional tool servers by default
 for workers that do not need them, using supported per-thread configuration.
 
@@ -571,7 +584,7 @@ tasks. Track command latency, queue delay, active execution time, coordination
 turns, review/fix work, recovery attempts, and raw observed token usage. Sum final
 per-turn counters, not repeated cumulative samples. Preserve the existing
 API-equivalent cost reporting, including workflow attribution, rate provenance,
-helper costs, and explicit partial coverage. These are estimates, not subscription
+independent review-task costs, and explicit partial coverage. These are estimates, not subscription
 billing. Store bounded analytical facts in Beads; diagnostic log retention must
 not erase them. Missing cost/usage is unknown, never zero. See the analytics
 [contract](contracts.md#usage-and-cost-commands).
@@ -580,7 +593,7 @@ On completion, automatically write `metadata.fc.completion_cost` onto each
 top-level work bead, including the root created for a Weaver session or plan.
 Record the estimated **USD API-equivalent cost of completing the whole workflow**:
 Weaver authoring, attributed Marshal decisions, child work, Executor/Warden turns,
-helpers, and same-scope recovery/specialists. Exclude unrelated follow-up work.
+independent review tasks, and same-scope recovery/specialists. Exclude unrelated follow-up work.
 This is directly readable from the bead; it is not available only through a cost
 report. Include coverage, a priced subtotal when incomplete, and the supporting
 analytics reference. Finalize from native terminal usage without another agent
@@ -607,14 +620,17 @@ leadership identities and, on explicit human installation, the initial
 configuration unless the human or Vizier explicitly requests a change.
 
 `reset --hard` is an explicit, resumable destructive operation over Fulcrum-owned
-resources. Stop dispatch; interrupt and observe managed turns and helpers; cancel
+resources. Stop dispatch; interrupt and observe managed turns and owned background tools; cancel
 nonterminal delivery work; delete managed native conversations; remove managed
 worktrees and their local branches; delete the old ledger, operational stores,
 logs, and generated runtime state; then initialize the clean replacement.
 Preserve project source repositories, the design documents, `fulcrum.yaml`, credentials, installed
 executables, unrelated Codex tasks, and unrelated delivery-provider history.
-Reset clears old Fulcrum data from the configured brain and its enumerated remote
-ledger; the clean replacement continues to use that same Git repository.
+Reset replaces the dedicated remote ledger history with a clean ledger; old
+Beads history must no longer be reachable through that enumerated ledger remote.
+Preserve the brain ordinary branch history and unrelated documents. Do not claim
+physical erasure from host-retained unreachable objects. The clean replacement
+continues to use the same Git repository.
 Delete only enumerated Fulcrum-owned resources, never `~/.codex` or the whole brain
 repository because it contains a ledger. Do not take a historical backup or import
 old data as part of this reset. See the exact restart-safe reset contract.
@@ -632,7 +648,7 @@ Implementation order:
    subscription cleanup, compaction hook, model overrides, and deterministic runtime
    adapter. Implement plan publication/refinement and durable memory on the ledger
    primitives before dispatching authored plans.
-3. **Ownership and delivery:** Claim tokens, stop-before-transfer, Executor to
+3. **Ownership and delivery:** Ownership-operation checks, stop-before-transfer, Executor to
    Warden, delivery interface and Tollgate mapping, complete CLI lifecycle, and
    deterministic delivery adapter. Include configured source publication and the
    missing-finish reminder. A scripted bead reaches observed promotion.
@@ -649,14 +665,22 @@ Remove obsolete implementation and skills when replacing their responsibilities,
 rather than layering the new model onto the existing controller. Model names are
 configuration, not embedded branching logic. Initial worker and leadership
 defaults are `gpt-5.6-sol` with `high` effort; respect explicit per-request overrides.
-The optional concurrency smoke uses `gpt-5.6-luna` with `low` effort.
+The explicit live replacement tests use `gpt-5.6-luna` with `low` effort for
+all participating roles and review tasks.
 
-Validation is compact: a small automated CLI scenario suite against real stock
-Beads and deterministic external adapters, plus one user-invoked, ten-minute
-maximum, 30-native-task concurrency smoke. No manual interview matrix, prolonged
-soak test, or live skill invocation is a routine promotion requirement. The smoke
-checks task/turn start, tool use, completion, and subscription release; it does not
-claim to prove long-term memory reclamation or all production reliability.
+Replacement acceptance requires installed-CLI regression scripts against real
+stock Beads and deterministic external adapters, plus real Luna workflows covering
+all eight roles and observed Tollgate/Git delivery. Allow 50 minutes for functional
+live testing and ten minutes for a 30-task concurrency smoke. A missing capability,
+timeout, or missing required evidence cannot be reported as a pass. Normal bounded
+workflow recovery remains active; external scripts own assertions and reports.
+Acceptance is not a Fulcrum work kind, scheduler, or additional workflow engine.
+The CLI exposes all actions and evidence needed to manage these tests. See
+[contracts §7](contracts.md#7-cli-driven-validation) and implementation tasks 22–24.
+Ordinary task promotions retain proportionate checks; they do not run this whole
+replacement suite. No prolonged soak or manual role-interview matrix is required.
+The smoke proves observed overlap, tool use, completion, and subscription release,
+not long-term process reclamation or arbitrary workload reliability.
 
 ## 9. Capabilities retained from current Fulcrum
 
@@ -670,14 +694,21 @@ Weaver supports substantial approved plans, incremental refinement, standalone
 future plans, and immediate small tasks. A plan is an epic with ordered, stable-key
 children and a complete outcome/acceptance specification. Refinement reconciles
 those keys; it does not recreate delivered tasks or silently change active work.
-Future plans remain explicitly deferred until human activation, with no timer.
+Future plans remain explicitly deferred until human or Vizier authorization,
+with no timer. Marshal may execute that recorded authorization but cannot grant it.
 Retain two review perspectives for substantial plans: a cold reader using only
 the draft, and a requirements review using the original request, discussion, and
-draft. Native independent helpers normally provide them. These are authoring
+draft. Separate ordinary Codex review tasks provide them, initiated through
+`plan review start` and linked in Beads without taking ownership of the plan. These are authoring
 reviews, not live-role execution or stress-test gates; resource failure records a
 missing review and allows continued investigation. Publication records completed
 reviews or an explicit human/Vizier/Justiciar waiver, rather than looping forever.
-Small tasks and question answering do not require this plan workflow.
+Small tasks and question answering do not require this plan workflow. Plan roots
+close mechanically when their approved deliverables and required publication/
+delivery obligations are satisfied. Cancelled or rejected children do not count
+as successful delivery. A separate cross-task validation child is a planning
+judgment, never a default requirement for small plans; existing child checks may
+fully establish the outcome.
 
 Respect the host's Plan Mode: no product edits, publication, or finish mutation
 while writes are prohibited. Role identification/context remains useful; if
@@ -705,11 +736,11 @@ its explicit exception authority.
 ### Continuity, compaction, and fleet maintenance
 
 Prefer the existing idle native task for the same bead and role when its scope,
-configuration, and claims are still valid. Resume safely across controller restart
+configuration, and ownership-operation references are still valid. Resume safely across controller restart
 without another task-creation side effect. A closed unrelated task is not a worker
 pool. Leadership replacement and fleet replacement preserve policy, memory, owned
 beads, worktree evidence, and causal attribution. A drain replacement waits for
-managed turns/helpers to stop; an interrupt replacement first interrupts and
+managed turns and owned tools to stop; an interrupt replacement first interrupts and
 observes termination. Both retain work, unlike the separately specified hard reset.
 Neither restarts the shared runtime or interrupts unrelated tasks.
 

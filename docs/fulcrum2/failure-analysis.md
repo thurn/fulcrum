@@ -96,13 +96,13 @@ manual validation ceremony.
 
 ### 1. Executor finishes, but handoff stops midway
 
-1. Retain the accepted finish receipt, exact source, evidence, and old claim.
+1. Retain the accepted finish receipt, exact source, evidence, and old ownership-operation reference.
 2. Inspect the source and any recorded provider submission. Do not ask Executor
    to implement again just because a later orchestration step failed.
 3. Locate or create the Warden using the recorded native creation locator. If a
    previous creation response was lost, inspect that locator before another send.
-4. Observe old Executor/helper termination. Transfer owner, role, and new claim in
-   one bead update; an old token can no longer finish or promote the work.
+4. Observe termination of conflicting managed tasks and tools. Transfer owner, role, and new ownership-operation reference in
+   one bead update; an old reference can no longer finish or promote the work.
 5. Start or locate Warden's correlated turn. Complete the original handoff receipt.
 
 An unavailable destination keeps the old owner accountable for the retained
@@ -142,14 +142,14 @@ blocking unrelated promotion on a live production invocation.
 1. Pause new automatic admission and expose observed pressure once.
 2. The already-running controller releases its idle subscriptions and completed
    owned terminals. `notLoaded` and `notSubscribed` settle successfully.
-3. Use reserved recovery capacity, or transition the existing Marshal task to a
+3. Transition the existing Marshal task to a
    scoped Justiciar. Do not recursively queue more diagnostic agents.
 4. If the runtime cannot run any agent, terminal `recover inspect/repair` operates
    on explicit owned targets without requesting a new model turn.
 5. Restore leadership/admission after observed recovery. Preserve unrelated human
    tasks and never archive merely to hide resource use.
 
-Unsubscription does not guarantee immediate helper reclamation: the current
+Unsubscription does not guarantee immediate process reclamation: the current
 [official lifecycle](https://learn.chatgpt.com/docs/app-server) has an inactivity
 grace period after the last subscriber leaves. Service configuration and finite
 working-set size must accommodate that fact.
@@ -213,7 +213,7 @@ The [capability audit](audit.md) found omissions in the initial replacement
 documents. Operational defects are reasons to repair a capability's implementation,
 not automatically to delete the capability:
 
-- Partial cost data calls for explicit coverage, correct native/helper attribution,
+- Partial cost data calls for explicit coverage, correct managed-task attribution,
   and retained rate provenance. It does not justify removing the implemented
   `usage` and `cost` reporting surfaces.
 - Publication failures call for independent receipts and inspected remote results.
@@ -239,7 +239,7 @@ the audit. No new production experiment was necessary for this comparison.
 
 The highest-value automated coverage is at the public CLI boundary with a real
 isolated stock Beads backend and deterministic runtime/delivery providers. Inject
-response loss, applied-but-unacknowledged effects, stale claims, and terminal
+response loss, applied-but-unacknowledged effects, stale ownership references, and terminal
 events; observe final ownership and external source outcomes. Do not grow a test
 suite that merely detects prompt wording or internal table/module changes.
 
@@ -249,3 +249,13 @@ release within its deadline. It cannot certify long-term absence of memory leaks
 or prove that every task at arbitrary model/tool intensity will have the same
 resource footprint. No prolonged stress suite or manual role interview program
 is required by this design.
+
+## Replacement validation after specification review
+
+The current requirement adds real Luna workflows for all eight roles and observed
+Tollgate/Git delivery, bounded to 50 minutes, followed by the ten-minute concurrency
+smoke. Four active managed tasks is the default, with no recovery reserve; the
+smoke explicitly raises its isolated limits to 30. Independent reviews are ordinary
+Codex tasks. Historical helper observations above describe the old incident, not
+a native-subagent subsystem to implement. [The task plan](plan/README.md) assigns
+these checks; this appendix does not assert that they have passed.

@@ -22,7 +22,7 @@ choose a deterministic adapter or a disposable native namespace.
 <brain.root>/.beads/dolt/       live server data, excluded from ordinary Git tracking
 <brain.root>/plans/            default Markdown plan publication destination
 <instance>/controller.sock     ephemeral IPC endpoint
-<instance>/controller.lock     OS advisory lock; contents are not workflow truth
+<instance>/controller.lock     discovery link to the brain-root advisory lock
 <instance>/threads/            native-task creation locator directories
 <instance>/worktrees/          managed worktrees, separated by project
 <instance>/logs/               rotated diagnostics, never replayed as state
@@ -53,7 +53,7 @@ directory. Reset and cleanup enumerate these provider-owned paths too.
 | `--thread-id ID` | Explicit acting/native task; no requirement to run inside that task |
 | `--actor human` or `--actor task:ID` | Audit initiator; ordinary shell defaults to human, a managed environment defaults to its task |
 | `--model NAME` / `--effort LEVEL` | Explicit model choice for role entry or task start; validate against runtime capabilities |
-| `--claim TOKEN` | Ownership acquisition token for owner-restricted mutations |
+| `--ownership-operation ID` | Receipt establishing current ownership for owner-restricted mutations |
 | `--request-id UUID` | Identity of a logical mutation; reuse the same ID and payload for an exact retry |
 | `--wait` | Wait for this command's operation to settle, not for an entire bead to finish |
 | `--timeout SECONDS` | Maximum client wait; default 30; never means automatic cancellation |
@@ -66,12 +66,15 @@ values; never interpolate descriptions into a shell command.
 
 Environment task discovery checks `CODEX_THREAD_ID` only. Explicit `--thread-id`
 wins. Do not preserve the old aliases or caller-lineage prerequisites. In a managed
-task, an omitted claim may be obtained from its current Beads task record after
-checking the native task ID; a terminal can always pass the claim explicitly.
+task, owner-restricted mutations carry the `--ownership-operation` supplied in
+the full turn prompt. Do not silently substitute a newer acquisition from the
+current task record: delayed commands from the same task must remain stale.
+Human operator actions use their documented override/transfer operations; a
+terminal simulating a worker passes both task ID and ownership operation.
 
 This is a trusted local-user system, not an adversarial multi-tenant permission
 boundary. Explicit human/operator commands are allowed from the terminal. Role
-checks and claim tokens prevent accidental stale writes; they do not pretend to
+checks and ownership-operation references prevent accidental stale writes; they do not pretend to
 stop a local user with direct Git or Beads access from changing state. Automatic
 agents must not relabel themselves `human` to evade normal policy.
 
@@ -97,6 +100,9 @@ IDs. A completed setup can carry warnings about unavailable optional facilities;
 that is not a failed reset or failed intake. `ok` means the requested command was
 accepted/executed, not that downstream work has shipped. A wait expiry uses
 `ok=false`, preserves the operation's actual state, and returns `WAIT_TIMEOUT`.
+
+IPC/input requests are capped at 4 MiB; oversize payloads return `INPUT_TOO_LARGE`
+(exit 2), never clipped task requirements.
 
 Errors contain `code`, `message`, `retryable`, `next_command`, and optional
 `details`. `next_command` is a structured argv array, never executable prose. JSON
@@ -131,8 +137,10 @@ should supply it themselves. Normal stdout stays one parseable JSON document.
 
 ## 2. Complete command surface
 
-All mutation commands in this document use operation receipts and the common options unless
-the bootstrap/reset exception is expressly documented. All listing commands
+All workflow mutation commands use operation receipts and common options unless
+the bootstrap/reset/degraded-repair exception is expressly documented. Test-provider
+clock/event/crash/barrier controls change external fixture facts only; the hook is
+read-only and uses its native response format. All listing commands
 accept `--limit N` (default 20, `0` means all) and `--cursor CURSOR` and return
 `items` plus `next_cursor`. File/log data is paginated by count or byte limit.
 
@@ -188,9 +196,9 @@ project-specific command. Setup writes absolute executable paths for services.
 
 | Command | Behavior |
 | --- | --- |
-| `enter ROLE --description TEXT [--bead ID] [--origin human|dispatch]` | Create/adopt work and bind the current explicit task, or create a native task when none is supplied; default origin human |
-| `leader show vizier|marshal` | Native ID, fixed title, and control-bead reference |
-| `leader replace ROLE --reason TEXT` | Explicitly replace broken leadership, invalidate old leadership claims, retain policy in `fulcrum.yaml` |
+| `enter ROLE --description TEXT [--bead ID] [--origin human\|dispatch]` | Create/adopt work and bind the current explicit task, or create a native task when none is supplied; default origin human |
+| `leader show vizier\|marshal` | Native ID, fixed title, and control-bead reference |
+| `leader replace ROLE --reason TEXT` | Explicitly replace broken leadership, invalidate old leadership ownership references, retain policy in `fulcrum.yaml` |
 | `context [--bead ID] [--role ROLE]` | Current bead, compiled instructions, ownership, actionable evidence, and pending operation references |
 | `work create --input FILE` | Create an outcome or graph; returns root and child IDs |
 | `work show ID` / `work list` | Work-only view, excluding control/operation issues; filters `--project`, `--role`, `--owner`, `--phase` |
@@ -199,7 +207,7 @@ project-specific command. Setup writes absolute executable paths for services.
 | `work transfer ID --to-thread ID --role ROLE --reason TEXT` | Controlled ownership transfer; refuse to run a second writer while the old turn is active |
 | `work children ID` | Deliverable children and dependency progress |
 | `work close ID --outcome OUTCOME --summary TEXT` | Terminal disposition; ordinary implementation requires observed delivery, while answered/rejected/duplicate work does not |
-| `work reopen ID --reason TEXT [--role ROLE]` | Explicit new ownership cycle on the same ID; invalidate old claims and return to Marshal unless human entry starts the specified role |
+| `work reopen ID --reason TEXT [--role ROLE]` | Explicit new ownership cycle on the same ID; invalidate old ownership references and return to Marshal unless human entry starts the specified role |
 | `progress --bead ID --input FILE` | Record a substantive checkpoint; no heartbeat-only event |
 | `finish --bead ID --outcome OUTCOME --input FILE` | Role-specific finish described below |
 | `report --input FILE` | File an incidental follow-up without changing the reporting task's role |
@@ -219,18 +227,18 @@ task; leadership entry instead routes to the standing leader. A call from an
 already-active human task binds that task and returns instructions; it does not
 send a redundant turn into itself. A role change owns the same bead unless a
 different bead is explicitly provided. Entry returns `bead_id`, `thread_id`,
-`role`, `claim_token`, `instructions`, and any outstanding operation ID.
+`role`, `ownership_operation`, `instructions`, and any outstanding operation ID.
 
 One non-leadership task actively executes one work bead at a time. Entry into a
 different bead checkpoints its prior unfinished work and returns that work to
 Marshal before adopting the new one. Preserve the actual source/worktree and
-stop old helpers before new conflicting edits. Leadership may steward many
+stop conflicting managed tasks before new edits. Leadership may steward many
 backlog beads while handling one request turn. This does not create a worker pool
 that reuses an unrelated task's conversation history automatically.
 
 Scoped Sage/Mason entry on a closed bead is an explicit investigation on the same
 ID. Save the prior terminal disposition in `interrupted_work`, assign a fresh
-claim, and open only the investigation. On finish, attach the findings receipt
+ownership operation, and open only the investigation. On finish, attach the findings receipt
 and restore the prior terminal disposition unless the human explicitly requested
 new implementation. Do not change “delivered” into “findings” or redispatch code
 that already shipped. Entry on unfinished Warden work returns it to Warden review
@@ -264,14 +272,14 @@ state independently of subsequent dispatch.
 | `policy set --input FILE` | Human/Vizier-only edit of the YAML policy section through the same config operation |
 | `backlog list [--ready] [--include-deferred]` | Compact work summaries, dependency/wait reasons, and priority |
 | `marshal brief [--bead ID]` | Exact default decision input plus omitted counts and continuation commands |
-| `marshal decide --input FILE` | Apply independent decisions after checking their claim/phase expectations |
-| `dispatch --bead ID` | Execute an already-authorized dispatch; `--human` explicitly authorizes immediate operator dispatch |
+| `marshal decide --input FILE` | Apply independent decisions after checking their ownership/snapshot expectations |
+| `dispatch --bead ID` | Execute an already-authorized dispatch; `--authorize` records operator authorization under ordinary limits, `--human` authorizes immediate operator bypass |
 | `human list` | Work assigned HUMAN and the exact action needed |
 | `human resolve ID --input FILE` | Record `answer`, optional `scope_change`, and `resume_role`; return ownership to Marshal for continuation |
 
 YAML policy fields are `automatic_capacity`, `default_project_capacity`,
 `project_capacity` (override map),
-`reserved_recovery_slots`, `worker_helper_limit` (null by default), `paused_projects`,
+`paused_projects`,
 `suspended_rules` (map from named rule to scope/reason), and `rationale`.
 Model, policy, and timing/log defaults all live in the same YAML file, not Beads
 or a second config copy. Marshal can use fewer slots without changing these values.
@@ -280,7 +288,7 @@ No automatic expiry schedules a new task. Vizier/human alone may grant broad rul
 suspensions; Justiciar's current takeover grants its already-defined local powers
 but never authority to modify `fulcrum.yaml`.
 
-A decision contains `bead_id`, `expected_claim`, `expected_phase`, `action`,
+A decision references the retained `decision_operation` described in §10 and contains `bead_id`, `expected_ownership_operation`, `expected_phase`, `action`,
 `reason`, and action-specific fields. The payload is `{"decisions":[...]}`.
 Actions: `dispatch` (`role`), `defer` (`reconsider_when`), `clarify` (`question`),
 `duplicate` (`canonical_bead`), `reject`, `recover` (`scope`, `diagnosis`), or
@@ -337,7 +345,7 @@ an assertion of promotion without observing Git/provider results.
 
 An accepted Executor finish seals its input and stops further Executor work. It
 returns `accepted` while a destination is being prepared; the owner transfer waits
-for native terminal evidence. The old claim cannot submit another different
+for native terminal evidence. The old ownership reference cannot submit another different
 finish. Failed reporting after this acceptance does not reopen implementation.
 
 ### Operations, diagnostics, and emergency repair
@@ -357,7 +365,7 @@ finish. Failed reporting after this acceptance does not reopen implementation.
 | `recover inspect --scope SCOPE` | Best-effort read-only evidence even with controller/ledger unavailable |
 | `recover takeover --scope SCOPE --reason TEXT` | Establish Justiciar takeover and stop competing managed work |
 | `recover repair --scope SCOPE --input FILE` | Execute an explicit typed repair through the same adapters, offline when needed |
-| `recover release --scope SCOPE --summary TEXT` | Reconcile facts, invalidate takeover claim, and restore ordinary ownership/leadership |
+| `recover release --scope SCOPE --summary TEXT` | Reconcile facts, invalidate takeover ownership reference, and restore ordinary ownership/leadership |
 
 Scopes are `bead:ID`, `beads:ID,ID,...`, `project:ID`, or `instance`. Repair actions are an ordered
 array of `{action, target, arguments, reason}`. Supported actions: `interrupt`,
@@ -425,7 +433,7 @@ its supported update fields are only status, priority, title, and assignee.
     "project": "fulcrum",
     "owner": "01a-example-executor",
     "role": "executor",
-    "claim": "22222222-2222-4222-8222-222222222222",
+    "ownership_operation": "fc-22222222222242228222222222222222",
     "phase": "working",
     "requested_role": "executor",
     "origin": {"thread_id": "01a-example-weaver", "request_id": null, "bead_id": null},
@@ -474,7 +482,7 @@ array of typed triggers `{event, subject}` where event is `dependency_closed`,
 `human_resolved`. Omitted subjects mean the current bead/project. No calendar
 trigger is supported. Resolving one reason leaves the others intact. `dispatch`
 is a durable Marshal/human decision, not an independent scheduling table. `handoff` holds destination role/task, originating
-claim, current source/evidence, and receipt. `interrupted_work` stores the original
+ownership operation, current source/evidence, and receipt. `interrupted_work` stores the original
 implementation/review role, phase, outcome, and source/delivery facts while
 Sage/Mason investigates. Further introspection switches retain that original work;
 do not build an unbounded role-return stack.
@@ -496,14 +504,14 @@ not an executable role-owned assignment until admission completes.
    role from assignee, project from the resolution rules, and source outcome from
    the original issue fields. Preserve the original issue text as evidence.
 2. Set native assignee and `fc.owner` to the accountable existing task (normally
-   Marshal), `phase=backlog`, and a new claim in one regular `bd update`. Set the
+   Marshal), `phase=backlog`, and a new ownership operation in one regular `bd update`. Set the
    current transition ID in that update and read back the postcondition.
 3. When dispatch is authorized, create/identify the destination task using a
    recorded operation. Preserve old ownership while provisioning.
-4. If an old worker exists, stop and observe its active turn/helpers before
+4. If an old worker exists, stop and observe its active managed turns and tools before
    transferring write responsibility. Validate any in-flight delivery first.
-5. Atomically update assignee, `fc.owner`, role, claim, phase, and handoff context.
-   Read back. Then start the destination turn with that exact claim.
+5. Atomically update assignee, `fc.owner`, role, ownership operation, phase, and handoff context.
+   Read back. Then start the destination turn with that exact ownership operation.
 
 Stock `bd update --claim` has atomic claim semantics, but it does not atomically
 transfer arbitrary operational metadata and is separate from additional update
@@ -521,7 +529,7 @@ break-glass edits, not the ordinary native interface.
 
 The stock API and cooperative local trust model do not guarantee exclusion
 against arbitrary simultaneous direct `bd` and Git edits. The guarantee is one
-authorized Fulcrum writer and stale-claim rejection through its CLI, with explicit
+authorized Fulcrum writer and stale-ownership rejection through its CLI, with explicit
 recovery of observed external interference. This limitation is deliberate and
 does not justify a second database or a Beads fork.
 
@@ -537,13 +545,13 @@ does not justify a second database or a Beads fork.
 | delivering | in_progress | Warden/Justiciar; observed delivery to done, failed validation back to reviewing |
 | recovering | blocked | Existing owner until Justiciar transfer; repair to previous valid phase/done/human |
 | human | blocked | HUMAN; explicit resolve to Marshal backlog/recovery |
-| done | closed | Historical last owner; explicit reopen must establish new scope/owner/claim |
+| done | closed | Historical last owner; explicit reopen must establish new scope/owner/ownership operation |
 
 `work close` accepts `answered`, `delivered`, `reduced_scope`, `findings`,
 `rejected`, `duplicate`, or `cancelled`. Disposition is `{outcome, summary,
 waived_requirements, known_defects, canonical_bead, completed_at}` with unused
 fields empty/null. Reopening through native `bd reopen` becomes a Marshal intake
-request and invalidates the old claim; it never silently reuses an old active turn.
+request and invalidates the old ownership reference; it never silently reuses an old active turn.
 
 ### Installation and task records
 
@@ -552,7 +560,7 @@ request and invalidates the old claim; it never silently reuses an old active tu
 `last_transition`. No task status, full backlog, or authoritative model/policy
 configuration is copied into it. Effective standing policy is read from YAML.
 
-Each task record holds `kind=task`, `owner` (its native task ID), `thread_id`, `role`, `work_bead`, `claim`,
+Each task record holds `kind=task`, `owner` (its native task ID), `thread_id`, `role`, `work_bead`, `ownership_operation`,
 `creation_operation`, `creation_cwd`, `model`, `effort`, `associated_beads`,
 `replaced_by`, `missing_finish_reminder`, `archive_state`,
 `archive_due_at`, `archive_operation`, and last observed native turn/status.
@@ -570,7 +578,7 @@ bead still has its record, allowing archive-once behavior after restart.
     "command": "promotion.start",
     "input": {"bead_id": "fc-51o", "source_oid": "example-git-oid"},
     "bead_id": "fc-51o",
-    "claim": "22222222-2222-4222-8222-222222222222",
+    "ownership_operation": "fc-22222222222242228222222222222222",
     "state": "accepted",
     "step": "authorize",
     "attempts": 0,
@@ -637,19 +645,41 @@ external format requirement, not a Fulcrum versioning scheme.
   "type": "workflow",
   "pour": false,
   "vars": {
-    "title": {"required": true},
-    "outcome": {"required": true},
-    "project": {"required": true},
-    "workspace": {"required": true},
-    "acceptance": {"required": true},
-    "current_evidence": {"default": "No prior evidence."},
-    "bead": {"required": true}
+    "title": {
+      "required": true
+    },
+    "outcome": {
+      "required": true
+    },
+    "project": {
+      "required": true
+    },
+    "workspace": {
+      "required": true
+    },
+    "acceptance": {
+      "required": true
+    },
+    "current_evidence": {
+      "default": "No prior evidence."
+    },
+    "bead": {
+      "required": true
+    },
+    "thread": {
+      "required": true
+    },
+    "ownership_operation": {
+      "required": true
+    }
   },
-  "steps": [{
-    "id": "work",
-    "title": "{{title}}",
-    "description": "## Outcome\n{{outcome}}\n\n## Project and workspace\n{{project}}\n{{workspace}}\n\n## Acceptance\n{{acceptance}}\n\n## Current evidence\n{{current_evidence}}\n\n## Next action\nImplement the outcome in the assigned worktree, run relevant checks, and commit. Before editing, acquire this bead through fulcrum enter executor --bead {{bead}} --description 'Implement assigned task'.\n\n## Finish\nRun fulcrum finish --bead {{bead}} --outcome ready_for_review --input - with summary, source_oid, checks, and evidence as JSON. Once accepted, stop implementation. Report incidental issues with fulcrum report."
-  }]
+  "steps": [
+    {
+      "id": "work",
+      "title": "{{title}}",
+      "description": "## Outcome\n{{outcome}}\n\n## Project and workspace\n{{project}}\n{{workspace}}\n\n## Acceptance\n{{acceptance}}\n\n## Current evidence\n{{current_evidence}}\n\n## Next action\nImplement the outcome in the assigned worktree, run relevant checks, and commit. Before editing, acquire this bead through fulcrum enter executor --bead {{bead}} --description 'Implement assigned task'.\n\n## Finish\nRun fulcrum finish --bead {{bead}} --thread-id {{thread}} --ownership-operation {{ownership_operation}} --outcome ready_for_review --input - with summary, source_oid, checks, and evidence as JSON. Once accepted, stop implementation. Report incidental issues with fulcrum report."
+    }
+  ]
 }
 ```
 
@@ -658,22 +688,23 @@ one `id=work` step. This was verified read-only against the installed stock bina
 The normal command currently requires an accessible Beads workspace even for
 compilation, which is why degraded entry uses packaged static instructions.
 
-Role entry is idempotent for the same task/bead/role: the context's instruction to
-enter does not create another claim or another worktree. A new invocation with a
-different role performs the specified transition. After entry, the fixed worker
-prompt is:
+Role entry is idempotent for the same task/bead/role while that acquisition is
+valid; an exact retry creates no new ownership operation or worktree. A different
+role performs the specified transition. After entry, pass the **entire cooked
+role/task description** directly as the worker turn input, together with the
+concrete finish command including `--thread-id` and `--ownership-operation`.
+Retain the exact input on the turn-start receipt. Add this literal correlation
+line (an identity, not another prompt layer):
 
 ```text
-Work on bead <ID>. Read it with bd show <ID> and follow its current instructions.
-Use fulcrum context --bead <ID> if current ownership or evidence is unclear.
-[Fulcrum operation <OPERATION_ID>; claim <CLAIM_TOKEN>]
+[Fulcrum operation <START_OPERATION_ID>; ownership operation <OWNERSHIP_OPERATION_ID>]
 ```
 
-The last line is a literal correlation marker retained with the sent input, not
-a secret or a prompt template hierarchy. Marshal uses its compact brief instead
-of the worker body. Each microskill runs `fulcrum enter <role> --description ...`
-with optional explicit bead; metadata disables implicit invocation. `$bead` runs
-`fulcrum report` and does not call enter.
+The fixed read-the-bead bootstrap prompt is removed. `context` remains available
+for inspection and compaction; it does not replace initial prompt delivery.
+Marshal receives its bounded decision brief. Each microskill runs
+`fulcrum enter <role> --description ...` with optional explicit bead; metadata
+disables implicit invocation. `$bead` runs `fulcrum report` and does not call enter.
 
 Every installed skill, including setup and reporting, has this
 `agents/openai.yaml` policy:
@@ -717,7 +748,7 @@ class Runtime:
 
 `TaskSpec` contains creation cwd, actual work cwd, project ID, allowed workspace
 roots, title, model, effort, and supported tool configuration. `TaskFacts` contains
-ID, title, cwd, archived/existence facts, active turn, loaded status, known helpers,
+ID, title, cwd, archived/existence facts, active turn, loaded status,
 pending input requests, and observation time. `TurnFacts` contains ID, lifecycle
 state, input correlation, completion/error, and observed tools/usage.
 `ReleaseFacts` distinguishes released/already-unsubscribed/not-loaded and any
@@ -826,8 +857,7 @@ run normal workflow against both ledgers. It is not a JSON journal or operationa
 database to retain alongside normal Beads. Its deterministic location is
 `<instance-parent>/<instance-name>.reset/` and `reset` resumes it if present.
 
-The reset receipt records exact old instance roots, managed native IDs, descendant
-IDs, worktrees/branches, outstanding provider handles, and the completed step for
+The reset receipt records exact old instance roots, managed native IDs, worktrees/branches, outstanding provider handles, and the completed step for
 each. For the old implementation only, inventory its read-only operational store
 to enumerate ownership; this is deletion inventory, not migration. Do not use
 role-looking titles alone to classify unrelated user tasks as owned. New-system
@@ -835,7 +865,7 @@ inventory comes from its task/operation/work records. Capture config needed to
 bootstrap as configuration, not retained historical work.
 
 Sequence: obtain exclusive service control; stop old dispatch; observe terminated
-managed tasks/helpers; cancel or reconcile active provider work; delete managed
+managed tasks and owned tools; cancel or reconcile active provider work; delete managed
 native tasks; remove managed worktrees and local branches; remove old ledger and
 operational/log data; initialize a clean normal ledger and leadership; mark reset
 complete; remove the temporary reset workspace; start normal service. If an
@@ -863,7 +893,7 @@ multi-resource destructive reset without a durable Beads receipt. The emergency
 role still investigates and repairs the dependency; this is not a refusal to
 perform useful work.
 
-## 7. CLI-driven scenarios
+## 7. CLI-driven validation
 
 These are executable acceptance examples for the future CLI. Use `jq` only to
 extract returned identifiers. The scenario suite invokes the installed executable
@@ -872,34 +902,32 @@ as a subprocess; it does not import controller internals or patch `_request`.
 ### Isolated setup and intake through promotion
 
 ```sh
-export FC_INSTANCE="$(mktemp -d /tmp/fulcrum-cli.XXXXXX)"
-fulcrum --instance "$FC_INSTANCE" setup --input - --json <<'JSON'
-{"runtime":{"kind":"deterministic"},"delivery":{"kind":"deterministic"},"beads":{"database":"fulcrum"},"brain":{"root":"/tmp/fulcrum-sample-brain","remote":"origin","branch":"main","push_interval_seconds":300},"projects":[{"id":"sample","root":"/tmp/fulcrum-sample","codex_project_id":"sample","delivery":{"kind":"deterministic"},"integration_branch":"main","prepare_argv":[],"validate_argv":[]}]}
+FC_TEST_PARENT="$(mktemp -d /tmp/fulcrum-cli.XXXXXX)"
+fixture=$(fulcrum fixture create --input - --json <<JSON
+{"root":"$FC_TEST_PARENT/fixture","runtime":{"kind":"deterministic"},"delivery":{"kind":"deterministic"},"model":"gpt-5.6-luna","effort":"low","capacity":4,"source_sync":true}
 JSON
-
-created=$(fulcrum --instance "$FC_INSTANCE" work create --json --input - <<'JSON'
-{"project":"sample","title":"Fix ordering","outcome":"Return values in ascending order.","acceptance":["Ordering tests pass."],"requested_role":"executor"}
+)
+FC_INSTANCE=$(printf '%s' "$fixture" | jq -r '.result.instance')
+project=$(printf '%s' "$fixture" | jq -r '.result.project_id')
+created=$(fulcrum --instance "$FC_INSTANCE" work create --project "$project" --json --input - <<'JSON'
+{"title":"Fix ordering","outcome":"Return values in ascending order.","acceptance":["Ordering tests pass."],"requested_role":"executor"}
 JSON
 )
 bead=$(printf '%s' "$created" | jq -r '.result.bead_id')
 entry=$(fulcrum --instance "$FC_INSTANCE" enter executor --bead "$bead" \
-  --description 'Fix ordering' --project sample --json --wait)
+  --description 'Fix ordering' --project "$project" --json --wait)
 thread=$(printf '%s' "$entry" | jq -r '.result.thread_id')
-claim=$(printf '%s' "$entry" | jq -r '.result.claim_token')
-fulcrum --instance "$FC_INSTANCE" scenario run delivery-happy --bead "$bead" --json
+ownership=$(printf '%s' "$entry" | jq -r '.result.ownership_operation')
+scripts/validate-fulcrum2-cli --instance "$FC_INSTANCE" --case delivery-happy --bead "$bead"
 fulcrum --instance "$FC_INSTANCE" wait --bead "$bead" --until closed --timeout 30 --json
 fulcrum --instance "$FC_INSTANCE" trace --bead "$bead" --json
 ```
 
-The test harness creates `/tmp/fulcrum-sample` as a disposable committed Git
-fixture before setup; it also creates `/tmp/fulcrum-sample-brain` with an `origin`
-pointing to a disposable Git remote served through the supported Git transport.
-The test harness supplies this endpoint and its isolated credentials. These fixture paths must be reserved
-for this isolated run; fail if they already belong to other work. No real
-repository or production remote is reused. Test setup
-provisions an isolated **real stock Beads** backend on a free local port.
-Deterministic providers use native-looking opaque IDs only inside that instance.
-They cannot attach to the production runtime or integration branch.
+The fixture utility creates committed disposable source/brain Git repositories and
+a disposable remote served through stock Beads' supported Git transport. It provides
+isolated credentials/ports, returns actual IDs and never reuses production paths.
+The suite uses a **real stock Beads** backend even with deterministic runtime/delivery.
+Native-looking fake provider IDs are scoped only to that fixture.
 
 ### Script the same role and delivery operations directly
 
@@ -909,17 +937,17 @@ in that worktree; the source below is a shell variable, not an invented OID.
 
 ```sh
 fulcrum --instance "$FC_INSTANCE" finish --bead "$bead" \
-  --thread-id "$thread" --claim "$claim" --outcome ready_for_review --json \
+  --thread-id "$thread" --ownership-operation "$ownership" --outcome ready_for_review --json \
   --input - <<JSON
 {"summary":"Ordering fixed.","source_oid":"$source","checks":[{"name":"ordering","status":"passed","evidence":"fixture test output"}],"evidence":[]}
 JSON
 fulcrum --instance "$FC_INSTANCE" reconcile --bead "$bead" --json
 warden=$(fulcrum --instance "$FC_INSTANCE" work show "$bead" --json | jq -r '.result.fc.owner')
-wclaim=$(fulcrum --instance "$FC_INSTANCE" work show "$bead" --json | jq -r '.result.fc.claim')
+wownership=$(fulcrum --instance "$FC_INSTANCE" work show "$bead" --json | jq -r '.result.fc.ownership_operation')
 fulcrum --instance "$FC_INSTANCE" review approve --bead "$bead" \
-  --thread-id "$warden" --claim "$wclaim" --source "$source" --summary 'Reviewed current source' --json
+  --thread-id "$warden" --ownership-operation "$wownership" --source "$source" --summary 'Reviewed current source' --json
 fulcrum --instance "$FC_INSTANCE" promotion start --bead "$bead" \
-  --thread-id "$warden" --claim "$wclaim" --source "$source" --json
+  --thread-id "$warden" --ownership-operation "$wownership" --source "$source" --json
 ```
 
 For deterministic mode, terminal-turn events and provider completion are supplied
@@ -948,16 +976,15 @@ hardcoded from a live installation. The integration tests supply an unfinished
 Executor for the role-transition case, an uncertain promotion receipt for the
 second case, and a genuinely HUMAN-owned bead for the third.
 
-### Deterministic scenario controls
+### Deterministic provider controls
 
-These commands are enabled only when the instance explicitly selects deterministic
-adapters. They inject **external-provider events/facts**, never arbitrary work-bead
+The `scenario` controls below require explicitly selected deterministic adapters.
+The separately listed `smoke concurrency` utility requires native fixture adapters.
+Deterministic controls inject **external-provider events/facts**, never arbitrary work-bead
 state or privileged transition bypasses.
 
 | Command | Contract |
 | --- | --- |
-| `scenario list` | Show supported named scenarios |
-| `scenario run NAME [--bead ID]` | Execute a small scripted sequence using public application commands and deterministic provider events |
 | `scenario emit --input FILE` | Inject `{provider, event, target, data}` into the configured deterministic adapter |
 | `scenario advance --seconds N` | Advance the injected test clock so timeout/archive behavior needs no real sleep |
 | `scenario fault --input FILE` | Set `{provider, method, occurrence, effect, response}` on the deterministic provider |
@@ -973,26 +1000,36 @@ side effect so production reconciliation can discover it. Deterministic adapter
 state may persist as **external test-provider state** across controller restarts;
 it is not an additional Fulcrum workflow ledger.
 
-Named scenarios: `delivery-happy`, `retry-same-request`, `handoff-crash`,
+Checked-in script cases: `delivery-happy`, `retry-same-request`, `handoff-crash`,
 `promotion-response-lost`, `controller-restart`, `archive-once`, `role-transition`,
-and `human-resolution`. A scenario returns assertions and trace references. Keep
-the implementation small; this is not a general simulation language.
+and `human-resolution`. Scripts return assertions and trace references; Fulcrum
+has no acceptance-scenario record, pass/fail state machine, or retry engine.
+`scenario emit/advance/fault` are only deterministic provider test controls.
 
-The concurrency smoke starts 30 distinct native tasks through the normal adapter,
+The explicit `smoke concurrency` utility creates a disposable fixture and invokes
+public task/work operations. It is a bounded test client, not a controller workflow.
+It raises global and project limits to 30 in that fixture only, leaves leaders idle
+during measurement, and starts 30 distinct native tasks through normal admission,
 with a shared start barrier to observe overlapping active turns. Each performs one
 trivial shell operation in a disposable fixture and finishes. Observe native
 start/completion and release Fulcrum subscriptions. The whole command is capped
 at ten minutes; on timeout, interrupt only its own tasks and report incomplete
-coverage. Delete its disposable artifacts through the same cleanup operations.
+coverage. Collect the final report before cleanup. Retain failed-run evidence and report
+any cleanup failure; use fixture cleanup to remove disposable resources.
 Do not wait 30 minutes for the runtime's unload grace or turn this into a repeated
 soak suite. An explicit smoke command authorizes its finite native model calls;
-ordinary automated tests make none.
+ordinary automated tests make none. The functional live script additionally
+exercises all eight roles with real Luna/low tasks and observed Tollgate/Git delivery
+in at most 50 minutes. Both commands are required for replacement acceptance,
+not ordinary delivery promotion. Missing capabilities or incomplete coverage fail
+the test report; they are not passes or reasons to fabricate native events.
 
 ## 8. Contract acceptance
 
-Implementation is ready when every command family in this document works from a terminal,
-structured results are consistent, and the compact scenarios prove these
-behaviors: exact retries do not duplicate work; old claims cannot finish new
+Implementation is ready only after every command family works from a terminal,
+structured results are consistent, the required all-role Luna and 30-task live
+checks pass, and the deterministic CLI cases prove these
+behaviors: exact retries do not duplicate work; old ownership references cannot finish new
 ownership; destination work waits for old writers to stop; successful external
 effects survive response loss/restart; manual unarchive remains visible; degraded
 investigation returns usable evidence; and a complete CLI-driven delivery closes
@@ -1015,7 +1052,7 @@ never create analytics or memory issues merely to display a report.
 | `plan publish --bead ID --input FILE` | Publish approved plan text and reconcile its child graph; returns plan/root ID, child-key map, publication receipt |
 | `plan refine --bead ID --input FILE` | Update an existing plan using stable keys; records scope differences and affected active owners before activating changes |
 | `plan show ID` | Canonical text, approval/review evidence, activation, graph, and local/remote publication facts |
-| `plan activate ID` | Human/Vizier/Marshal-authorized activation of a future plan; clears only its future deferral |
+| `plan activate ID [--authorization ID]` | Human/Vizier authorization, or Marshal execution of that recorded authorization; clears only its future deferral |
 | `memory list [--scope global\|project:ID\|role:ROLE]` | List bounded curated memory records |
 | `memory show ID` | Canonical text, scope, owner, and update attribution |
 | `memory set [--id ID] --input FILE` | Create/replace `{scope, title, text, references}`; retain previous text in the mutation receipt |
@@ -1024,19 +1061,20 @@ never create analytics or memory issues merely to display a report.
 | `ledger status` | Local commit, last pushed state/time, pending age, cadence, operation ID, and any remote error |
 
 `plan publish/refine` input is `{text, activation, approved_by, approval_evidence,
-reviews, tasks, publication}`. Activation is `active` or `future`; `approved_by`
-is `human` or an explicitly authorized leader task. The evidence references an
-actual approval message or explicit CLI action; an agent must not invent it.
+reviews, tasks, publication, approval_operation}`. Activation is `active` or `future`;
+`approved_by` is `human` or the current Vizier. Approval fields must match the exact
+retained approval receipt specified in §10; an agent cannot merely assert approval.
 `reviews` has `cold_reader` and `requirements` entries, each `{thread_id, findings,
 resolution, state}` with state `complete` or `waived`. Waived entries require
 `waiver: {actor, reason}` from human/Vizier/Justiciar. Continued authoring never
-requires successful helper creation; an unpublished draft remains available in
-its bead. Review helpers use the ordinary runtime and count toward capacity.
+requires successful review-task creation; an unpublished draft remains available in
+its bead. Independent review tasks use the ordinary runtime and count toward capacity.
 
 `tasks` uses the `work create` graph schema with stable keys. `publication` is
 null or `{destination: knowledge|project, relative_path, require_remote_sync}`.
-An absent publication destination retains the complete plan solely in Beads;
-substantial plans default to the configured knowledge destination when available.
+Explicit `publication=null` retains the complete plan solely in Beads. When the
+field is omitted, a substantial plan defaults to configured knowledge publication;
+the effective choice is included in its approval input, never silently added later.
 Reject path escapes. `plan` on the root bead holds `{text, activation, approved_by,
 approval_evidence, reviews, children_by_key, publication_operation}`; children hold
 `plan={root_id, key}`. Existing keys retain IDs. Deleted keys preserve delivered
@@ -1092,7 +1130,7 @@ SQLite row IDs. Reads work with the controller stopped and survive log pruning.
 Use one `fc:analytics` record per observed native turn, with `external_ref` set to
 `fulcrum:usage:<thread-id>:<turn-id>`. Its `fc` object holds `kind=analytics`,
 `subtype=turn`, `owner`, `thread_id`, `turn_id`, `bead_id`, `workflow_root`, `role`,
-`project`, `operation_id`, `parent_turn`, `helper_call_id`, `attributions`, `model`, `effort`,
+`project`, `operation_id`, `related_task`, `purpose`, `attributions`, `model`, `effort`,
 `usage`, `response_records`, `coverage`, and `missing_reasons`. A response record
 has its native item ID (or a recorded observation ordinal when absent), configured
 and effective model, service tier, disjoint token categories, tools, rate-card
@@ -1103,19 +1141,22 @@ record with its block ordinal; this bounds individual Beads updates. All records
 remain stock issues, queried through the ledger adapter without SQL tables.
 
 `attributions` lists `{workflow_root, operation_id, weight, reason}`. Ordinary
-work and helpers inherit one root with weight 1. A Marshal decision batch spanning
+work and independent review tasks inherit one root with weight 1. A Marshal decision batch spanning
 several roots allocates its turn equally across the distinct roots explicitly in
 the recorded decision input; record that allocation as an estimate, not observed
 per-bead token usage. Rows with no causal work remain leadership overhead.
 Weights for a turn sum to 1, so global totals count every native turn once.
-Reports expose direct/helper/coordination components and unallocated overhead.
+Reports expose direct/review/coordination components and unallocated overhead.
 This accounting must not start extra Marshal turns to simplify attribution.
 
 Duplicate cumulative usage observations replace the same observation; sum unique
-final native turns, never successive cumulative totals. Track discovered helper
-turns through explicit parent turn and helper-call identity, including nested and
-late-finishing helpers. Repeated helper calls remain distinct; unrelated native
-tasks are excluded. Native model-reroute events affect the next response only:
+final native turns, never successive cumulative totals. Track independent
+review tasks through their Beads relationship and distinct native task/turn IDs,
+including late results. Fulcrum does not discover or price native subagents as a
+separate contribution. If native totals include usage without enough attribution,
+retain those observed totals and mark the breakdown incomplete rather than adding
+invented task rows. Unrelated native tasks are excluded. Native model-reroute
+events affect the next response only:
 deduplicate retransmission while pending, consume once at the next response,
 and treat a later occurrence as new. Missing response/model evidence marks cost
 partial instead of guessing from the originally configured model.
@@ -1139,12 +1180,12 @@ partial. Reasoning tokens are already included in output and are not added again
 Apply documented long-context rules to that response, then tier/tool rules from
 its retained rate card. Decimal arithmetic sums the priced components. Return
 `coverage=complete|partial|unknown`, `priced_subtotal`, optional `total` (null
-unless complete), `currency`, direct/helper/coordination breakdowns, counts, and named
+unless complete), `currency`, direct/review/coordination breakdowns, counts, and named
 missing/excluded contributions.
 Never present a partial subtotal as the full cost or an actual subscription bill.
 
 Freeze a workflow summary when its work/plan and all observed causally included
-turns/helpers are terminal. Persist the included ID set, exclusions, coverage,
+turns are terminal. Persist the included ID set, exclusions, coverage,
 completion boundary, totals, and rate references in an analytics record; no
 Marshal turn is needed just to close or price work. If observation is unavailable,
 freeze with the gap recorded rather than blocking delivery. Later recovery adds
@@ -1187,7 +1228,7 @@ explicitly unpriced here, with no invented exchange rate. `estimated_api_cost_us
 is null when coverage is partial/unknown; `priced_subtotal_usd` retains any known
 priced portion and is null if no priced evidence exists. A zero value requires
 known zero cost, not missing telemetry. Include all causally attributed work from
-Weaver planning/intake through child delivery and recovery, including helpers,
+Weaver planning/intake through child delivery and recovery, including independent review tasks,
 shared Marshal decision allocations, and supported model-billed tool charges.
 The summary record retains component/rate provenance and attribution assumptions.
 This is an API-equivalent estimate, not an actual subscription charge.
@@ -1261,16 +1302,16 @@ advisory, while unknown/unmanaged/inactive tasks receive no text.
 
 A task's `missing_finish_reminder` is null or `{turn_id, operation_id, state}`.
 After a terminal turn without the required outcome, create one reminder receipt
-for that ownership claim. Send only when the task is idle, with the original
+for that ownership acquisition. Send only when the task is idle, with the original
 scope and decision input unchanged. If another user turn arrived, wait for its
 safe boundary; do not inject a competing start. Repeated omission becomes a
 recovery reason. A human's normal question-answering conversation is not required
 to issue an implementation finish when it has no such active responsibility.
 
-Fleet replacement records the exact selected task/helper inventory, old-to-new
-mapping, pending claims, and replacements on one receipt. Drain has no implicit
+Fleet replacement records the exact selected managed-task inventory, old-to-new
+mapping, pending ownership transfers, and replacements on one receipt. Drain has no implicit
 switch to interrupt on client timeout. Pause admission for the selected
-scope until all old writers stop; replace and transfer through normal claims.
+scope until all old writers stop; replace and transfer through normal ownership operations.
 Preserve current work state and reload only relevant context. Replace each leader
 at most once, update its control identity, and never start a Vizier turn except
 for a retained explicit human request. Do not delete the old task's retained
@@ -1370,13 +1411,18 @@ Justiciar recovery. Routine publication never force-pushes. Do not automatically
 pull remote workflow ownership changes into a running fleet: divergence requires
 controlled reconciliation with stopped conflicting writers.
 
-The hard reset remains a separate explicit cutover: clear only enumerated old
-Fulcrum Beads data on the brain remote and publish the clean native database.
-Preserve the repository and unrelated documents; never resurrect old data from
-a historical issue export during startup. Existing Git history is not automatically
-rewritten by a normal push or this maintenance cadence. A historical purge, if
-needed for the separately authorized reset inventory, must be a narrowly scoped
-reset action, never inferred by ordinary synchronization.
+The hard reset is a separate explicit cutover: replace the enumerated dedicated
+Dolt remote history with a clean database and verify from a fresh clone that old
+issues/history are no longer reachable through that ledger. Preserve all unrelated
+Git refs, the brain ordinary branch history, documents, and configuration. Use
+stock Beads' supported remote-discard initialization and a narrowly targeted
+replacement of the dedicated ledger ref after recording the expected old ref and
+stopping old writers. If the remote changed since inventory, stop for reconciliation;
+reset authorization is not permission to overwrite an uninspected concurrent edit.
+This exception never applies to ordinary sync. It does not promise physical
+removal of unreachable objects retained by a host, and creates no backup/export.
+An inaccessible remote leaves reset incomplete. Task 21 specifies the disposable
+proof required before production cutover.
 
 Extend the deterministic restart/duplicate scenario with a disposable Git
 remote fixture and the same stock Beads Git transport. With an injected clock, prove a
@@ -1413,11 +1459,9 @@ models:
   mason: {model: gpt-5.6-sol, effort: high}
   justiciar: {model: gpt-5.6-sol, effort: high}
 policy:
-  automatic_capacity: 30
-  default_project_capacity: 30
+  automatic_capacity: 4
+  default_project_capacity: 4
   project_capacity: {}
-  reserved_recovery_slots: 1
-  worker_helper_limit: null
   paused_projects: []
   suspended_rules: {}
   rationale: Initial human-approved installation defaults.
@@ -1428,8 +1472,7 @@ brain:
 ```
 
 A project's slot ceiling is its `policy.project_capacity[project_id]` override,
-otherwise `default_project_capacity`, always constrained by global capacity and
-the recovery reserve. Per-project role model defaults remain under each enrolled
+otherwise `default_project_capacity`, always constrained by global capacity; there is no reserved recovery slot. Per-project role model defaults remain under each enrolled
 project's `models` map. Existing per-request/work overrides apply only to that
 work and retain their origin; they never modify these defaults. The smoke's
 Luna/low choice is an explicit invocation override, not a config edit.
@@ -1493,6 +1536,374 @@ Add one compact deterministic CLI assertion for each boundary: a Marshal or
 Justiciar config edit is rejected without changing the file; a Vizier edit changes
 subsequent model/slot selection; reset preserves the YAML. No native model run is
 needed for these checks.
+
+## 10. Complete workflow and operator interfaces
+
+This section completes the contracts above. [The implementation index](plan/README.md)
+maps every command family to its application operation, implementation task, and
+verification. No second workflow engine is implied by the larger CLI surface.
+
+### Ownership operation and decision freshness
+
+`fc.ownership_operation` is the ID of the acquisition/transfer receipt, not its
+request UUID and not the most recent ordinary mutation. The transfer receipt
+records `{from_thread, from_ownership_operation, to_thread, to_role}` and planned
+work/task updates before changing ownership. The new acquisition reference is
+that receipt's own ID. The source work update and destination task-record update
+are reconciled steps; a turn cannot start until both agree. Human takeover and
+reopening use the same rule. A repeated compatible `enter` retains the existing
+reference; a real role change or new ownership cycle replaces it even if the
+native task ID stays the same.
+
+Owner-restricted writes require both matching task ID and ownership operation;
+return `OWNERSHIP_CONFLICT` (exit 5) before external effects on mismatch. Sealing
+an Executor finish also rejects a different second finish from the same
+acquisition (`FINISH_SEALED`, exit 5); an exact request retry returns its receipt.
+Accepted downstream steps remain bound to their recorded handoff/source and are
+not invalidated merely because the successful transfer changed the work owner.
+
+`marshal brief` is a read-only preview. Before sending a decision turn, create a
+`marshal.decision` receipt with the exact ordered input, chosen work IDs, and
+per-row decision-relevant facts. `marshal decide` input adds
+`decision_operation` to `{decisions:[...]}`. Compare each row's owner, ownership
+operation, phase, outcome, acceptance, dependencies, priority, relevant waiting
+reasons, current source/approval, overlap tags, and relevant effective policy
+against that receipt. Store complete comparison facts even when the displayed
+brief summarizes them. Never use a digest or revision counter. `marshal decide`
+may reference a receipt from `marshal request [--bead ID]`, which initiates the
+same coalesced decision operation as automatic dispatch judgment. Its result is
+`decision_operation`, selected IDs, and task/turn facts. Human requests can use
+this command without invoking a skill.
+
+Changed relevant facts return `STALE_DECISION` for that row. Reconcile dependency
+and capacity changes mechanically: recheck capacity at dispatch, queue an already
+authorized start when full, and do not require fresh judgment for a routine freed
+slot. A batch can apply independent unchanged rows. One outstanding Marshal turn
+is the limit, including explicit requests. Full work requirements are never
+clipped into the comparison facts or a worker prompt.
+
+### Missing work and task actions
+
+| Command | Input, result, and authority |
+| --- | --- |
+| `work dependencies ID --input FILE` | `{add:[bead_id], remove:[bead_id]}`; returns current dependencies and affected waiting reasons. Current owner or human; reject cycles, self-edges, missing targets, and overlapping add/remove sets before writes. |
+| `task output ID [--turn-id ID]` | Bounded native messages/tool evidence with `items`, `next_cursor`, `observed_at`, and `gaps`; read without resuming. Supports `--limit`, `--cursor`, `--max-bytes` (default 262144). |
+| `task wait ID [--turn-id ID] --until idle\|terminal` | Native observed condition, turn ID, pending requests, and gaps; common timeout, never implicit cancellation. A failed turn satisfies terminal observation but is returned as failed evidence. |
+| `task terminals ID` | Exact owned terminal IDs, running/completed/unknown status and output references; read-only. |
+| `task terminal stop ID --terminal TERMINAL_ID --reason TEXT` | Owner/human/scoped Justiciar; record intent and observe termination. If the native API only supports all-terminal cleanup, reject targeted stopping as unsupported rather than stopping additional running terminals. |
+| `task terminal stop ID --all-owned --reason TEXT` | Explicitly stop all background terminals belonging to that managed task through the supported native method, then observe; mutually exclusive with `--terminal`. |
+| `marshal request [--bead ID]` | Initiate the recorded decision described above; returns its receipt and selected work. |
+
+`work update` additionally accepts `priority` (0–4) and `title`. Its known fields
+are `title`, `outcome`, `acceptance`, `summary`, `size`, `overlap_tags`, `context`,
+and `priority`; omitted fields remain unchanged. Native status changes go through
+close/reopen/transfer, not an arbitrary phase assignment. Dependency writes are
+separate stock operations whose planned edge set is retained and inspected after
+response loss. Dependency closure is a wake trigger, not proof of successful
+prerequisite completion: delivered/answered/findings satisfy only the declared
+prerequisite outcome; cancelled/rejected/reduced-scope work requires judgment.
+A duplicate follows its recorded canonical bead and cannot bypass that bead's
+unsatisfied outcome or introduce a cycle.
+
+`project add` accepts `codex_project_id=null`: discover an exact enrolled root or
+create a native project through the supported runtime API; similarly enroll the
+exact repository with Tollgate when its ID is absent. Retain planned locators and
+observed provider IDs on the enrollment receipt. Unsupported creation fails that
+capability with an actionable result; operators need not use the Desktop UI.
+Never create a second project when lookup after a lost response is inconclusive.
+
+### Plan authoring, reviews, and closure
+
+| Command | Input and result |
+| --- | --- |
+| `plan draft --bead ID --input FILE` | `{text, tasks, summary, publication, validation}`; stores complete unpublished draft, stable keys, and proposed checks. Returns draft facts and its operation; no dispatch/publication. |
+| `plan review start --bead ID --perspective cold_reader\|requirements` | Start one independent ordinary Codex task, returning `review_operation`, `thread_id`, and input evidence. Owner/authorized author or human initiates. |
+| `plan review finish --task ID --input FILE` | `{review_operation, findings, summary}` from that review task; findings are `{problem, required_change, evidence}` objects. Retain output and mark the review result complete without changing plan ownership. |
+| `plan approve --bead ID --input FILE` | Human/Vizier `{reason, resolutions, waivers}`; resolutions map review operation to text, waivers are `{perspective, reason}`. Returns `approval_operation` and exact approved scope. Justiciar may separately waive an unavailable review within its takeover scope via repair, but cannot impersonate plan approval. |
+| `plan complete ID` | Inspect and mechanically settle root completion; returns root state, unsatisfied obligations and next commands. Same application operation runs after child/publication settlement. |
+
+A draft's `validation` is `{summary, checks}`. Each check is
+`{criterion, task_keys, evidence_required}` and identifies how planned work covers
+the outcome; it need not be a separate child. Weaver decides proportionate
+verification. Small plans do not acquire a validation bead by default. A large
+assembled-system test may be a real deliverable child when warranted.
+
+`plan complete` is a mechanical reconcile operation available to human, current
+owner or the controller; it cannot authorize changed scope. Draft/review/approval
+errors use `STALE_REVIEW`, `APPROVAL_CONFLICT`, or `ACTIVATION_NOT_AUTHORIZED`
+(exit 5) with current unmet facts and next commands, never silent waiver.
+An incomplete `plan complete` inspection returns `root_closed=false` and unsatisfied
+obligations; successful command inspection does not imply successful root closure.
+It creates no mutation receipt merely to repeat an unchanged inspection.
+
+Review tasks use role `weaver`, `purpose=plan_review`, `related_task` and
+`associated_beads` on their ordinary task record. `review_operation` records the
+perspective and exact reviewed draft. They do not acquire the plan's ownership or
+become materialized workflow-step issues. Cold-reader input contains only the
+candidate draft and review instructions; requirements-review input also contains
+the original request and retained discussion references/text. Do not reuse an
+author's conversation for an independent review. Send full prepared prompts,
+count these tasks toward ordinary capacity, and price their native turns once.
+Only the named review task may finish its review. Task control, output, request
+responses and stopping use the existing task CLI. No native-subagent API is used.
+A terminal review without a result gets one reminder, then normal recovery.
+
+The root `plan` object adds `draft`, `validation`, `approval_operation` and
+`activation_authorization`. An approval receipt retains the exact text, task-key
+map with outcomes/acceptance/dependencies, review inputs/results/resolutions,
+validation, and publication requirements. Publish/refine takes the previously
+specified plan payload plus `approval_operation` and verifies it against those
+retained values. Supplied `approved_by`/`approval_evidence` must match the receipt;
+merely asserting approval is insufficient. Any substantive difference requires
+new approval and invalidates affected reviews; cosmetic changes can be retained
+as a documented difference without invalidating unchanged reviewed requirements.
+The author identifies proposed cosmetic changes; human/Vizier approval decides
+any disputed classification. Draft saving requires current owner/human authority;
+publication mutates only approved scope.
+
+Human/Vizier `plan activate` records authorization for the currently approved
+future plan. Marshal passes that receipt through `--authorization`; it cannot
+activate based only on age, policy capacity, or its ordinary dispatcher authority.
+Required remote publication must settle before actual child starts. A changed
+substantive draft invalidates authorization of that new scope, not already shipped
+work. Deleted keys retain delivered evidence; stopping/cancelling unfinished
+children is explicit in refinement and never silently inferred.
+
+The root remains open and Marshal-owned while approved children or required
+publication/delivery obligations remain. A planned future root is open/deferred;
+`finish planned` ends the authoring responsibility without closing that root.
+`plan complete` re-reads current facts. Successful required children and observed
+required publication/delivery permit `done/delivered`; question-only roots close
+as answered without a child graph. Cancelled/rejected children leave a scope
+blocker until an authorized refinement removes/replaces the obligation, or scoped
+Justiciar records reduced-scope completion. No extra model turn or validation
+child is required to perform the aggregation. Root reopening retains prior cost
+metadata as historical and establishes a new ownership operation. Telemetry never
+blocks closure.
+
+### Bootstrap, writer exclusion, and configuration failure
+
+Use one advisory writer lock at `<brain.root>/.fulcrum-controller.lock`, outside
+the resettable ledger. `<instance>/controller.lock` is a discovery symlink to it,
+not another lock authority. `fc-system` binds the resolved `instance_root` and
+`brain_root`; a second distinct instance against the same root fails
+`INSTANCE_CONFLICT` before dispatch. Resolve symlinks before locking; reject a
+backend configuration pointing to a different database/root than the verified
+binding. Remote-host ledgers and multiple machines writing one active installation
+are outside the local single-user contract. Setup verifies physical server identity,
+not just a user-supplied port string.
+
+With no ledger, setup may create the declared root/configuration, dependency
+runtime, and stock Beads workspace before its first receipt. These are bounded,
+idempotent bootstrap primitives inspected on rerun, not a new workflow journal.
+Create the setup receipt as soon as Beads is available, before native tasks,
+project enrollment or other workflow effects. Reserved `fc-system` is inspected
+before initialization; leadership provisioning records intent before native starts.
+A failed setup returns completed steps and precise unavailable capabilities. Never
+claim a receipt when it was not persisted. Nothing starts Vizier without an
+explicit retained human request.
+
+An explicitly selected instance with missing/dangling configuration fails closed;
+only an invocation with no explicit instance/config selection may use the production
+default. `--config` gives a human a direct repair path. `service status` and
+`recover inspect` inspect owned installation artifacts and explicit targets when
+YAML cannot parse; they do not reconstruct work from logs. The running controller
+retains an in-memory last validated configuration for finishing known work while
+pausing admission. After a restart with invalid YAML, inspection remains available
+but mutations requiring missing endpoints wait for human repair; do not promise
+they can execute from a nonexistent configuration cache. Offline human config
+repair has the already-specified no-receipt degraded exception.
+
+### Observable operator results
+
+`status.result` contains `observed_at`, `instance`, `work`, `operations`, `capacity`,
+`publication`, and `gaps`. Work rows extend `WorkView` with `phase`,
+`ownership_operation`, `next_action`, `waiting`, `active_task`, `last_progress_at`,
+`delivery`, and structured `next_commands`. Capacity reports configured global and
+project limits, active managed IDs, pending start reservations, unknown managed
+IDs, human bypasses, and pressure. Delivery separates submitted source, approved
+source, promoted integration source, source synchronization, and cleanup.
+
+`doctor.result` contains `components` and `loops`; each has `name`,
+`healthy|unavailable|unsupported|stale|unknown`, `last_success_at`, `evidence`,
+`affected_commands`, and `next_commands`. Report intake/event/reconciliation/runner
+loop health separately from service/socket liveness. Default reconciliation is
+stale after two missed 15-second deadlines plus one external-request budget
+(60 seconds); loops expose their own configured expected interval/deadline.
+
+`trace.result` has ordered `items`, `next_cursor`, and `gaps`; items carry time,
+bead/task/turn/operation IDs, transition/effect, outcome, evidence references, and
+source identities when applicable. Reconstruct the durable summary from Beads
+receipts and live facts, optionally enriching it from logs. Pruned logs produce
+an explicit gap, never an invented complete transcript. `task output` exposes
+native output without loading idle tasks; unavailable native history is a gap.
+`operation show` includes accepted input, planned IDs/steps, attempt count,
+external locators, current observations, errors and next argv commands.
+
+All ordinary JSON reads are one envelope. Only explicitly requested `logs --follow`
+streams JSONL event envelopes, with a final summary on normal termination. Reads
+are bounded: default 20 items, `--limit 0` explicitly requests all; task/log chunks
+have a byte cap. Cursors encode ordering position, not a hash or workflow version.
+Document concurrent-page limitations and stable `(timestamp, id)` tie breaking.
+
+### Publication bookkeeping boundaries
+
+The adapter compares native issue changes since the last real published boundary,
+using supported stock Beads history/diff and current issue reads. Ignore only
+`fc-system.fc.publication` fields and `ledger.sync` receipt changes when deciding
+whether a new batch is needed; do not ignore the entire control issue or other
+operation classes. Retain the native boundary commit identity in the publication
+receipt. If an installed stock API cannot provide enough change detail, report an
+unsupported publication capability during setup/probing rather than polling
+commits into an endless loop or introducing a second dirty-state database.
+
+The same tick flushes separately observed ordinary Git changes for authorized
+configuration and exported knowledge. A new source/work item, native edit or YAML
+edit may create real pending work; recording push success alone may not. A relevant
+connectivity-recovery retry authorization is a recorded transition from failed to
+successful capability observation, not every successful poll. Compare these facts
+directly and retain retry grants on the existing operation.
+
+### Disposable fixtures and test controls
+
+These are explicit test utilities; they are not work kinds or an acceptance-state
+engine. Checked-in scripts own assertions and reports. Fixture resource operations
+use normal application/adapters and operation receipts once bootstrap Beads exists.
+
+| Command | Contract |
+| --- | --- |
+| `fixture create --input FILE` | Input `{root, runtime, delivery, model, effort, capacity, source_sync}`; root is a new absolute disposable directory, runtime/delivery explicitly select their kinds/endpoints, defaults for model/effort/capacity are Luna/low/4, source_sync is explicit. Return fixture operation, instance/config/brain/project/remote paths and provider IDs. |
+| `fixture show ID` | Read recorded inventory, resource observations, pending operations and evidence/cleanup references. |
+| `fixture cleanup ID --yes` | Stop/observe only fixture managed work, remove exact registered resources, preserve caller-owned report files, and report incomplete cleanup. Unresolved or dirty evidence is retained unless the explicit fixture cleanup requests its disposable deletion; no production target is eligible. |
+| `fixture barrier arrive ID --name NAME --participant TASK [--wait]` | Test-only tool operation records that participant in external fixture state; optionally waits within client timeout. No work ownership/phase mutation. |
+| `fixture barrier show ID --name NAME` | Read expected/arrived participants and released state. |
+| `fixture barrier prepare ID --name NAME --input FILE` | Set expected participants from `{participants:[task_id]}`; exact repeat is a no-op, changed membership conflicts. |
+| `fixture barrier release ID --name NAME` | Release that fixture barrier; repeat is a no-op. Human test client only. |
+| `scenario crash --operation ID --boundary NAME` | Deterministic instances only: arm one controller crash at the named persisted boundary; returns the armed target. |
+
+`fixture create` is a bootstrap command: its explicit input root selects the new
+instance, without reading production configuration. Fixture creation scaffolds a
+committed toy source repository and brain plus disposable
+Git/Dolt remotes using the supported Git transport, allocates isolated Beads ports,
+and invokes normal setup/project enrollment. It leaves the fixture controller
+stopped; scripts explicitly call `service start` after preparing their work and
+barriers. Creation returns `instance`, `config`, `brain`, `project_id`, `project_root`,
+`remote`, `fixture_id` (the creation receipt), and `service_started=false`.
+The fixture root must be absent, or
+belong to an exact retry of recorded creation; no fixed shared `/tmp` sample paths
+may overwrite prior work. Failed pre-ledger bootstrap returns created resource facts
+and safe cleanup commands; it creates no unrecorded model task. After ledger setup,
+retain resource inventory in the fixture-creation receipt. `fixture show/cleanup`
+use that ID and explicit instance so discovery does not depend on an external test
+state database. Caller reports live outside deleted fixture directories.
+
+Native fixtures attach ordinary test tasks to the explicitly configured shared
+runtime; they do not install/modify shared runtime services, production skill links
+or YAML. Toy project setup/removal uses native project API and Tollgate enrollment
+through adapters. `project remove ID --remove-owned-registrations` exposes provider registration
+cleanup after open work/worktrees have settled; normal removal only unenrolls YAML.
+It removes only registrations created by this installation, never discovered/reused
+ones or source repositories. Native project deletion is a provider resource operation: record
+and inspect exact owned ID removal, refuse if unrelated tasks remain associated,
+and return unsupported if the installed API lacks removal. A missing required
+fixture capability is an actionable test precondition failure, never production
+fallback. Deterministic fixtures use durable external fake-provider facts, not
+another Fulcrum workflow journal.
+
+`fixture barrier prepare` records the expected participant list without releasing
+it. A different list for an existing barrier is a conflict. Worker arrive/wait commands report ready status through the fixture
+provider, while native active/tool state is independently observed through task CLI.
+Barriers are bounded external test resources, not production scheduling controls.
+
+`scenario emit/advance/fault` retain the §7 input schemas and cannot target native
+adapters. An advance cannot move time backward. Supported one-shot crash boundaries
+are `receipt_created`, `work_written`, `task_created`, `turn_started`,
+`handoff_owner_written`, `delivery_effect_observed`, `publication_pushed`,
+`reset_inventory_recorded`, `reset_old_ledger_removed`, `reset_remote_replaced`,
+and `reset_terminal_written`. Each pauses/crashes only after its named real step;
+no command can directly assign arbitrary bead state. A deterministic external
+provider fault uses applied/not-applied plus timeout/disconnect/reject/malformed;
+crashing the controller is a separate test control, not a provider success event.
+
+For operator-authorized queued work, `dispatch --bead ID --authorize` records a
+durable dispatch authorization without bypassing configured admission limits or
+starting a judgment turn. Human/Vizier may use it; `--human` instead retains the
+existing explicit immediate bypass. The flags are mutually exclusive. A later
+plain `dispatch`/reconcile executes that authorization through ordinary admission.
+This also lets the concurrency test exercise the 30-slot limit without 30 human
+bypasses or extra Marshal model turns. Its setup holds normal reconciliation until
+the intended participant set and barrier are recorded, then starts the fixture
+controller. This pause is fixture setup/foreground control, not a second scheduler.
+
+Project-scoped fleet replacement retains shared standing leaders; instance-wide
+replacement includes them. Memory writes require the owning curator (Vizier for
+global, Marshal for project/role) or an explicit human action; other roles file
+proposals. These rules do not create a second configuration authority.
+
+### Timing, diagnostics, and repair payload details
+
+The remaining optional configuration maps have these known fields/defaults; omitted
+fields take these defaults only in an otherwise valid file, never after invalid
+configuration. Times are positive seconds unless noted; ratios are strictly between
+zero and one with resume below pause. `source_watch_root` remains the optional
+absolute path/null field specified in setup. Preserve existing `knowledge`, model,
+project and provider maps from §2.
+
+```yaml
+timing:
+  intake_busy_seconds: 2
+  intake_idle_seconds: 10
+  reconcile_seconds: 15
+  external_timeout_seconds: 30
+  event_silence_seconds: 120
+  checkpoint_seconds: 600
+  stalled_seconds: 1800
+  marshal_coalesce_seconds: 2
+  archive_idle_seconds: 600
+diagnostics:
+  retention_days: 14
+  max_bytes: 1073741824
+  capture_bytes_per_stream: 262144
+resources:
+  fd_soft_limit: 4096
+  pause_ratio: 0.85
+  resume_ratio: 0.70
+```
+
+Retry policy remains the single fixed three-send/2-second/10-second policy; do not
+add per-role retry configuration. `brain.push_interval_seconds` remains 300.
+The managed task record also records the selected model origin, purpose, related
+ordinary task, latest substantive progress and last sent checkpoint/reminder
+operation. The control record includes the resolved instance/brain binding,
+leadership acquisition operations and optional fixture-creation operation.
+
+Repair uses `{actions:[{action,target,arguments,reason}]}`. `target` is an exact
+recorded ID/path/service inside the supplied takeover scope. Reject unrecognized
+argument keys before any action, retain input/order, and inspect each step before
+advancing. Required action arguments are:
+
+| Action | Arguments |
+| --- | --- |
+| `interrupt` | `{turn_id}` for the target task; inspect current turn before sending. |
+| `release_subscription` | `{}` for the target task. |
+| `terminate_owned_terminal` | `{terminal_id}`; unsupported precise targeting is an error, not broader termination. |
+| `adopt_owner` | `{thread_id, role, expected_ownership_operation}` for the target work bead. |
+| `replace_thread` | `{mode: drain\|interrupt}` for the target managed task; record successor before transfer. |
+| `cancel_delivery`, `reconcile_delivery` | `{source_oid, provider_handle}` for the target bead; handle may be null only when inspecting an unknown submission. |
+| `remove_worktree` | `{}` for the exact recorded path; default dirty/unsynchronized protection applies. |
+| `set_disposition` | `{outcome, summary, new_scope, waived_requirements, known_defects, evidence}` for work; optional source evidence must be observed, never an asserted promotion. |
+| `restore_leadership` | `{role: marshal\|vizier, thread_id}` against the control record. |
+| `repair_service` | `{operation: start\|stop\|restart\|reinstall_definition}` for an enumerated owned service. |
+| `reinstall` | `{installation: main\|recovery, source_root}` for the instance. |
+| `quarantine` | `{}` for an exact corrupt owned artifact; choose a unique sibling destination and retain that planned path before moving. |
+| `beads_update` | `{fields}` for one exact bead, using native update fields; this is scoped break-glass and must reconcile reserved metadata afterward. |
+| `git` | `{argv:[literal arguments]}` for an exact recorded repository/worktree; never a shell string. |
+
+All repairs except best-effort read/resource release require verifiable takeover
+or human authority. None authorizes editing `fulcrum.yaml` as Justiciar. Essential
+no-ledger service/reinstall repair returns actual effects without claiming a
+receipt; it never expands into multi-resource reset. Platform permissions still
+apply to every native/shell action.
 
 ## Source notes
 
