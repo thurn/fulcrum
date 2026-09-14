@@ -472,7 +472,11 @@ def _add_command_options(
         _option(parser, "--task", required=True)
     elif path == ("plan", "activate"):
         _option(parser, "--authorization")
-    elif path in {("memory", "list"), ("usage",), ("cost",)}:
+    elif path == ("memory", "list"):
+        _option(parser, "--scope")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+    elif path in {("usage",), ("cost",)}:
         for name in ("scope", "workflow", "role", "task", "turn", "root"):
             _option(parser, f"--{name}")
         _option(parser, "--group-by")

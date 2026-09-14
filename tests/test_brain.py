@@ -19,7 +19,7 @@ def git(root: Path, *arguments: str) -> str:
 
 
 class BrainRepositoryTest(unittest.TestCase):
-    def test_divergent_publication_merges_without_discarding_either_history(
+    def test_isolated_publication_preserves_remote_and_live_worktree(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -62,16 +62,19 @@ class BrainRepositoryTest(unittest.TestCase):
             publication = BrainRepository(second).publish(
                 [second / "local.txt"], "publish local"
             )
-            self.assertTrue(publication.merged_remote)
+            self.assertFalse(publication.merged_remote)
             self.assertEqual(publication.local_revision, publication.remote_revision)
-            self.assertEqual((second / "remote.txt").read_text(), "remote\n")
+            self.assertFalse((second / "remote.txt").exists())
             self.assertEqual((second / "local.txt").read_text(), "local\n")
+            self.assertEqual(git(second, "status", "--porcelain=v1"), "?? local.txt")
             self.assertEqual(
                 git(first, "fetch", "origin", branch),
                 "",
             )
             remote_tip = git(first, "rev-parse", f"origin/{branch}")
-            self.assertEqual(remote_tip, publication.local_revision)
+            self.assertEqual(remote_tip, publication.remote_revision)
+            self.assertEqual(git(first, "show", f"{remote_tip}:remote.txt"), "remote")
+            self.assertEqual(git(first, "show", f"{remote_tip}:local.txt"), "local")
 
 
 if __name__ == "__main__":

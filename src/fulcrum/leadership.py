@@ -20,11 +20,13 @@ from fulcrum.contracts import (
 )
 from fulcrum.ledger import (
     Ledger,
+    LedgerFailure,
     LedgerRecord,
     OperationRecord,
     operation_view,
     utc_now,
 )
+from fulcrum.knowledge import select_memory
 from fulcrum.roles import LEADERSHIP_TITLES, RoleService
 from fulcrum.runtime import AppServerError, TaskSpec
 from fulcrum.work import WorkService, work_view
@@ -1178,6 +1180,28 @@ def build_brief(
         "omitted_counts": omitted_counts,
         "continuations": continuations,
     }
+    projects = sorted(
+        {
+            str((record.fc or {}).get("project"))
+            for record, _, _ in selected
+            if (record.fc or {}).get("project")
+        }
+    )
+    memory_gap: str | None = None
+    try:
+        memory = select_memory(
+            ledger,
+            project_ids=projects,
+            role="marshal",
+            max_chars=750,
+        )
+    except LedgerFailure as error:
+        memory = {"items": []}
+        memory_gap = str(error)
+    if memory["items"]:
+        brief["memory"] = memory
+    if memory_gap:
+        brief["memory_gap"] = memory_gap
     while brief["rows"] and len(_serialize(brief)) > BRIEF_CHARACTER_LIMIT:
         brief["rows"].pop()
         if kind:

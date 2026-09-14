@@ -22,6 +22,7 @@ from fulcrum.ledger import (
     random_record_id,
     utc_now,
 )
+from fulcrum.knowledge import render_selected_memory, select_memory
 from fulcrum.runtime import TaskFacts, TaskSpec
 from fulcrum.runtime_service import (
     _create_and_configure,
@@ -609,6 +610,22 @@ def _cook_role(
         "handoff": fc.get("handoff"),
         "delivery": fc.get("delivery"),
     }
+    try:
+        selected_memory = select_memory(
+            ledger,
+            project_ids=(str(fc.get("project")),),
+            role=role,
+        )
+    except LedgerFailure:
+        selected_memory = {"items": []}
+    work_context = _render_facts(fc.get("context"), "No additional task context.")
+    memory_context = (
+        work_context
+        if not selected_memory["items"]
+        else work_context
+        + "\n\nCurated memory:\n"
+        + render_selected_memory(selected_memory)
+    )
     variables = {
         "title": work.title,
         "outcome": str(
@@ -619,7 +636,7 @@ def _cook_role(
         "acceptance": acceptance_text,
         "current_evidence": _render_facts(evidence, "No prior evidence."),
         "blockers": _render_facts(fc.get("waiting"), "No current blocker."),
-        "context": _render_facts(fc.get("context"), "No additional context."),
+        "context": memory_context,
         "next_action": _role_next_action(role),
         "bead": work.id,
         "thread": thread_id,

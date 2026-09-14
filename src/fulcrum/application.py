@@ -19,6 +19,7 @@ from fulcrum.ledger import (
     OperationService,
 )
 from fulcrum.leadership import LeadershipService
+from fulcrum.knowledge import KnowledgeService, MemoryService
 from fulcrum.plans import PlanService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.reviews import ReviewService
@@ -104,6 +105,13 @@ class Application:
         self.register(("plan", "refine"), plans.refine)
         self.register(("plan", "activate"), plans.activate)
         self.register(("plan", "complete"), plans.complete)
+        memory = MemoryService()
+        self.register(("memory", "list"), memory.list)
+        self.register(("memory", "show"), memory.show)
+        self.register(("memory", "set"), memory.set)
+        knowledge = KnowledgeService()
+        self.register(("knowledge", "publish"), knowledge.publish)
+        self.register(("config", "sync"), knowledge.config_sync)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

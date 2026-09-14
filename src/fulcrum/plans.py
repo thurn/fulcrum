@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -16,6 +18,7 @@ from fulcrum.ledger import (
     operation_view,
     utc_now,
 )
+from fulcrum.knowledge import KnowledgeService
 from fulcrum.work import (
     WorkService,
     _marshal_or_human,
@@ -313,6 +316,7 @@ class PlanService:
                 "approved_keys": list(task_specs),
                 "publication_operation": operation.id,
                 "publication": publication_facts,
+                "previous_publication": (plan.get("publication") if refining else None),
                 "publication_ready": not _remote_publication_required(publication),
                 "activation": str(retained["activation"]),
                 "reopen_requirement": None,
@@ -362,6 +366,32 @@ class PlanService:
             assignee=(marshal if not authoring_pending else None),
             status="open" if not authoring_pending else "in_progress",
         )
+        publication_operation: str | None = None
+        if publication is not None:
+            publication_request = replace(
+                request,
+                command=("knowledge", "publish"),
+                arguments={"bead": root.id},
+                input={},
+                request_id=str(
+                    uuid.uuid5(
+                        uuid.UUID("72bce8de-305c-40fc-916f-9d38683c649c"),
+                        operation.id,
+                    )
+                ),
+            )
+            publication_result = KnowledgeService().publish(publication_request)
+            publication_operation = publication_result.operation_id
+            observed_root = ledger.show(root.id)
+            observed_plan = (
+                observed_root.fc.get("plan")
+                if observed_root is not None and observed_root.fc
+                else None
+            )
+            if isinstance(observed_plan, Mapping) and isinstance(
+                observed_plan.get("publication"), Mapping
+            ):
+                publication_facts = dict(observed_plan["publication"])
         operation = ledger.update_operation(
             operation.id,
             state="completed",
@@ -375,6 +405,7 @@ class PlanService:
                 "changed": list(retained.get("changed", [])),
                 "activation": activation,
                 "publication": publication_facts,
+                "publication_operation": publication_operation,
                 "graph_ready": True,
             },
             next_action=fc["next_action"],
@@ -825,7 +856,12 @@ def _validate_publication(value: Any) -> dict[str, Any] | None:
     if not isinstance(relative, str) or not relative.strip():
         raise _invalid("publication.relative_path", "is required")
     path = PurePosixPath(relative)
-    if path.is_absolute() or ".." in path.parts:
+    if (
+        path.is_absolute()
+        or not path.parts
+        or ".." in path.parts
+        or path.parts[0] in {".git", ".beads"}
+    ):
         raise _invalid("publication.relative_path", "must stay within its destination")
     if not isinstance(remote, bool):
         raise _invalid("publication.require_remote_sync", "must be boolean")
