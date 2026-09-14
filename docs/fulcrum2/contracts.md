@@ -16,7 +16,8 @@ Production Codex attachment is shared with Desktop; test instances explicitly
 choose a deterministic adapter or a disposable native namespace.
 
 ```text
-<instance>/config.toml         configuration and project registration
+<brain.root>/fulcrum.yaml      authoritative configuration; human/Vizier edits only
+<instance>/config              discovery symlink to that YAML, never a second copy
 <brain.root>/.beads/           shared stock Beads workspace (default ~/brain/.beads)
 <brain.root>/.beads/dolt/       live server data, excluded from ordinary Git tracking
 <brain.root>/plans/            default Markdown plan publication destination
@@ -30,8 +31,9 @@ choose a deterministic adapter or a disposable native namespace.
 ```
 
 Configuration holds executable paths, provider endpoints, project paths/provider
-IDs, model defaults, and fixed operational limits. Mutable dispatch policy and
-work state live in Beads. Credentials are referenced through environment or the
+IDs, model defaults, task-slot limits, standing policy, and operational timing.
+It lives only in `<brain.root>/fulcrum.yaml`; actual dispatch decisions and work
+state live in Beads. Only the human and Vizier may modify the YAML. Credentials are referenced through environment or the
 provider's native authentication, not copied into beads.
 
 The worktree directory above is the default for providers that accept an explicit
@@ -44,6 +46,7 @@ directory. Reset and cleanup enumerate these provider-owned paths too.
 
 | Option | Contract |
 | --- | --- |
+| `--config ABSOLUTE_PATH` | Select the authoritative `fulcrum.yaml`; resolves before the instance discovery link and default `~/brain/fulcrum.yaml` |
 | `--json` | Emit one JSON result on stdout; human-readable text is the default |
 | `--input PATH` / `--input -` | Read a UTF-8 JSON object from a file/stdin; supported mutation payloads are listed below |
 | `--project ID` | Explicit project selection; required if it cannot be resolved without ambiguity |
@@ -138,13 +141,15 @@ accept `--limit N` (default 20, `0` means all) and `--cursor CURSOR` and return
 | Command | Purpose and required input |
 | --- | --- |
 | `setup --input FILE` | Install/bootstrap from the configuration object below; no UI wizard required |
-| `config show` | Effective configuration with credentials omitted |
-| `config set --input FILE` | Patch known operational configuration; report which services need explicit restart |
-| `project add --input FILE` | Register `id`, `root`, `codex_project_id`, `delivery`, `integration_branch`, `prepare_argv`, `validate_argv`, optional `source_remote`, `require_source_sync`, `models` |
+| `config show` | Read effective `fulcrum.yaml` and its source path; credentials omitted |
+| `config validate` | Read-only schema/capability checks with actionable field errors |
+| `config sync` | Commit/push the existing authorized YAML contents to the brain branch; never edits the file |
+| `config set --input FILE` | Human/Vizier-only patch to YAML; validate, atomically replace, and report changes/restart requirements |
+| `project add --input FILE` | Human/Vizier-only YAML enrollment: register `id`, `root`, `codex_project_id`, `delivery`, `integration_branch`, `prepare_argv`, `validate_argv`, optional `source_remote`, `require_source_sync`, `models` |
 | `project list` / `project show ID` | Inspect enrollment and observed provider availability |
-| `project disable ID --reason TEXT` | Stop automatic new work; retain active ownership and allow recovery/direct human work |
-| `project enable ID` | Enable automatic new work |
-| `project remove ID` | Remove enrollment only after open work and managed worktrees are disposed; Justiciar can override explicitly |
+| `project disable ID --reason TEXT` | Human/Vizier-only configuration change to stop automatic new work; retain active ownership and allow recovery/direct human work |
+| `project enable ID` | Human/Vizier-only configuration change to enable automatic new work |
+| `project remove ID` | Human/Vizier-only YAML enrollment removal after open work/worktrees are disposed; Justiciar may repair that work but cannot edit this file |
 | `service start` / `service stop` / `service restart` | Supervise the installed controller; stop observes drain/interruption according to explicit `--interrupt` |
 | `service status` | Service and loop health without requiring the controller socket |
 | `serve [--once]` | Run foreground controller; once processes one eligible reconciliation pass and returns |
@@ -153,7 +158,7 @@ accept `--limit N` (default 20, `0` means all) and `--cursor CURSOR` and return
 
 Setup input has `runtime` (`kind`, `endpoint`, `executable`), `delivery` defaults,
 `beads` (`executable`, `host`, `port`, `database`), `brain` (`root`, `remote`,
-`branch`, `push_interval_seconds`), `projects`, `models`, and optional `knowledge`
+`branch`, `push_interval_seconds`), `projects`, `models`, `policy`, and optional `knowledge`
 (`root`, `remote`, `branch`, `require_remote_sync`) maps. Production `brain.root`
 defaults to `~/brain`; `remote` defaults to its existing `origin`, `branch` to its
 configured branch, and `push_interval_seconds` to 300. Setup verifies that remote
@@ -185,7 +190,7 @@ project-specific command. Setup writes absolute executable paths for services.
 | --- | --- |
 | `enter ROLE --description TEXT [--bead ID] [--origin human|dispatch]` | Create/adopt work and bind the current explicit task, or create a native task when none is supplied; default origin human |
 | `leader show vizier|marshal` | Native ID, fixed title, and control-bead reference |
-| `leader replace ROLE --reason TEXT` | Explicitly replace broken leadership, invalidate old leadership claims, retain policy in Beads |
+| `leader replace ROLE --reason TEXT` | Explicitly replace broken leadership, invalidate old leadership claims, retain policy in `fulcrum.yaml` |
 | `context [--bead ID] [--role ROLE]` | Current bead, compiled instructions, ownership, actionable evidence, and pending operation references |
 | `work create --input FILE` | Create an outcome or graph; returns root and child IDs |
 | `work show ID` / `work list` | Work-only view, excluding control/operation issues; filters `--project`, `--role`, `--owner`, `--phase` |
@@ -255,8 +260,8 @@ state independently of subsequent dispatch.
 
 | Command | Behavior |
 | --- | --- |
-| `policy show` | Effective dispatch/exception policy and rationale |
-| `policy set --input FILE` | Vizier or human sets policy; Marshal may change its delegated capacity and backlog decisions |
+| `policy show` | Read the policy section of `fulcrum.yaml` and its rationale |
+| `policy set --input FILE` | Human/Vizier-only edit of the YAML policy section through the same config operation |
 | `backlog list [--ready] [--include-deferred]` | Compact work summaries, dependency/wait reasons, and priority |
 | `marshal brief [--bead ID]` | Exact default decision input plus omitted counts and continuation commands |
 | `marshal decide --input FILE` | Apply independent decisions after checking their claim/phase expectations |
@@ -264,13 +269,16 @@ state independently of subsequent dispatch.
 | `human list` | Work assigned HUMAN and the exact action needed |
 | `human resolve ID --input FILE` | Record `answer`, optional `scope_change`, and `resume_role`; return ownership to Marshal for continuation |
 
-Policy fields are `automatic_capacity`, `project_capacity` (map),
+YAML policy fields are `automatic_capacity`, `default_project_capacity`,
+`project_capacity` (override map),
 `reserved_recovery_slots`, `worker_helper_limit` (null by default), `paused_projects`,
 `suspended_rules` (map from named rule to scope/reason), and `rationale`.
-Operational timing/log defaults live in config, not a second policy copy.
+Model, policy, and timing/log defaults all live in the same YAML file, not Beads
+or a second config copy. Marshal can use fewer slots without changing these values.
 Every suspension has an explicit scope and can be cleared through `policy set`.
 No automatic expiry schedules a new task. Vizier/human alone may grant broad rule
-suspensions; Justiciar's current takeover grants its already-defined local powers.
+suspensions; Justiciar's current takeover grants its already-defined local powers
+but never authority to modify `fulcrum.yaml`.
 
 A decision contains `bead_id`, `expected_claim`, `expected_phase`, `action`,
 `reason`, and action-specific fields. The payload is `{"decisions":[...]}`.
@@ -539,8 +547,9 @@ request and invalidates the old claim; it never silently reuses an old active tu
 ### Installation and task records
 
 `fc-system.fc` holds `kind=control`, effective owner, `vizier_thread`,
-`marshal_thread`, `policy`, `policy_rationale`, `active_takeover`, and
-`last_transition`. No task status or full backlog is copied into it.
+`marshal_thread`, `active_takeover`, and
+`last_transition`. No task status, full backlog, or authoritative model/policy
+configuration is copied into it. Effective standing policy is read from YAML.
 
 Each task record holds `kind=task`, `owner` (its native task ID), `thread_id`, `role`, `work_bead`, `claim`,
 `creation_operation`, `creation_cwd`, `model`, `effort`, `associated_beads`,
@@ -1300,6 +1309,116 @@ remote fixture and the same stock Beads Git transport. With an injected clock, p
 native `bd` change is pushed by the next five-minute tick, an idle tick produces
 no new commit, and an applied-but-unacknowledged push is reconciled without a
 duplicate operation. This requires no native model calls or wall-clock five-minute wait.
+
+### Authoritative system configuration
+
+The sole configuration file is `<brain.root>/fulcrum.yaml`, defaulting to
+`~/brain/fulcrum.yaml`. It is ordinary Git-tracked YAML in the existing brain
+repository. Do not create `config.toml`, a second JSON config, or a policy/model
+mirror in Beads. Configuration discovery uses explicit `--config`, then the
+selected instance's `config` symlink, then `~/brain/fulcrum.yaml`. Setup creates
+only a link to the selected file, so subsequent commands with `--instance` can
+find an isolated test configuration without falling back to production. A dangling
+link is an error, not permission to use the default. The YAML's resolved parent
+must match `brain.root` when that field is present; otherwise derive the root
+from the parent. The installed service records the absolute selected path in its
+launch arguments. Neither a discovery link nor generated service arguments are
+another configuration authority.
+
+These are the initial role and slot defaults in `fulcrum.yaml`; the rest of the
+configuration uses the setup fields already specified above:
+
+```yaml
+models:
+  vizier: {model: gpt-5.6-sol, effort: high}
+  marshal: {model: gpt-5.6-sol, effort: high}
+  weaver: {model: gpt-5.6-sol, effort: high}
+  executor: {model: gpt-5.6-sol, effort: high}
+  warden: {model: gpt-5.6-sol, effort: high}
+  sage: {model: gpt-5.6-sol, effort: high}
+  mason: {model: gpt-5.6-sol, effort: high}
+  justiciar: {model: gpt-5.6-sol, effort: high}
+policy:
+  automatic_capacity: 30
+  default_project_capacity: 30
+  project_capacity: {}
+  reserved_recovery_slots: 1
+  worker_helper_limit: null
+  paused_projects: []
+  suspended_rules: {}
+  rationale: Initial human-approved installation defaults.
+brain:
+  root: /Users/dthurn/brain
+  remote: origin
+  push_interval_seconds: 300
+```
+
+A project's slot ceiling is its `policy.project_capacity[project_id]` override,
+otherwise `default_project_capacity`, always constrained by global capacity and
+the recovery reserve. Per-project role model defaults remain under each enrolled
+project's `models` map. Existing per-request/work overrides apply only to that
+work and retain their origin; they never modify these defaults. The smoke's
+Luna/low choice is an explicit invocation override, not a config edit.
+
+Only `--actor human` or the current Vizier task may create/change this file via
+`config set`, `policy set`, `project add/remove/enable/disable`, or setup input.
+A managed task may not impersonate a human. Controller file writes are permitted
+only to execute a retained request from one of those actors, not autonomous
+policy changes. Setup is allowed to initialize the file during a human-requested
+installation; unattended setup is the same human-authorized operation. Rerunning
+setup without an explicit config mutation must preserve the existing file.
+Other roles, including Marshal and Justiciar, may inspect configuration and
+propose changes but cannot apply them, replace the discovery target to bypass the
+rule, or ask an implementation worker to edit it. The recovery executable
+preserves this restriction. This is enforced by CLI role checks and role/tool
+instructions within the existing trusted-local-user model, not a claim that OS
+permissions can distinguish agents sharing the same user account.
+
+`config set` accepts a JSON object of known configuration fields via the common
+`--input` contract and merges specified mappings while replacing supplied arrays;
+`policy set` applies the same operation within `policy`. Reject unknown fields,
+duplicate YAML keys, unsafe YAML tags, invalid slot counts, and unsupported model/
+effort values when capabilities are available. A model capability outage reports
+unverified fields without fabricating a successful capability check. Write a
+validated temporary file beside the target and atomically replace it, preserving
+comments and unrelated settings. Compare the current file contents with those
+read before editing; a concurrent manual change returns `CONFIG_CONFLICT`, not a
+silent overwrite. No configuration version field or content hash is introduced.
+Receipts retain initiator, rationale, changed fields, and Git publication evidence;
+they are audit evidence, never a second source for the controller's policy.
+Configuration repair must not depend on the connection it is fixing: an explicit
+human `config set --offline` may use the same writer lock and file operation when
+Beads is unavailable. Return `degraded` with the actual file change and no claimed
+Beads receipt; retain ordinary Git history when available, never a second repair
+journal. A Vizier request needs verifiable current leadership identity; absent
+that evidence, report the missing verification and leave direct human repair
+available. This exception permits human repair, not agent impersonation.
+
+Direct human/Vizier edits are supported. Read and validate the current file before
+new dispatch decisions; source-file events can refresh the parsed in-memory view.
+Apply model/slot/policy changes to subsequent decisions without changing active
+turns or interrupting workers to fit a lowered limit. Endpoint/executable/backend
+changes are reported as requiring controlled service restart. Malformed/missing
+configuration pauses new automatic admissions with a precise diagnostic; it must
+not silently restore defaults or rewrite the file. Existing owners can finish
+using their retained task/delivery facts, and inspection/emergency diagnosis stays
+available. Repair requiring a file edit belongs to the human or Vizier.
+
+Authorized YAML changes are committed and pushed to the brain's normal branch
+by the five-minute maintenance cycle or `config sync`. This is independent of
+native Beads history publication under `refs/dolt/data`: status exposes both.
+Use the existing Git publication adapter with only `fulcrum.yaml` selected; keep
+unrelated staged changes untouched. The controller may publish exact authorized
+contents but must not resolve a YAML merge conflict itself. Conflicting remote
+configuration is returned to human/Vizier; other roles may still repair unrelated
+Git/Beads problems. Remote publication failure leaves local configuration usable
+and its pending status visible. Reset preserves this file and its configured
+values; it does not replace them with defaults while wiping workflow data.
+
+Add one compact deterministic CLI assertion for each boundary: a Marshal or
+Justiciar config edit is rejected without changing the file; a Vizier edit changes
+subsequent model/slot selection; reset preserves the YAML. No native model run is
+needed for these checks.
 
 ## Source notes
 

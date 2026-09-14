@@ -176,6 +176,37 @@ evidence is a Marshal clarification item, never a guess based on the controller'
 current directory. Native callers that override the actor can use an ordinary
 project label. Enrollment adds short Beads guidance explaining that convention.
 
+### System configuration belongs in the brain
+
+`~/brain/fulcrum.yaml` is the authoritative system configuration, tracked in the
+brain's ordinary Git history. It defines role model/effort defaults, global task
+slots, the default per-project slots and project overrides, enrollment/provider
+settings, operational timing, and standing policy. There is no instance-local
+configuration copy and no separate policy authority in a Beads control record.
+Beads retains actual ownership, decisions, reservations, failures, and recovery
+state; YAML declares how the system should operate.
+
+**Only the human and Vizier may modify `fulcrum.yaml`.** CLI configuration and
+project-management commands enforce that rule; a controller may apply an explicit
+authorized request on their behalf. Setup may create it as part of a human's
+installation request, but service startup, Marshal, other workers, and Justiciar
+may not rewrite it. Justiciar may diagnose a configuration problem and propose a
+patch; its break-glass authority does not override this file restriction.
+
+Marshal chooses priorities and how many available slots to use within the
+configured limits. Resource-pressure handling can temporarily stop admission;
+neither operation changes configured defaults. Explicit per-task model choices
+remain task-scoped and do not edit system defaults. Configuration changes apply
+to subsequent decisions and starts, not to already-running turns. Invalid YAML
+pauses new automatic admission and reports the precise error while preserving
+inspection, existing work, and repair access. See the
+[configuration contract](contracts.md#authoritative-system-configuration).
+
+Commit and push authorized YAML edits with the same five-minute brain publication
+cadence, or immediately through `config sync`. Publishing the unchanged contents
+is mechanical work, not permission for the publishing agent/controller to edit
+configuration. Hard reset preserves this configuration file.
+
 ### Brain Git persistence and push cadence
 
 Persist Beads history to the brain's existing GitHub repository through stock
@@ -295,9 +326,10 @@ not require replacing the leadership task. Bootstrap creates both native tasks
 without starting unsolicited Vizier work. No controller event, completion, or
 HUMAN escalation sends a Vizier turn.
 
-Vizier can change policy, suspend rules, and request repair. Policy is kept on its
-control bead with a concise rationale. Marshal can make ordinary priority,
-capacity, overlap, and recovery decisions within that policy. Defaults allow
+Vizier can change policy, suspend rules, and request repair. Standing policy and
+its rationale live in `~/brain/fulcrum.yaml`. Marshal can make ordinary priority,
+allocation, overlap, and recovery decisions within that policy; it cannot edit
+the configuration file. Defaults allow
 progress without waiting for an initial policy-writing turn.
 
 Marshal owns unstarted backlog and parents whose children are being implemented.
@@ -427,8 +459,9 @@ same capacity accounting; there is no additional fixed per-worker helper ceiling
 by default. An optional policy can impose one. Human-started tasks bypass these
 policy limits and are included in observations; do not interrupt them to restore the
 configured count. Unknown helper activity makes capacity conservative rather than
-being counted as zero. Marshal may lower limits, but cannot create resources the
-runtime lacks.
+being counted as zero. Marshal may choose to use fewer slots, but only the human
+or Vizier can change configured limits. No role can create resources the runtime
+lacks.
 
 Use declared overlap tags for changes to the same component and a default
 `control-plane` tag for Fulcrum installation/runtime changes. Marshal chooses
@@ -557,14 +590,16 @@ role/formula assets, the controller service, a dedicated shared Beads backend, a
 the shared Codex runtime configuration. It writes absolute executable paths and
 explicit environments. CLI-only operation does not require Desktop to be open;
 the shared app-server remains the native execution service. Setup creates
-leadership identities and default policy without waiting for an agent turn.
+leadership identities and, on explicit human installation, the initial
+`fulcrum.yaml` defaults without waiting for an agent turn. Reruns preserve existing
+configuration unless the human or Vizier explicitly requests a change.
 
 `reset --hard` is an explicit, resumable destructive operation over Fulcrum-owned
 resources. Stop dispatch; interrupt and observe managed turns and helpers; cancel
 nonterminal delivery work; delete managed native conversations; remove managed
 worktrees and their local branches; delete the old ledger, operational stores,
 logs, and generated runtime state; then initialize the clean replacement.
-Preserve project source repositories, the design documents, credentials, installed
+Preserve project source repositories, the design documents, `fulcrum.yaml`, credentials, installed
 executables, unrelated Codex tasks, and unrelated delivery-provider history.
 Reset clears old Fulcrum data from the configured brain and its enumerated remote
 ledger; the clean replacement continues to use that same Git repository.
@@ -575,7 +610,8 @@ old data as part of this reset. See the exact restart-safe reset contract.
 Implementation order:
 
 1. **CLI/application spine and ledger:** Result envelopes, request identities,
-   writer lock, offline execution, stock Beads records, project enrollment, and
+   writer lock, offline execution, authoritative YAML configuration with human/Vizier
+   write checks, stock Beads records, project enrollment, and
    native intake, brain Git persistence, and five-minute publication maintenance.
    Demonstrate terminal-only creation/adoption/status using an
    isolated real Beads ledger.

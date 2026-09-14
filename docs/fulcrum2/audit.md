@@ -27,7 +27,7 @@ research remains in [failure-analysis.md](failure-analysis.md).
 | User-initiated work, continuous supervision, no recurring agent jobs | Design §1 clarifies the agreed boundary: Python continuously watches existing work and periodically checks for stalled agents, with automatic recovery and Marshal/Justiciar escalation. Periodic brain Git pushes are also mechanical maintenance. No recurring model patrol, Sage/Mason reviews, interviews, calendar work, or periodic self-improvement assignments. Future plans activate explicitly. |
 | Microskills; every role manually invocable; no implicit invocation | Contracts §§2, 4: same CLI entry, explicit task IDs, `allow_implicit_invocation: false`. All eight roles have degraded entry guidance when registration cannot succeed. |
 | Direct human entry begins immediately and overrides queue/admission | Design §§4–5; contracts role entry applies this to every role. Physical runtime failure remains a truthful limitation, not fake task registration. |
-| Vizier is one persistent human liaison with supreme policy authority and no system messages | Design §4; policy/leader/task-send contracts. Replacement retains policy/memory; bootstrap/replacement do not send unsolicited Vizier turns. |
+| Vizier is one persistent human liaison with supreme policy authority and no system messages | Design §4; YAML configuration authority and policy/leader/task-send contracts. Replacement retains policy/memory; bootstrap/replacement do not send unsolicited Vizier turns. |
 | Marshal is one persistent autonomous dispatcher with short context | Design §5: bounded brief, selective full-bead reads, batched decisions, stale-decision checks, overlap/capacity decisions, autonomous Justiciar dispatch, one-time HUMAN surfacing. |
 | Deliberate low-priority deferral is allowed | Design §§4–5; typed event-based reconsideration. No progress theater or timer-generated work to touch old backlog. |
 | Weaver investigates/answers without editing product code; `$bead` reports from any conversation | Design §4. Answer-only requests are valid; reporting neither changes role nor blocks delivery. The former question-punctuation authorization rule is superseded. |
@@ -64,7 +64,7 @@ documents were committed as `8aca63a` before this audit.
 | Soft/draining and hard/interrupting fleet replacement without deleting work | Implemented [CLI](../../src/fulcrum/cli.py), controller, [operations](../operations.md). | `fleet replace --mode drain|interrupt`, distinct from destructive `reset --hard`. Preserve policy, worktrees, ownership history, and explicit old/new task mapping. |
 | Safe native task continuity and reuse across restart | Implemented lineage provisioning in controller, [contracts](../contracts.md). | Same-bead/same-role compatible task reuse remains. Numeric lineage pools and overflow suffixes are replaced by stable bead titles and native task IDs. |
 | Read-only compaction reminders and one missing-outcome reminder | Implemented [hook](../../src/fulcrum/hook.py), controller; [hook contract](../hooks.md). | `hook context` plus shared context provider; no Stop-hook enforcement, prompt replay, or mutation. Missing finish gets one scope-preserving reminder. |
-| Per-project/model/effort selection and per-work overrides | Implemented [config](../../src/fulcrum/config.py), CLI, intake and prompts. | Explicit flags and work/project/instance role maps, advertised capability checks, selection provenance. No silent model substitution. |
+| Per-project/model/effort selection and per-work overrides | Implemented [config](../../src/fulcrum/config.py), CLI, intake and prompts. | Explicit flags and work overrides, YAML project/global role maps, advertised capability checks, selection provenance; only human/Vizier edit defaults. No silent model substitution. |
 | Dependency ordering, priority, parallel projects, overlap/capacity control, composable holds | Implemented [scheduling](../../src/fulcrum/scheduling.py), lifecycle/controller. | Beads dependencies and typed waiting reasons; resolving one reason never clears another. Marshal decisions remain separate from mechanical dispatch. Time-scheduled work is removed. |
 | Initial independent review, exact-source validation, promotion, synchronization and cleanup | Implemented [Tollgate adapter](../../src/fulcrum/tollgate.py), [lifecycle](../../src/fulcrum/lifecycle.py). | Executor-to-Warden flow retains the delivery postconditions; Warden owns fixes. Post-promotion failures are delivery repair, never a request to redo promoted code. |
 | Proportionate verification and rendered evidence for visible changes | Existing [Executor prompt](../../src/fulcrum/prompts/executor.md). | Design §4 retains the capability without a universal end-to-end skill test or a manual validation matrix. |
@@ -117,6 +117,17 @@ are generated or required.
 A five-minute dirty-only push cadence is required mechanical maintenance; the
 ban on recurring agent jobs does not prohibit it. `ledger sync` exposes immediate
 publication and `ledger status` exposes pending/failed publication.
+
+## Follow-up clarification: one human/Vizier-owned configuration
+
+The human specified `~/brain/fulcrum.yaml` as the authoritative configuration,
+including role model defaults and global/default-per-project slot limits. Only
+the human and Vizier modify it. This supersedes the earlier instance-local
+`config.toml`, policy-in-Beads representation, and Marshal configuration-edit
+permission. The design and contracts now keep declarative settings in YAML and
+actual allocation/recovery decisions in Beads. Justiciar's broad recovery powers
+do not override the file restriction. Authorized configuration edits are published
+on the brain Git cadence; mechanical publication does not authorize edits.
 
 ## Remaining qualifications
 
