@@ -17,6 +17,7 @@ from ruamel.yaml import YAML  # pyre-ignore[21]
 
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_view
+from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 ROLES: tuple[str, ...] = (
     "vizier",
@@ -510,23 +511,17 @@ class ProjectService:
         project.setdefault("require_source_sync", False)
         project.setdefault("models", {})
         _validate_project(project_id, project)
-        if not isinstance(project.get("delivery"), Mapping) or not project[
-            "delivery"
-        ].get("id"):
-            raise FulcrumError(
-                "CAPABILITY_UNAVAILABLE",
-                "the delivery provider ID must be supplied until its creation adapter is available",
-                exit_code=4,
-                request_id=request.request_id,
-                details={"required": ["delivery.id"]},
-            )
         manager = ConfigurationManager(request.instance.config_path)
         document, original = manager.load()
         ledger = _authorized_ledger(request, effective)
         _require_config_authority(request, ledger)
         operation, reused = ledger.create_operation(
             request,
-            planned={"project_id": project_id, "root": project["root"]},
+            planned={
+                "project_id": project_id,
+                "root": project["root"],
+                "delivery": project.get("delivery"),
+            },
             next_action="Enroll the exact project root with the shared Beads backend.",
         )
         if reused and operation.operation.get("state") in {
@@ -557,6 +552,51 @@ class ProjectService:
                 },
                 result={"codex_project": native_project},
                 next_action="Enroll the project in the shared Beads backend.",
+            )
+        if effective["delivery"].get("kind") == "tollgate":
+            try:
+                delivery, registration = _ensure_tollgate_repository(
+                    project_id, project, effective
+                )
+            except FulcrumError as error:
+                state = (
+                    "uncertain" if error.state == CommandState.UNCERTAIN else "failed"
+                )
+                operation = ledger.update_operation(
+                    operation,
+                    state=state,
+                    step="delivery_repository_unresolved",
+                    error={
+                        "code": error.code,
+                        "message": str(error),
+                        "retryable": error.retryable,
+                        "details": error.details,
+                    },
+                    result={"project_id": project_id, "root": project["root"]},
+                    next_action="Inspect the exact Tollgate repository registration before retrying enrollment.",
+                )
+                return _operation_command_result(operation)
+            project["delivery"] = delivery
+            operation = ledger.update_operation(
+                operation,
+                step="delivery_repository_verified",
+                external={
+                    **dict(operation.operation.get("external") or {}),
+                    "delivery_provider": "tollgate",
+                    "repository_id": delivery["id"],
+                },
+                result={"delivery_registration": registration},
+                next_action="Enroll the project in the shared Beads backend.",
+            )
+        elif not isinstance(project.get("delivery"), Mapping) or not project[
+            "delivery"
+        ].get("id"):
+            raise FulcrumError(
+                "CAPABILITY_UNAVAILABLE",
+                "deterministic delivery enrollment requires an explicit provider ID",
+                exit_code=4,
+                request_id=request.request_id,
+                operation_id=operation.id,
             )
         _enroll_project_beads(project_id, project, effective, ledger.executable)
         projects = document.get("projects")
@@ -798,6 +838,141 @@ def _enroll_project_beads(
                 handle.write(".beads/\n")
 
 
+def _ensure_tollgate_repository(
+    project_id: str,
+    project: Mapping[str, Any],
+    effective: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    root = _absolute(project["root"], f"projects.{project_id}.root")
+    delivery_config = _mapping(effective["delivery"], "delivery")
+    try:
+        tollgate = Tollgate(delivery_config.get("executable"))
+        repositories = tollgate.repositories()
+    except TollgateError as error:
+        raise FulcrumError(
+            "DELIVERY_UNAVAILABLE",
+            str(error),
+            exit_code=4,
+            retryable=error.category in {"transient", "unavailable"},
+            details={"category": error.category},
+        ) from error
+    requested = project.get("delivery")
+    requested_id = requested.get("id") if isinstance(requested, Mapping) else None
+    exact_path = [
+        row
+        for row in repositories
+        if _tollgate_repository_path(row) == root.resolve(strict=True)
+    ]
+    if requested_id:
+        matches = [
+            row for row in repositories if _tollgate_repository_id(row) == requested_id
+        ]
+        if len(matches) != 1 or _tollgate_repository_path(matches[0]) != root:
+            raise FulcrumError(
+                "PROJECT_PROVIDER_MISMATCH",
+                "configured Tollgate repository does not identify the exact project root",
+                exit_code=5,
+                details={"repository_id": requested_id, "root": str(root)},
+            )
+        delivery = dict(requested)
+        delivery["id"] = str(requested_id)
+        delivery.setdefault("registration", "supplied")
+        return delivery, {
+            "state": "verified",
+            "ownership": delivery["registration"],
+            "repository": matches[0],
+        }
+    if len(exact_path) > 1:
+        raise FulcrumError(
+            "DELIVERY_UNCERTAIN",
+            "multiple Tollgate repositories identify the exact project root",
+            exit_code=4,
+            state=CommandState.UNCERTAIN,
+            details={
+                "root": str(root),
+                "repository_ids": [_tollgate_repository_id(row) for row in exact_path],
+            },
+        )
+    if exact_path:
+        repository_id = _tollgate_repository_id(exact_path[0])
+        assert repository_id is not None
+        return {
+            "id": repository_id,
+            "registration": "discovered",
+        }, {
+            "state": "verified",
+            "ownership": "discovered",
+            "repository": exact_path[0],
+        }
+    try:
+        created = tollgate.add_repository(root)
+    except TollgateError as error:
+        try:
+            recovered = [
+                row
+                for row in tollgate.repositories()
+                if _tollgate_repository_path(row) == root
+            ]
+        except TollgateError:
+            recovered = []
+        if len(recovered) != 1:
+            raise FulcrumError(
+                "DELIVERY_UNCERTAIN",
+                "Tollgate repository creation response was lost and exact recovery is inconclusive",
+                exit_code=4,
+                retryable=isinstance(error, TollgateUncertainError),
+                state=CommandState.UNCERTAIN,
+                details={
+                    "root": str(root),
+                    "matches": len(recovered),
+                    "provider_error": str(error),
+                },
+            ) from error
+        created = recovered[0]
+    repository_id = _tollgate_repository_id(created)
+    if repository_id is None:
+        recovered = [
+            row
+            for row in tollgate.repositories()
+            if _tollgate_repository_path(row) == root
+        ]
+        if len(recovered) != 1:
+            raise FulcrumError(
+                "DELIVERY_UNCERTAIN",
+                "Tollgate repository creation returned no verifiable repository ID",
+                exit_code=4,
+                state=CommandState.UNCERTAIN,
+                details={"root": str(root), "response": created},
+            )
+        created = recovered[0]
+        repository_id = _tollgate_repository_id(created)
+    assert repository_id is not None
+    return {"id": repository_id, "registration": "created"}, {
+        "state": "created",
+        "ownership": "created",
+        "repository": created,
+    }
+
+
+def _tollgate_repository_state(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    state = value.get("state")
+    return state if isinstance(state, Mapping) else value
+
+
+def _tollgate_repository_id(value: Mapping[str, Any]) -> str | None:
+    identifier = _tollgate_repository_state(value).get("id")
+    return str(identifier) if isinstance(identifier, str) and identifier else None
+
+
+def _tollgate_repository_path(value: Mapping[str, Any]) -> Path | None:
+    path = _tollgate_repository_state(value).get("path")
+    return (
+        Path(path).resolve(strict=False)
+        if isinstance(path, str) and Path(path).is_absolute()
+        else None
+    )
+
+
 def _validate_project(project_id: str, project: Mapping[str, Any]) -> None:
     _known(
         project,
@@ -827,6 +1002,27 @@ def _validate_project(project_id: str, project: Mapping[str, Any]) -> None:
             f"projects.{project_id}.source_remote",
             "is required when source synchronization is required",
         )
+    if "delivery" in project:
+        delivery = _mapping(project["delivery"], f"projects.{project_id}.delivery")
+        _known(
+            delivery,
+            {"id", "registration"},
+            f"projects.{project_id}.delivery",
+        )
+        if "id" in delivery and (
+            not isinstance(delivery["id"], str) or not delivery["id"]
+        ):
+            raise _invalid(f"projects.{project_id}.delivery.id", "must be a string")
+        if delivery.get("registration") not in {
+            None,
+            "supplied",
+            "discovered",
+            "created",
+        }:
+            raise _invalid(
+                f"projects.{project_id}.delivery.registration",
+                "must be supplied, discovered, or created",
+            )
     models = project.get("models", {})
     if not isinstance(models, Mapping):
         raise _invalid(f"projects.{project_id}.models", "must be a mapping")

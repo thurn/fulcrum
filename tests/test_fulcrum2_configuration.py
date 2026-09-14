@@ -8,10 +8,13 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
-from fulcrum.configuration import ConfigurationManager
+from fulcrum.configuration import ConfigurationManager, _ensure_tollgate_repository
 from fulcrum.contracts import FulcrumError
 from fulcrum.ledger import Ledger
+from fulcrum.tollgate import TollgateUncertainError
 
 
 class Fulcrum2ConfigurationTest(unittest.TestCase):
@@ -79,7 +82,9 @@ class Fulcrum2ConfigurationTest(unittest.TestCase):
             f"  executable: {shutil.which('bd')}\n"
             "  host: 127.0.0.1\n"
             f"  port: {cls.port}\n"
-            "  database: fulcrum\n",
+            "  database: fulcrum\n"
+            "delivery:\n"
+            "  kind: deterministic\n",
             encoding="utf-8",
         )
         (cls.instance / "config").symlink_to(cls.config)
@@ -350,6 +355,63 @@ class Fulcrum2ConfigurationTest(unittest.TestCase):
             "--json",
         )
         self.assertEqual(removed.returncode, 0, removed.stderr)
+
+    def test_tollgate_enrollment_verifies_exact_root_and_recovers_lost_creation(
+        self,
+    ) -> None:
+        class FakeTollgate:
+            def __init__(self) -> None:
+                self.rows: list[dict[str, Any]] = []
+                self.lose_creation = True
+
+            def repositories(self) -> list[dict[str, Any]]:
+                return list(self.rows)
+
+            def add_repository(self, path: Path) -> dict[str, Any]:
+                row = {"state": {"id": "repo-created", "path": str(path)}}
+                self.rows.append(row)
+                if self.lose_creation:
+                    self.lose_creation = False
+                    raise TollgateUncertainError(
+                        "lost response", category="uncertain", possible_effect=True
+                    )
+                return row
+
+        provider = FakeTollgate()
+        effective = {"delivery": {"kind": "tollgate", "executable": "/fixture/tg"}}
+        with patch("fulcrum.configuration.Tollgate", return_value=provider):
+            delivery, evidence = _ensure_tollgate_repository(
+                "exact", {"root": str(self.project)}, effective
+            )
+        self.assertEqual(delivery, {"id": "repo-created", "registration": "created"})
+        self.assertEqual(evidence["ownership"], "created")
+
+        with patch("fulcrum.configuration.Tollgate", return_value=provider):
+            supplied, supplied_evidence = _ensure_tollgate_repository(
+                "exact",
+                {
+                    "root": str(self.project),
+                    "delivery": {"id": "repo-created"},
+                },
+                effective,
+            )
+        self.assertEqual(supplied["registration"], "supplied")
+        self.assertEqual(supplied_evidence["state"], "verified")
+
+        other = self.root / "other-provider-root"
+        other.mkdir(exist_ok=True)
+        provider.rows[0]["state"]["path"] = str(other)
+        with patch("fulcrum.configuration.Tollgate", return_value=provider):
+            with self.assertRaises(FulcrumError) as mismatch:
+                _ensure_tollgate_repository(
+                    "exact",
+                    {
+                        "root": str(self.project),
+                        "delivery": {"id": "repo-created"},
+                    },
+                    effective,
+                )
+        self.assertEqual(mismatch.exception.code, "PROJECT_PROVIDER_MISMATCH")
 
 
 if __name__ == "__main__":

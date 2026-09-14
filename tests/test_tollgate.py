@@ -70,7 +70,7 @@ class TollgateTests(unittest.TestCase):
         self.assertNotIsInstance(raised.exception, TollgateUncertainError)
         self.assertEqual(raised.exception.stderr, stderr)
 
-    def test_approve_accepts_retained_json_lines_streams(self) -> None:
+    def test_retained_json_lines_streams_are_decoded_only_as_evidence(self) -> None:
         tollgate = Tollgate("/usr/bin/tg")
         for operation_id in (13, 28, 38, 64):
             with self.subTest(operation_id=operation_id):
@@ -80,33 +80,41 @@ class TollgateTests(unittest.TestCase):
                 documents = [json.loads(line) for line in stdout.splitlines()]
                 candidate_id = documents[0]["item_id"]
                 repository_id = documents[1]["item"]["repository_id"]
-                completed = subprocess.CompletedProcess(
-                    args=[], returncode=0, stdout=stdout, stderr=""
+                result = tollgate.decode_approval_stream(
+                    stdout, repository_id, candidate_id
                 )
-
-                with patch(
-                    "fulcrum.tollgate.subprocess.run", return_value=completed
-                ) as run:
-                    result = tollgate.approve(repository_id, candidate_id)
 
                 self.assertEqual(result["authorization"], documents[0])
                 self.assertEqual(result["wait_statuses"], documents[1:])
                 self.assertEqual(
                     result["wait_statuses"][-1]["item"]["state"], "promoted"
                 )
-                self.assertEqual(
-                    run.call_args.args[0],
-                    [
-                        "/usr/bin/tg",
-                        "--json",
-                        "--no-launch",
-                        "--repository",
-                        repository_id,
-                        "approve",
-                        candidate_id,
-                        "--wait",
-                    ],
-                )
+
+    def test_approve_is_nonblocking_and_returns_authorization_object(self) -> None:
+        tollgate = Tollgate("/usr/bin/tg")
+        authorization = {
+            "item_id": "candidate-1",
+            "already_authorized": False,
+            "authorized_item_ids": ["candidate-1"],
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(authorization), stderr=""
+        )
+        with patch("fulcrum.tollgate.subprocess.run", return_value=completed) as run:
+            result = tollgate.approve("repo-1", "candidate-1")
+        self.assertEqual(result, authorization)
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "/usr/bin/tg",
+                "--json",
+                "--no-launch",
+                "--repository",
+                "repo-1",
+                "approve",
+                "candidate-1",
+            ],
+        )
 
     def test_approve_rejects_ambiguous_candidate_stream_with_raw_evidence(
         self,
@@ -132,16 +140,8 @@ class TollgateTests(unittest.TestCase):
                 ),
             ]
         )
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=stdout, stderr=""
-        )
-
-        with patch("fulcrum.tollgate.subprocess.run", return_value=completed):
-            with self.assertRaises(TollgateUncertainError) as raised:
-                tollgate.approve("repo-1", "candidate-1")
-
-        self.assertEqual(raised.exception.stdout, stdout)
-        self.assertIn("ambiguous JSON", str(raised.exception))
+        with self.assertRaisesRegex(ValueError, "different candidate"):
+            tollgate.decode_approval_stream(stdout, "repo-1", "candidate-1")
 
     def test_approve_accepts_idempotent_authorization_with_empty_candidate_set(
         self,
@@ -154,17 +154,27 @@ class TollgateTests(unittest.TestCase):
         documents[0]["already_authorized"] = True
         documents[0]["authorized_item_ids"] = []
         stdout = "\n".join(json.dumps(document) for document in documents)
-        completed = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=stdout, stderr=""
+        result = tollgate.decode_approval_stream(
+            stdout,
+            documents[1]["item"]["repository_id"],
+            documents[0]["item_id"],
         )
-
-        with patch("fulcrum.tollgate.subprocess.run", return_value=completed):
-            result = tollgate.approve(
-                documents[1]["item"]["repository_id"], documents[0]["item_id"]
-            )
 
         self.assertTrue(result["authorization"]["already_authorized"])
         self.assertEqual(result["authorization"]["authorized_item_ids"], [])
+
+    def test_nonblocking_mutation_rejects_multi_object_output_as_uncertain(
+        self,
+    ) -> None:
+        tollgate = Tollgate("/usr/bin/tg")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"ok":true}\n{"ok":true}', stderr=""
+        )
+        with patch("fulcrum.tollgate.subprocess.run", return_value=completed):
+            with self.assertRaises(TollgateUncertainError) as raised:
+                tollgate.approve("repo-1", "candidate-1")
+        self.assertTrue(raised.exception.possible_effect)
+        self.assertIn("invalid JSON", str(raised.exception))
 
     def test_malformed_read_output_is_deterministic(self) -> None:
         tollgate = Tollgate("/usr/bin/tg")

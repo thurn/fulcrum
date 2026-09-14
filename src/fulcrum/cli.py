@@ -412,12 +412,25 @@ def _add_command_options(
             "--all-owned", action="store_true", default=argparse.SUPPRESS
         )
         _option(parser, "--reason", required=True)
-    elif path in {("validation", "start"), ("review", "approve")}:
+    elif path in {
+        ("worktree", "prepare"),
+        ("worktree", "inspect"),
+        ("worktree", "cleanup"),
+    }:
         _option(parser, "--bead", required=True)
-        _option(parser, "--source", required=path == ("validation", "start"))
+    elif path in {
+        ("validation", "start"),
+        ("review", "approve"),
+        ("promotion", "start"),
+    }:
+        _option(parser, "--bead", required=True)
+        _option(
+            parser,
+            "--source",
+            required=path in {("validation", "start"), ("promotion", "start")},
+        )
     elif path in {
         ("validation", "show"),
-        ("promotion", "start"),
         ("promotion", "show"),
         ("source", "sync"),
         ("knowledge", "publish"),

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.configuration import ConfigurationService, ProjectService
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
+from fulcrum.delivery_service import DeliveryService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -69,6 +70,15 @@ class Application:
         self.register(("task", "archive"), tasks.archive)
         self.register(("task", "unarchive"), tasks.unarchive)
         self.register(("task", "delete"), tasks.delete)
+        delivery = DeliveryService()
+        self.register(("worktree", "prepare"), delivery.worktree_prepare)
+        self.register(("worktree", "inspect"), delivery.worktree_inspect)
+        self.register(("worktree", "cleanup"), delivery.worktree_cleanup)
+        self.register(("validation", "start"), delivery.validation_start)
+        self.register(("validation", "show"), delivery.validation_show)
+        self.register(("promotion", "start"), delivery.promotion_start)
+        self.register(("promotion", "show"), delivery.promotion_show)
+        self.register(("source", "sync"), delivery.source_sync)
         roles = RoleService()
         self.register(("enter",), roles.enter)
         self.register(("context",), roles.context)
