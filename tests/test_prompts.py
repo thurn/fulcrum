@@ -82,6 +82,8 @@ class PromptsTest(unittest.TestCase):
         self.assertNotIn("unchanged", text)
         self.assertNotIn("fulcrum instructions", text)
         self.assertNotIn("1 updates", text)
+        self.assertNotIn("/absolute/decisions.json", text)
+        self.assertNotIn("/absolute/reactivation.json", text)
         for irrelevant in (
             "resolve_operation",
             "resolve_escalation",
@@ -111,6 +113,115 @@ class PromptsTest(unittest.TestCase):
         self.assertIn("offset project Inquisitor anchors twelve hours", text)
         self.assertNotIn("request_specialist", text)
         self.assertNotIn("resolve_operation", text)
+
+    def test_bound_messages_render_only_exact_structured_destinations(self) -> None:
+        root = "/private/control/handoffs/" + "a" * 32 + "/action-42"
+        archon_paths = {
+            "decisions": root + "/decisions.json",
+            "deferred": root + "/reactivation.json",
+        }
+        deferral = action_message(
+            action={"id": 42, "kind": "archon", "payload": {}},
+            handoff_paths=archon_paths,
+            role="archon",
+        )
+        self.assertEqual(deferral.count(archon_paths["decisions"]), 2)
+        self.assertEqual(deferral.count(archon_paths["deferred"]), 2)
+
+        acknowledgement = action_message(
+            action={
+                "id": 42,
+                "kind": "archon",
+                "payload": {
+                    "batch_items": [
+                        {
+                            "update_id": 1,
+                            "content": {
+                                "kind": "assignment_completed",
+                                "bead_id": "p-1",
+                                "assignment_id": 1,
+                                "run_id": 1,
+                            },
+                        }
+                    ]
+                },
+            },
+            handoff_paths=archon_paths,
+            role="archon",
+        )
+        self.assertIn(archon_paths["decisions"], acknowledgement)
+        self.assertNotIn(archon_paths["deferred"], acknowledgement)
+        self.assertIn("finish with decisions.", acknowledgement)
+        self.assertNotIn("decisions or deferred", acknowledgement)
+
+        judgment = action_message(
+            action={
+                "id": 42,
+                "kind": "archon",
+                "payload": {
+                    "batch_items": [
+                        {
+                            "update_id": 1,
+                            "content": {
+                                "kind": "assignment_completed",
+                                "bead_id": "p-1",
+                                "assignment_id": 1,
+                                "run_id": 1,
+                                "required_decision": "Choose recovery",
+                            },
+                        }
+                    ]
+                },
+            },
+            handoff_paths=archon_paths,
+            role="archon",
+        )
+        self.assertIn("finish with decisions or deferred", judgment)
+        self.assertEqual(judgment.count(archon_paths["decisions"]), 2)
+        self.assertEqual(judgment.count(archon_paths["deferred"]), 2)
+
+        review_paths = {
+            "approved": root + "/approval.json",
+            "changes_requested": root + "/findings.json",
+            "incomplete": root + "/missing.json",
+        }
+        review = action_message(
+            action={"id": 42, "kind": "review", "payload": {}},
+            assignment=self.assignment,
+            handoff_paths=review_paths,
+            role="overseer",
+        )
+        for path in review_paths.values():
+            self.assertIn(path, review)
+        self.assertNotIn("/absolute/approval.json", review)
+
+        specialist_paths = {
+            "report": root + "/report.json",
+            "evidence_needed": root + "/requests.json",
+        }
+        specialist = action_message(
+            action={
+                "id": 42,
+                "kind": "specialist",
+                "payload": {"scope": {"projects": ["p"]}},
+            },
+            handoff_paths=specialist_paths,
+            role="sage",
+        )
+        for path in specialist_paths.values():
+            self.assertIn(path, specialist)
+
+        answer_path = root + "/answer.json"
+        interview = action_message(
+            action={
+                "id": 42,
+                "kind": "interview",
+                "payload": {"question": "Why?"},
+            },
+            handoff_paths={"interview_answer": answer_path},
+            role="executor",
+        )
+        self.assertIn(answer_path, interview)
 
     def test_archon_preserves_relevant_conflicts_holds_and_unknown_exceptions(
         self,
@@ -358,7 +469,78 @@ class PromptsTest(unittest.TestCase):
         self.assertIn("normal human follow-up", text)
         self.assertNotIn("fulcrum finish decisions", text)
         self.assertNotIn('"resolve_operation"', text)
-        self.assertLess(len(text.split()), 230)
+        self.assertLess(len(text.split()), 280)
+
+    def test_bound_messages_use_exact_paths_and_atomic_publish_wording(self) -> None:
+        root = "/private/control/handoffs/" + "a" * 32 + "/action-42"
+        cases = (
+            (
+                {"id": 42, "kind": "archon", "payload": {"batch_items": []}},
+                None,
+                {
+                    "decisions": f"{root}/decisions.json",
+                    "deferred": f"{root}/reactivation.json",
+                },
+                ("decisions", "deferred"),
+            ),
+            (
+                {"id": 42, "kind": "review", "payload": {}},
+                self.assignment,
+                {
+                    "approved": f"{root}/approval.json",
+                    "changes_requested": f"{root}/findings.json",
+                    "incomplete": f"{root}/missing.json",
+                },
+                ("approved", "changes_requested", "incomplete"),
+            ),
+            (
+                {
+                    "id": 42,
+                    "kind": "specialist",
+                    "payload": {"scope": {"projects": ["p"]}},
+                },
+                None,
+                {
+                    "report": f"{root}/report.json",
+                    "evidence_needed": f"{root}/requests.json",
+                },
+                ("report", "evidence_needed"),
+            ),
+            (
+                {"id": 42, "kind": "interview", "payload": {"question": "Why?"}},
+                None,
+                {"interview_answer": f"{root}/answer.json"},
+                ("interview_answer",),
+            ),
+        )
+        for action, assignment, paths, outcomes in cases:
+            text = action_message(
+                action=action,
+                assignment=assignment,
+                handoff_paths=paths,
+                role="sage",
+            )
+            self.assertIn("sibling temporary file", text)
+            self.assertIn("atomically rename", text)
+            for outcome in outcomes:
+                self.assertIn(paths[outcome], text)
+                self.assertIn(f"fulcrum finish {outcome}", text)
+            self.assertNotIn("/absolute/", text)
+
+    def test_reminder_reuses_exact_bound_destination(self) -> None:
+        path = "/private/control/handoffs/" + "b" * 32 + "/action-9/report.json"
+        text = action_message(
+            action={
+                "id": 9,
+                "kind": "specialist",
+                "payload": {},
+                "reminder_sent": 1,
+            },
+            handoff_paths={"report": path},
+            role="inquisitor",
+        )
+        self.assertIn(path, text)
+        self.assertIn("atomically rename", text)
 
     def test_executor_creation_instructions_are_concise_and_action_specific(
         self,

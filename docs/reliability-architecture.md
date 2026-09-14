@@ -144,6 +144,19 @@ authoritative if the secondary file sink is unavailable. Database triggers retai
 every workflow state change with before/after values. External attempts preserve
 structured result or error evidence and bounded stdout/stderr.
 
+Action-bound structured finish inputs are transient control-plane handoffs, not
+repository artifacts. Their allow-listed filenames sit beneath a durable random
+SQLite state identity and action ID under the configured control root. The CLI
+sends the canonical path, regular-file identity, and parsed snapshot; the
+controller independently verifies the environment, action, outcome, filename,
+identity, and content. Rejections retain the file. Acceptance commits the parsed
+outcome to SQLite before identity-checked removal, so cleanup cannot roll back an
+outcome. Removal first moves the pathname into a fresh private quarantine and
+verifies the moved file through a no-follow descriptor; a pathname swap is retained
+rather than deleted. The cleanup result is retained with the action, and an exact
+missing-file retry reuses that durable result. Reset creates a new state identity
+and therefore cannot collide with retained diagnostic files.
+
 Token notifications use a separate observational path. Each update is an
 idempotent SQLite upsert of the native turn's cumulative snapshot; it neither
 takes the workflow mutation lock nor requests reconciliation, and individual

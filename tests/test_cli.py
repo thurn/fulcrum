@@ -222,25 +222,29 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = RuntimePaths(root, root, root / "config.json", root / "control")
-            missing = root / "decisions.json"
+            missing = paths.handoff_root / "state" / "action-1" / "decisions.json"
             stderr = io.StringIO()
             with (
                 patch("fulcrum.cli.resolve_paths", return_value=paths),
-                patch("fulcrum.cli._request") as request,
+                patch("fulcrum.cli._request", return_value={"ok": True}) as request,
                 patch("sys.stderr", new=stderr),
             ):
                 result = main(["finish", "decisions", "--input", str(missing)])
 
-            self.assertEqual(result, 2)
-            request.assert_not_called()
-            self.assertIn("cannot read valid JSON", stderr.getvalue())
-            self.assertIn(str(missing), stderr.getvalue())
+            self.assertEqual(result, 0)
+            request.assert_called_once()
+            sent = request.call_args.args[1]["options"]
+            self.assertEqual(sent["input_path"], str(missing.resolve(strict=False)))
+            self.assertTrue(sent["input_missing"])
+            self.assertNotIn("input", sent)
+            self.assertEqual(stderr.getvalue(), "")
 
     def test_finish_sends_complete_input_snapshot_to_controller(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             paths = RuntimePaths(root, root, root / "config.json", root / "control")
-            input_path = root / "decisions.json"
+            input_path = paths.handoff_root / "state" / "action-1" / "decisions.json"
+            input_path.parent.mkdir(parents=True)
             decision = {
                 "decisions": [],
                 "handled_update_ids": [1],
@@ -251,7 +255,15 @@ class CliTest(unittest.TestCase):
                 _paths: RuntimePaths, request: dict[str, object]
             ) -> dict[str, object]:
                 input_path.write_text("{", encoding="utf-8")
-                self.assertEqual(request["options"], {"input": decision})
+                options = request["options"]
+                self.assertEqual(options["input"], decision)
+                self.assertEqual(
+                    options["input_path"], str(input_path.resolve(strict=False))
+                )
+                self.assertEqual(
+                    set(options["input_identity"]),
+                    {"device", "inode", "size", "mtime_ns", "ctime_ns"},
+                )
                 return {"ok": True}
 
             with (
@@ -263,6 +275,50 @@ class CliTest(unittest.TestCase):
 
             self.assertEqual(result, 0)
             request.assert_called_once()
+
+    def test_finish_rejects_relative_outside_and_symlink_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = RuntimePaths(root, root, root / "config.json", root / "control")
+            outside = root / "outside.json"
+            outside.write_text("{}", encoding="utf-8")
+            target = paths.handoff_root / "state" / "action-1" / "decisions.json"
+            target.parent.mkdir(parents=True)
+            inside = target.with_name("inside.json")
+            inside.write_text("{}", encoding="utf-8")
+            target.symlink_to(inside)
+            for supplied, message in (
+                ("decisions.json", "absolute path"),
+                (str(outside), "must be beneath"),
+                (str(target), "must not be a symlink"),
+            ):
+                stderr = io.StringIO()
+                with (
+                    patch("fulcrum.cli.resolve_paths", return_value=paths),
+                    patch("fulcrum.cli._request") as request,
+                    patch("sys.stderr", new=stderr),
+                ):
+                    result = main(["finish", "decisions", "--input", supplied])
+                self.assertEqual(result, 2)
+                request.assert_not_called()
+                self.assertIn(message, stderr.getvalue())
+
+    def test_malformed_json_is_retained_without_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = RuntimePaths(root, root, root / "config.json", root / "control")
+            target = paths.handoff_root / "state" / "action-1" / "decisions.json"
+            target.parent.mkdir(parents=True)
+            target.write_text("{", encoding="utf-8")
+            with (
+                patch("fulcrum.cli.resolve_paths", return_value=paths),
+                patch("fulcrum.cli._request") as request,
+                patch("sys.stderr", new=io.StringIO()),
+            ):
+                result = main(["finish", "decisions", "--input", str(target)])
+            self.assertEqual(result, 2)
+            request.assert_not_called()
+            self.assertEqual(target.read_text(encoding="utf-8"), "{")
 
 
 if __name__ == "__main__":

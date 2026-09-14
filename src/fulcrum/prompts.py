@@ -186,7 +186,10 @@ def _budgeted_archon_message(
 
 
 def _archon_finish_guidance(
-    payload: dict[str, Any], *, action_id: int | str | None
+    payload: dict[str, Any],
+    *,
+    action_id: int | str | None,
+    handoff_paths: dict[str, str] | None = None,
 ) -> list[str]:
     """Give Archon only the result shapes relevant to this frozen action."""
     items = payload.get("batch_items", [])
@@ -195,11 +198,16 @@ def _archon_finish_guidance(
         item["content"] for item in items if isinstance(item.get("content"), dict)
     ]
     kinds = {content.get("kind") for content in contents}
+    relevant = _relevant_structured_outcomes("archon", payload, None)
+    finish_choices = (
+        "decisions" if relevant == ("decisions",) else "decisions or deferred"
+    )
+    decision_kind = "Acknowledgement" if relevant == ("decisions",) else "Scheduling"
     rendered_id = action_id if action_id is not None else "current"
     lines = [
         f"Action {rendered_id}. Finish required: yes. "
         f"Update IDs: {json.dumps(update_ids)}. "
-        "Scheduling decision required; finish with decisions or deferred."
+        f"{decision_kind} decision required; finish with {finish_choices}."
     ]
 
     if payload.get("purpose") == "initial_policies":
@@ -284,16 +292,22 @@ def _archon_finish_guidance(
             "Relevant hold actions: release_hold accepts the exact hold_id after its stated condition is satisfied; a new hold requires scope, target except for global, reason, and release_condition."
         )
 
-    lines.append(
-        'Finish decisions: write complete JSON to a sibling temporary file, atomically rename it to "/absolute/decisions.json", then run `fulcrum finish decisions --input "/absolute/decisions.json"`.'
-    )
-    lines.append(
-        'Defer the whole batch only when it must wait: `fulcrum finish deferred --reason "why" --input "/absolute/reactivation.json"`. Reactivation JSON must contain exactly one concrete trigger: capacity, dependency, hold, operator_change, or next_check_at.'
-    )
+    lines.extend(_structured_finish_guidance(handoff_paths, relevant))
+    if "deferred" in relevant:
+        lines.append(
+            "Defer the whole batch only when it must wait. Reactivation JSON must "
+            "contain exactly one concrete trigger: capacity, dependency, hold, "
+            "operator_change, or next_check_at."
+        )
     return lines
 
 
-def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> str:
+def _archon_message(
+    payload: dict[str, Any],
+    *,
+    action_id: int | str | None,
+    handoff_paths: dict[str, str] | None = None,
+) -> str:
     """Render the pending decisions, not the entire fleet record or role manual."""
     items = payload.get("batch_items", [])
     lines: list[str] = []
@@ -495,7 +509,9 @@ def _archon_message(payload: dict[str, Any], *, action_id: int | str | None) -> 
             lines.append("Projects: " + _bounded(payload["projects"]) + ".")
         for policy in snapshot.get("policies", [])[:MAX_ARCHON_ROWS]:
             lines.append("Policy: " + _bounded_facts(policy))
-    guidance = _archon_finish_guidance(payload, action_id=action_id)
+    guidance = _archon_finish_guidance(
+        payload, action_id=action_id, handoff_paths=handoff_paths
+    )
     return _budgeted_archon_message(
         [guidance[0], *lines], snapshot_sections, guidance[1:]
     )
@@ -577,6 +593,71 @@ def _handoff_text(content: Any) -> str:
     return _facts(content) if isinstance(content, dict) else _text(content)
 
 
+def _structured_finish_guidance(
+    handoff_paths: dict[str, str] | None, outcomes: tuple[str, ...]
+) -> list[str]:
+    """Render exact controller-owned destinations for a bound action."""
+
+    if not outcomes:
+        return []
+    if not handoff_paths:
+        return [
+            "The controller supplies the exact action-bound destination in the "
+            "current action. "
+            + " ".join(
+                f"Use `fulcrum finish {outcome} --input CONTROLLER_SUPPLIED_PATH`."
+                for outcome in outcomes
+            )
+        ]
+    lines: list[str] = []
+    for outcome in outcomes:
+        path = handoff_paths.get(outcome)
+        if path is None:
+            continue
+        reason = ' --reason "Why this batch must wait"' if outcome == "deferred" else ""
+        lines.append(
+            f"Finish {outcome}: write complete JSON to a sibling temporary file, "
+            f'atomically rename it to "{path}", then run '
+            f'`fulcrum finish {outcome}{reason} --input "{path}"`.'
+        )
+    return lines
+
+
+def _relevant_structured_outcomes(
+    kind: str, payload: dict[str, Any], role: str | None
+) -> tuple[str, ...]:
+    if kind == "review":
+        return ("approved", "changes_requested", "incomplete")
+    if kind == "interview":
+        return ("interview_answer",)
+    if kind == "specialist":
+        return (
+            ("report", "evidence_needed")
+            if role == "sage" and not payload.get("continuation")
+            else ("report",)
+        )
+    if kind == "archon":
+        contents = [
+            item.get("content")
+            for item in payload.get("batch_items", [])
+            if isinstance(item, dict)
+        ]
+        completion_kinds = {
+            "assignment_completed",
+            "specialist_completed",
+            "archon_succession_completed",
+        }
+        acknowledge_only = bool(contents) and all(
+            isinstance(content, dict)
+            and content.get("kind") in completion_kinds
+            and not content.get("required_decision")
+            and not content.get("requires_decision")
+            for content in contents
+        )
+        return ("decisions",) if acknowledge_only else ("decisions", "deferred")
+    return ()
+
+
 def action_message(
     *,
     action: dict[str, Any],
@@ -584,27 +665,36 @@ def action_message(
     constraints: list[str] | None = None,
     include_scope: bool = True,
     full_context: bool = False,
+    handoff_paths: dict[str, str] | None = None,
+    role: str | None = None,
 ) -> str:
     """Deliver the actual action inline, with no prerequisite instruction read."""
     kind = action["kind"]
     payload = action_payload(action)
     if action.get("reminder_sent"):
-        if kind == "archon":
-            return (
-                f"Action {action.get('id', 'current')}. Finish required: yes. "
-                "The previous turn ended without an outcome. Submit only that "
-                "action's outstanding result using the finish shape already supplied; "
-                "do not repeat completed work."
-            )
-        return "Your previous turn ended without a finish outcome. Submit the outstanding result for that action; do not repeat completed work."
+        lead = (
+            f"Action {action.get('id', 'current')}. Finish required: yes. "
+            "The previous turn ended without an outcome. Submit only that "
+            "action's outstanding result; do not repeat completed work."
+            if kind == "archon"
+            else "Your previous turn ended without a finish outcome. Submit the outstanding result for that action; do not repeat completed work."
+        )
+        outcomes = _relevant_structured_outcomes(kind, payload, role)
+        return "\n".join([lead, *_structured_finish_guidance(handoff_paths, outcomes)])
     if kind == "archon":
-        return _archon_message(payload, action_id=action.get("id"))
+        return _archon_message(
+            payload,
+            action_id=action.get("id"),
+            handoff_paths=handoff_paths,
+        )
     if kind == "interview":
-        return (
-            "Workflow debrief only; do not resume prior work.\n"
-            + str(payload["question"])
-            + '\nSubmit `fulcrum finish interview_answer --input "/absolute/answer.json"` '
-            + 'with {"answer":"your answer","evidence":["reference"]}.'
+        return "\n".join(
+            [
+                "Workflow debrief only; do not resume prior work.\n"
+                + str(payload["question"])
+                + '\nUse {"answer":"your answer","evidence":["reference"]}.',
+                *_structured_finish_guidance(handoff_paths, ("interview_answer",)),
+            ]
         )
     if kind == "specialist":
         scope = payload.get("scope") or {}
@@ -656,7 +746,12 @@ def action_message(
                     lines.append(
                         key.replace("_", " ").capitalize() + ": " + _text(evidence[key])
                     )
-        return "\n".join(lines)
+        outcomes = ["report"]
+        if role == "sage" and not payload.get("continuation"):
+            outcomes.append("evidence_needed")
+        return "\n".join(
+            [*lines, *_structured_finish_guidance(handoff_paths, tuple(outcomes))]
+        )
     if kind == "operative":
         return (
             "Resolve only the human-stated emergency. The operative journal is the "
@@ -756,6 +851,12 @@ def action_message(
         evidence = payload.get("delivery_evidence") or {}
         if evidence:
             lines.append("Diagnosis: " + _text(evidence.get("diagnosis") or evidence))
+    if kind == "review":
+        lines.extend(
+            _structured_finish_guidance(
+                handoff_paths, ("approved", "changes_requested", "incomplete")
+            )
+        )
     return "\n\n".join(lines) + "\n"
 
 

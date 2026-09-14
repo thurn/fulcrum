@@ -22,5 +22,8 @@ support escalation; full evidence remains in controller state.
 
 The controller owns state, dispatch, retries, delivery, archival, and automatic
 completion-only acknowledgement without an Archon turn. Bound messages state the
-action ID, update IDs, result shape, and finish command. A normal human follow-up
-without that header is not a Fulcrum action: answer without calling `fulcrum finish`.
+action ID, update IDs, result shape, and finish command. A structured finish must
+use the exact action-bound destination supplied by that message; never choose a
+path. Write complete JSON to a sibling temporary file and atomically rename it to
+the supplied destination before finishing. A normal human follow-up without that
+header is not a Fulcrum action: answer without calling `fulcrum finish`.

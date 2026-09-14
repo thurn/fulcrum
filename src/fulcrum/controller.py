@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -58,6 +60,11 @@ from fulcrum.operative import (
     read_journal,
     transition_journal,
     write_journal,
+)
+from fulcrum.outcomes import (
+    ALLOWED,
+    STRUCTURED_OUTCOME_FILENAMES,
+    validate_outcome,
 )
 from fulcrum.kernel import (
     LeaseRequest,
@@ -3125,13 +3132,52 @@ class Controller:
                 )
                 is None
             )
+        handoff_paths = self._handoff_destinations(action, create=not full_context)
         return action_message(
             action=action,
             assignment=assignment,
             constraints=constraints if include_scope else [],
             include_scope=include_scope,
             full_context=full_context,
+            handoff_paths=handoff_paths,
+            role=str(task["role"]),
         )
+
+    def _handoff_destinations(
+        self, action: dict[str, Any], *, create: bool = True
+    ) -> dict[str, str]:
+        """Create and return stable structured-finish paths for one action."""
+
+        outcomes = ALLOWED.get(str(action["kind"]), set()) & set(
+            STRUCTURED_OUTCOME_FILENAMES
+        )
+        if not outcomes:
+            return {}
+        state_identity = self.store.state_identity()
+        destinations = {
+            outcome: self.paths.handoff_path(
+                state_identity,
+                int(action["id"]),
+                STRUCTURED_OUTCOME_FILENAMES[outcome],
+            )
+            for outcome in outcomes
+        }
+        if not create:
+            return {outcome: str(path) for outcome, path in destinations.items()}
+        action_root = next(iter(destinations.values())).parent
+        for directory in (
+            self.paths.handoff_root,
+            action_root.parent,
+            action_root,
+        ):
+            directory.mkdir(exist_ok=True, mode=0o700)
+            status = directory.lstat()
+            if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+                raise StoreError(
+                    f"handoff directory is not a real directory: {directory}"
+                )
+            os.chmod(directory, 0o700)
+        return {outcome: str(path) for outcome, path in destinations.items()}
 
     async def _ensure_worktree_environment(self, worktree: Path) -> None:
         """Provision a complete environment owned by the managed worktree."""
@@ -4688,6 +4734,359 @@ class Controller:
         writer.close()
         await writer.wait_closed()
 
+    @staticmethod
+    def _handoff_identity(value: os.stat_result) -> dict[str, int]:
+        return {
+            "device": value.st_dev,
+            "inode": value.st_ino,
+            "size": value.st_size,
+            "mtime_ns": value.st_mtime_ns,
+            "ctime_ns": value.st_ctime_ns,
+        }
+
+    @staticmethod
+    def _same_handoff_file(observed: dict[str, int], accepted: dict[str, int]) -> bool:
+        # Rename may update ctime; device/inode bind the file and size/mtime bind
+        # the accepted snapshot.
+        return all(
+            observed[key] == accepted[key]
+            for key in ("device", "inode", "size", "mtime_ns")
+        )
+
+    def _expected_handoff_path(self, action: dict[str, Any], outcome_kind: str) -> Path:
+        filename = STRUCTURED_OUTCOME_FILENAMES.get(outcome_kind)
+        if filename is None or outcome_kind not in ALLOWED.get(
+            str(action["kind"]), set()
+        ):
+            raise StoreError(
+                f"{outcome_kind!r} is not a structured outcome for this action"
+            )
+        return self.paths.handoff_path(
+            self.store.state_identity(), int(action["id"]), filename
+        )
+
+    def _read_bound_handoff(
+        self,
+        expected: Path,
+        options: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
+        supplied = options.get("input_path")
+        if not isinstance(supplied, str) or not Path(supplied).is_absolute():
+            raise StoreError("structured finish requires canonical absolute input_path")
+        if supplied != str(expected):
+            raise StoreError(
+                f"structured finish input path does not match this action: expected {expected}"
+            )
+        if Path(supplied).resolve(strict=False) != expected:
+            raise StoreError("structured finish input path is not canonical")
+        if options.get("input_missing") is True:
+            if "input" in options or "input_identity" in options:
+                raise StoreError("missing-file retry must not include input contents")
+            if expected.exists() or expected.is_symlink():
+                raise StoreError(
+                    "structured finish input appeared after a missing-file retry"
+                )
+            return None, None
+        claimed = options.get("input_identity")
+        snapshot = options.get("input")
+        if not isinstance(claimed, dict) or not isinstance(snapshot, dict):
+            raise StoreError(
+                "structured finish requires input payload and file identity"
+            )
+        identity_keys = {"device", "inode", "size", "mtime_ns", "ctime_ns"}
+        if set(claimed) != identity_keys or any(
+            not isinstance(claimed[key], int) or isinstance(claimed[key], bool)
+            for key in identity_keys
+        ):
+            raise StoreError("structured finish file identity is malformed")
+        try:
+            path_status = expected.lstat()
+        except OSError as error:
+            raise StoreError(
+                f"cannot inspect structured finish input: {error}"
+            ) from error
+        if stat.S_ISLNK(path_status.st_mode) or not stat.S_ISREG(path_status.st_mode):
+            raise StoreError(
+                "structured finish input must be a non-symlink regular file"
+            )
+        if self._handoff_identity(path_status) != claimed:
+            raise StoreError(
+                "structured finish input identity changed before acceptance"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(expected, flags)
+            before = os.fstat(descriptor)
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = None
+                raw = handle.read()
+                after = os.fstat(handle.fileno())
+        except OSError as error:
+            raise StoreError(f"cannot read structured finish input: {error}") from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        before_identity = self._handoff_identity(before)
+        after_identity = self._handoff_identity(after)
+        if before_identity != claimed or after_identity != claimed:
+            raise StoreError("structured finish input changed while being read")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise StoreError(
+                f"structured finish input is not valid JSON: {error}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise StoreError("structured finish input must contain a JSON object")
+        if payload != snapshot:
+            raise StoreError(
+                "structured finish payload does not match the file snapshot"
+            )
+        return payload, after_identity
+
+    @staticmethod
+    def _accepted_finish_options(action: dict[str, Any]) -> dict[str, Any]:
+        payload = json.loads(action["outcome_payload"] or "{}")
+        if action["outcome_kind"] == "deferred":
+            return {"reason": payload["reason"], "input": payload["reactivation"]}
+        return {"input": payload}
+
+    @staticmethod
+    def _validate_missing_retry_options(
+        action: dict[str, Any], options: dict[str, Any]
+    ) -> None:
+        if action["outcome_kind"] == "deferred" and options.get("reason") != json.loads(
+            action["outcome_payload"] or "{}"
+        ).get("reason"):
+            raise StoreError(
+                "structured finish retry reason differs from accepted outcome"
+            )
+
+    def _cleanup_handoff(
+        self, action: dict[str, Any], path: Path, identity: dict[str, int]
+    ) -> dict[str, Any]:
+        quarantine_root: Path | None = None
+        quarantine: Path | None = None
+        try:
+            current = path.lstat()
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+                raise StoreError("accepted handoff was replaced by a non-regular file")
+            if self._handoff_identity(current) != identity:
+                raise StoreError("accepted handoff identity changed before cleanup")
+            for _attempt in range(10):
+                candidate = path.with_name(f".cleanup-{uuid.uuid4().hex}")
+                try:
+                    candidate.mkdir(mode=0o700)
+                except FileExistsError:
+                    continue
+                quarantine_root = candidate
+                break
+            if quarantine_root is None:
+                raise StoreError("cannot allocate a private handoff quarantine")
+            quarantine = quarantine_root / path.name
+            os.rename(path, quarantine)
+            moved = quarantine.lstat()
+            if stat.S_ISLNK(moved.st_mode) or not stat.S_ISREG(moved.st_mode):
+                raise StoreError("quarantined handoff is not a regular file")
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(quarantine, flags)
+            try:
+                moved_identity = self._handoff_identity(os.fstat(descriptor))
+            finally:
+                os.close(descriptor)
+            if not self._same_handoff_file(
+                self._handoff_identity(moved), identity
+            ) or not self._same_handoff_file(moved_identity, identity):
+                raise StoreError(
+                    "handoff pathname changed before quarantine; retained without deletion"
+                )
+            quarantine.unlink()
+        except Exception as error:
+            diagnostic = str(error)[:500]
+            retained = (
+                quarantine
+                if quarantine is not None
+                and (quarantine.exists() or quarantine.is_symlink())
+                else path
+            )
+            if (
+                quarantine_root is not None
+                and quarantine_root.is_dir()
+                and (quarantine is None or not quarantine.exists())
+            ):
+                try:
+                    quarantine_root.rmdir()
+                except OSError:
+                    pass
+            self.store.event(
+                "handoff_cleanup_failed",
+                diagnostic,
+                entity_type="action",
+                entity_id=action["id"],
+                detail={
+                    "path": str(path),
+                    "retained_path": str(retained),
+                    "outcome": action["outcome_kind"],
+                },
+            )
+            return {
+                "removed": False,
+                "error": diagnostic,
+                "retained_path": str(retained),
+            }
+        directory_errors: list[str] = []
+        assert quarantine_root is not None
+        try:
+            quarantine_root.rmdir()
+        except OSError as error:
+            directory_errors.append(str(error)[:250])
+        for directory in (path.parent, path.parent.parent):
+            try:
+                directory.rmdir()
+            except OSError as error:
+                if error.errno != errno.ENOTEMPTY:
+                    directory_errors.append(str(error)[:250])
+        result: dict[str, Any] = {"removed": True}
+        if directory_errors:
+            result["directory_cleanup_errors"] = directory_errors
+        self.store.event(
+            "handoff_removed",
+            "removed accepted structured finish input",
+            entity_type="action",
+            entity_id=action["id"],
+            detail={"path": str(path), "outcome": action["outcome_kind"]},
+        )
+        return result
+
+    def _record_handoff_cleanup(self, action_id: int, cleanup: dict[str, Any]) -> None:
+        self.store.execute(
+            "UPDATE actions SET outcome_input_cleanup = ?, updated_at = ? WHERE id = ?",
+            (
+                json.dumps(cleanup, sort_keys=True, separators=(",", ":")),
+                utc_now(),
+                action_id,
+            ),
+        )
+
+    @staticmethod
+    def _retained_handoff_cleanup(action: dict[str, Any]) -> dict[str, Any]:
+        encoded = action.get("outcome_input_cleanup")
+        if isinstance(encoded, str):
+            cleanup = json.loads(encoded)
+            if isinstance(cleanup, dict):
+                return cleanup
+        return {"removed": True, "already_missing": True}
+
+    def _processed_handoff_retry(
+        self,
+        native_thread_id: str,
+        outcome_kind: str,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        supplied = options.get("input_path")
+        if not isinstance(supplied, str):
+            raise StoreError("thread has no current Fulcrum action")
+        action = self.store.row(
+            """SELECT a.*, t.native_thread_id, t.role, t.title
+               FROM actions a JOIN tasks t ON t.id = a.task_id
+               WHERE t.native_thread_id = ? AND a.state = 'processed'
+                 AND a.outcome_kind = ? AND a.outcome_input_path = ?
+               ORDER BY a.id DESC LIMIT 1""",
+            (native_thread_id, outcome_kind, supplied),
+        )
+        if action is None:
+            raise StoreError("no accepted action matches this structured finish retry")
+        expected = self._expected_handoff_path(action, outcome_kind)
+        payload, identity = self._read_bound_handoff(expected, options)
+        if payload is None:
+            self._validate_missing_retry_options(action, options)
+            return {
+                "ok": True,
+                "action_id": action["id"],
+                "outcome": outcome_kind,
+                "reused": True,
+                "cleanup": self._retained_handoff_cleanup(action),
+            }
+        submitted = dict(options)
+        submitted["input"] = payload
+        validated = validate_outcome(str(action["kind"]), outcome_kind, submitted)
+        encoded = json.dumps(validated, sort_keys=True, separators=(",", ":"))
+        if encoded != action["outcome_payload"]:
+            raise StoreError(
+                "structured finish retry payload differs from accepted outcome"
+            )
+        assert identity is not None
+        result = {
+            "ok": True,
+            "action_id": action["id"],
+            "outcome": outcome_kind,
+            "reused": True,
+        }
+        cleanup = self._cleanup_handoff(action, expected, identity)
+        self._record_handoff_cleanup(int(action["id"]), cleanup)
+        result["cleanup"] = cleanup
+        return result
+
+    def _accept_finish_request(
+        self,
+        native_thread_id: str,
+        outcome_kind: str,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            action = self.store.current_action(native_thread_id)
+        except StoreError:
+            if outcome_kind in STRUCTURED_OUTCOME_FILENAMES:
+                return self._processed_handoff_retry(
+                    native_thread_id, outcome_kind, options
+                )
+            raise
+        if outcome_kind not in STRUCTURED_OUTCOME_FILENAMES:
+            return accept_finish(
+                self.store,
+                native_thread_id=native_thread_id,
+                outcome_kind=outcome_kind,
+                options=options,
+            )
+        expected = self._expected_handoff_path(action, outcome_kind)
+        payload, identity = self._read_bound_handoff(expected, options)
+        if payload is None:
+            if action["outcome_kind"] != outcome_kind or action.get(
+                "outcome_input_path"
+            ) != str(expected):
+                raise StoreError("structured finish input is missing before acceptance")
+            self._validate_missing_retry_options(action, options)
+            submitted = self._accepted_finish_options(action)
+            stored_identity = json.loads(action["outcome_input_identity"] or "null")
+            result = accept_finish(
+                self.store,
+                native_thread_id=native_thread_id,
+                outcome_kind=outcome_kind,
+                options=submitted,
+                input_path=str(expected),
+                input_identity=stored_identity,
+            )
+            result["cleanup"] = self._retained_handoff_cleanup(action)
+            return result
+        submitted = dict(options)
+        submitted["input"] = payload
+        assert identity is not None
+        result = accept_finish(
+            self.store,
+            native_thread_id=native_thread_id,
+            outcome_kind=outcome_kind,
+            options=submitted,
+            input_path=str(expected),
+            input_identity=identity,
+        )
+        accepted = self.store.row("SELECT * FROM actions WHERE id = ?", (action["id"],))
+        assert accepted is not None
+        cleanup = self._cleanup_handoff(accepted, expected, identity)
+        self._record_handoff_cleanup(int(action["id"]), cleanup)
+        result["cleanup"] = cleanup
+        return result
+
     async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         command = request.get("command")
         self._enforce_operative_operation_matrix(request)
@@ -4792,11 +5191,10 @@ class Controller:
                 ),
             }
         if command == "finish":
-            return accept_finish(
-                self.store,
-                native_thread_id=_thread_identity(request),
-                outcome_kind=str(request.get("outcome")),
-                options=(
+            return self._accept_finish_request(
+                _thread_identity(request),
+                str(request.get("outcome")),
+                (
                     request.get("options")
                     if isinstance(request.get("options"), dict)
                     else {}

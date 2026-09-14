@@ -6,12 +6,13 @@ import argparse
 import asyncio
 import json
 import os
+import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from fulcrum.config import load_installation, resolve_paths
+from fulcrum.config import RuntimePaths, load_installation, resolve_paths
 from fulcrum.controller import run_controller
 from fulcrum.doctor import doctor
 from fulcrum.ipc import request_sync
@@ -315,7 +316,17 @@ def _intake_payload(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
-def _finish_options(args: argparse.Namespace) -> dict[str, Any]:
+def _file_identity(value: os.stat_result) -> dict[str, int]:
+    return {
+        "device": value.st_dev,
+        "inode": value.st_ino,
+        "size": value.st_size,
+        "mtime_ns": value.st_mtime_ns,
+        "ctime_ns": value.st_ctime_ns,
+    }
+
+
+def _finish_options(args: argparse.Namespace, paths: RuntimePaths) -> dict[str, Any]:
     """Snapshot structured finish input before contacting the controller."""
 
     options = {
@@ -327,14 +338,49 @@ def _finish_options(args: argparse.Namespace) -> dict[str, Any]:
     input_path = options.get("input")
     if input_path is None:
         return options
-    path = Path(str(input_path)).expanduser()
+    supplied = Path(str(input_path))
+    if not supplied.is_absolute():
+        raise ValueError("structured finish --input must be an absolute path")
+    path = supplied.resolve(strict=False)
+    handoff_root = paths.handoff_root.resolve(strict=False)
+    if not path.is_relative_to(handoff_root):
+        raise ValueError(f"structured finish --input must be beneath {handoff_root}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        path_status = supplied.lstat()
+    except FileNotFoundError:
+        options.pop("input", None)
+        options["input_path"] = str(path)
+        options["input_missing"] = True
+        return options
+    except OSError as error:
+        raise ValueError(
+            f"cannot inspect structured finish input {path}: {error}"
+        ) from error
+    if stat.S_ISLNK(path_status.st_mode):
+        raise ValueError(f"structured finish --input must not be a symlink: {path}")
+    if not stat.S_ISREG(path_status.st_mode):
+        raise ValueError(f"structured finish --input must be a regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(supplied, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            before = os.fstat(handle.fileno())
+            raw = handle.read()
+            after = os.fstat(handle.fileno())
+        if _file_identity(before) != _file_identity(after):
+            raise ValueError(
+                f"structured finish input changed while being read: {path}"
+            )
+        payload = json.loads(raw.decode("utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read valid JSON from {path}: {error}") from error
+    except UnicodeDecodeError as error:
+        raise ValueError(f"cannot read UTF-8 JSON from {path}: {error}") from error
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain a JSON object")
     options["input"] = payload
+    options["input_path"] = str(path)
+    options["input_identity"] = _file_identity(after)
     return options
 
 
@@ -534,7 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {"command": "report", "report": _report_payload(args)},
             )
         elif args.command == "finish":
-            options = _finish_options(args)
+            options = _finish_options(args, paths)
             result = _request(
                 paths,
                 {"command": "finish", "outcome": args.outcome, "options": options},

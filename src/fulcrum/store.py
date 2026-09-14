@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -177,6 +178,7 @@ CREATE TABLE IF NOT EXISTS actions (
   kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
     CHECK (state IN ('pending','starting','active','terminal','processed','failed','uncertain','canceled')),
   native_turn_id TEXT, outcome_kind TEXT, outcome_payload TEXT,
+  outcome_input_path TEXT, outcome_input_identity TEXT, outcome_input_cleanup TEXT,
   reminder_sent INTEGER NOT NULL DEFAULT 0 CHECK (reminder_sent IN (0, 1)),
   check_after TEXT, condition TEXT, attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   next_attempt_at TEXT, operator_hold_id INTEGER REFERENCES holds(id),
@@ -717,6 +719,10 @@ class Store:
             self.connection.execute("PRAGMA synchronous = FULL")
             self.connection.executescript(SCHEMA)
             self._migrate_existing_database()
+            self.connection.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES ('state_identity', ?)",
+                (uuid.uuid4().hex,),
+            )
             self._seed_rate_cards()
             self._replace_invariant_triggers()
             self.connection.executescript(INVARIANT_TRIGGERS)
@@ -938,6 +944,9 @@ class Store:
                 "attempt_count": "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)",
                 "next_attempt_at": "TEXT",
                 "operator_hold_id": "INTEGER REFERENCES holds(id)",
+                "outcome_input_path": "TEXT",
+                "outcome_input_identity": "TEXT",
+                "outcome_input_cleanup": "TEXT",
             },
             "reservations": {
                 "conflict_keys": "TEXT NOT NULL DEFAULT '[]'",
@@ -1777,6 +1786,14 @@ class Store:
         )
         if cursor.rowcount != 1:
             raise StoreError("operative operation is not an unsent intent")
+
+    def state_identity(self) -> str:
+        """Return the collision-resistant identity of this SQLite state generation."""
+
+        row = self.row("SELECT value FROM meta WHERE key = 'state_identity'")
+        if row is None:
+            raise StoreError("Fulcrum state identity is missing")
+        return str(row["value"])
 
     def bind_action_turn(
         self, action_id: int, native_thread_id: str, native_turn_id: str

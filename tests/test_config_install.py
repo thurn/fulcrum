@@ -163,6 +163,49 @@ class ConfigInstallTest(unittest.TestCase):
             self.assertEqual(paths.control_root.name, "control")
             self.assertNotEqual(paths.database.parent, paths.control_root)
 
+    def test_handoff_root_honors_config_adjacency_and_control_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            config = home / "environments" / "one" / "config.json"
+            adjacent = resolve_paths(
+                environ={"FULCRUM_CONFIG": str(config)}, user_home=home
+            )
+            self.assertEqual(
+                adjacent.handoff_root,
+                (config.parent / "control/handoffs").resolve(strict=False),
+            )
+
+            override = home / "private control"
+            selected = resolve_paths(
+                environ={
+                    "FULCRUM_CONFIG": str(config),
+                    "FULCRUM_CONTROL_ROOT": str(override),
+                },
+                user_home=home,
+            )
+            self.assertEqual(
+                selected.handoff_root, (override / "handoffs").resolve(strict=False)
+            )
+
+    def test_handoff_paths_are_allow_listed_and_ignore_project_cwd(self) -> None:
+        paths = RuntimePaths(
+            Path("/repo/brain"),
+            Path("/state"),
+            Path("/configuration/config.json"),
+            Path("/private/control"),
+        )
+        identity = "a" * 32
+        self.assertEqual(
+            paths.handoff_path(identity, 17, "decisions.json"),
+            Path("/private/control/handoffs")
+            / identity
+            / "action-17"
+            / "decisions.json",
+        )
+        for filename in ("../decisions.json", "unknown.json"):
+            with self.assertRaisesRegex(ValueError, "unsupported handoff filename"):
+                paths.handoff_path(identity, 17, filename)
+
     def test_hook_merge_removes_all_old_fulcrum_handlers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hooks.json"

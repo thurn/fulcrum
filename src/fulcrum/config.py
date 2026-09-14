@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -83,6 +84,37 @@ class RuntimePaths:
     @property
     def logs_root(self) -> Path:
         return self.state_root / "logs"
+
+    @property
+    def handoff_root(self) -> Path:
+        return self.control_root / "handoffs"
+
+    def handoff_path(self, state_identity: str, action_id: int, filename: str) -> Path:
+        """Return one allow-listed, action-scoped structured finish destination."""
+
+        if re.fullmatch(r"[0-9a-f]{32}", state_identity) is None:
+            raise ConfigurationError("invalid Fulcrum state identity")
+        if (
+            not isinstance(action_id, int)
+            or isinstance(action_id, bool)
+            or action_id < 1
+        ):
+            raise ConfigurationError(f"invalid action ID: {action_id!r}")
+        if filename not in {
+            "approval.json",
+            "findings.json",
+            "missing.json",
+            "decisions.json",
+            "reactivation.json",
+            "report.json",
+            "requests.json",
+            "answer.json",
+        }:
+            raise ConfigurationError(f"unsupported handoff filename: {filename!r}")
+        root = self.handoff_root.resolve(strict=False)
+        parts = (state_identity, f"action-{action_id}", filename)
+        safe_child(root, *parts)
+        return root.joinpath(*parts)
 
 
 def _expand_path(raw: str | Path, home: Path) -> Path:

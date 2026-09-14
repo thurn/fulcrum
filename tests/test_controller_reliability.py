@@ -504,6 +504,339 @@ class ControllerReliabilityTest(unittest.IsolatedAsyncioTestCase):
             self.controller.lock_handle = None
         self.controller = Controller(self.paths, self.config)
 
+    def _structured_specialist_action(
+        self, thread_id: str = "structured-specialist"
+    ) -> tuple[dict[str, Any], Path]:
+        task = self.controller.store.register_task(
+            native_thread_id=thread_id,
+            role="inquisitor",
+            description="Structured report",
+            model="sol",
+            reasoning_effort="high",
+        )
+        cursor = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, kind, payload, state, created_at, updated_at
+               ) VALUES (?, 'specialist', '{"scope":{"projects":["p"]}}',
+                         'active', 'now', 'now')""",
+            (task["id"],),
+        )
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (cursor.lastrowid,)
+        )
+        assert action is not None
+        path = Path(self.controller._handoff_destinations(action)["report"])
+        return action, path
+
+    @staticmethod
+    def _structured_options(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+        status = path.stat()
+        return {
+            "input": payload,
+            "input_path": str(path),
+            "input_identity": {
+                "device": status.st_dev,
+                "inode": status.st_ino,
+                "size": status.st_size,
+                "mtime_ns": status.st_mtime_ns,
+                "ctime_ns": status.st_ctime_ns,
+            },
+        }
+
+    def test_structured_finish_is_bound_cleaned_and_durable(self) -> None:
+        action, path = self._structured_specialist_action()
+        payload = {"summary": "done", "coverage": ["tests"], "findings": []}
+        with self.assertRaisesRegex(StoreError, "missing before acceptance"):
+            self.controller._accept_finish_request(
+                "structured-specialist",
+                "report",
+                {"input_path": str(path), "input_missing": True},
+            )
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        result = self.controller._accept_finish_request(
+            "structured-specialist", "report", self._structured_options(path, payload)
+        )
+        self.assertFalse(result["reused"])
+        self.assertEqual(result["cleanup"], {"removed": True})
+        self.assertFalse(path.exists())
+        retained = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.assertEqual(json.loads(retained["outcome_payload"]), payload)
+        self.assertEqual(retained["outcome_input_path"], str(path))
+
+    async def test_action_message_and_context_use_exact_stable_handoff_paths(
+        self,
+    ) -> None:
+        action, path = self._structured_specialist_action()
+        task = self.controller.store.row(
+            "SELECT * FROM tasks WHERE id = ?", (action["task_id"],)
+        )
+        assert task is not None
+        initial = self.controller._build_action_message(action, task, None)
+        self.assertEqual(initial.count(str(path)), 2)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        self.assertIn("sibling temporary file", initial)
+        self.assertIn("atomically rename", initial)
+        self.assertNotIn("evidence_needed", initial)
+        self.assertNotIn("/absolute/report.json", initial)
+
+        reminder = self.controller._build_action_message(
+            {**action, "reminder_sent": 1}, task, None
+        )
+        self.assertIn(str(path), reminder)
+        context = await self.controller.handle_request(
+            {"command": "context", "thread_id": "structured-specialist"}
+        )
+        self.assertIn(str(path), context["context"])
+
+    def test_structured_finish_rejects_wrong_action_outcome_and_swapped_file(
+        self,
+    ) -> None:
+        _action, report_path = self._structured_specialist_action()
+        payload = {"summary": "done", "coverage": ["tests"], "findings": []}
+        report_path.write_text(json.dumps(payload), encoding="utf-8")
+        options = self._structured_options(report_path, payload)
+
+        wrong = report_path.with_name("requests.json")
+        wrong.write_text(json.dumps({"requests": []}), encoding="utf-8")
+        with self.assertRaisesRegex(StoreError, "does not match this action"):
+            self.controller._accept_finish_request(
+                "structured-specialist",
+                "report",
+                self._structured_options(wrong, {"requests": []}),
+            )
+        with self.assertRaisesRegex(StoreError, "not a structured outcome"):
+            self.controller._accept_finish_request(
+                "structured-specialist", "approved", options
+            )
+        foreign = (
+            self.paths.handoff_root
+            / ("b" * 32)
+            / report_path.parent.name
+            / report_path.name
+        ).resolve(strict=False)
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text(json.dumps(payload), encoding="utf-8")
+        with self.assertRaisesRegex(StoreError, "does not match this action"):
+            self.controller._accept_finish_request(
+                "structured-specialist",
+                "report",
+                self._structured_options(foreign, payload),
+            )
+
+        replacement = report_path.with_name("replacement.json")
+        replacement.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(replacement, report_path)
+        with self.assertRaisesRegex(StoreError, "identity changed"):
+            self.controller._accept_finish_request(
+                "structured-specialist", "report", options
+            )
+        self.assertTrue(report_path.exists())
+        report_path.unlink()
+        symlink_target = report_path.with_name("symlink-target.json")
+        symlink_target.write_text(json.dumps(payload), encoding="utf-8")
+        report_path.symlink_to(symlink_target)
+        with self.assertRaisesRegex(StoreError, "canonical|non-symlink regular file"):
+            self.controller._accept_finish_request(
+                "structured-specialist",
+                "report",
+                self._structured_options(report_path, payload),
+            )
+        self.assertTrue(report_path.is_symlink())
+
+    def test_structured_finish_cleanup_failure_keeps_accepted_file(self) -> None:
+        action, path = self._structured_specialist_action()
+        payload = {"summary": "done", "coverage": ["tests"], "findings": []}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        options = self._structured_options(path, payload)
+        original_unlink = Path.unlink
+
+        def fail_target(candidate: Path, *args: Any, **kwargs: Any) -> None:
+            if candidate.name == path.name and candidate.parent.name.startswith(
+                ".cleanup-"
+            ):
+                raise PermissionError("simulated cleanup denial")
+            original_unlink(candidate, *args, **kwargs)
+
+        with patch("pathlib.Path.unlink", new=fail_target):
+            result = self.controller._accept_finish_request(
+                "structured-specialist", "report", options
+            )
+        self.assertFalse(result["cleanup"]["removed"])
+        self.assertIn("simulated cleanup denial", result["cleanup"]["error"])
+        retained_path = Path(result["cleanup"]["retained_path"])
+        self.assertFalse(path.exists())
+        self.assertTrue(retained_path.exists())
+        self.assertEqual(json.loads(retained_path.read_text()), payload)
+        retained = self.controller.store.row(
+            "SELECT outcome_kind FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.assertEqual(retained["outcome_kind"], "report")
+        retry = self.controller._accept_finish_request(
+            "structured-specialist",
+            "report",
+            {"input_path": str(path), "input_missing": True},
+        )
+        self.assertTrue(retry["reused"])
+        self.assertEqual(retry["cleanup"], result["cleanup"])
+        self.assertTrue(retained_path.exists())
+
+    def test_cleanup_quarantines_a_path_swap_without_deleting_replacement(
+        self,
+    ) -> None:
+        action, path = self._structured_specialist_action()
+        payload = {"summary": "done", "coverage": ["tests"], "findings": []}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        options = self._structured_options(path, payload)
+        accepted_elsewhere = path.with_name("accepted-moved-aside.json")
+        replacement = path.with_name("unrelated-replacement.json")
+        replacement_payload = {"unrelated": True}
+        replacement.write_text(json.dumps(replacement_payload), encoding="utf-8")
+        original_identity = self.controller._handoff_identity
+        calls = 0
+
+        def swap_after_cleanup_check(value: os.stat_result) -> dict[str, int]:
+            nonlocal calls
+            result = original_identity(value)
+            calls += 1
+            if calls == 4:
+                os.rename(path, accepted_elsewhere)
+                os.rename(replacement, path)
+            return result
+
+        with patch.object(
+            self.controller,
+            "_handoff_identity",
+            side_effect=swap_after_cleanup_check,
+        ):
+            result = self.controller._accept_finish_request(
+                "structured-specialist", "report", options
+            )
+
+        self.assertFalse(result["cleanup"]["removed"])
+        self.assertIn("retained without deletion", result["cleanup"]["error"])
+        retained_replacement = Path(result["cleanup"]["retained_path"])
+        self.assertTrue(accepted_elsewhere.exists())
+        self.assertEqual(json.loads(accepted_elsewhere.read_text()), payload)
+        self.assertTrue(retained_replacement.exists())
+        self.assertEqual(
+            json.loads(retained_replacement.read_text()), replacement_payload
+        )
+        self.assertFalse(path.exists())
+        retained = self.controller.store.row(
+            "SELECT outcome_kind, outcome_input_cleanup FROM actions WHERE id = ?",
+            (action["id"],),
+        )
+        self.assertEqual(retained["outcome_kind"], "report")
+        self.assertFalse(json.loads(retained["outcome_input_cleanup"])["removed"])
+
+    def test_exact_retry_survives_cleanup_restart_and_processing(self) -> None:
+        action, path = self._structured_specialist_action()
+        payload = {"summary": "done", "coverage": ["tests"], "findings": []}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        first = self.controller._accept_finish_request(
+            "structured-specialist", "report", self._structured_options(path, payload)
+        )
+        self.assertFalse(first["reused"])
+        missing = {"input_path": str(path), "input_missing": True}
+        repeated = self.controller._accept_finish_request(
+            "structured-specialist", "report", missing
+        )
+        self.assertTrue(repeated["reused"])
+        self.controller.store.execute(
+            "UPDATE actions SET state = 'processed' WHERE id = ?", (action["id"],)
+        )
+        self._restart_controller()
+        processed = self.controller._accept_finish_request(
+            "structured-specialist", "report", missing
+        )
+        self.assertTrue(processed["reused"])
+        different = {
+            "summary": "different",
+            "coverage": ["tests"],
+            "findings": [],
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(different), encoding="utf-8")
+        with self.assertRaisesRegex(StoreError, "differs from accepted"):
+            self.controller._accept_finish_request(
+                "structured-specialist",
+                "report",
+                self._structured_options(path, different),
+            )
+        self.assertTrue(path.exists())
+
+    def test_old_action_path_is_rejected_when_a_new_action_is_current(self) -> None:
+        action, path = self._structured_specialist_action()
+        payload = {"summary": "done", "coverage": ["tests"], "findings": []}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self.controller._accept_finish_request(
+            "structured-specialist", "report", self._structured_options(path, payload)
+        )
+        self.controller.store.execute(
+            "UPDATE actions SET state = 'processed' WHERE id = ?", (action["id"],)
+        )
+        task = self.controller.store.row(
+            "SELECT task_id FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.controller.store.execute(
+            """INSERT INTO actions(task_id, kind, payload, state, created_at, updated_at)
+               VALUES (?, 'specialist', '{}', 'active', 'later', 'later')""",
+            (task["task_id"],),
+        )
+        with self.assertRaisesRegex(StoreError, "does not match this action"):
+            self.controller._accept_finish_request(
+                "structured-specialist",
+                "report",
+                {"input_path": str(path), "input_missing": True},
+            )
+
+    def test_handoff_paths_survive_restart_but_new_state_does_not_collide(self) -> None:
+        action, path = self._structured_specialist_action()
+        concurrent = Path(
+            self.controller._handoff_destinations(
+                {"id": int(action["id"]) + 1, "kind": "specialist"}
+            )["report"]
+        )
+        self.assertNotEqual(path, concurrent)
+        identity = self.controller.store.state_identity()
+        self._restart_controller()
+        retained = self.controller.store.row(
+            "SELECT * FROM actions WHERE id = ?", (action["id"],)
+        )
+        self.assertEqual(
+            Path(self.controller._handoff_destinations(retained)["report"]), path
+        )
+        self.assertEqual(self.controller.store.state_identity(), identity)
+
+        other_root = Path(self.temporary.name) / "other-state"
+        with Store(other_root / "fulcrum.sqlite3") as replacement:
+            other = self.paths.handoff_path(
+                replacement.state_identity(), int(action["id"]), "report.json"
+            )
+        self.assertNotEqual(path, other)
+
+    def test_repository_sentinels_are_never_handoff_targets(self) -> None:
+        roots = [Path(self.config.projects[0].repo_path), self.worktree]
+        for root in roots:
+            (root / "decisions.json").write_text("user decisions", encoding="utf-8")
+            (root / "reactivation.json").write_text(
+                "user reactivation", encoding="utf-8"
+            )
+        _action, path = self._structured_specialist_action()
+        for root in roots:
+            self.assertFalse(path.is_relative_to(root))
+            self.assertEqual(
+                (root / "decisions.json").read_text(encoding="utf-8"),
+                "user decisions",
+            )
+            self.assertEqual(
+                (root / "reactivation.json").read_text(encoding="utf-8"),
+                "user reactivation",
+            )
+            self.assertFalse((root / "handoffs").exists())
+
     def _attach_current_assignment_to_weaver_lineage(self) -> dict[str, Any]:
         weaver = self.controller.store.register_task(
             native_thread_id="bound-worker-weaver",
@@ -1103,20 +1436,19 @@ print(json.dumps({
             )["state"],
             "retained",
         )
-        deferral_file = Path(self.temporary.name) / "recovery-deferral.json"
-        deferral_file.write_text(
-            json.dumps({"next_check_at": "2020-01-01T00:00:00Z"}),
-            encoding="utf-8",
+        deferral_file = Path(
+            self.controller._handoff_destinations(recovery_action)["deferred"]
         )
+        deferral_payload = {"next_check_at": "2020-01-01T00:00:00Z"}
+        deferral_file.write_text(json.dumps(deferral_payload), encoding="utf-8")
+        deferral_options = self._structured_options(deferral_file, deferral_payload)
+        deferral_options["reason"] = "collect exact external evidence"
         await self.controller.handle_request(
             {
                 "command": "finish",
                 "thread_id": "archon-recovery",
                 "outcome": "deferred",
-                "options": {
-                    "reason": "collect exact external evidence",
-                    "input": json.loads(deferral_file.read_text()),
-                },
+                "options": deferral_options,
             }
         )
         self.controller.store.execute(
@@ -1191,29 +1523,27 @@ print(json.dumps({
             )
         ]
         self.assertEqual(handled, [recovery_update["id"]])
-        decision_file = Path(self.temporary.name) / "recovery-decision.json"
-        decision_file.write_text(
-            json.dumps(
-                {
-                    "decisions": [
-                        {
-                            "decision": "resolve_operation",
-                            "operation_id": operation_id,
-                            "resolution": "confirmed_unsent",
-                            "evidence": "exact Git inventory contains no matching worktree",
-                        }
-                    ],
-                    "handled_update_ids": handled,
-                }
-            ),
-            encoding="utf-8",
+        decision_file = Path(
+            self.controller._handoff_destinations(recovery_action)["decisions"]
         )
+        decision_payload = {
+            "decisions": [
+                {
+                    "decision": "resolve_operation",
+                    "operation_id": operation_id,
+                    "resolution": "confirmed_unsent",
+                    "evidence": "exact Git inventory contains no matching worktree",
+                }
+            ],
+            "handled_update_ids": handled,
+        }
+        decision_file.write_text(json.dumps(decision_payload), encoding="utf-8")
         await self.controller.handle_request(
             {
                 "command": "finish",
                 "thread_id": "archon-recovery",
                 "outcome": "decisions",
-                "options": {"input": json.loads(decision_file.read_text())},
+                "options": self._structured_options(decision_file, decision_payload),
             }
         )
         self.controller.store.execute(
@@ -4035,6 +4365,80 @@ print(json.dumps({
         self.assertIn("$3.13", events[0]["message"])
         self.assertEqual(events[0]["detail_json"].count("automatic"), 1)
 
+    async def test_judgment_completion_dispatches_both_paths_in_action_and_context(
+        self,
+    ) -> None:
+        archon = self.controller.store.register_task(
+            native_thread_id="archon-judgment-completion",
+            role="archon",
+            description="Fleet",
+            model="sol",
+            reasoning_effort="high",
+            project_id="p",
+            state="idle",
+        )
+        self.controller._queue_archon_update(
+            "completion:required-decision",
+            {
+                "kind": "assignment_completed",
+                "assignment_id": self.assignment["id"],
+                "bead_id": "p-1",
+                "run_id": self.assignment["run_id"],
+                "required_decision": "Choose the recovery route",
+            },
+        )
+        self.controller._queue_archon_update(
+            "completion:requires-decision",
+            {
+                "kind": "specialist_completed",
+                "specialist": "sage",
+                "occurrence_id": "judgment",
+                "summary": "Human judgment remains",
+                "finding_count": 1,
+                "requires_decision": True,
+            },
+        )
+        with (
+            patch.object(
+                self.controller,
+                "_refresh_task",
+                new=AsyncMock(
+                    return_value={
+                        "can_start": True,
+                        "last_turn_id": None,
+                        "runtime_status": "idle",
+                    }
+                ),
+            ),
+            patch.object(
+                self.controller.runtime,
+                "start_turn",
+                new=AsyncMock(return_value="archon-judgment-turn"),
+            ) as start,
+        ):
+            await self.controller._deliver_update_batch()
+
+        action = self.controller.store.row(
+            "SELECT * FROM actions WHERE task_id = ? AND kind = 'archon'",
+            (archon["id"],),
+        )
+        assert action is not None
+        paths = self.controller._handoff_destinations(action)
+        initial = start.call_args.args[1]
+        self.assertIn("finish with decisions or deferred", initial)
+        self.assertEqual(initial.count(paths["decisions"]), 2)
+        self.assertEqual(initial.count(paths["deferred"]), 2)
+
+        reminder = self.controller._build_action_message(
+            {**action, "reminder_sent": 1}, archon, None
+        )
+        context = await self.controller.handle_request(
+            {"command": "context", "thread_id": archon["native_thread_id"]}
+        )
+        for rendered in (reminder, context["context"]):
+            self.assertEqual(rendered.count(paths["decisions"]), 2)
+            self.assertEqual(rendered.count(paths["deferred"]), 2)
+
     async def test_archon_batch_and_prompt_size_are_bounded(self) -> None:
         archon = self.controller.store.register_task(
             native_thread_id="archon-bounded-batch",
@@ -4917,29 +5321,27 @@ print(json.dumps({
             "batched",
         )
 
-        decision_path = Path(self.temporary.name) / "review-decision.json"
-        decision_path.write_text(
-            json.dumps(
-                {
-                    "decisions": [
-                        {
-                            "decision": "resolve_escalation",
-                            "assignment_id": self.assignment["id"],
-                            "resolution": "cancel",
-                            "reason": "Repeated substantive failures make the work unsuitable.",
-                        }
-                    ],
-                    "handled_update_ids": [escalation["id"]],
-                }
-            ),
-            encoding="utf-8",
+        decision_path = Path(
+            self.controller._handoff_destinations(frozen_action)["decisions"]
         )
+        decision_payload = {
+            "decisions": [
+                {
+                    "decision": "resolve_escalation",
+                    "assignment_id": self.assignment["id"],
+                    "resolution": "cancel",
+                    "reason": "Repeated substantive failures make the work unsuitable.",
+                }
+            ],
+            "handled_update_ids": [escalation["id"]],
+        }
+        decision_path.write_text(json.dumps(decision_payload), encoding="utf-8")
         await self.controller.handle_request(
             {
                 "command": "finish",
                 "thread_id": "archon-review-escalation",
                 "outcome": "decisions",
-                "options": {"input": json.loads(decision_path.read_text())},
+                "options": self._structured_options(decision_path, decision_payload),
             }
         )
         self.controller.store.execute(

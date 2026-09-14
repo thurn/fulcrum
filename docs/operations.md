@@ -34,6 +34,21 @@ current-action fact. The command is read-only, derives identity solely from the
 calling Codex task, and accepts no selector for another task or an older action.
 Routine action messages remain self-contained; this is an optional recovery path.
 
+Transient structured finish inputs live under `control/handoffs`, partitioned by
+the SQLite state generation and action. Invalid, malformed, stale, or otherwise
+rejected files are retained for diagnosis. After durable acceptance, the
+controller atomically moves the expected name into a fresh private quarantine,
+verifies the moved regular file's accepted identity through a no-follow
+descriptor, removes only that entry, and then attempts to remove its empty action
+directories; it never sweeps the handoff tree. A swapped entry remains in its
+quarantine. If cleanup fails, the accepted outcome and cleanup result remain
+committed and the response and event log contain a bounded diagnostic. The parsed
+outcome remains durable in SQLite after successful file cleanup, including for
+lost-response retries.
+Authored `--evidence` documents and `fulcrum intake --input` sources keep their
+existing caller-owned durability and are not moved into or removed through this
+handoff lifecycle.
+
 Fleet replacement is explicit:
 
 - `reboot --soft` drains active managed turns before replacing conversations.

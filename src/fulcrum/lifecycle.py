@@ -130,6 +130,8 @@ def accept_finish(
     native_thread_id: str,
     outcome_kind: str,
     options: dict[str, Any],
+    input_path: str | None = None,
+    input_identity: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Bind a finish to the caller's current action; exact retries are idempotent."""
 
@@ -152,6 +154,7 @@ def accept_finish(
         if (
             action["outcome_kind"] == outcome_kind
             and action["outcome_payload"] == encoded
+            and (input_path is None or action.get("outcome_input_path") == input_path)
         ):
             return {
                 "ok": True,
@@ -175,8 +178,21 @@ def accept_finish(
             raise StoreError("only one interview round is allowed")
     timestamp = utc_now()
     store.execute(
-        "UPDATE actions SET outcome_kind = ?, outcome_payload = ?, updated_at = ? WHERE id = ?",
-        (outcome_kind, encoded, timestamp, action["id"]),
+        """UPDATE actions SET outcome_kind = ?, outcome_payload = ?,
+                   outcome_input_path = ?, outcome_input_identity = ?, updated_at = ?
+           WHERE id = ?""",
+        (
+            outcome_kind,
+            encoded,
+            input_path,
+            (
+                json.dumps(input_identity, sort_keys=True, separators=(",", ":"))
+                if input_identity is not None
+                else None
+            ),
+            timestamp,
+            action["id"],
+        ),
     )
     store.event(
         "outcome_accepted",

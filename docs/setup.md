@@ -47,6 +47,12 @@ project and Tollgate identities, Git/Beads connectivity, linked assets, SQLite,
 and initial Archon policies. It prints `setup incomplete` with the exact remaining
 condition and exits nonzero until all required checks pass.
 
+Structured `fulcrum finish --input` files use exact action-scoped destinations
+under the configured control root. The destination follows `FULCRUM_CONFIG`
+adjacency or `FULCRUM_CONTROL_ROOT`; it is never derived from a repository or
+worktree. Author the complete JSON in a sibling temporary file and atomically
+rename it to the destination supplied in the current action.
+
 For service diagnostics, run `fulcrum doctor --json`, inspect the installed and
 loaded controller definitions, and read its error log:
 

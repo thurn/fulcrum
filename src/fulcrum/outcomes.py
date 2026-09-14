@@ -27,6 +27,17 @@ ALLOWED: dict[str, set[str]] = {
     "interview": {"interview_answer", "blocked"},
 }
 
+STRUCTURED_OUTCOME_FILENAMES: dict[str, str] = {
+    "approved": "approval.json",
+    "changes_requested": "findings.json",
+    "incomplete": "missing.json",
+    "decisions": "decisions.json",
+    "deferred": "reactivation.json",
+    "report": "report.json",
+    "evidence_needed": "requests.json",
+    "interview_answer": "answer.json",
+}
+
 ARCHON_DECISIONS = {
     "approve",
     "hold",
@@ -452,8 +463,19 @@ def finish_contract(action_kind: str, *, interviews_allowed: bool = True) -> str
     return "\n\n".join(lines)
 
 
-def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
+def finish_syntax(
+    action_kind: str,
+    *,
+    interviews_allowed: bool = True,
+    input_paths: dict[str, str] | None = None,
+) -> str:
     """Complete commands, one per outcome, with explicit selection guidance."""
+    supplied: dict[str, str] = input_paths or {}
+
+    def input_argument(outcome: str) -> str:
+        path = supplied.get(outcome)
+        return f'--input "{path}"' if path else "--input CONTROLLER_SUPPLIED_PATH"
+
     commands = {
         "ready_for_review": (
             '--evidence "/absolute/evidence.md"',
@@ -472,15 +494,15 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
             "Repair clearly fits a retained explicit permission and has been validated.",
         ),
         "approved": (
-            '--input "/absolute/approval.json"',
+            input_argument("approved"),
             "The exact candidate is ready for promotion; minor fixes are nonblocking follow-up requests.",
         ),
         "changes_requested": (
-            '--input "/absolute/findings.json"',
+            input_argument("changes_requested"),
             "Source has concrete blocking defects.",
         ),
         "incomplete": (
-            '--input "/absolute/missing.json"',
+            input_argument("incomplete"),
             "Specific evidence is missing; no substantive defect is established.",
         ),
         "exception": (
@@ -488,11 +510,11 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
             "A review exception needs adjudication.",
         ),
         "decisions": (
-            '--input "/absolute/decisions.json"',
+            input_argument("decisions"),
             "Submit supported scheduling decisions and acknowledge the frozen update IDs.",
         ),
         "deferred": (
-            '--reason "Why this batch must wait" --input "/absolute/reactivation.json"',
+            '--reason "Why this batch must wait" ' + input_argument("deferred"),
             "Defer the batch until a concrete trigger.",
         ),
         "intake_complete": (
@@ -504,15 +526,15 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
             "An approved plan has been saved with explicit future activation.",
         ),
         "report": (
-            '--input "/absolute/report.json"',
+            input_argument("report"),
             "Analysis is complete, including an explicit findings list.",
         ),
         "evidence_needed": (
-            '--input "/absolute/requests.json"',
+            input_argument("evidence_needed"),
             "Sage requests its single interview round, then ends this action.",
         ),
         "interview_answer": (
-            '--input "/absolute/answer.json"',
+            input_argument("interview_answer"),
             "Answer the current debrief question once.",
         ),
     }
@@ -554,11 +576,11 @@ def finish_syntax(action_kind: str, *, interviews_allowed: bool = True) -> str:
             [
                 "# Finish\n\nRun exactly one:",
                 "Ready for promotion, with any nonblocking minor fixes recorded:\n"
-                '`fulcrum finish approved --input "/absolute/approval.json"`',
+                f'`fulcrum finish approved {input_argument("approved")}`',
                 "Blocking source defects require correction before promotion:\n"
-                '`fulcrum finish changes_requested --input "/absolute/findings.json"`',
+                f'`fulcrum finish changes_requested {input_argument("changes_requested")}`',
                 "No defect established because specific evidence is missing:\n"
-                '`fulcrum finish incomplete --input "/absolute/missing.json"`',
+                f'`fulcrum finish incomplete {input_argument("incomplete")}`',
                 "Review authority or scope needs adjudication:\n"
                 '`fulcrum finish exception --reason "Review boundary and decision needed"`',
                 "Use approval only when the submitted candidate may be promoted unchanged. "
