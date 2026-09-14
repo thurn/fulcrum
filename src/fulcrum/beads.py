@@ -48,6 +48,7 @@ class IntakeTask:
     model_provenance: str = "default"
     plan_id: str | None = None
     plan_commit: str | None = None
+    report_provenance: dict[str, Any] | None = None
 
     def validate(self) -> None:
         for name, value in (
@@ -130,7 +131,7 @@ class Beads:
 
     def create(self, task: IntakeTask) -> str:
         task.validate()
-        metadata = {
+        metadata: dict[str, Any] = {
             "fulcrum": {
                 "intake_key": task.intake_key,
                 "activation": task.activation,
@@ -145,6 +146,12 @@ class Beads:
             }
         }
         labels = [f"project:{task.project}", f"activation:{task.activation}"]
+        if task.report_provenance is not None:
+            metadata["fulcrum"]["report"] = {
+                "kind": "follow-up",
+                "provenance": task.report_provenance,
+            }
+            labels.append("origin:fulcrum-report")
         arguments = [
             "create",
             "--title",

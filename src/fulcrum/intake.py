@@ -298,6 +298,108 @@ def task_from_payload(
     )
 
 
+REPORT_FIELDS: frozenset[str] = frozenset(
+    {
+        "report_key",
+        "project",
+        "title",
+        "problem",
+        "observed_evidence",
+        "required_change",
+        "acceptance_checks",
+        "dependencies",
+        "context",
+    }
+)
+
+
+def report_task_from_payload(
+    payload: dict[str, Any],
+    *,
+    project: str,
+    provenance: dict[str, Any],
+) -> IntakeTask:
+    """Validate and translate one implementation-ready follow-up report."""
+
+    unexpected = sorted(set(payload) - REPORT_FIELDS)
+    if unexpected:
+        raise StoreError("unexpected report fields: " + ", ".join(unexpected))
+    required_strings = (
+        "report_key",
+        "title",
+        "problem",
+        "observed_evidence",
+        "required_change",
+    )
+    missing = [
+        name
+        for name in required_strings
+        if not isinstance(payload.get(name), str) or not payload[name].strip()
+    ]
+    if missing:
+        raise StoreError("missing required report fields: " + ", ".join(missing))
+
+    def string_list(name: str, *, required: bool = False) -> tuple[str, ...]:
+        raw = payload.get(name, [])
+        if not isinstance(raw, list) or any(
+            not isinstance(item, str) or not item.strip() for item in raw
+        ):
+            raise StoreError(f"report field {name} must be a list of nonempty strings")
+        if required and not raw:
+            raise StoreError(f"report field {name} must not be empty")
+        return tuple(item.strip() for item in raw)
+
+    checks = string_list("acceptance_checks", required=True)
+    dependencies = string_list("dependencies")
+    context = string_list("context")
+    description = "\n".join(
+        (
+            f"Problem: {payload['problem'].strip()}",
+            f"Observed evidence: {payload['observed_evidence'].strip()}",
+            f"Required change: {payload['required_change'].strip()}",
+            "Acceptance checks:\n" + "\n".join(f"- {item}" for item in checks),
+            *(
+                ("Context:\n" + "\n".join(f"- {item}" for item in context),)
+                if context
+                else ()
+            ),
+        )
+    )
+    return IntakeTask(
+        intake_key=f"report:{payload['report_key'].strip()}",
+        project=project,
+        title=payload["title"].strip(),
+        description=description,
+        activation="pending",
+        dependencies=dependencies,
+        context=context,
+        report_provenance=provenance,
+    )
+
+
+def file_report(
+    store: Store,
+    beads: Beads,
+    task: IntakeTask,
+) -> dict[str, Any]:
+    """Publish one report, accepting only byte-equivalent normalized retries."""
+
+    existing = store.row("SELECT 1 FROM beads WHERE intake_key = ?", (task.intake_key,))
+    if existing is not None:
+        operation = store.row(
+            """SELECT input_json FROM external_operations
+               WHERE kind = 'beads_create' AND target = ? ORDER BY id LIMIT 1""",
+            (task.intake_key,),
+        )
+        retained = json.loads(operation["input_json"]) if operation else None
+        if isinstance(retained, dict):
+            retained.pop("weaver_task_id", None)
+        current = json.loads(json.dumps(task.__dict__))
+        if retained != current:
+            raise StoreError("report identity already exists with different content")
+    return file_task(store, beads, task)
+
+
 def file_graph(
     store: Store,
     beads: Beads,

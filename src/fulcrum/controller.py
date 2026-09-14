@@ -31,8 +31,10 @@ from fulcrum.config import (
 )
 from fulcrum.intake import (
     file_graph,
+    file_report,
     file_task,
     reconcile_beads_creation,
+    report_task_from_payload,
     task_from_payload,
 )
 from fulcrum.install import (
@@ -4932,6 +4934,41 @@ class Controller:
                 request.get("thread_id"), list(result.get("bead_ids", []))
             )
             return result
+        if command == "report":
+            payload = request.get("report")
+            if not isinstance(payload, dict):
+                raise StoreError("report requires an object")
+            provenance = self._report_provenance(request.get("thread_id"))
+            raw_project = payload.get("project")
+            if raw_project is not None and (
+                not isinstance(raw_project, str) or not raw_project.strip()
+            ):
+                raise StoreError("report project must be a nonempty string")
+            project = (
+                raw_project.strip()
+                if isinstance(raw_project, str)
+                else self._infer_project(
+                    request.get("thread_id"),
+                    guidance="include project in the report input",
+                )
+            )
+            if (
+                self.store.row(
+                    "SELECT 1 FROM projects WHERE project_id = ? AND enabled = 1",
+                    (project,),
+                )
+                is None
+            ):
+                raise StoreError(f"unknown or disabled report project {project!r}")
+            result = await asyncio.to_thread(
+                file_report,
+                self.store,
+                self.beads,
+                report_task_from_payload(
+                    payload, project=project, provenance=provenance
+                ),
+            )
+            return result
         if command == "weaver_register":
             return await self._register_weaver(request)
         if command == "operative_register":
@@ -5024,6 +5061,52 @@ class Controller:
             )
         return authorized
 
+    def _report_provenance(self, thread_id: object) -> dict[str, Any]:
+        """Permit unmanaged reports and post-finish managed session reports."""
+
+        if not isinstance(thread_id, str):
+            return {"source": "unregistered-codex-task"}
+        task = self.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        )
+        if task is None:
+            return {
+                "source": "unregistered-codex-task",
+                "source_thread_id": thread_id,
+            }
+        action = self.store.row(
+            "SELECT * FROM actions WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (task["id"],),
+        )
+        if action is None or action["outcome_kind"] is None:
+            raise StoreError(
+                "managed-session follow-up reports are allowed only after this "
+                "action has an accepted `fulcrum finish` outcome; finish the "
+                "assigned work first, then retry the unchanged report"
+            )
+        provenance: dict[str, Any] = {
+            "source": "managed-fulcrum-session",
+            "source_thread_id": thread_id,
+            "source_task_id": int(task["id"]),
+            "source_role": str(task["role"]),
+            "source_action_id": int(action["id"]),
+            "source_outcome": str(action["outcome_kind"]),
+        }
+        if action["assignment_id"] is not None:
+            assignment = self.store.row(
+                "SELECT id, run_id, bead_id FROM assignments WHERE id = ?",
+                (action["assignment_id"],),
+            )
+            if assignment is not None:
+                provenance.update(
+                    {
+                        "source_assignment_id": int(assignment["id"]),
+                        "source_run_id": int(assignment["run_id"]),
+                        "source_bead_id": str(assignment["bead_id"]),
+                    }
+                )
+        return provenance
+
     def _link_weaver_intake_workflow(
         self, thread_id: object, bead_ids: list[str]
     ) -> None:
@@ -5047,7 +5130,9 @@ class Controller:
         for bead_id in bead_ids:
             self.store.link_bead_to_workflow(workflow_id, bead_id)
 
-    def _infer_project(self, thread_id: object) -> str:
+    def _infer_project(
+        self, thread_id: object, *, guidance: str = "pass --project"
+    ) -> str:
         if isinstance(thread_id, str):
             task = self.store.row(
                 "SELECT project_id FROM tasks WHERE native_thread_id = ?", (thread_id,)
@@ -5057,7 +5142,7 @@ class Controller:
         projects = self.store.rows("SELECT project_id FROM projects WHERE enabled = 1")
         if len(projects) == 1:
             return str(projects[0]["project_id"])
-        raise StoreError("project is ambiguous; pass --project")
+        raise StoreError(f"project is ambiguous; {guidance}")
 
     async def _register_weaver(self, request: dict[str, Any]) -> dict[str, Any]:
         thread_id = _thread_identity(request)

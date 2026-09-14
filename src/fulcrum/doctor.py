@@ -76,6 +76,24 @@ def _json_command(command: list[str]) -> tuple[Any, str | None]:
         return None, "command returned invalid JSON"
 
 
+def human_skill_link_checks(
+    source_root: Path, *, codex_root: Path | None = None
+) -> list[dict[str, Any]]:
+    """Describe whether each human skill is a checkout-backed symlink."""
+
+    root = codex_root or Path.home() / ".codex" / "skills"
+    source = source_root.resolve(strict=False)
+    return [
+        {
+            "name": f"skill:{name}",
+            "ok": (root / name).is_symlink()
+            and (root / name).resolve(strict=False).is_relative_to(source),
+            "detail": str(root / name),
+        }
+        for name in HUMAN_SKILLS
+    ]
+
+
 def doctor(paths: RuntimePaths) -> dict[str, Any]:
     config = load_installation(paths.config_file)
     checks: list[dict[str, Any]] = []
@@ -145,14 +163,8 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
         except Exception as error:
             check(f"prompt:{role}", False, str(error))
     codex_root = Path.home() / ".codex" / "skills"
-    for name in HUMAN_SKILLS:
-        target = codex_root / name
-        check(
-            f"skill:{name}",
-            target.is_symlink()
-            and target.resolve(strict=False).is_relative_to(Path(config.source_root)),
-            str(target),
-        )
+    for skill_check in human_skill_link_checks(Path(config.source_root)):
+        check(skill_check["name"], skill_check["ok"], skill_check["detail"])
     for name in REMOVED_SKILLS:
         target = codex_root / name
         check(

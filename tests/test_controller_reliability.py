@@ -1507,6 +1507,121 @@ print(json.dumps({
         )
         self.controller._require_registered_weaver("registered-weaver")
 
+    async def test_unregistered_task_files_one_report_with_metadata_and_retries(
+        self,
+    ) -> None:
+        beads = FakeBeads()
+        self.controller.beads = beads  # type: ignore[assignment]
+        report = {
+            "report_key": "ordinary-one",
+            "title": "Repair a small defect",
+            "problem": "The helper rejects an empty value",
+            "observed_evidence": "The focused test exits with status 1",
+            "required_change": "Accept the documented empty value",
+            "acceptance_checks": ["The focused empty-value test passes"],
+            "dependencies": ["p-1"],
+            "context": ["Found while validating unrelated work"],
+        }
+
+        first = await self.controller.handle_request(
+            {"command": "report", "thread_id": "ordinary", "report": report}
+        )
+        repeated = await self.controller.handle_request(
+            {"command": "report", "thread_id": "ordinary", "report": report}
+        )
+
+        self.assertEqual(first["bead_id"], "p-child-1")
+        self.assertEqual(first["publication_state"], "complete")
+        self.assertFalse(first["reused"])
+        self.assertTrue(repeated["reused"])
+        self.assertEqual(len(beads.created), 1)
+        task = beads.created[0]
+        self.assertEqual(task.intake_key, "report:ordinary-one")
+        self.assertEqual(task.project, "p")
+        self.assertEqual(task.dependencies, ("p-1",))
+        self.assertIn("Observed evidence:", task.description)
+        self.assertEqual(
+            task.report_provenance,
+            {
+                "source": "unregistered-codex-task",
+                "source_thread_id": "ordinary",
+            },
+        )
+
+        changed = {**report, "required_change": "A different fix"}
+        with self.assertRaisesRegex(StoreError, "different content"):
+            await self.controller.handle_request(
+                {"command": "report", "thread_id": "ordinary", "report": changed}
+            )
+
+        separate = {**report, "report_key": "ordinary-two"}
+        second = await self.controller.handle_request(
+            {"command": "report", "thread_id": "ordinary", "report": separate}
+        )
+        self.assertEqual(second["bead_id"], "p-child-2")
+        self.assertEqual(len(beads.created), 2)
+
+    async def test_managed_report_requires_finish_and_retains_source_provenance(
+        self,
+    ) -> None:
+        beads = FakeBeads()
+        self.controller.beads = beads  # type: ignore[assignment]
+        action = self.controller.store.execute(
+            """INSERT INTO actions(
+                   task_id, assignment_id, kind, payload, state, created_at, updated_at
+               ) VALUES (?, ?, 'implement', '{}', 'active', 'now', 'now')""",
+            (self.executor["id"], self.assignment["id"]),
+        )
+        report = {
+            "report_key": "managed-one",
+            "title": "Repair adjacent tooling",
+            "problem": "The adjacent tool fails",
+            "observed_evidence": "A diagnostic command returned status 2",
+            "required_change": "Handle the observed condition",
+            "acceptance_checks": ["The diagnostic command passes"],
+        }
+
+        with self.assertRaisesRegex(StoreError, "finish the assigned work first"):
+            await self.controller.handle_request(
+                {"command": "report", "thread_id": "executor", "report": report}
+            )
+        self.assertEqual(beads.created, [])
+
+        accepted = accept_finish(
+            self.controller.store,
+            native_thread_id="executor",
+            outcome_kind="ready_for_review",
+            options={"evidence": "/tmp/evidence"},
+        )
+        result = await self.controller.handle_request(
+            {"command": "report", "thread_id": "executor", "report": report}
+        )
+
+        self.assertEqual(result["publication_state"], "complete")
+        self.assertEqual(
+            beads.created[0].report_provenance,
+            {
+                "source": "managed-fulcrum-session",
+                "source_thread_id": "executor",
+                "source_task_id": self.executor["id"],
+                "source_role": "executor",
+                "source_action_id": action.lastrowid,
+                "source_outcome": "ready_for_review",
+                "source_assignment_id": self.assignment["id"],
+                "source_run_id": self.assignment["run_id"],
+                "source_bead_id": "p-1",
+            },
+        )
+        retained = self.controller.store.row(
+            "SELECT outcome_kind, outcome_payload, state FROM actions WHERE id = ?",
+            (action.lastrowid,),
+        )
+        self.assertEqual(retained["outcome_kind"], accepted["outcome"])
+        self.assertEqual(retained["state"], "active")
+        self.assertEqual(
+            json.loads(retained["outcome_payload"]), {"evidence": "/tmp/evidence"}
+        )
+
     def test_reexec_adopts_inherited_lock_without_permitting_a_contender(self) -> None:
         inherited = os.dup(self.controller.lock_handle.fileno())
         os.set_inheritable(inherited, True)

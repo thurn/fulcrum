@@ -23,7 +23,12 @@ class InstallationError(RuntimeError):
     pass
 
 
-HUMAN_SKILLS = ("fulcrum-setup", "fulcrum-weaver", "fulcrum-archon")
+HUMAN_SKILLS = (
+    "fulcrum-setup",
+    "fulcrum-weaver",
+    "fulcrum-bead",
+    "fulcrum-archon",
+)
 REMOVED_SKILLS = (
     "fulcrum-executor",
     "fulcrum-overseer",

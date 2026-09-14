@@ -19,6 +19,56 @@ from fulcrum.operative import read_journal
 from fulcrum.setup import require_setup_unfenced, run_setup
 from fulcrum.store import Store
 
+FINISH_REPORT_HINT = (
+    "If you encountered pre-existing issues or tooling errors this session, invoke "
+    "fulcrum report --help for filing instructions."
+)
+
+REPORT_DESCRIPTION = """File exactly one small, understood, implementation-ready follow-up Bead.
+
+Use this for an incidental discovery from the current session: a pre-existing
+defect, tooling failure, workflow friction, or another concrete problem outside
+the assigned work. Do not use it to expand or replace the assigned work. File
+independent problems with separate report invocations. If the work needs
+substantial planning, multiple dependent tasks, or material clarification, use
+$weaver instead. The installed $bead skill is the guided convenience path."""
+
+REPORT_EPILOG = """Accepted stdin JSON schema (no other fields are accepted):
+{
+  "report_key": "new stable UUID for this one report and its exact retries",
+  "project": "required only when Fulcrum cannot infer one project",
+  "title": "concise implementation title",
+  "problem": "the bounded problem",
+  "observed_evidence": "specific repository or command evidence",
+  "required_change": "the bounded change required",
+  "acceptance_checks": ["observable validation check"],
+  "dependencies": ["relevant existing Bead ID"],
+  "context": ["other concise implementation context"]
+}
+
+Complete example:
+  fulcrum report --input - <<'JSON'
+  {
+    "report_key": "7d42dd03-c8e6-4dd2-a4d7-642bbc349a37",
+    "project": "fulcrum",
+    "title": "Handle missing formatter binary",
+    "problem": "scripts/check crashes when black is unavailable",
+    "observed_evidence": "Running scripts/check exited 127 at the black command",
+    "required_change": "Detect the missing tool and print the setup command",
+    "acceptance_checks": [
+      "A missing black executable produces an actionable nonzero diagnostic",
+      "The normal scripts/check path still passes"
+    ],
+    "dependencies": [],
+    "context": ["Discovered while validating unrelated assigned work"]
+  }
+  JSON
+
+Reuse the same report_key and exact payload only when retrying the same
+invocation. A separately discovered problem needs a new report_key and a separate
+invocation. Fulcrum publishes through its controller-owned durable Beads path and
+returns the actual Bead ID and publication state."""
+
 
 def _nonempty_description(value: str) -> str:
     description = value.strip()
@@ -173,6 +223,19 @@ def build_parser() -> argparse.ArgumentParser:
     for role in ("executor", "overseer"):
         intake.add_argument(f"--{role}-model")
         intake.add_argument(f"--{role}-reasoning-effort")
+    report = commands.add_parser(
+        "report",
+        help="file one small implementation-ready follow-up",
+        description=REPORT_DESCRIPTION,
+        epilog=REPORT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    report.add_argument(
+        "--input",
+        choices=("-",),
+        help="read the report JSON object from stdin",
+    )
+    report.set_defaults(_report_parser=report)
     finish = commands.add_parser("finish", help="submit the bound action's result")
     finish_sub = finish.add_subparsers(dest="outcome", required=True)
     for name in ("ready_for_review", "checkpointed", "future_plan"):
@@ -275,9 +338,19 @@ def _finish_options(args: argparse.Namespace) -> dict[str, Any]:
     return options
 
 
+def _report_payload(args: argparse.Namespace) -> dict[str, Any]:
+    value = json.load(sys.stdin)
+    if not isinstance(value, dict):
+        raise ValueError("report input must contain a JSON object")
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "report" and args.input is None:
+        print(args._report_parser.format_help(), end="")
+        return 0
     paths = resolve_paths(
         brain_override=args.brain_root, state_override=args.state_root
     )
@@ -455,6 +528,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "intake_key": args.intake_key,
                     },
                 )
+        elif args.command == "report":
+            result = _request(
+                paths,
+                {"command": "report", "report": _report_payload(args)},
+            )
         elif args.command == "finish":
             options = _finish_options(args)
             result = _request(
@@ -482,6 +560,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("unsupported command")
             return 2
         print(json.dumps(result, indent=2, sort_keys=True))
+        if args.command == "finish" and result.get("ok") is True:
+            print(FINISH_REPORT_HINT)
         if args.command == "reboot" and result.get("complete") is True:
             return 0
         return 0 if result.get("ready", result.get("ok", True)) else 2

@@ -208,6 +208,22 @@ Weaver agent runs `intake` and finishes its authoring action for you. The human
 creates and registers Weaver; Fulcrum creates and manages all Executor and
 Overseer tasks after Archon approval.
 
+### Report an incidental follow-up
+
+Use the installed `$bead` skill for one small, understood, implementation-ready
+problem discovered incidentally during a session, such as a pre-existing defect,
+tooling failure, or workflow friction. It gathers concise evidence and submits one
+JSON object through `fulcrum report --input -`. Run `fulcrum report --help` for the
+complete schema and stdin example. File independent problems separately; use
+`$weaver` when the work needs substantial planning, dependent tasks, or material
+clarification.
+
+`fulcrum intake` remains Weaver's interface for authoring a requested task or task
+graph. `fulcrum report` is the lightweight follow-up interface and does not
+register, approve, schedule, reopen, or delay managed work. An ordinary
+unregistered Codex task may report directly. A managed Fulcrum task may report a
+session follow-up only after its current action has an accepted finish outcome.
+
 ### Find Archon
 
 ```sh
