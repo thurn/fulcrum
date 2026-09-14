@@ -1,5 +1,15 @@
 # Validation
 
+Emergency-takeover coverage includes atomic private installation, isolated
+imports, absent socket/controller/App Server, broken source syntax, missing and
+corrupt SQLite, idempotent fallback re-entry, steer-before-interrupt ordering,
+nested-helper terminal proof, quarantine preservation, transactional database
+repair, provisional-caller repair rejection, non-idempotent repair crashes after
+intent/during transaction/after commit, dirty Git/worktree observation, and
+process-level fallback closeout finalization after the invoking turn exits. Compound
+drills name every exact task/turn/helper and operation disposition; unavailable
+facts are never inferred.
+
 `scripts/check` creates an isolated environment, installs the pinned dependency
 set and editable package, then runs formatting, type checks, and unit and integration
 tests. Tests use controlled adapters and injected time for state transitions,

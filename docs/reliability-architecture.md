@@ -1,5 +1,12 @@
 # Reliability architecture
 
+The emergency recovery plane is installed atomically under the control root with
+an isolated Python dependency closure. It participates in the same
+`controller.lock` single-writer fence and treats the fsynced Operative journal as
+authoritative when SQLite or the controller is unavailable. Stable operation keys
+make crash re-entry idempotent; sent or uncertain effects are observed or
+explicitly reconciled, never guessed or blindly replayed.
+
 This document turns the findings in the
 [first Python runtime postmortem](postmortems/2026-09-12-python-runtime-first-test.md)
 into runtime invariants. The design assumes SQLite, Codex, Tollgate, Beads, Git,

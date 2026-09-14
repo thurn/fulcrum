@@ -26,7 +26,7 @@ Fulcrum uses a few terms throughout its status output and conversations:
 - The **private brain** is a private Git repository containing plans, shared
   memory, and Beads history. It is separate from Fulcrum's SQLite operational
   state.
-- The **controller** is Fulcrum's local Python process and sole owner of durable
+- The **controller** is Fulcrum's normal local Python writer and owner of durable
   workflow changes. It creates and messages managed Codex tasks, records state,
   dispatches work, retries recoverable operations, publishes results, delivers
   code, and archives finished conversations after they have remained idle for 10
@@ -102,9 +102,11 @@ real fix rather than blindly rerunning the same source.
 ## Who has authority
 
 The human-facing entry points are **Weaver** for submitting work, **Sage** for a
-read-only investigation of one retained work item, and **Archon** for strategic
-coordination. Archon is the only role that approves, prioritizes, or schedules
-pending implementation work. A queued Sage or Inquisitor request separately
+read-only investigation of one retained work item, **Archon** for strategic
+coordination, and the explicitly invoked break-glass **Operative**. In normal
+operation Archon alone approves, prioritizes, or schedules pending implementation
+work. During one unfinished human-authorized Operative takeover, ordinary authority
+and dispatch remain fenced until verified closeout. A queued Sage or Inquisitor request separately
 authorizes one analysis run, but it neither approves the resulting findings for
 implementation nor bypasses normal capacity controls.
 
@@ -116,8 +118,9 @@ implementation nor bypasses normal capacity controls.
 | **Overseer** | Independently decides whether the exact candidate satisfies scope; it owns blocking findings, nonblocking minor fixes, approval, and any narrow repair permission. | The controller reuses the lineage's safely idle Overseer, or creates its next deterministic overflow identity, after Executor finishes and the immutable candidate and evidence are available. | Does not edit source, build in Executor's worktree, contact Executor directly, certify or promote code, or perform delivery. |
 | **Sage** | Reviews **workflow effectiveness**: failures, wasted effort, handoff friction, and evidence-backed process improvements. | A human can invoke `$sage` for one retained work item; the controller also runs queued and recurring reviews. | Does not implement findings, approve them for implementation, set its own cadence, schedule interviews, or publish its own report and issues. |
 | **Inquisitor** | Reviews **project architecture** across the selected codebase and proposes evidence-backed structural improvements. | The controller runs it from an Archon-approved recurring policy, an Archon request, or an explicit one-off human request. | Does not edit product source, authorize implementation or promotion, or publish its own report and issues. |
+| **Operative** | Resolves one exact human-stated emergency across this Fulcrum installation, including agent wind-down, state reconciliation, and evidence-preserving source/service repair. | A human creates an otherwise-unmanaged Codex task and explicitly invokes `$operative`; no controller, policy, timer, or managed agent may create it. | Does not exceed the human scope or platform safety, silently steal an elapsed takeover, infer unavailable evidence, or release the fence before two-phase closeout succeeds. |
 
-The controller, not an agent, owns SQLite state, Beads publication, dispatch,
+Outside an unfinished Operative takeover, the controller, not an agent, owns SQLite state, Beads publication, dispatch,
 handoffs, bounded retries, specialist report publication, code delivery, and
 archival. Tollgate, not Fulcrum's agents, owns candidate CI, certification,
 promotion, integration, configured source synchronization, and worktree cleanup.
@@ -141,6 +144,11 @@ and initializes SQLite. It also creates Archon, waits for Archon's initial
 capacity and recurring policies, and runs readiness checks. Re-running the same
 command repairs or resumes the retained installation rather than creating a
 second fleet.
+
+Setup also atomically installs and smoke-tests a mode-0700 Operative recovery
+launcher with its own private dependency closure under the control root. It does
+not import the checkout, editable package, or checkout `.venv`, so `$operative`
+can recover a broken normal runtime.
 
 Setup installs two separate per-user `launchd` services:
 

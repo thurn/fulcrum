@@ -1,5 +1,11 @@
 # Python control of the live Codex desktop runtime
 
+Operative wind-down is the sole exception to ordinary no-steer delivery. It sends
+`turn/steer` with `threadId` and the exact retained `expectedTurnId`, containing a
+no-follow-up notice, before `turn/interrupt` for those same IDs. Accepted requests
+do not prove termination: `thread/read` must show the parent and every nested
+helper terminal before retirement and archive.
+
 Status: completed experiment on 2026-09-12; all disposable tasks archived.
 
 ## Executive summary

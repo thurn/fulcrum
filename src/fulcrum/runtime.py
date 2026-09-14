@@ -391,6 +391,21 @@ class CodexRuntime:
     async def interrupt(self, thread_id: str, turn_id: str) -> None:
         await self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
 
+    async def steer(
+        self, thread_id: str, turn_id: str, notice: str, *, correlation: str
+    ) -> None:
+        """Append an emergency notice only to the exact still-active turn."""
+
+        await self.request(
+            "turn/steer",
+            {
+                "threadId": thread_id,
+                "expectedTurnId": turn_id,
+                "input": [{"type": "text", "text": notice}],
+                "clientUserMessageId": correlation,
+            },
+        )
+
     async def archive(self, thread_id: str) -> None:
         await self.request("thread/archive", {"threadId": thread_id})
         await self.unsubscribe(thread_id)

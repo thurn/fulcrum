@@ -1,5 +1,15 @@
 # Technical design
 
+## Emergency control plane
+
+The retained recovery deployment contains a private Python environment layout, a
+control-plane snapshot, and its complete runtime wheel payloads. Its 0700 launcher
+uses isolated mode and never adds configured source to `sys.path`. Fallback uses
+the controller lock, writes the versionless journal state machine, and reconciles
+journal to store only after both SQLite and the exact App Server caller are
+observable. Controller startup reads the journal before workers, refresh, or
+dispatch and stays Operative-only while it is unfinished.
+
 The product design is
 [`plans/fulcrum-python-runtime.md`](plans/fulcrum-python-runtime.md). The
 [reliability architecture](reliability-architecture.md) is authoritative for

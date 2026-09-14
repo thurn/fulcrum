@@ -1,5 +1,12 @@
 # Controller contracts
 
+An unfinished `operative.json` is the installation-wide authority and dispatch
+fence; SQLite is its queryable mirror. The only exception to normal role
+separation is a human-created `$operative` bound to the exact current native
+thread. Managed roles cannot self-promote, and a different thread cannot replace
+or steal it. Every bypass retains intent, exact target, before-state, observed
+result or uncertainty, after-state, evidence, and correlation.
+
 Static installation configuration is ordinary JSON without a format or schema
 version. Resettable operational state is SQLite and has no generic record-write
 CLI. Native external IDs remain strings; Fulcrum entities use SQLite integer IDs.

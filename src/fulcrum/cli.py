@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,7 +17,7 @@ from typing import Any
 from fulcrum.config import RuntimePaths, load_installation, resolve_paths
 from fulcrum.controller import run_controller
 from fulcrum.doctor import doctor
-from fulcrum.ipc import request_sync
+from fulcrum.ipc import ControllerUnavailable, request_sync
 from fulcrum.operative import read_journal
 from fulcrum.setup import require_setup_unfenced, run_setup
 from fulcrum.store import Store
@@ -212,23 +213,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operative_sub = operative.add_subparsers(dest="operative_command", required=True)
     operative_register = operative_sub.add_parser("register")
-    operative_register.add_argument(
-        "--description", required=True, type=_nonempty_description
-    )
-    operative_register.add_argument("--model", default="gpt-6-astra")
-    operative_register.add_argument("--effort", default="high")
+    operative_register.add_argument("--input", required=True)
+    operative_sub.add_parser("probe")
     operative_sub.add_parser("status")
     operative_sub.add_parser("dossier")
+    for name in (
+        "wind-down",
+        "reconcile",
+        "worktree",
+        "reinstall",
+        "quarantine",
+        "store-repair",
+    ):
+        control = operative_sub.add_parser(name)
+        control.add_argument("--input", required=True)
+    operative_sub.add_parser("repair-check")
+    operative_sub.add_parser("service-check")
     operative_finish = operative_sub.add_parser("finish")
-    operative_finish.add_argument("--evidence", required=True)
+    operative_finish.add_argument("--input", required=True)
     operative_abort = operative_sub.add_parser("abort")
-    operative_abort.add_argument("--reason", required=True)
-    operative_abort.add_argument("--evidence", required=True)
+    operative_abort.add_argument("--input", required=True)
     operative_recover = operative_sub.add_parser("recover")
-    operative_recover.add_argument("--takeover-id", required=True)
-    operative_recover.add_argument("--evidence", required=True)
-    operative_recover.add_argument("--model", default="gpt-6-astra")
-    operative_recover.add_argument("--effort", default="high")
+    operative_recover.add_argument("--input", required=True)
     intake = commands.add_parser(
         "intake", help="file one task or a complete task graph"
     )
@@ -427,6 +433,60 @@ def _report_payload(args: argparse.Namespace) -> dict[str, Any]:
     return value
 
 
+def _operative_control_input(path_value: str) -> tuple[dict[str, Any], str]:
+    supplied = Path(path_value)
+    if not supplied.is_absolute():
+        raise ValueError("operative --input must be an absolute path")
+    status = supplied.lstat()
+    if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+        raise ValueError("operative --input must be a regular non-symlink file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(supplied, flags)
+    with os.fdopen(descriptor, "rb") as handle:
+        before = os.fstat(handle.fileno())
+        raw = handle.read(1_000_001)
+        after = os.fstat(handle.fileno())
+    if _file_identity(before) != _file_identity(after):
+        raise ValueError("operative --input changed while being read")
+    if len(raw) > 1_000_000:
+        raise ValueError("operative --input exceeds the retained artifact bound")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"operative --input must contain UTF-8 JSON: {error}"
+        ) from error
+    if not isinstance(value, dict):
+        raise ValueError("operative --input must contain a JSON object")
+    return value, str(supplied.resolve(strict=True))
+
+
+def _recovery_request(
+    paths: RuntimePaths, command: str, input_path: str | None
+) -> dict[str, Any]:
+    launcher = paths.recovery_launcher
+    if not os.access(launcher, os.X_OK):
+        raise RuntimeError(
+            f"controller request failed and recovery launcher is unavailable: {launcher}"
+        )
+    arguments = [str(launcher), command]
+    if input_path is not None:
+        arguments.extend(["--input", input_path])
+    completed = subprocess.run(
+        arguments, capture_output=True, text=True, check=False, timeout=300
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
+        raise RuntimeError(f"recovery launcher failed: {detail}")
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("recovery launcher returned invalid JSON") from error
+    if not isinstance(result, dict):
+        raise RuntimeError("recovery launcher returned a non-object result")
+    return result
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -567,29 +627,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "operative":
             command = args.operative_command
-            payload: dict[str, Any] = {"command": f"operative_{command}"}
-            if command == "register":
-                payload.update(
-                    {
-                        "description": args.description,
-                        "model": args.model,
-                        "effort": args.effort,
-                    }
-                )
-            elif command == "finish":
-                payload["evidence"] = args.evidence
-            elif command == "abort":
-                payload.update({"reason": args.reason, "evidence": args.evidence})
-            elif command == "recover":
-                payload.update(
-                    {
-                        "takeover_id": args.takeover_id,
-                        "evidence": args.evidence,
-                        "model": args.model,
-                        "effort": args.effort,
-                    }
-                )
-            result = _request(paths, payload)
+            wire_command = command.replace("-", "_")
+            payload: dict[str, Any] = {"command": f"operative_{wire_command}"}
+            input_path: str | None = None
+            if hasattr(args, "input"):
+                supplied, input_path = _operative_control_input(args.input)
+                payload["input"] = supplied
+                payload["input_path"] = input_path
+                if command in {"register", "finish", "abort", "recover"}:
+                    payload.update(supplied)
+            try:
+                if command in {"probe", "quarantine", "store-repair"}:
+                    raise ControllerUnavailable(
+                        "direct recovery control requires the controller fence"
+                    )
+                result = _request(paths, payload)
+            except ControllerUnavailable:
+                result = _recovery_request(paths, command, input_path)
         elif args.command == "intake":
             payload = _intake_payload(args)
             if "tasks" in payload:

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import importlib.metadata
 import os
 import plistlib
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -29,6 +31,7 @@ HUMAN_SKILLS = (
     "fulcrum-bead",
     "fulcrum-archon",
     "fulcrum-sage",
+    "fulcrum-operative",
 )
 REMOVED_SKILLS = (
     "fulcrum-executor",
@@ -52,6 +55,19 @@ SYSTEM_EXECUTABLE_PATHS = (
 USER_EXECUTABLE_PATHS = (".local/bin", "bin")
 WORKTREE_RUNTIME_IMPORTS = ("jsonschema", "yaml", "watchfiles", "websockets")
 WORKTREE_DEVELOPMENT_COMMANDS = ("black", "pyre", "fulcrum")
+RECOVERY_DISTRIBUTIONS = (
+    "anyio",
+    "attrs",
+    "idna",
+    "jsonschema",
+    "jsonschema-specifications",
+    "referencing",
+    "rpds-py",
+    "PyYAML",
+    "watchfiles",
+    "websockets",
+    "typing_extensions",
+)
 
 
 @dataclass(frozen=True)
@@ -141,6 +157,137 @@ def install_control_plane(
         if child.resolve(strict=False) != active and child.is_dir():
             shutil.rmtree(child)
     return current / "fulcrum", previous != copied
+
+
+def _artifact_contents(root: Path) -> dict[Path, bytes | str]:
+    if not root.is_dir():
+        return {}
+    result: dict[Path, bytes | str] = {}
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if "__pycache__" in relative.parts:
+            continue
+        if path.is_symlink():
+            result[relative] = f"symlink:{os.readlink(path)}"
+        elif path.is_file():
+            result[relative] = path.read_bytes()
+    return result
+
+
+def _copy_installed_distribution(name: str, target: Path) -> None:
+    """Copy one installed wheel payload without retaining environment links."""
+
+    try:
+        distribution = importlib.metadata.distribution(name)
+    except importlib.metadata.PackageNotFoundError as error:
+        raise InstallationError(
+            f"recovery dependency is unavailable in the setup environment: {name}"
+        ) from error
+    root = Path(str(distribution.locate_file(""))).resolve(strict=True)
+    files = distribution.files or []
+    for entry in files:
+        source = Path(str(distribution.locate_file(entry)))
+        try:
+            resolved = source.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved.is_file() or not resolved.is_relative_to(root):
+            continue
+        relative = resolved.relative_to(root)
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resolved, destination)
+
+
+def install_recovery_artifact(
+    config: InstallationConfig, paths: RuntimePaths
+) -> tuple[Path, bool]:
+    """Atomically install the checkout-independent break-glass runtime."""
+
+    source_package = Path(config.source_root).resolve(strict=True) / "src" / "fulcrum"
+    recovery_root = paths.recovery_root
+    recovery_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    current = recovery_root / "current"
+    previous = _artifact_contents(current.resolve()) if current.is_dir() else {}
+    deployment = recovery_root / f"deployment-{os.getpid()}-{uuid.uuid4().hex}"
+    site = (
+        deployment
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    binary = deployment / "bin"
+    try:
+        site.mkdir(parents=True, mode=0o700)
+        binary.mkdir(parents=True, mode=0o700)
+        shutil.copytree(
+            source_package,
+            site / "fulcrum",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        for name in RECOVERY_DISTRIBUTIONS:
+            _copy_installed_distribution(name, site)
+        base_python = Path(sys.executable).resolve(strict=True)
+        (binary / "python").symlink_to(base_python)
+        (deployment / "pyvenv.cfg").write_text(
+            "\n".join(
+                [
+                    f"home = {base_python.parent}",
+                    "include-system-site-packages = false",
+                    f"version = {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        launcher = binary / "operative-recovery"
+        launcher.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            'artifact=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
+            'exec "$artifact/bin/python" -I -m fulcrum.recovery "$@"\n',
+            encoding="utf-8",
+        )
+        os.chmod(launcher, 0o700)
+        smoke = subprocess.run(
+            [str(launcher), "--smoke-test"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        try:
+            smoke_detail = json.loads(smoke.stdout)
+        except json.JSONDecodeError:
+            smoke_detail = None
+        if not (
+            smoke.returncode == 0
+            and isinstance(smoke_detail, dict)
+            and smoke_detail.get("isolated") is True
+            and isinstance(smoke_detail.get("module"), str)
+            and Path(str(smoke_detail["module"]))
+            .resolve(strict=True)
+            .is_relative_to(deployment.resolve(strict=True))
+        ):
+            raise InstallationError(
+                "recovery artifact smoke test failed: "
+                + (smoke.stderr.strip() or smoke.stdout.strip() or "no diagnostic")
+            )
+        copied = _artifact_contents(deployment)
+        if not copied:
+            raise InstallationError("recovery artifact is empty")
+        temporary = recovery_root / f".current.{os.getpid()}.tmp"
+        temporary.unlink(missing_ok=True)
+        temporary.symlink_to(deployment.name, target_is_directory=True)
+        os.replace(temporary, current)
+        active = current.resolve(strict=True)
+        for child in recovery_root.glob("deployment-*"):
+            if child.resolve(strict=False) != active and child.is_dir():
+                shutil.rmtree(child)
+        return paths.recovery_launcher, previous != copied
+    except Exception:
+        shutil.rmtree(deployment, ignore_errors=True)
+        raise
 
 
 def controller_program_arguments(

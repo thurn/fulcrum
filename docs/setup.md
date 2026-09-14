@@ -1,5 +1,11 @@
 # Setup
 
+Setup atomically installs and smoke-tests the private Operative recovery artifact
+before switching its `current` symlink. A failed copy or smoke test leaves the
+previous launcher active. `fulcrum doctor --json` reports `operative_recovery`
+for this mode-0700 isolated artifact independently of the editable checkout and
+controller snapshot.
+
 The supported entry point is `./scripts/setup`. It creates or reuses `.venv`,
 installs `requirements-dev.lock` and the editable checkout, then runs the Python
 installer. First use asks only for missing brain, project, validation, and Archon

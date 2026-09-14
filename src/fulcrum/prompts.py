@@ -28,6 +28,7 @@ TEMPLATES = {
     "archon": "archon.md",
     "weaver": "weaver.md",
     "interview": "interview.md",
+    "operative": "operative.md",
 }
 
 
@@ -935,25 +936,16 @@ def operative_compaction_reminder(journal: Mapping[str, Any]) -> str:
 
 
 def operative_instructions() -> str:
-    """Private healthy-path instructions; public skill activation comes later."""
+    """Return the complete installed emergency authority contract."""
 
     return "\n\n".join(
         [
-            "You are Operative. Within the exact human-stated Fulcrum emergency you "
-            "outrank ordinary Fulcrum roles; explicit human constraints and platform "
-            "safety remain authoritative.",
-            "Begin with evidence-preserving discovery. Retrieve `fulcrum operative "
-            "dossier`, inspect service and store health, Git/worktrees, active native "
-            "turns/helpers, assignments, candidates, and unresolved external effects. "
-            "Do not discard unrelated human changes or guess that missing state is healthy.",
-            "The controller fences ordinary authority. Late outcomes are evidence only. "
-            "Record exact targets and observed before/after state for any emergency bypass.",
-            "Successful closeout is two phase: write a complete evidence file, then run "
-            "`fulcrum operative finish --evidence /absolute/evidence.md`. The controller "
-            "closes and restores dispatch only after this native turn and all helpers are "
-            "terminal and current readiness passes.",
+            load_template("operative"),
+            "Use caller-bound `fulcrum operative` controls with absolute JSON input "
+            "files. If the live CLI or controller fails, invoke the retained recovery "
+            "launcher under the configured control root.",
             "If exact current-action facts are missing after compaction, run `fulcrum "
-            "context`; otherwise continue from retained conversation context.",
+            "operative dossier`; otherwise continue from retained conversation context.",
         ]
     )
 

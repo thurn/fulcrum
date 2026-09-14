@@ -1638,6 +1638,55 @@ class Store:
         )
         retained = self.operative_takeover(str(journal["takeover_id"]))
         assert retained is not None
+        for item in journal.get("offline_operations", []):
+            if not isinstance(item, dict):
+                raise StoreError("operative journal offline operation is invalid")
+            correlation = item.get("correlation_id")
+            kind = item.get("kind")
+            target = item.get("target")
+            before = item.get("before")
+            if not all(
+                isinstance(value, str) and value
+                for value in (correlation, kind, target)
+            ) or not isinstance(before, dict):
+                raise StoreError(
+                    "operative journal offline operation identity is invalid"
+                )
+            operation = self.create_operative_operation(
+                str(journal["takeover_id"]),
+                kind,
+                target,
+                before,
+                correlation_id=correlation,
+            )
+            if operation["takeover_id"] != journal["takeover_id"]:
+                raise StoreError("operative offline operation correlation conflicts")
+            item_state = item.get("state")
+            if operation["state"] == "intent" and item_state == "sent":
+                self.mark_operative_operation_sent(int(operation["id"]))
+            elif operation["state"] in {
+                "intent",
+                "sent",
+                "uncertain",
+            } and item_state in {
+                "complete",
+                "failed",
+                "uncertain",
+            }:
+                self.finish_operative_operation(
+                    int(operation["id"]),
+                    state=str(item_state),
+                    result=(
+                        item.get("observed_result")
+                        if isinstance(item.get("observed_result"), dict)
+                        else {}
+                    ),
+                    after=(
+                        item.get("after")
+                        if isinstance(item.get("after"), dict)
+                        else {"coverage": "unavailable"}
+                    ),
+                )
         return retained
 
     def operative_journal_from_mirror(self, takeover: dict[str, Any]) -> dict[str, Any]:
@@ -1679,6 +1728,39 @@ class Store:
             journal["operative_identity"] = json.loads(takeover["operative_identity"])
         if takeover.get("operative_action"):
             journal["operative_action"] = json.loads(takeover["operative_action"])
+        offline_operations = []
+        for operation in self.rows(
+            """SELECT * FROM operative_operations WHERE takeover_id = ?
+               AND correlation_id LIKE 'offline-%' ORDER BY id""",
+            (takeover["takeover_id"],),
+        ):
+            offline_operations.append(
+                {
+                    "correlation_id": operation["correlation_id"],
+                    "state": operation["state"],
+                    "intent": {
+                        "kind": operation["kind"],
+                        "target": operation["target"],
+                    },
+                    "kind": operation["kind"],
+                    "target": operation["target"],
+                    "before": json.loads(operation["before_json"]),
+                    "observed_result": (
+                        json.loads(operation["result_json"])
+                        if operation["result_json"]
+                        else {}
+                    ),
+                    "after": (
+                        json.loads(operation["after_json"])
+                        if operation["after_json"]
+                        else {"coverage": "unavailable"}
+                    ),
+                    "evidence": None,
+                    "created_at": operation["created_at"],
+                }
+            )
+        if offline_operations:
+            journal["offline_operations"] = offline_operations
         return journal
 
     def record_operative_evidence(

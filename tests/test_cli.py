@@ -20,10 +20,60 @@ from fulcrum.install import (
     reconcile_skill_links,
 )
 from fulcrum.intake import report_task_from_payload
+from fulcrum.ipc import ControllerRejected, ControllerUnavailable
 from fulcrum.store import StoreError
 
 
 class CliTest(unittest.TestCase):
+    def test_operative_uses_file_input_and_falls_back_only_for_unavailability(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = RuntimePaths(root, root, root / "config.json", root / "control")
+            input_path = root / "operative.json"
+            input_path.write_text(
+                json.dumps({"description": "Repair unavailable controller"}),
+                encoding="utf-8",
+            )
+            with (
+                patch("fulcrum.cli.resolve_paths", return_value=paths),
+                patch(
+                    "fulcrum.cli._request",
+                    side_effect=ControllerUnavailable("socket absent"),
+                ) as request,
+                patch(
+                    "fulcrum.cli._recovery_request",
+                    return_value={"ok": True, "state": "acquiring"},
+                ) as recovery,
+                patch("sys.stdout", new=io.StringIO()),
+            ):
+                self.assertEqual(
+                    main(["operative", "register", "--input", str(input_path)]),
+                    0,
+                )
+            sent = request.call_args.args[1]
+            self.assertEqual(sent["description"], "Repair unavailable controller")
+            self.assertEqual(sent["input_path"], str(input_path.resolve()))
+            recovery.assert_called_once_with(
+                paths, "register", str(input_path.resolve())
+            )
+
+            with (
+                patch("fulcrum.cli.resolve_paths", return_value=paths),
+                patch(
+                    "fulcrum.cli._request",
+                    side_effect=ControllerRejected("managed agents cannot register"),
+                ),
+                patch("fulcrum.cli._recovery_request") as recovery,
+                patch("sys.stderr", new=io.StringIO()),
+            ):
+                self.assertEqual(
+                    main(["operative", "register", "--input", str(input_path)]),
+                    2,
+                )
+            recovery.assert_not_called()
+
     def test_bead_skill_has_the_human_entry_contract_and_only_reports(self) -> None:
         skill = (
             Path(__file__).resolve().parents[1] / "skills" / "fulcrum-bead" / "SKILL.md"

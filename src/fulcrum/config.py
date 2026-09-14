@@ -82,6 +82,18 @@ class RuntimePaths:
         return self.control_root / "operative.json"
 
     @property
+    def recovery_root(self) -> Path:
+        return self.control_root / "recovery"
+
+    @property
+    def recovery_launcher(self) -> Path:
+        return self.recovery_root / "current" / "bin" / "operative-recovery"
+
+    @property
+    def operative_quarantine(self) -> Path:
+        return self.control_root / "operative-quarantine"
+
+    @property
     def logs_root(self) -> Path:
         return self.state_root / "logs"
 

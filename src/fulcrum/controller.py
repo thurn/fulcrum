@@ -43,6 +43,7 @@ from fulcrum.intake import (
 from fulcrum.install import (
     APP_SERVER_LABEL,
     CONTROLLER_LABEL,
+    control_plane_source,
     controller_program_arguments,
     inspect_service,
     install_control_plane,
@@ -142,7 +143,18 @@ OPERATIVE_PASSIVE_COMMANDS: frozenset[str] = frozenset(
     }
 )
 OPERATIVE_CONTROL_COMMANDS: frozenset[str] = frozenset(
-    {"operative_register", "operative_finish", "operative_abort", "operative_recover"}
+    {
+        "operative_register",
+        "operative_finish",
+        "operative_abort",
+        "operative_recover",
+        "operative_wind_down",
+        "operative_reconcile",
+        "operative_worktree",
+        "operative_repair_check",
+        "operative_reinstall",
+        "operative_service_check",
+    }
 )
 
 
@@ -6176,6 +6188,18 @@ class Controller:
         if command == "operative_dossier":
             self._require_bound_operative(_thread_identity(request))
             return await self._build_operative_dossier()
+        if command == "operative_wind_down":
+            return await self._wind_down_operative_targets(request)
+        if command == "operative_reconcile":
+            return await self._operative_reconcile_control(request)
+        if command == "operative_worktree":
+            return self._operative_worktree_control(request)
+        if command == "operative_repair_check":
+            return self._operative_repair_check(request)
+        if command == "operative_reinstall":
+            return self._operative_reinstall(request)
+        if command == "operative_service_check":
+            return self._operative_service_check(request)
         if command == "operative_finish":
             return await self._request_operative_finish(request)
         if command == "operative_abort":
@@ -6448,6 +6472,74 @@ class Controller:
             "dossier": journal.get("dossier"),
         }
 
+    def _provisional_operative_registration(
+        self, error: AppServerError, *, reused: bool
+    ) -> dict[str, Any]:
+        """Retain a fenced acquisition when exact caller verification is offline."""
+
+        journal = self.operative_journal
+        if journal is None or journal.get("state") != "acquiring":
+            raise StoreError("operative acquisition is not resumable") from error
+        thread_id = str(journal["native_thread_id"])
+        task = self.store.row(
+            "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
+        )
+        if task is not None and task["role"] != "operative":
+            raise StoreError("provisional operative identity is unavailable") from error
+        retained_verification = journal.get("caller_verification")
+        if (
+            isinstance(retained_verification, dict)
+            and retained_verification.get("coverage") == "observed"
+            and retained_verification.get("method") == "exact App Server thread/read"
+            and retained_verification.get("native_thread_id") == thread_id
+        ):
+            verification = retained_verification
+        else:
+            verification = {
+                "coverage": "unavailable",
+                "method": "controller-retained environment identity pending exact App Server thread/read",
+                "native_thread_id": thread_id,
+                "managed_agent": False,
+                "reason": str(error),
+            }
+        effects = list(journal.get("completed_effects") or [])
+        if "app_server_verification_deferred" not in effects:
+            effects.append("app_server_verification_deferred")
+        retained = self._save_operative_journal(
+            caller_verification=verification,
+            completed_effects=effects,
+            next_step="repair service/store, then run reconcile",
+        )
+        result = {
+            "takeover_id": retained["takeover_id"],
+            "state": "acquiring",
+            "thread_id": thread_id,
+            "dispatch_enabled": False,
+            "reused": reused,
+            "authority": "provisional_local_repair",
+            "caller_verification": verification,
+            "database": {
+                "coverage": "observed",
+                "state": "healthy",
+                "path": str(self.paths.database),
+            },
+            "quarantine": None,
+            "next_step": retained["next_step"],
+            "instructions": operative_instructions(),
+            "dossier": retained.get("dossier"),
+        }
+        if task is not None:
+            result.update(title=task["title"], role_number=task["role_number"])
+        return result
+
+    async def _resume_operative_registration(
+        self, request: dict[str, Any], *, reused: bool
+    ) -> dict[str, Any]:
+        try:
+            return await self._resume_operative_acquisition(request)
+        except AppServerError as error:
+            return self._provisional_operative_registration(error, reused=reused)
+
     async def _register_operative(self, request: dict[str, Any]) -> dict[str, Any]:
         """Acquire installation-wide authority from a human-created native turn."""
 
@@ -6478,9 +6570,9 @@ class Controller:
                     "SELECT * FROM tasks WHERE id = ?", (journal.get("task_id"),)
                 )
             if task is None:
-                return await self._resume_operative_acquisition(request)
+                return await self._resume_operative_registration(request, reused=True)
             if journal["state"] == "acquiring":
-                return await self._resume_operative_acquisition(request)
+                return await self._resume_operative_registration(request, reused=True)
             return self._operative_registration_result(task, reused=True)
         if existing_task is not None:
             raise StoreError(
@@ -6538,7 +6630,7 @@ class Controller:
             if str(error) == "Fulcrum authority mutation is already in progress":
                 raise StoreError("setup mutation active") from error
             raise
-        return await self._resume_operative_acquisition(request)
+        return await self._resume_operative_registration(request, reused=False)
 
     async def _resume_operative_acquisition(
         self, request: dict[str, Any]
@@ -6547,6 +6639,23 @@ class Controller:
         if journal is None or journal.get("state") != "acquiring":
             raise StoreError("operative acquisition is not resumable")
         thread_id = str(journal["native_thread_id"])
+        thread = await self.runtime.read_thread(thread_id)
+        if thread.get("id") != thread_id:
+            raise AppServerError(
+                "App Server returned a different native thread identity"
+            )
+        effects = list(journal.get("completed_effects") or [])
+        if "exact_caller_verified" not in effects:
+            effects.append("exact_caller_verified")
+        journal = self._save_operative_journal(
+            caller_verification={
+                "coverage": "observed",
+                "method": "exact App Server thread/read",
+                "native_thread_id": thread_id,
+                "managed_agent": False,
+            },
+            completed_effects=effects,
+        )
         task = self.store.row(
             "SELECT * FROM tasks WHERE native_thread_id = ?", (thread_id,)
         )
@@ -6562,7 +6671,6 @@ class Controller:
                 project_id=None,
                 state="provisioning",
             )
-        thread = await self.runtime.read_thread(thread_id)
         facts = thread_facts(thread)
         action = self.store.row(
             """SELECT * FROM actions WHERE task_id = ? AND kind = 'operative'
@@ -6799,6 +6907,708 @@ class Controller:
             "completed_effects": journal["completed_effects"],
             "sqlite_mirror": "observed" if mirror is not None else "unavailable",
             "dispatch_enabled": False,
+        }
+
+    @staticmethod
+    def _operative_input(request: dict[str, Any]) -> dict[str, Any]:
+        value = request.get("input")
+        if not isinstance(value, dict):
+            raise StoreError("operative control requires a JSON object input file")
+        return value
+
+    @staticmethod
+    def _retained_operative_result(operation: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = json.loads(operation.get("result_json") or "{}")
+        except json.JSONDecodeError as error:
+            raise StoreError(
+                "retained operative operation result is invalid"
+            ) from error
+        if not isinstance(value, dict):
+            raise StoreError("retained operative operation result is invalid")
+        return value
+
+    async def _wind_down_operative_targets(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Stop exact managed turns, prove helpers terminal, then retire them.
+
+        The notice is deliberately a steer on the retained active turn.  It grants
+        no action, asks for no finish, and is followed by an exact interrupt.
+        """
+
+        journal = self._require_bound_operative(_thread_identity(request))
+        supplied = self._operative_input(request)
+        targets = supplied.get("task_ids")
+        notice = supplied.get("notice")
+        operation_key = supplied.get("operation_key")
+        dispositions = supplied.get("dispositions", {})
+        if (
+            not isinstance(targets, list)
+            or not targets
+            or not all(
+                isinstance(item, int) and not isinstance(item, bool) for item in targets
+            )
+        ):
+            raise StoreError("operative wind-down requires exact integer task_ids")
+        if not isinstance(notice, str) or not notice.strip():
+            raise StoreError("operative wind-down requires a nonempty notice")
+        if not isinstance(operation_key, str) or not operation_key.strip():
+            raise StoreError("operative wind-down requires a stable operation_key")
+        if not isinstance(dispositions, dict):
+            raise StoreError("operative wind-down dispositions must be an object")
+        notice_text = (
+            notice.strip()
+            + "\n\nDo not perform more work, call finish, publish, deliver, clean a "
+            "worktree, or send a follow-up. This is a no-follow-up emergency "
+            "wind-down notice."
+        )
+        results: list[dict[str, Any]] = []
+        blockers: list[str] = []
+        takeover_id = str(journal["takeover_id"])
+        for task_id in targets:
+            task = self.store.row("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            if task is None:
+                raise StoreError(f"unknown operative wind-down task {task_id}")
+            if task["role"] == "operative":
+                raise StoreError("the bound Operative cannot wind down itself")
+            thread_id = str(task["native_thread_id"])
+            if task["state"] in {"retired", "archived"} and task["archived"]:
+                results.append(
+                    {"task_id": task_id, "state": "archived", "reused": True}
+                )
+                continue
+            try:
+                thread = await self.runtime.read_thread(thread_id)
+            except Exception as error:
+                self.store.record_operative_evidence(
+                    takeover_id,
+                    f"wind-down-unavailable:{operation_key}:{task_id}",
+                    "wind_down",
+                    coverage="unavailable",
+                    target_type="task",
+                    target_id=task_id,
+                    detail={"error": str(error)},
+                    artifact_path=request.get("input_path"),
+                )
+                blockers.append(f"task {task_id} runtime state is unavailable: {error}")
+                continue
+            facts = thread_facts(thread)
+            active_turn = (
+                str(facts["last_turn_id"])
+                if facts.get("runtime_status") == "active"
+                and facts.get("last_turn_status") == "inProgress"
+                and isinstance(facts.get("last_turn_id"), str)
+                else None
+            )
+            idle_notice_correlation = (
+                f"operative-wind-down:{takeover_id}:{operation_key}:"
+                f"{task_id}:idle-notice"
+            )
+            prior_idle_notice = self.store.row(
+                "SELECT * FROM operative_operations WHERE correlation_id = ?",
+                (idle_notice_correlation,),
+            )
+            prior_notice_result = (
+                self._retained_operative_result(prior_idle_notice)
+                if prior_idle_notice is not None
+                else {}
+            )
+            active_is_idle_notice = bool(
+                active_turn is not None
+                and prior_notice_result.get("turn_id") == active_turn
+            )
+            if active_turn is not None:
+                steer_id: int | None = None
+                if not active_is_idle_notice:
+                    action = self.store.row(
+                        """SELECT * FROM actions WHERE task_id = ?
+                           AND state IN ('starting','active','terminal','uncertain')
+                           ORDER BY id DESC LIMIT 1""",
+                        (task_id,),
+                    )
+                    if action is None or action.get("native_turn_id") != active_turn:
+                        blockers.append(
+                            f"task {task_id} active turn contradicts the retained exact turn"
+                        )
+                        continue
+                    steer_correlation = (
+                        f"operative-wind-down:{takeover_id}:{operation_key}:"
+                        f"{task_id}:steer:{active_turn}"
+                    )
+                    steer = self.store.create_operative_operation(
+                        takeover_id,
+                        "turn_steer",
+                        f"{thread_id}:{active_turn}",
+                        {"thread": thread, "notice": notice_text},
+                        correlation_id=steer_correlation,
+                    )
+                    steer_id = int(steer["id"])
+                    if steer["state"] == "intent":
+                        self.store.mark_operative_operation_sent(steer_id)
+                        try:
+                            await self.runtime.steer(
+                                thread_id,
+                                active_turn,
+                                notice_text,
+                                correlation=steer_correlation,
+                            )
+                        except Exception as error:
+                            self.store.finish_operative_operation(
+                                steer_id,
+                                state="uncertain",
+                                result={
+                                    "error": str(error),
+                                    "accepted": "unavailable",
+                                },
+                                after={
+                                    "turn_id": active_turn,
+                                    "coverage": "unavailable",
+                                },
+                            )
+                        else:
+                            self.store.finish_operative_operation(
+                                steer_id,
+                                state="complete",
+                                result={"accepted": True, "no_follow_up": True},
+                                after={"turn_id": active_turn, "notice_sent": True},
+                            )
+                interrupt_correlation = (
+                    f"operative-wind-down:{takeover_id}:{operation_key}:"
+                    f"{task_id}:interrupt:{active_turn}"
+                )
+                interrupt = self.store.create_operative_operation(
+                    takeover_id,
+                    "turn_interrupt",
+                    f"{thread_id}:{active_turn}",
+                    {
+                        "turn_id": active_turn,
+                        "steer_operation_id": steer_id,
+                        "idle_notification_turn": active_is_idle_notice,
+                    },
+                    correlation_id=interrupt_correlation,
+                )
+                if interrupt["state"] == "intent":
+                    self.store.mark_operative_operation_sent(int(interrupt["id"]))
+                    try:
+                        await self.runtime.interrupt(thread_id, active_turn)
+                    except Exception as error:
+                        self.store.finish_operative_operation(
+                            int(interrupt["id"]),
+                            state="uncertain",
+                            result={"error": str(error), "accepted": "unavailable"},
+                            after={"turn_id": active_turn, "coverage": "unavailable"},
+                        )
+            else:
+                idle_notice = self.store.create_operative_operation(
+                    takeover_id,
+                    "idle_notification_turn",
+                    thread_id,
+                    {
+                        "thread": thread,
+                        "notice": notice_text,
+                        "normal_workflow_authority_created": False,
+                    },
+                    correlation_id=idle_notice_correlation,
+                )
+                if idle_notice["state"] == "intent":
+                    project = self.store.row(
+                        "SELECT * FROM projects WHERE project_id = ?",
+                        (task.get("project_id"),),
+                    )
+                    cwd = (
+                        str(project["repo_path"])
+                        if project is not None
+                        else self.config.source_root
+                    )
+                    self.store.mark_operative_operation_sent(int(idle_notice["id"]))
+                    try:
+                        notice_turn = await self.runtime.start_turn(
+                            thread_id,
+                            notice_text,
+                            cwd=cwd,
+                            workspace_root=cwd,
+                            model=str(task["model"]),
+                            effort=str(task["reasoning_effort"]),
+                            correlation=idle_notice_correlation,
+                        )
+                    except Exception as error:
+                        self.store.finish_operative_operation(
+                            int(idle_notice["id"]),
+                            state="uncertain",
+                            result={"error": str(error)},
+                            after={"coverage": "unavailable"},
+                        )
+                        blockers.append(
+                            f"task {task_id} idle notification is uncertain: {error}"
+                        )
+                        continue
+                    self.store.execute(
+                        """UPDATE operative_operations SET result_json = ?,
+                           updated_at = ? WHERE id = ?""",
+                        (
+                            json.dumps(
+                                {
+                                    "turn_id": notice_turn,
+                                    "normal_workflow_authority_created": False,
+                                },
+                                sort_keys=True,
+                            ),
+                            utc_now(),
+                            idle_notice["id"],
+                        ),
+                    )
+
+            # An accepted interrupt is not proof.  This targeted read is the
+            # authority for both the exact parent and its native helpers.
+            observed = await self.runtime.read_thread(thread_id)
+            after_facts = thread_facts(observed)
+            helper_observations: list[dict[str, Any]] = []
+            helpers_proven_terminal = True
+            for helper in self.store.rows(
+                """SELECT DISTINCT helper.native_thread_id
+                   FROM telemetry_helper_threads AS helper
+                   JOIN actions ON actions.id = helper.attributed_action_id
+                   WHERE actions.task_id = ? ORDER BY helper.native_thread_id""",
+                (task_id,),
+            ):
+                helper_thread_id = str(helper["native_thread_id"])
+                try:
+                    helper_thread = await self.runtime.read_thread(helper_thread_id)
+                    helper_facts = thread_facts(helper_thread)
+                except Exception as error:
+                    helper_observations.append(
+                        {
+                            "thread_id": helper_thread_id,
+                            "coverage": "unavailable",
+                            "error": str(error),
+                        }
+                    )
+                    helpers_proven_terminal = False
+                    continue
+                helper_observations.append(
+                    {
+                        "thread_id": helper_thread_id,
+                        "coverage": "observed",
+                        "facts": helper_facts,
+                    }
+                )
+                helpers_proven_terminal = helpers_proven_terminal and bool(
+                    helper_facts["last_turn_terminal"]
+                    and helper_facts["helpers_terminal"]
+                )
+            if not (
+                after_facts["last_turn_terminal"]
+                and after_facts["helpers_terminal"]
+                and helpers_proven_terminal
+            ):
+                blockers.append(
+                    f"task {task_id} parent turn or native helpers are not terminal"
+                )
+                self.store.record_operative_evidence(
+                    takeover_id,
+                    f"wind-down-blocked:{operation_key}:{task_id}",
+                    "wind_down",
+                    coverage="observed",
+                    target_type="task",
+                    target_id=task_id,
+                    detail={
+                        "thread": observed,
+                        "facts": after_facts,
+                        "helper_threads": helper_observations,
+                    },
+                    artifact_path=request.get("input_path"),
+                )
+                continue
+            if active_turn is None:
+                idle_notice = self.store.row(
+                    "SELECT * FROM operative_operations WHERE correlation_id = ?",
+                    (
+                        f"operative-wind-down:{takeover_id}:{operation_key}:"
+                        f"{task_id}:idle-notice",
+                    ),
+                )
+                if idle_notice is not None and idle_notice["state"] != "complete":
+                    self.store.finish_operative_operation(
+                        int(idle_notice["id"]),
+                        state="complete",
+                        result={
+                            **self._retained_operative_result(idle_notice),
+                            "terminal_observed": True,
+                            "normal_workflow_authority_created": False,
+                        },
+                        after={
+                            "thread": observed,
+                            "facts": after_facts,
+                            "helper_threads": helper_observations,
+                        },
+                    )
+            if active_turn is not None:
+                interrupt = self.store.row(
+                    "SELECT * FROM operative_operations WHERE correlation_id = ?",
+                    (
+                        f"operative-wind-down:{takeover_id}:{operation_key}:"
+                        f"{task_id}:interrupt:{active_turn}",
+                    ),
+                )
+                if interrupt is not None and interrupt["state"] != "complete":
+                    self.store.finish_operative_operation(
+                        int(interrupt["id"]),
+                        state="complete",
+                        result={"terminal_observed": True},
+                        after={
+                            "thread": observed,
+                            "facts": after_facts,
+                            "helper_threads": helper_observations,
+                        },
+                    )
+            archive_correlation = (
+                f"operative-wind-down:{takeover_id}:{operation_key}:"
+                f"{task_id}:archive"
+            )
+            archive = self.store.create_operative_operation(
+                takeover_id,
+                "thread_archive",
+                thread_id,
+                {
+                    "thread": observed,
+                    "facts": after_facts,
+                    "helper_threads": helper_observations,
+                },
+                correlation_id=archive_correlation,
+            )
+            if archive["state"] == "intent":
+                self.store.mark_operative_operation_sent(int(archive["id"]))
+                try:
+                    await self.runtime.archive(thread_id)
+                    archived = await self.runtime.read_thread(thread_id)
+                except Exception as error:
+                    self.store.finish_operative_operation(
+                        int(archive["id"]),
+                        state="uncertain",
+                        result={"error": str(error)},
+                        after={"coverage": "unavailable"},
+                    )
+                    blockers.append(f"task {task_id} archive is uncertain: {error}")
+                    continue
+                if not archived.get("archived"):
+                    self.store.finish_operative_operation(
+                        int(archive["id"]),
+                        state="failed",
+                        result={"accepted": True},
+                        after={"thread": archived},
+                    )
+                    blockers.append(f"task {task_id} archive was not observed")
+                    continue
+                self.store.finish_operative_operation(
+                    int(archive["id"]),
+                    state="complete",
+                    result={"accepted": True},
+                    after={"thread": archived},
+                )
+            elif archive["state"] != "complete":
+                blockers.append(
+                    f"task {task_id} archive operation {archive['id']} requires reconciliation"
+                )
+                continue
+
+            timestamp = utc_now()
+            disposition = dispositions.get(str(task_id), "quarantine")
+            if disposition not in {"quarantine", "cancel"}:
+                raise StoreError(
+                    f"task {task_id} disposition must be quarantine or cancel"
+                )
+            with self.store.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM reservations WHERE action_id IN (SELECT id FROM actions WHERE task_id = ?)",
+                    (task_id,),
+                )
+                connection.execute(
+                    """UPDATE actions SET state = 'canceled',
+                       condition = 'superseded by operative emergency takeover',
+                       updated_at = ? WHERE task_id = ?
+                       AND state NOT IN ('processed','canceled')""",
+                    (timestamp, task_id),
+                )
+                connection.execute(
+                    """UPDATE tasks SET state = 'retired', archived = 1,
+                       runtime_status = 'idle', last_turn_terminal = 1,
+                       helpers_terminal = 1, updated_at = ? WHERE id = ?""",
+                    (timestamp, task_id),
+                )
+                if disposition == "cancel":
+                    connection.execute(
+                        """UPDATE assignments SET stage = 'canceled',
+                           condition = 'canceled by operative emergency takeover',
+                           updated_at = ? WHERE executor_task_id = ? OR overseer_task_id = ?""",
+                        (timestamp, task_id, task_id),
+                    )
+                else:
+                    connection.execute(
+                        """UPDATE assignments SET condition =
+                           'quarantined for operative disposition', updated_at = ?
+                           WHERE executor_task_id = ? OR overseer_task_id = ?""",
+                        (timestamp, task_id, task_id),
+                    )
+            results.append(
+                {
+                    "task_id": task_id,
+                    "thread_id": thread_id,
+                    "state": "retired",
+                    "disposition": disposition,
+                    "parent_terminal": True,
+                    "helpers_terminal": True,
+                    "helper_threads": helper_observations,
+                }
+            )
+        return {"ok": not blockers, "results": results, "blockers": blockers}
+
+    async def _operative_reconcile_control(
+        self, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        journal = self._require_bound_operative(_thread_identity(request))
+        supplied = self._operative_input(request)
+        target_kind = supplied.get("target_kind")
+        if target_kind == "external_operation":
+            return await self.handle_request(
+                {
+                    "command": "resolve_operation",
+                    "thread_id": journal["native_thread_id"],
+                    "decision": {
+                        key: value
+                        for key, value in supplied.items()
+                        if key
+                        in {
+                            "operation_id",
+                            "resolution",
+                            "evidence",
+                            "native_id",
+                            "result",
+                        }
+                    },
+                }
+            )
+        if target_kind != "operative_operation":
+            raise StoreError(
+                "operative reconciliation target_kind must be external_operation or operative_operation"
+            )
+        operation_id = supplied.get("operation_id")
+        resolution = supplied.get("resolution")
+        if not isinstance(operation_id, int) or resolution not in {
+            "observed_success",
+            "observed_failure",
+            "confirmed_unsent",
+        }:
+            raise StoreError(
+                "operative reconciliation requires an exact operation and resolution"
+            )
+        operation = self.store.row(
+            "SELECT * FROM operative_operations WHERE id = ? AND takeover_id = ?",
+            (operation_id, journal["takeover_id"]),
+        )
+        if operation is None:
+            raise StoreError(f"unknown operative operation {operation_id}")
+        evidence_path, evidence = self._read_operative_evidence(
+            supplied.get("evidence")
+        )
+        retained = self.store.record_operative_evidence(
+            str(journal["takeover_id"]),
+            f"operative-reconcile:{operation_id}:{resolution}",
+            "operation_reconciliation",
+            coverage="observed",
+            target_type="operative_operation",
+            target_id=operation_id,
+            detail={"resolution": resolution, "evidence": evidence},
+            artifact_path=evidence_path,
+        )
+        state = "complete" if resolution != "observed_failure" else "failed"
+        self.store.finish_operative_operation(
+            operation_id,
+            state=state,
+            result={"resolution": resolution, "evidence": evidence},
+            after=(
+                supplied.get("after")
+                if isinstance(supplied.get("after"), dict)
+                else {"coverage": "observed"}
+            ),
+            evidence_id=int(retained["id"]),
+        )
+        return {"ok": True, "operation_id": operation_id, "resolution": resolution}
+
+    def _operative_worktree_control(self, request: dict[str, Any]) -> dict[str, Any]:
+        journal = self._require_bound_operative(_thread_identity(request))
+        supplied = self._operative_input(request)
+        action = supplied.get("action")
+        path_value = supplied.get("path")
+        operation_key = supplied.get("operation_key")
+        if action not in {"adopt", "release"}:
+            raise StoreError("operative worktree action must be adopt or release")
+        if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+            raise StoreError("operative worktree requires an exact absolute path")
+        if not isinstance(operation_key, str) or not operation_key:
+            raise StoreError("operative worktree requires a stable operation_key")
+        path = Path(path_value).resolve(strict=True)
+        project = next(
+            (
+                item
+                for item in self.config.projects
+                if path
+                in {
+                    Path(line.removeprefix("worktree ")).resolve(strict=True)
+                    for line in subprocess.run(
+                        ["git", "worktree", "list", "--porcelain"],
+                        cwd=item.repo_path,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    ).stdout.splitlines()
+                    if line.startswith("worktree ")
+                }
+            ),
+            None,
+        )
+        if project is None:
+            raise StoreError("path is not an enrolled repository worktree")
+        snapshot = self._observe_git_root(
+            project.project_id,
+            path,
+            snapshot_id="worktree-control",
+            changes_section="worktree-control-changes",
+        )
+        adopted = dict(journal.get("adopted_worktrees") or {})
+        if action == "release" and str(path) not in adopted:
+            raise StoreError("worktree is not adopted by this takeover")
+        correlation = f"operative-worktree:{journal['takeover_id']}:{operation_key}:{action}:{path}"
+        operation = self.store.create_operative_operation(
+            str(journal["takeover_id"]),
+            f"worktree_{action}",
+            str(path),
+            snapshot,
+            correlation_id=correlation,
+        )
+        if operation["state"] == "complete":
+            return self._retained_operative_result(operation)
+        if operation["state"] != "intent":
+            raise StoreError(
+                f"operative operation {operation['id']} is {operation['state']}; reconcile it"
+            )
+        if action == "adopt":
+            adopted[str(path)] = {
+                "project_id": project.project_id,
+                "adopted_at": utc_now(),
+                "before": snapshot,
+            }
+        else:
+            adopted.pop(str(path), None)
+        self._save_operative_journal(adopted_worktrees=adopted)
+        result = {"ok": True, "action": action, "path": str(path), "snapshot": snapshot}
+        self.store.finish_operative_operation(
+            int(operation["id"]), state="complete", result=result, after=snapshot
+        )
+        return result
+
+    def _operative_repair_check(self, request: dict[str, Any]) -> dict[str, Any]:
+        self._require_bound_operative(_thread_identity(request))
+        source = Path(self.config.source_root)
+        checks: list[dict[str, Any]] = []
+        completed = subprocess.run(
+            ["git", "status", "--porcelain=v1"],
+            cwd=source,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        checks.append(
+            {
+                "name": "git_status",
+                "ok": completed.returncode == 0,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+        )
+        syntax_errors = []
+        for path in (source / "src" / "fulcrum").rglob("*.py"):
+            try:
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
+            except (OSError, SyntaxError) as error:
+                syntax_errors.append({"path": str(path), "error": str(error)})
+        checks.append(
+            {
+                "name": "python_syntax",
+                "ok": not syntax_errors,
+                "errors": syntax_errors,
+            }
+        )
+        return {"ok": all(item["ok"] for item in checks), "checks": checks}
+
+    def _operative_reinstall(self, request: dict[str, Any]) -> dict[str, Any]:
+        journal = self._require_bound_operative(_thread_identity(request))
+        supplied = self._operative_input(request)
+        if supplied.get("confirm") != "reinstall retained recovery and control plane":
+            raise StoreError(
+                "operative reinstall requires the exact confirmation phrase"
+            )
+        operation_key = supplied.get("operation_key")
+        if not isinstance(operation_key, str) or not operation_key:
+            raise StoreError("operative reinstall requires a stable operation_key")
+        from fulcrum.install import install_recovery_artifact
+
+        correlation = f"operative-reinstall:{journal['takeover_id']}:{operation_key}"
+        operation = self.store.create_operative_operation(
+            str(journal["takeover_id"]),
+            "reinstall",
+            str(self.paths.control_root),
+            {
+                "recovery_launcher": str(self.paths.recovery_launcher),
+                "control_plane": str(control_plane_source(self.paths)),
+            },
+            correlation_id=correlation,
+        )
+        if operation["state"] == "complete":
+            return self._retained_operative_result(operation)
+        if operation["state"] != "intent":
+            raise StoreError(
+                f"operative reinstall operation {operation['id']} requires reconciliation"
+            )
+        self.store.mark_operative_operation_sent(int(operation["id"]))
+        try:
+            recovery, recovery_updated = install_recovery_artifact(
+                self.config, self.paths
+            )
+            control_plane, control_updated = install_control_plane(
+                self.config, self.paths
+            )
+        except Exception as error:
+            self.store.finish_operative_operation(
+                int(operation["id"]),
+                state="uncertain",
+                result={"error": str(error)},
+                after={
+                    "recovery_launcher": str(self.paths.recovery_launcher),
+                    "control_plane": str(control_plane_source(self.paths)),
+                },
+            )
+            raise
+        result = {
+            "ok": True,
+            "recovery_launcher": str(recovery),
+            "recovery_updated": recovery_updated,
+            "control_plane": str(control_plane),
+            "control_plane_updated": control_updated,
+        }
+        self.store.finish_operative_operation(
+            int(operation["id"]), state="complete", result=result, after=result
+        )
+        return result
+
+    def _operative_service_check(self, request: dict[str, Any]) -> dict[str, Any]:
+        self._require_bound_operative(_thread_identity(request))
+        controller, app_server = self._observe_operative_services()
+        return {
+            "ok": bool(controller.get("complete") and app_server.get("complete")),
+            "controller": controller,
+            "app_server": app_server,
         }
 
     def _dossier_section(
@@ -7058,6 +7868,37 @@ class Controller:
                 )
         integrity = self.store.row("PRAGMA quick_check")
         controller_service, app_server = self._observe_operative_services()
+        try:
+            recovery_smoke = subprocess.run(
+                [str(self.paths.recovery_launcher), "--smoke-test"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            recovery_launcher = {
+                "coverage": "unavailable",
+                "complete": False,
+                "path": str(self.paths.recovery_launcher),
+                "reason": str(error),
+                "truncated": False,
+            }
+        else:
+            recovery_mode = (
+                stat.S_IMODE(self.paths.recovery_launcher.stat().st_mode)
+                if self.paths.recovery_launcher.exists()
+                else None
+            )
+            recovery_launcher = {
+                "coverage": "observed",
+                "complete": recovery_smoke.returncode == 0 and recovery_mode == 0o700,
+                "path": str(self.paths.recovery_launcher),
+                "mode": oct(recovery_mode) if recovery_mode is not None else None,
+                "result": recovery_smoke.stdout.strip(),
+                "error": recovery_smoke.stderr.strip(),
+                "truncated": False,
+            }
         state_ok, state_reasons = state_readiness(
             self.store, include_operative_fence=False
         )
@@ -7092,6 +7933,9 @@ class Controller:
                 "completed_effects",
                 "created_at",
                 "updated_at",
+                "offline_operations",
+                "adopted_worktrees",
+                "store_quarantine",
             )
         }
 
@@ -7200,6 +8044,7 @@ class Controller:
             ),
             "controller_service": controller_service,
             "app_server": app_server,
+            "recovery_launcher": recovery_launcher,
             "store_integrity": {
                 "coverage": "observed" if integrity is not None else "unavailable",
                 "quick_check": next(iter(integrity.values())) if integrity else None,
@@ -7592,6 +8437,20 @@ class Controller:
             failures.extend(progress_reasons)
         if not self.runtime.ready:
             failures.append("App Server is unavailable")
+        recovery = self.paths.recovery_launcher
+        try:
+            smoke = subprocess.run(
+                [str(recovery), "--smoke-test"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            failures.append("independent recovery launcher is unavailable")
+        else:
+            if smoke.returncode != 0:
+                failures.append("independent recovery launcher smoke test failed")
         active = self.store.rows(
             """SELECT id, title FROM tasks WHERE role != 'operative' AND archived = 0
                AND (last_turn_terminal = 0 OR helpers_terminal = 0 OR runtime_status = 'active')
@@ -7718,6 +8577,11 @@ class Controller:
         app_server = dossier.get("app_server")
         if not isinstance(app_server, dict) or not app_server.get("complete", False):
             failures.append("App Server ownership/connectivity is unavailable")
+        recovery_launcher = dossier.get("recovery_launcher")
+        if not isinstance(recovery_launcher, dict) or not recovery_launcher.get(
+            "complete", False
+        ):
+            failures.append("independent recovery launcher is unavailable")
         readiness = dossier.get("readiness")
         if not isinstance(readiness, dict) or not readiness.get(
             "ready_without_takeover_fence", False

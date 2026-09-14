@@ -22,6 +22,7 @@ from fulcrum.install import (
     CONTROLLER_LABEL,
     install_control_plane,
     install_links,
+    install_recovery_artifact,
     install_services,
     start_services,
     verify_runtime_ownership_or_availability,
@@ -290,6 +291,9 @@ def run_setup(
             save_installation(paths.config_file, config)
             _prepare_brain(config)
             links = install_links(config)
+            recovery_launcher, recovery_updated = install_recovery_artifact(
+                config, paths
+            )
             _, control_plane_updated = install_control_plane(config, paths)
             services, updated_services = install_services(config, paths)
             if control_plane_updated:
@@ -326,4 +330,6 @@ def run_setup(
         "projects": [project.project_id for project in config.projects],
         "cli": links["cli"],
         "desktop_launcher": services["desktop_wrapper"],
+        "recovery_launcher": str(recovery_launcher),
+        "recovery_updated": recovery_updated,
     }

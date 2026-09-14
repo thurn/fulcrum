@@ -7,6 +7,7 @@ import json
 import os
 import plistlib
 import shutil
+import stat
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -135,6 +136,55 @@ def doctor(paths: RuntimePaths) -> dict[str, Any]:
         "control_plane_snapshot",
         bool(source_files) and deployed_files == source_files,
         str(deployed_package),
+    )
+    recovery_launcher = paths.recovery_launcher
+    recovery_smoke = None
+    if os.access(recovery_launcher, os.X_OK):
+        recovery_smoke = subprocess.run(
+            [str(recovery_launcher), "--smoke-test"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    recovery_detail: dict[str, Any] | None = None
+    if recovery_smoke is not None and recovery_smoke.returncode == 0:
+        try:
+            value = json.loads(recovery_smoke.stdout)
+            if isinstance(value, dict):
+                recovery_detail = value
+        except json.JSONDecodeError:
+            recovery_detail = None
+    recovery_mode = (
+        stat.S_IMODE(recovery_launcher.stat().st_mode)
+        if recovery_launcher.exists()
+        else None
+    )
+    check(
+        "operative_recovery",
+        bool(
+            recovery_smoke
+            and recovery_smoke.returncode == 0
+            and recovery_mode == 0o700
+            and recovery_detail
+            and recovery_detail.get("isolated") is True
+            and isinstance(recovery_detail.get("module"), str)
+            and Path(str(recovery_detail["module"]))
+            .resolve(strict=True)
+            .is_relative_to(paths.recovery_root.resolve(strict=True))
+        ),
+        (
+            json.dumps(
+                {
+                    "path": str(recovery_launcher),
+                    "mode": oct(recovery_mode) if recovery_mode is not None else None,
+                    "smoke": recovery_detail,
+                },
+                sort_keys=True,
+            )
+            if recovery_smoke is not None
+            else str(recovery_launcher)
+        ),
     )
     for name, command in (
         ("codex", config.codex_bin),

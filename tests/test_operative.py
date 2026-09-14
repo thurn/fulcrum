@@ -1,21 +1,31 @@
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import json
 import os
+import select
 import sqlite3
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from copy import deepcopy
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from fulcrum.config import InstallationConfig, ProjectConfig, RuntimePaths
+from fulcrum.config import (
+    InstallationConfig,
+    ProjectConfig,
+    RuntimePaths,
+    save_installation,
+)
 from fulcrum.cli import main as cli_main
-from fulcrum.controller import Controller
+from fulcrum.controller import Controller, INHERITED_LOCK_FD_ENV
 from fulcrum.hook import handle_event
 from fulcrum.lifecycle import accept_finish
 from fulcrum.operative import (
@@ -25,6 +35,11 @@ from fulcrum.operative import (
     write_journal,
 )
 from fulcrum.readiness import state_readiness
+from fulcrum.recovery import (
+    FINALIZER_READY_FD_ENV,
+    _require_verified_active_operative,
+)
+from fulcrum.runtime import AppServerError
 from fulcrum.setup import SetupError, run_setup
 from fulcrum.store import Store, StoreError, utc_now
 
@@ -43,10 +58,14 @@ class OperativeRuntime:
         self._read_must_fail = False
         self.set_name_calls: list[tuple[str, str]] = []
         self.assign_project_calls: list[tuple[str, str]] = []
+        self.control_calls: list[tuple[str, str, str]] = []
+        self.threads: dict[str, dict[str, object]] = {}
 
     async def read_thread(
         self, thread_id: str, *, include_turns: bool = True
     ) -> dict[str, object]:
+        if thread_id in self.threads:
+            return deepcopy(self.threads[thread_id])
         if self._read_must_fail:
             self._read_must_fail = False
             raise RuntimeError("observation unavailable after accepted naming")
@@ -100,7 +119,25 @@ class OperativeRuntime:
 
     async def archive(self, thread_id: str) -> None:
         self.archived_threads.append(thread_id)
+        if thread_id in self.threads:
+            self.control_calls.append(("archive", thread_id, ""))
+            self.threads[thread_id]["archived"] = True
+            return
         self.archived = True
+
+    async def steer(
+        self, thread_id: str, turn_id: str, _notice: str, *, correlation: str
+    ) -> None:
+        self.control_calls.append(("steer", thread_id, turn_id))
+        self.assert_correlation = correlation
+
+    async def interrupt(self, thread_id: str, turn_id: str) -> None:
+        self.control_calls.append(("interrupt", thread_id, turn_id))
+        thread = self.threads[thread_id]
+        thread["status"] = {"type": "idle"}
+        turns = thread.get("turns")
+        if isinstance(turns, list) and turns and isinstance(turns[-1], dict):
+            turns[-1]["status"] = "interrupted"
 
 
 class OperativeTest(unittest.IsolatedAsyncioTestCase):
@@ -165,6 +202,9 @@ class OperativeTest(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     def _seed_ready_installation(self) -> None:
+        self.paths.recovery_launcher.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.recovery_launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.paths.recovery_launcher.chmod(0o700)
         self.controller.store.execute(
             "INSERT INTO meta(key, value) VALUES ('global_limit', '2')"
         )
@@ -311,6 +351,146 @@ class OperativeTest(unittest.IsolatedAsyncioTestCase):
             {"command": "status", "thread_id": "different-human-thread"}
         )
         self.assertEqual(status["operative_journal_state"], "active")
+
+    async def test_reachable_controller_returns_idempotent_provisional_takeover(
+        self,
+    ) -> None:
+        input_path = self.paths.control_root / "operative-input.json"
+        input_path.write_text(
+            json.dumps({"description": "Repair the unavailable App Server"}),
+            encoding="utf-8",
+        )
+        input_path.chmod(0o600)
+        self.paths.socket.parent.mkdir(parents=True, exist_ok=True)
+        server = await asyncio.start_unix_server(
+            self.controller._handle_client, path=self.paths.socket
+        )
+        try:
+            results: list[dict[str, object]] = []
+            with (
+                patch("fulcrum.cli.resolve_paths", return_value=self.paths),
+                patch("fulcrum.cli._recovery_request") as recovery,
+                patch.dict(
+                    os.environ, {"CODEX_THREAD_ID": "operative-thread"}, clear=False
+                ),
+            ):
+                with patch.object(
+                    self.runtime,
+                    "read_thread",
+                    side_effect=AppServerError("App Server socket is unavailable"),
+                ):
+                    for _ in range(2):
+                        output = StringIO()
+                        with redirect_stdout(output):
+                            exit_code = await asyncio.to_thread(
+                                cli_main,
+                                [
+                                    "operative",
+                                    "register",
+                                    "--input",
+                                    str(input_path),
+                                ],
+                            )
+                        self.assertEqual(exit_code, 0)
+                        results.append(json.loads(output.getvalue()))
+                provisional_journal = read_journal(self.paths.operative_journal)
+                assert provisional_journal is not None
+                self.assertEqual(
+                    provisional_journal["caller_verification"]["coverage"],
+                    "unavailable",
+                )
+                self.assertEqual(
+                    self.controller.store.rows(
+                        "SELECT * FROM tasks WHERE role = 'operative'"
+                    ),
+                    [],
+                )
+
+                original_register_task = self.controller.store.register_task
+
+                def register_after_verification(
+                    *args: object, **kwargs: object
+                ) -> object:
+                    retained = read_journal(self.paths.operative_journal)
+                    assert retained is not None
+                    self.assertEqual(
+                        retained["caller_verification"]["coverage"], "observed"
+                    )
+                    return original_register_task(*args, **kwargs)
+
+                output = StringIO()
+                with (
+                    patch.object(
+                        self.controller.store,
+                        "register_task",
+                        side_effect=register_after_verification,
+                    ),
+                    redirect_stdout(output),
+                ):
+                    exit_code = await asyncio.to_thread(
+                        cli_main,
+                        ["operative", "register", "--input", str(input_path)],
+                    )
+                self.assertEqual(exit_code, 0)
+                results.append(json.loads(output.getvalue()))
+                recovery.assert_not_called()
+        finally:
+            server.close()
+            await server.wait_closed()
+            self.paths.socket.unlink(missing_ok=True)
+
+        self.assertEqual(results[0]["state"], "acquiring")
+        self.assertEqual(results[0]["authority"], "provisional_local_repair")
+        self.assertEqual(results[0]["caller_verification"]["coverage"], "unavailable")
+        self.assertFalse(results[0]["reused"])
+        self.assertTrue(results[1]["reused"])
+        self.assertEqual(results[1]["takeover_id"], results[0]["takeover_id"])
+        self.assertEqual(results[2]["takeover_id"], results[0]["takeover_id"])
+        self.assertEqual(results[2]["state"], "active")
+        journal = read_journal(self.paths.operative_journal)
+        assert journal is not None
+        self.assertEqual(journal["takeover_id"], results[0]["takeover_id"])
+        self.assertEqual(journal["state"], "active")
+        self.assertEqual(journal["caller_verification"]["coverage"], "observed")
+        self.assertEqual(
+            journal["caller_verification"]["method"], "exact App Server thread/read"
+        )
+        dossier = await self.controller._build_operative_dossier()
+        self.assertEqual(
+            dossier["takeover"]["value"]["caller_verification"],
+            journal["caller_verification"],
+        )
+        self.assertEqual(
+            len(
+                self.controller.store.rows(
+                    "SELECT * FROM tasks WHERE role = 'operative'"
+                )
+            ),
+            1,
+        )
+        save_installation(self.paths.config_file, self.config)
+
+        class VerifiedRuntime:
+            async def close(self) -> None:
+                return None
+
+        async def verified(
+            _config: object, thread_id: str
+        ) -> tuple[VerifiedRuntime, dict[str, object]]:
+            return VerifiedRuntime(), {
+                "coverage": "observed",
+                "method": "exact App Server thread/read",
+                "native_thread_id": thread_id,
+            }
+
+        with (
+            patch.dict(
+                os.environ, {"CODEX_THREAD_ID": "operative-thread"}, clear=False
+            ),
+            patch("fulcrum.recovery._verified_runtime", side_effect=verified),
+        ):
+            verified_journal = await _require_verified_active_operative(self.paths)
+        self.assertEqual(verified_journal["takeover_id"], results[0]["takeover_id"])
 
     async def test_setup_is_fenced_before_run_setup_for_active_and_acquiring_journal(
         self,
@@ -618,6 +798,138 @@ class OperativeTest(unittest.IsolatedAsyncioTestCase):
         evidence = self.controller.store.row("""SELECT * FROM operative_evidence
                WHERE evidence_key LIKE 'late-finish:%'""")
         self.assertEqual(evidence["kind"], "late_outcome")
+
+    async def test_wind_down_steers_exact_turn_before_interrupt_and_terminal_archive(
+        self,
+    ) -> None:
+        task = self.controller.store.register_task(
+            native_thread_id="managed-active",
+            role="executor",
+            description="Interrupted work",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        cursor = self.controller.store.execute(
+            """INSERT INTO actions(
+                 task_id, kind, payload, state, native_turn_id, created_at, updated_at
+               ) VALUES (?, 'implement', '{}', 'active', 'managed-turn', ?, ?)""",
+            (task["id"], utc_now(), utc_now()),
+        )
+        self.controller.store.bind_action_turn(
+            int(cursor.lastrowid), "managed-active", "managed-turn"
+        )
+        self.runtime.threads["managed-active"] = {
+            "id": "managed-active",
+            "status": {"type": "active"},
+            "archived": False,
+            "turns": [
+                {
+                    "id": "managed-turn",
+                    "status": "inProgress",
+                    "items": [
+                        {
+                            "type": "collabToolCall",
+                            "agentsStates": {"helper": {"status": "completed"}},
+                        }
+                    ],
+                }
+            ],
+        }
+        await self._register()
+
+        result = await self.controller._wind_down_operative_targets(
+            {
+                "thread_id": "operative-thread",
+                "input_path": "/tmp/wind-down.json",
+                "input": {
+                    "task_ids": [task["id"]],
+                    "operation_key": "stop-managed-active",
+                    "notice": "The human authorized emergency takeover.",
+                    "dispositions": {str(task["id"]): "cancel"},
+                },
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            self.runtime.control_calls,
+            [
+                ("steer", "managed-active", "managed-turn"),
+                ("interrupt", "managed-active", "managed-turn"),
+                ("archive", "managed-active", ""),
+            ],
+        )
+        operations = self.controller.store.rows(
+            """SELECT kind, state FROM operative_operations
+               WHERE target LIKE 'managed-active%' ORDER BY id"""
+        )
+        self.assertEqual(
+            [(item["kind"], item["state"]) for item in operations],
+            [
+                ("turn_steer", "complete"),
+                ("turn_interrupt", "complete"),
+                ("thread_archive", "complete"),
+            ],
+        )
+        retained = self.controller.store.row(
+            "SELECT state, archived FROM tasks WHERE id = ?", (task["id"],)
+        )
+        self.assertEqual((retained["state"], retained["archived"]), ("retired", 1))
+
+    async def test_wind_down_does_not_archive_until_every_helper_is_terminal(
+        self,
+    ) -> None:
+        task = self.controller.store.register_task(
+            native_thread_id="managed-helper",
+            role="executor",
+            description="Nested helper work",
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+            project_id="p",
+        )
+        cursor = self.controller.store.execute(
+            """INSERT INTO actions(
+                 task_id, kind, payload, state, native_turn_id, created_at, updated_at
+               ) VALUES (?, 'implement', '{}', 'active', 'parent-turn', ?, ?)""",
+            (task["id"], utc_now(), utc_now()),
+        )
+        self.controller.store.bind_action_turn(
+            int(cursor.lastrowid), "managed-helper", "parent-turn"
+        )
+        self.runtime.threads["managed-helper"] = {
+            "id": "managed-helper",
+            "status": {"type": "active"},
+            "archived": False,
+            "turns": [
+                {
+                    "id": "parent-turn",
+                    "status": "inProgress",
+                    "items": [
+                        {
+                            "type": "collabAgentToolCall",
+                            "agentsStates": {"nested": {"status": "running"}},
+                        }
+                    ],
+                }
+            ],
+        }
+        await self._register()
+
+        result = await self.controller._wind_down_operative_targets(
+            {
+                "thread_id": "operative-thread",
+                "input": {
+                    "task_ids": [task["id"]],
+                    "operation_key": "stop-managed-helper",
+                    "notice": "Emergency wind-down.",
+                },
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("native helpers are not terminal", result["blockers"][0])
+        self.assertNotIn(("archive", "managed-helper", ""), self.runtime.control_calls)
 
     async def test_operative_reconciliation_never_repairs_ordinary_runtime_state(
         self,
@@ -1038,6 +1350,178 @@ class OperativeTest(unittest.IsolatedAsyncioTestCase):
             "SELECT * FROM actions WHERE kind = 'operative'"
         )
         self.assertEqual(action["state"], "processed")
+
+    async def test_absent_controller_fallback_finalizer_survives_invoking_turn(
+        self,
+    ) -> None:
+        """A separate lock owner closes only after the invoking turn terminates."""
+
+        (Path(self.config.source_root) / "src" / "fulcrum").mkdir(parents=True)
+        save_installation(self.paths.config_file, self.config)
+        registered = await self._register()
+        evidence = Path(self.temporary.name) / "fallback-closeout.json"
+        evidence.write_text(
+            json.dumps(await self._closeout_contract()), encoding="utf-8"
+        )
+        result = await self.controller._request_operative_finish(
+            {"thread_id": "operative-thread", "evidence": str(evidence)}
+        )
+        self.assertEqual(result["state"], "closing")
+
+        status_path = Path(self.temporary.name) / "process-runtime.json"
+        result_path = Path(self.temporary.name) / "process-result.json"
+        status_path.write_text(
+            json.dumps({"terminal": False, "archived": False}), encoding="utf-8"
+        )
+        assert self.controller.lock_handle is not None
+        lock_fd = os.dup(self.controller.lock_handle.fileno())
+        ready_read, ready_write = os.pipe()
+        child_script = textwrap.dedent("""
+            import asyncio
+            import json
+            import os
+            from pathlib import Path
+
+            import fulcrum.controller as controller_module
+            from fulcrum.config import resolve_paths
+            from fulcrum.controller import Controller
+            from fulcrum.operative import read_journal
+            from fulcrum.recovery import _run_closeout_finalizer
+
+            status_path = Path(os.environ["TEST_FINALIZER_STATUS"])
+            result_path = Path(os.environ["TEST_FINALIZER_RESULT"])
+
+            class Runtime:
+                def __init__(self, _endpoint, **_options):
+                    self.ready = False
+
+                async def connect(self):
+                    self.ready = True
+
+                async def close(self):
+                    self.ready = False
+
+                def status(self):
+                    return json.loads(status_path.read_text(encoding="utf-8"))
+
+                async def read_thread(self, thread_id, include_turns=True):
+                    if thread_id == "archon-thread":
+                        return {
+                            "id": thread_id,
+                            "name": "Archon",
+                            "projectId": None,
+                            "status": {"type": "idle"},
+                            "turns": [],
+                            "archived": False,
+                        }
+                    observed = self.status()
+                    terminal = bool(observed.get("terminal"))
+                    return {
+                        "id": thread_id,
+                        "name": "Operative",
+                        "projectId": None,
+                        "status": {"type": "idle" if terminal else "active"},
+                        "turns": ([{
+                            "id": "operative-turn",
+                            "status": "completed" if terminal else "inProgress",
+                            "items": [],
+                        }] if include_turns else []),
+                        "archived": bool(observed.get("archived")),
+                    }
+
+                async def archive(self, _thread_id):
+                    observed = self.status()
+                    observed["archived"] = True
+                    status_path.write_text(json.dumps(observed), encoding="utf-8")
+
+            def observed_services(_controller):
+                common = {"coverage": "observed", "complete": True, "truncated": False}
+                return (
+                    {**common, "lock_owned": True, "ownership": "controller_lock"},
+                    {**common, "connected": True, "ownership": "launchd"},
+                )
+
+            controller_module.CodexRuntime = Runtime
+            Controller._observe_operative_services = observed_services
+            try:
+                result = asyncio.run(
+                    _run_closeout_finalizer(
+                        resolve_paths(), os.environ["TEST_FINALIZER_TAKEOVER"]
+                    )
+                )
+                result_path.write_text(json.dumps({
+                    "result": result,
+                    "journal": read_journal(resolve_paths().operative_journal),
+                }), encoding="utf-8")
+                raise SystemExit(0 if result.get("ok") else 1)
+            except BaseException as error:
+                if not isinstance(error, SystemExit):
+                    result_path.write_text(
+                        json.dumps({"error": repr(error)}), encoding="utf-8"
+                    )
+                raise
+            """)
+        environment = {
+            **os.environ,
+            INHERITED_LOCK_FD_ENV: str(lock_fd),
+            FINALIZER_READY_FD_ENV: str(ready_write),
+            "FULCRUM_CONFIG": str(self.paths.config_file),
+            "FULCRUM_STATE_ROOT": str(self.paths.state_root),
+            "FULCRUM_CONTROL_ROOT": str(self.paths.control_root),
+            "TEST_FINALIZER_STATUS": str(status_path),
+            "TEST_FINALIZER_RESULT": str(result_path),
+            "TEST_FINALIZER_TAKEOVER": str(registered["takeover_id"]),
+        }
+        process = subprocess.Popen(
+            [sys.executable, "-c", child_script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            pass_fds=(lock_fd, ready_write),
+            close_fds=True,
+        )
+
+        os.close(lock_fd)
+        os.close(ready_write)
+        self.controller.store.close()
+        self.controller.lock_handle.close()
+        self.controller.lock_handle = None
+        readable, _, _ = select.select([ready_read], [], [], 10)
+        ready = os.read(ready_read, 4096) if readable else b""
+        os.close(ready_read)
+        self.assertEqual(ready, b"ready\n")
+        self.assertEqual(read_journal(self.paths.operative_journal)["state"], "closing")
+        with self.paths.lock.open("a+") as contender:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        status_path.write_text(
+            json.dumps({"terminal": True, "archived": False}), encoding="utf-8"
+        )
+        stdout, stderr = process.communicate(timeout=15)
+        self.assertEqual(
+            process.returncode,
+            0,
+            (
+                result_path.read_text(encoding="utf-8")
+                if result_path.exists()
+                else f"no child result; stdout={stdout!r}; stderr={stderr!r}"
+            ),
+        )
+        self.assertEqual(read_journal(self.paths.operative_journal)["state"], "closed")
+        with self.paths.lock.open("a+") as contender:
+            fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(contender.fileno(), fcntl.LOCK_UN)
+        with Store(self.paths.database, readonly=True) as store:
+            self.assertEqual(
+                store.row("SELECT value FROM meta WHERE key = 'dispatch_enabled'")[
+                    "value"
+                ],
+                "1",
+            )
+        self.assertTrue(json.loads(status_path.read_text(encoding="utf-8"))["archived"])
 
     async def test_closeout_recovery_uses_retained_evidence_not_caller_file(
         self,

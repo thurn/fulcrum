@@ -14,6 +14,12 @@ class ControllerUnavailable(RuntimeError):
     pass
 
 
+class ControllerRejected(RuntimeError):
+    """The controller was reached and rejected the requested operation."""
+
+    pass
+
+
 async def request(
     socket_path: Path, payload: dict[str, Any], *, timeout: float = 30
 ) -> dict[str, Any]:
@@ -39,7 +45,7 @@ async def request(
                 "Fulcrum controller returned an invalid response"
             )
         if response.get("ok") is False:
-            raise ControllerUnavailable(
+            raise ControllerRejected(
                 str(response.get("error", "controller request failed"))
             )
         return response
