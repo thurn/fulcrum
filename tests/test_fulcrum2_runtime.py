@@ -184,7 +184,7 @@ class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
             if method == "thread/read":
                 if deleted:
                     raise AppServerError(
-                        "thread not found: thread-1", category="rejected"
+                        "thread not loaded: thread-1", category="rejected"
                     )
                 return {
                     "thread": {
@@ -195,6 +195,8 @@ class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
                 }
             if method == "thread/loaded/list":
                 return {"data": ["thread-1"] if loaded else []}
+            if method == "thread/list":
+                return {"data": []}
             if method == "thread/backgroundTerminals/list":
                 if not loaded:
                     raise AppServerError(
@@ -218,7 +220,23 @@ class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["exists"])
         self.assertEqual(result["runtime_state"], "deleted")
         self.assertLess(calls.index("thread/resume"), calls.index("thread/delete"))
-        self.assertEqual(calls[-1], "thread/read")
+        self.assertEqual(calls[-3:], ["thread/read", "thread/list", "thread/list"])
+
+    async def test_unloaded_saved_task_is_not_reported_deleted(self) -> None:
+        for archived in (False, True):
+            with self.subTest(archived=archived):
+                transport = AsyncMock()
+                transport.read_thread.side_effect = AppServerError(
+                    "thread not loaded: thread-1", category="rejected"
+                )
+                transport.list_all_threads.side_effect = lambda **kwargs: (
+                    [{"id": "thread-1"}] if kwargs["archived"] == archived else []
+                )
+                runtime = AppServerRuntime(
+                    "ws://unused", transport=cast(CodexRuntime, transport)
+                )
+                with self.assertRaisesRegex(AppServerError, "thread not loaded"):
+                    await runtime.inspect_task("thread-1")
 
     async def test_inspection_rejection_is_not_proof_task_is_absent(self) -> None:
         transport = AsyncMock()

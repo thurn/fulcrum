@@ -1285,6 +1285,12 @@ class AppServerRuntime:
             elif not _unloaded_thread_error(error):
                 raise
             else:
+                # A missing in-memory task is not proof its saved history is
+                # gone. Check both inventories before reporting absence.
+                for archived in (False, True):
+                    listed = await self.transport.list_all_threads(archived=archived)
+                    if any(item.get("id") == thread_id for item in listed):
+                        raise error
                 return TaskFacts(
                     id=thread_id,
                     title=None,
@@ -1793,7 +1799,10 @@ def _empty_history_error(error: AppServerError) -> bool:
 
 
 def _unloaded_thread_error(error: AppServerError) -> bool:
-    return error.category == "rejected" and "thread not found:" in str(error).lower()
+    return error.category == "rejected" and any(
+        message in str(error).lower()
+        for message in ("thread not found:", "thread not loaded:")
+    )
 
 
 def _contains_marker(value: Any, marker: str) -> bool:
