@@ -1577,7 +1577,9 @@ def _decision_row(
 ) -> tuple[str | None, dict[str, Any] | None]:
     fc = record.fc or {}
     plan = fc.get("plan")
-    if isinstance(plan, Mapping) and plan.get("published_scope") is not None:
+    if isinstance(plan, Mapping) and (
+        plan.get("draft") is not None or plan.get("published_scope") is not None
+    ):
         return None, None
     phase = str(fc.get("phase", "intake"))
     if phase in {"working", "handoff", "reviewing", "delivering", "done"}:

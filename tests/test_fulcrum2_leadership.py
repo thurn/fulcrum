@@ -546,10 +546,23 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
         )
         root_fc = dict(root.fc or {})
         root_fc["plan"] = {
-            "published_scope": {"summary": "Coordinate the published plan."},
+            "draft": {"summary": "Coordinate the draft plan."},
+            "published_scope": None,
             "children_by_key": {"child": "fc-plan-child"},
         }
         self.ledger.update_fc(root.id, root_fc)
+
+        published_root = self.create_work(
+            "fc-published-plan-root",
+            intake={"benefit": "Known", "uncertainties": []},
+            priority=0,
+        )
+        published_root_fc = dict(published_root.fc or {})
+        published_root_fc["plan"] = {
+            "published_scope": {"summary": "Coordinate the published plan."},
+            "children_by_key": {"child": "fc-plan-child"},
+        }
+        self.ledger.update_fc(published_root.id, published_root_fc)
 
         prerequisite = self.create_work(
             "fc-plan-prerequisite",
