@@ -846,15 +846,35 @@ async def ensure_leadership(
         current = current_control
         current_fc = dict(current.fc or {})
         recorded_thread = _optional_string(current_fc.get(f"{role}_thread"))
+        stale_task: LedgerRecord | None = None
         if recorded_thread and recorded_thread in known_tasks:
-            actions.append(
-                {"role": role, "thread_id": recorded_thread, "created": False}
-            )
-            continue
+            try:
+                if connection_error is not None:
+                    raise connection_error
+                await runtime.connect()
+                observed = await runtime.inspect_task(recorded_thread)
+            except AppServerError as error:
+                if error.category in {"unavailable", "transient"}:
+                    connection_error = error
+                observed = None
+            if observed is not None and observed.exists:
+                retained = known_tasks[recorded_thread]
+                retained_fc = dict(retained.fc or {})
+                retained_fc["last_observed"] = observed.to_dict()
+                ledger.update_fc(retained.id, retained_fc, assignee=recorded_thread)
+                actions.append(
+                    {"role": role, "thread_id": recorded_thread, "created": False}
+                )
+                continue
+            stale_task = known_tasks[recorded_thread]
         request_id = str(
             uuid.uuid5(
                 LEADERSHIP_NAMESPACE,
-                f"{expected_instance}:{expected_brain}:{role}:standing",
+                (
+                    f"{expected_instance}:{expected_brain}:{role}:standing"
+                    if stale_task is None
+                    else f"{expected_instance}:{expected_brain}:{role}:standing-repair:{recorded_thread}"
+                ),
             )
         )
         task_record_id = f"fc-{uuid.uuid5(LEADERSHIP_NAMESPACE, request_id).hex[:8]}"
@@ -1019,6 +1039,18 @@ async def ensure_leadership(
                 {"role": role, "operation_id": operation.id, "state": "uncertain"}
             )
             continue
+        if stale_task is not None:
+            stale_fc = dict(stale_task.fc or {})
+            stale_fc["replaced_by"] = task_record_id
+            stale_fc["deleted_at"] = utc_now()
+            stale_fc["archive_state"] = "replaced"
+            stale_fc["last_transition"] = operation.id
+            ledger.update_fc(
+                stale_task.id,
+                stale_fc,
+                assignee=stale_task.assignee,
+                status=stale_task.status,
+            )
         current_fc = dict(current.fc or {})
         current_fc["instance_root"] = expected_instance
         current_fc["brain_root"] = expected_brain

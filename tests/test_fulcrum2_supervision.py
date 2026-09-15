@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticService
 from fulcrum.deterministic import ProviderState, initial_provider_state
 from fulcrum.instance import resolve_instance
+from fulcrum.leadership import ensure_leadership
 from fulcrum.ledger import Ledger, operation_id
 from fulcrum.runtime import ReleaseFacts, ResourceFacts, TaskFacts, TurnFacts
 from fulcrum.supervision import ControllerSupervisor
@@ -47,6 +49,7 @@ class FakeRuntime:
         self.fd_soft_limit = 100
         self.fd_usage = 10
         self.overloaded = False
+        self.created = 0
 
     async def connect(self) -> None:
         pass
@@ -55,7 +58,47 @@ class FakeRuntime:
         pass
 
     async def inspect_task(self, thread_id: str) -> TaskFacts:
-        return self.facts[thread_id]
+        if thread_id in self.facts:
+            return self.facts[thread_id]
+        return TaskFacts(
+            id=thread_id,
+            title=None,
+            cwd=None,
+            project_id=None,
+            workspace_roots=(),
+            archived=False,
+            exists=False,
+            loaded=None,
+            runtime_status=None,
+            active_turn=None,
+            last_turn=None,
+            pending_requests=(),
+            observed_at="2026-09-14T16:00:00Z",
+        )
+
+    async def find_tasks(self, creation_cwd: str) -> list[TaskFacts]:
+        return [facts for facts in self.facts.values() if facts.cwd == creation_cwd]
+
+    async def create_task(self, spec: Any) -> TaskFacts:
+        self.created += 1
+        thread_id = f"replacement-leader-{self.created}"
+        facts = TaskFacts(
+            id=thread_id,
+            title=spec.title,
+            cwd=spec.creation_cwd,
+            project_id=spec.project_id,
+            workspace_roots=spec.workspace_roots,
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="idle",
+            active_turn=None,
+            last_turn=None,
+            pending_requests=(),
+            observed_at="2026-09-14T16:00:00Z",
+        )
+        self.facts[thread_id] = facts
+        return facts
 
     async def resources(self) -> ResourceFacts:
         return ResourceFacts(
@@ -335,6 +378,31 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         self.clock.advance(1000)
         await supervisor.run_once(operation_id=exhausted_id)
         self.assertEqual(application.calls[exhausted_id], calls)
+
+    async def test_startup_replaces_missing_standing_leader_identity(self) -> None:
+        del self.runtime.facts["native-vizier-leader"]
+        config = ConfigurationManager(self.config).effective(
+            ConfigurationManager(self.config).load()[0]
+        )
+
+        actions = await ensure_leadership(
+            self.request, self.ledger, self.runtime, config
+        )
+
+        control = self.ledger.show("fc-system")
+        old = self.ledger.show("fc-vizier-leader-task")
+        assert control is not None and control.fc and old is not None and old.fc
+        replacement_thread = str(control.fc["vizier_thread"])
+        self.assertNotEqual(replacement_thread, "native-vizier-leader")
+        self.assertTrue(self.runtime.facts[replacement_thread].exists)
+        self.assertIsNotNone(old.fc["replaced_by"])
+        self.assertTrue(
+            any(
+                row.get("role") == "vizier"
+                and row.get("thread_id") == replacement_thread
+                for row in actions
+            )
+        )
 
     async def test_crash_reconciliation_and_uncertain_effect_do_not_duplicate(
         self,
