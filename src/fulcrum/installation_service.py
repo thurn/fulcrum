@@ -23,6 +23,7 @@ from fulcrum.install import (
     inspect_service,
     reconcile_fulcrum2_skills,
 )
+from fulcrum.ipc import ControllerTimedOut, ControllerUnavailable, request_sync
 from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_view
 from fulcrum.runtime_service import _runtime_call
 
@@ -237,6 +238,7 @@ class ServiceService:
         results.append(controller_start)
         try:
             readiness = _wait_for_controller(
+                request,
                 request.instance.socket_path,
                 controller,
                 timeout=min(max(request.timeout, 1.0), 30.0),
@@ -379,7 +381,32 @@ class ServiceService:
             request_id=str(uuid.uuid5(namespace, "service-start")),
         )
         stopped = self.stop(stop_request)
+        stop_failure = _service_child_failure(stopped, "stop")
+        if stop_failure is not None:
+            operation = ledger.update_operation(
+                operation,
+                state="failed",
+                step="controller_restart_stop_failed",
+                error=stop_failure,
+                result={"stop_operation": stopped.operation_id},
+                next_action="Inspect the retained stop operation before retrying restart.",
+            )
+            return _operation_result(operation)
         started = self.start(start_request)
+        start_failure = _service_child_failure(started, "start")
+        if start_failure is not None:
+            operation = ledger.update_operation(
+                operation,
+                state="failed",
+                step="controller_restart_start_failed",
+                error=start_failure,
+                result={
+                    "stop_operation": stopped.operation_id,
+                    "start_operation": started.operation_id,
+                },
+                next_action="Inspect controller service status and the retained start operation before retrying restart.",
+            )
+            return _operation_result(operation)
         operation = ledger.update_operation(
             operation,
             state="completed",
@@ -477,26 +504,64 @@ def _occupied(endpoint: str) -> bool:
 
 
 def _wait_for_controller(
-    socket_path: Path, service: InstalledService, *, timeout: float
+    request: ParsedRequest,
+    socket_path: Path,
+    service: InstalledService,
+    *,
+    timeout: float,
+    stability_seconds: float = 1.0,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_observation = inspect_service(service.label)
     last_error: str | None = None
     while time.monotonic() < deadline:
         last_observation = inspect_service(service.label)
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(0.25)
+        remaining = deadline - time.monotonic()
+        probe = replace(
+            request,
+            command=("status",),
+            arguments={},
+            input={},
+            request_id=None,
+            timeout=min(2.0, max(0.1, remaining)),
+            offline=False,
+        )
         try:
-            client.connect(str(socket_path))
+            response = request_sync(
+                socket_path,
+                probe.to_wire(),
+                timeout=probe.timeout,
+            )
+            if response.get("ok") is not True:
+                last_error = str(response.get("error") or "readiness probe failed")
+                time.sleep(0.1)
+                continue
+            observed_pid = last_observation.pid
+            stable_until = time.monotonic() + stability_seconds
+            stable = True
+            while time.monotonic() < stable_until:
+                current = inspect_service(service.label)
+                if (
+                    not current.running
+                    or observed_pid is None
+                    or current.pid != observed_pid
+                ):
+                    last_observation = current
+                    last_error = "controller process changed after readiness response"
+                    stable = False
+                    break
+                time.sleep(0.1)
+            if not stable:
+                continue
             return {
                 "socket": str(socket_path),
                 "responsive": True,
-                "pid": last_observation.pid,
+                "pid": observed_pid,
+                "probe_state": response.get("state"),
+                "stable_seconds": stability_seconds,
             }
-        except OSError as error:
+        except (ControllerUnavailable, ControllerTimedOut) as error:
             last_error = str(error)
-        finally:
-            client.close()
         time.sleep(0.1)
     raise FulcrumError(
         "CONTROLLER_UNAVAILABLE",
@@ -510,6 +575,30 @@ def _wait_for_controller(
             "socket": str(socket_path),
         },
     )
+
+
+def _service_child_failure(result: CommandResult, action: str) -> dict[str, Any] | None:
+    if result.state == CommandState.COMPLETED and result.ok:
+        return None
+    retained_error = (
+        result.result.get("error") if isinstance(result.result, Mapping) else None
+    )
+    if result.error is not None:
+        retained_error = result.error.to_dict()
+    if isinstance(retained_error, Mapping):
+        return {
+            "code": str(retained_error.get("code") or "SERVICE_RESTART_FAILED"),
+            "message": str(
+                retained_error.get("message")
+                or f"controller {action} operation did not complete"
+            ),
+            "retryable": bool(retained_error.get("retryable", True)),
+        }
+    return {
+        "code": "SERVICE_RESTART_FAILED",
+        "message": f"controller {action} operation ended in {result.state.value}",
+        "retryable": True,
+    }
 
 
 def _start_one(service: InstalledService, *, endpoint: str | None) -> dict[str, Any]:

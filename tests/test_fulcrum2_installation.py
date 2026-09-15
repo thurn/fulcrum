@@ -9,7 +9,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fulcrum.configuration import ConfigurationManager, default_config
-from fulcrum.contracts import ActorContext, InstanceContext, ParsedRequest
+from fulcrum.contracts import (
+    ActorContext,
+    CommandResult,
+    CommandState,
+    InstanceContext,
+    ParsedRequest,
+)
 from fulcrum.install import (
     HUMAN_SKILLS,
     InstalledService,
@@ -20,6 +26,7 @@ from fulcrum.install import (
     reconcile_fulcrum2_skills,
 )
 from fulcrum.installation_service import (
+    _service_child_failure,
     _start_one,
     _wait_for_controller,
     service_status_result,
@@ -232,9 +239,6 @@ class Fulcrum2InstallationTest(unittest.TestCase):
 
     def test_controller_readiness_requires_a_connectable_unix_socket(self) -> None:
         path = self.root / "ready.sock"
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(path))
-        server.listen(1)
         service = InstalledService(
             "controller", "dev.fulcrum.test.controller", self.root / "x"
         )
@@ -248,16 +252,51 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             working_directory=None,
             detail="observed",
         )
-        try:
-            with patch(
+        with (
+            patch(
                 "fulcrum.installation_service.inspect_service",
                 return_value=observation,
-            ):
-                result = _wait_for_controller(path, service, timeout=0.5)
-        finally:
-            server.close()
+            ),
+            patch(
+                "fulcrum.installation_service.request_sync",
+                return_value={"ok": True, "state": "completed", "result": {}},
+            ) as probe,
+        ):
+            result = _wait_for_controller(
+                self.request(),
+                path,
+                service,
+                timeout=0.5,
+                stability_seconds=0.05,
+            )
         self.assertTrue(result["responsive"])
         self.assertEqual(result["socket"], str(path))
+        self.assertEqual(result["probe_state"], "completed")
+        probe.assert_called_once()
+
+    def test_restart_child_failure_is_not_treated_as_success(self) -> None:
+        completed = CommandResult(ok=True, state=CommandState.COMPLETED)
+        failed = CommandResult(
+            ok=False,
+            state=CommandState.FAILED,
+            result={
+                "error": {
+                    "code": "CONTROLLER_UNAVAILABLE",
+                    "message": "controller exited during readiness",
+                    "retryable": True,
+                }
+            },
+        )
+
+        self.assertIsNone(_service_child_failure(completed, "start"))
+        self.assertEqual(
+            _service_child_failure(failed, "start"),
+            {
+                "code": "CONTROLLER_UNAVAILABLE",
+                "message": "controller exited during readiness",
+                "retryable": True,
+            },
+        )
 
 
 if __name__ == "__main__":
