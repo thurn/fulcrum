@@ -472,6 +472,9 @@ class Fulcrum2TaskControlReviewTest(unittest.TestCase):
         requirements_input = requirements_operation.fc["planned"]["review_input"]
         self.assertNotIn("ORIGINAL REQUIREMENT SENTINEL", cold_input)
         self.assertIn("ORIGINAL REQUIREMENT SENTINEL", requirements_input)
+        self.assertNotIn("$CODEX_THREAD_ID", cold_input)
+        self.assertIn(reviews["cold_reader"]["task_record_id"], cold_input)
+        self.assertIn('"required_before_ending_turn":true', cold_input)
         manager = ConfigurationManager(self.config)
         document, _ = manager.load()
         self.assertEqual(
@@ -777,6 +780,29 @@ class Fulcrum2TaskControlReviewTest(unittest.TestCase):
 
 
 class NativeOutputBoundTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_output_defaults_to_the_latest_observed_turn(self) -> None:
+        runtime = AppServerRuntime("fake://runtime")
+        runtime.inspect_task = AsyncMock(
+            return_value=facts(
+                "thread-1",
+                active_turn=None,
+                last_turn={"id": "turn-latest", "status": "completed"},
+            )
+        )
+        runtime.transport.thread_items_page = AsyncMock(
+            return_value={"items": [], "next_cursor": None}
+        )
+
+        result = await runtime.output(
+            "thread-1", turn_id=None, limit=20, cursor=None, max_bytes=128
+        )
+
+        self.assertEqual(result["turn_id"], "turn-latest")
+        self.assertEqual(
+            runtime.transport.thread_items_page.await_args.kwargs["turn_id"],
+            "turn-latest",
+        )
+
     async def test_runtime_output_pages_without_resuming_and_truncates_one_item(
         self,
     ) -> None:

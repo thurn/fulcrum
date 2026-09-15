@@ -73,12 +73,18 @@ class ReviewService:
                     "task_record_id": existing_review.get("task_record_id"),
                 },
             )
-        prompt = _review_prompt(root, perspective, retained_draft, expected_operation)
+        task_record_id = random_record_id()
+        prompt = _review_prompt(
+            root,
+            perspective,
+            retained_draft,
+            expected_operation,
+            task_record_id,
+        )
         config, project = _project_config(request, str(root.fc.get("project")))
         model, effort, model_origin = _select_model(
             request, config, project, root.fc, "weaver"
         )
-        task_record_id = random_record_id()
         creation_cwd = str(
             (
                 request.instance.instance_root
@@ -486,6 +492,7 @@ def _review_prompt(
     perspective: str,
     draft: Mapping[str, Any],
     review_operation: str,
+    task_record_id: str,
 ) -> str:
     instructions = {
         "role": "weaver",
@@ -499,8 +506,9 @@ def _review_prompt(
         "candidate_draft": dict(draft),
         "finish": {
             "command": (
-                "fulcrum plan review finish --task $CODEX_THREAD_ID --input - --json"
+                f"fulcrum plan review finish --task {task_record_id} --input - --json"
             ),
+            "required_before_ending_turn": True,
             "review_operation": review_operation,
             "payload": {
                 "review_operation": review_operation,
@@ -524,7 +532,12 @@ def _review_prompt(
             "intake": fc.get("intake"),
             "discussion": fc.get("context", []),
         }
-    return json.dumps(instructions, separators=(",", ":"), ensure_ascii=False)
+    return (
+        "Complete this bounded independent review and submit its structured result "
+        "with the exact finish command before ending the turn. A prose-only answer "
+        "does not complete the review.\n\n"
+        + json.dumps(instructions, separators=(",", ":"), ensure_ascii=False)
+    )
 
 
 def _validate_findings(value: Any) -> list[dict[str, str]]:

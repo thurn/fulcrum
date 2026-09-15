@@ -1469,10 +1469,29 @@ class AppServerRuntime:
         used = 2
         current = cursor
         remaining = limit
+        resolved_turn_id = turn_id
+        if resolved_turn_id is None:
+            task = await self.inspect_task(thread_id)
+            if task.active_turn is not None:
+                resolved_turn_id = task.active_turn
+            elif isinstance(task.last_turn, Mapping) and isinstance(
+                task.last_turn.get("id"), str
+            ):
+                resolved_turn_id = str(task.last_turn["id"])
+            else:
+                return {
+                    "thread_id": thread_id,
+                    "turn_id": None,
+                    "items": [],
+                    "next_cursor": None,
+                    "observed_at": _now(),
+                    "gaps": ["native task has no observable turn"],
+                    "bytes": used,
+                }
         while remaining != 0:
             page = await self.transport.thread_items_page(
                 thread_id,
-                turn_id=turn_id,
+                turn_id=resolved_turn_id,
                 limit=1,
                 cursor=current,
             )
@@ -1527,7 +1546,7 @@ class AppServerRuntime:
                 break
         return {
             "thread_id": thread_id,
-            "turn_id": turn_id,
+            "turn_id": resolved_turn_id,
             "items": items,
             "next_cursor": current,
             "observed_at": _now(),
