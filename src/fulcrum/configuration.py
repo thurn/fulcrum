@@ -556,7 +556,7 @@ class ProjectService:
         if effective["delivery"].get("kind") == "tollgate":
             try:
                 delivery, registration = _ensure_tollgate_repository(
-                    project_id, project, effective
+                    project_id, project, effective, timeout=request.timeout
                 )
             except FulcrumError as error:
                 state = (
@@ -768,7 +768,10 @@ class ProjectService:
                     and delivery.get("registration") == "created"
                     and isinstance(delivery.get("id"), str)
                 ):
-                    tollgate = Tollgate(effective["delivery"].get("executable"))
+                    tollgate = Tollgate(
+                        effective["delivery"].get("executable"),
+                        timeout=max(60, int(request.timeout)),
+                    )
                     removed = tollgate.remove_repository(str(delivery["id"]))
                     provider_removals.append(
                         {"delivery_repository": removed or str(delivery["id"])}
@@ -934,11 +937,15 @@ def _ensure_tollgate_repository(
     project_id: str,
     project: Mapping[str, Any],
     effective: Mapping[str, Any],
+    *,
+    timeout: float = 60,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     root = _absolute(project["root"], f"projects.{project_id}.root")
     delivery_config = _mapping(effective["delivery"], "delivery")
     try:
-        tollgate = Tollgate(delivery_config.get("executable"))
+        tollgate = Tollgate(
+            delivery_config.get("executable"), timeout=max(60, int(timeout))
+        )
         repositories = tollgate.repositories()
     except TollgateError as error:
         raise FulcrumError(

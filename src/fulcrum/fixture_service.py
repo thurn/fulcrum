@@ -74,6 +74,13 @@ class FixtureService:
                 exit_code=5,
                 details={"root": str(root)},
             )
+        paths: dict[str, Path] | None = None
+        state_path: Path | None = None
+        ledger: Ledger | None = None
+        operation: OperationRecord | None = None
+        project_result: CommandResult | None = None
+        port = 0
+        setup_operation = ""
         try:
             if existing is None:
                 paths = _scaffold_fixture(root)
@@ -259,6 +266,40 @@ class FixtureService:
             )
             return _operation_result(operation)
         except Exception as error:
+            if (
+                paths is not None
+                and state_path is not None
+                and ledger is not None
+                and operation is not None
+            ):
+                partial = _partial_fixture_inventory(
+                    request,
+                    root=root,
+                    paths=paths,
+                    state_path=state_path,
+                    operation=operation,
+                    project_result=project_result,
+                    runtime_input=runtime_input,
+                    delivery_input=delivery_input,
+                    model=model,
+                    effort=effort,
+                    capacity=capacity,
+                    source_sync=source_sync,
+                    port=port,
+                    setup_operation=setup_operation,
+                )
+                operation = ledger.update_operation(
+                    operation,
+                    state="uncertain",
+                    step="fixture_create_incomplete",
+                    result=partial,
+                    error={
+                        "code": "FIXTURE_CREATE_FAILED",
+                        "message": str(error),
+                        "retryable": False,
+                    },
+                    next_action="Run exact fixture cleanup before a separate retry.",
+                )
             raise FulcrumError(
                 "FIXTURE_CREATE_FAILED",
                 str(error),
@@ -398,6 +439,11 @@ class FixtureService:
             provider_ids = inventory.get("provider_ids")
             ownership = inventory.get("provider_ownership")
             if isinstance(provider_ids, Mapping) and isinstance(ownership, Mapping):
+                for provider_name in ("runtime_project", "delivery_repository"):
+                    if ownership.get(provider_name) == "unknown":
+                        failures.append(
+                            f"{provider_name} ownership is unknown; preserve fixture root"
+                        )
                 runtime_project: str = str(provider_ids.get("runtime_project") or "")
                 if runtime_project and ownership.get("runtime_project") == "created":
                     native_runtime: AppServerRuntime = AppServerRuntime(
@@ -424,7 +470,8 @@ class FixtureService:
                 ):
                     try:
                         removed = Tollgate(
-                            config["delivery"].get("executable")
+                            config["delivery"].get("executable"),
+                            timeout=max(60, int(request.timeout)),
                         ).remove_repository(delivery_repository)
                         provider_removals.append(
                             {"delivery_repository": removed or delivery_repository}
@@ -986,6 +1033,104 @@ def _project_from_result(result: CommandResult) -> dict[str, Any]:
     if not result.ok or not isinstance(project, Mapping):
         raise RuntimeError(f"fixture project enrollment failed: {outer}")
     return dict(project)
+
+
+def _partial_fixture_inventory(
+    request: ParsedRequest,
+    *,
+    root: Path,
+    paths: Mapping[str, Path],
+    state_path: Path,
+    operation: OperationRecord,
+    project_result: CommandResult | None,
+    runtime_input: Mapping[str, Any],
+    delivery_input: Mapping[str, Any],
+    model: str,
+    effort: str,
+    capacity: int,
+    source_sync: bool,
+    port: int,
+    setup_operation: str,
+) -> dict[str, Any]:
+    project_operation = (
+        project_result.operation_id
+        if project_result is not None and project_result.operation_id
+        else operation_id(_derived_request_id(request, "fixture-project-add"))
+    )
+    runtime_project_id: str | None = None
+    if project_result is not None and isinstance(project_result.result, Mapping):
+        external = project_result.result.get("external")
+        if isinstance(external, Mapping) and external.get("project_id"):
+            runtime_project_id = str(external["project_id"])
+    delivery_repository_id: str | None = None
+    delivery_ownership = "unknown"
+    provider_gaps: list[str] = []
+    if delivery_input.get("kind") == "tollgate":
+        try:
+            repositories = Tollgate(
+                delivery_input.get("executable"),
+                timeout=max(60, int(request.timeout)),
+            ).repositories()
+            exact = [
+                row
+                for row in repositories
+                if _tollgate_path(row) == paths["project"].resolve(strict=True)
+            ]
+            if len(exact) == 1:
+                delivery_repository_id = _tollgate_id(exact[0])
+                delivery_ownership = "created"
+            elif not exact:
+                delivery_ownership = "absent"
+            elif len(exact) > 1:
+                provider_gaps.append(
+                    "multiple Tollgate repositories match the disposable project root"
+                )
+        except TollgateError as provider_error:
+            provider_gaps.append(str(provider_error))
+    return {
+        "fixture_id": operation.id,
+        "root": str(root),
+        "instance": str(root / "instance"),
+        "config": str(paths["brain"] / "fulcrum.yaml"),
+        "brain": str(paths["brain"]),
+        "project_id": "fixture",
+        "project_root": str(paths["project"]),
+        "remote": str(paths["brain_remote"]),
+        "source_remote": str(paths["source_remote"]),
+        "fixture_state": str(state_path),
+        "provider_state": (
+            str(state_path) if runtime_input.get("kind") == "deterministic" else None
+        ),
+        "provider_kinds": {
+            "runtime": runtime_input.get("kind"),
+            "delivery": delivery_input.get("kind"),
+        },
+        "provider_ids": {
+            "runtime_project": runtime_project_id,
+            "delivery_repository": delivery_repository_id,
+        },
+        "provider_ownership": {
+            "runtime_project": "created" if runtime_project_id else "unknown",
+            "delivery_repository": delivery_ownership,
+        },
+        "provider_observation_gaps": provider_gaps,
+        "beads_port": port,
+        "model": model,
+        "effort": effort,
+        "capacity": capacity,
+        "source_sync": source_sync,
+        "service_started": False,
+        "setup_operation": setup_operation,
+        "project_operation": project_operation,
+        "creation_complete": False,
+    }
+
+
+def _tollgate_path(value: Mapping[str, Any]) -> Path | None:
+    state = value.get("state")
+    row = state if isinstance(state, Mapping) else value
+    path = row.get("path")
+    return Path(str(path)).resolve(strict=False) if path else None
 
 
 def _ledger(request: ParsedRequest) -> Ledger:
