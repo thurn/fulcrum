@@ -105,3 +105,61 @@ class ResetTests(unittest.TestCase):
         self.assertIn("RESET_INCOMPLETE: reset incomplete", output.getvalue())
         self.assertIn("clean_ledger /brain: server failed", output.getvalue())
         self.assertIn("--request-id original-request", output.getvalue())
+
+    def test_final_remote_allows_recreated_system_ids_but_rejects_old_records(self):
+        from fulcrum.reset import _publish_clean_terminal
+        from fulcrum.contracts import FulcrumError
+
+        ledger = MagicMock()
+        ledger.list_records.return_value = [
+            LedgerRecord.from_native({"id": identifier})
+            for identifier in ("fc-system", "fc-leader", "fc-reset")
+        ]
+        inventory = {
+            "remote_ledger": {"ordinary_remote": "remote"},
+            "old_ledger_record_ids": ["fc-system", "fc-leader", "fc-old-work"],
+        }
+        with (
+            patch(
+                "fulcrum.reset._run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ),
+            patch("fulcrum.reset._remote_refs", return_value={"refs/dolt/data": "new"}),
+            patch(
+                "fulcrum.reset._fresh_remote_proof",
+                return_value={"records": ["fc-system", "fc-leader", "fc-reset"]},
+            ) as proof,
+        ):
+            _publish_clean_terminal(self.request(), ledger, inventory, "fc-reset")
+            self.assertEqual(proof.call_args.args[2], ["fc-old-work"])
+            proof.return_value = {"records": ["fc-system", "fc-reset", "unexpected"]}
+            with self.assertRaisesRegex(FulcrumError, "differs from the clean ledger"):
+                _publish_clean_terminal(self.request(), ledger, inventory, "fc-reset")
+
+    def test_resume_after_cleanup_does_not_stop_clean_database(self):
+        from fulcrum.reset import ResetService
+
+        operation = OperationRecord.from_record(
+            LedgerRecord.from_native(
+                {
+                    "id": "fc-reset",
+                    "metadata": {
+                        "fc": {
+                            "kind": "operation",
+                            "planned": {
+                                "targets": [
+                                    {"kind": "ledger_root", "state": "completed"},
+                                    {"kind": "operational_path", "state": "completed"},
+                                ]
+                            },
+                        }
+                    },
+                }
+            )
+        )
+        with patch("fulcrum.installation_service._stop_one") as stop:
+            result = ResetService()._remove_old_state(
+                self.request(), MagicMock(), operation, []
+            )
+        self.assertIs(result, operation)
+        stop.assert_not_called()

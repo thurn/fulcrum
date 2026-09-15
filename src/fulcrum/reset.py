@@ -509,6 +509,8 @@ class ResetService:
         from fulcrum.installation_service import _stop_one, load_installed_services
 
         planned = dict(operation.operation.get("planned") or {})
+        if _kinds_completed(operation, "operational_path", "ledger_root"):
+            return operation
         dolt = load_installed_services(request.instance.instance_root).get("dolt")
         if dolt is not None:
             try:
@@ -1788,12 +1790,24 @@ def _publish_clean_terminal(
             retryable=True,
         )
     remote = str(inventory["remote_ledger"]["ordinary_remote"])
+    # Bootstrap recreates fixed system/leadership IDs. The clean ledger was
+    # checked for old records before bootstrap, so compare the final remote
+    # with that new ledger instead of rejecting deliberately reused IDs.
+    expected_ids = {record.id for record in ledger.list_records(limit=0)}
     proof = _fresh_remote_proof(
         ledger.executable,
         remote,
-        inventory.get("old_ledger_record_ids", []),
+        sorted(set(inventory.get("old_ledger_record_ids", [])) - expected_ids),
         request.timeout,
     )
+    if set(proof["records"]) != expected_ids:
+        raise FulcrumError(
+            "REMOTE_TERMINAL_RECEIPT_MISMATCH",
+            "fresh remote clone differs from the clean ledger",
+            exit_code=4,
+            retryable=True,
+            details={"expected_records": sorted(expected_ids), "proof": proof},
+        )
     if terminal_id not in proof["records"] or "fc-system" not in proof["records"]:
         raise FulcrumError(
             "REMOTE_TERMINAL_RECEIPT_MISSING",
