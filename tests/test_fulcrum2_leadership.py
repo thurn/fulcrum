@@ -100,6 +100,22 @@ class FakeLeadershipRuntime:
     async def inspect_task(self, thread_id: str) -> TaskFacts:
         return self.tasks[thread_id]
 
+    async def find_turn(self, thread_id: str, operation_id: str) -> TurnFacts | None:
+        last_turn = self.tasks[thread_id].last_turn
+        if last_turn is None or last_turn.get("operation_id") != operation_id:
+            return None
+        return TurnFacts(
+            id=str(last_turn["id"]),
+            thread_id=thread_id,
+            state=str(last_turn["state"]),
+            operation_id=operation_id,
+            completed=bool(last_turn["completed"]),
+            error=None,
+            tools=(),
+            usage=None,
+            observed_at=str(last_turn["observed_at"]),
+        )
+
     async def start_turn(self, thread_id: str, turn_input: Any) -> TurnFacts:
         self.turns.append(thread_id)
         turn = TurnFacts(
@@ -614,7 +630,7 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
             targeted_result["rows"][0]["decision_context"]["dependencies_ready"]
         )
 
-    def test_bootstrap_records_intents_and_creates_idle_leaders_without_turns(
+    def test_bootstrap_keeps_reconcile_idle_and_setup_initializes_leaders_once(
         self,
     ) -> None:
         root = Path(self.temporary.name).resolve()
@@ -671,12 +687,44 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
         try:
             first = asyncio.run(ensure_leadership(request, ledger, runtime, config))
             second = asyncio.run(ensure_leadership(request, ledger, runtime, config))
+            initialized = asyncio.run(
+                ensure_leadership(
+                    request,
+                    ledger,
+                    runtime,
+                    config,
+                    send_initial_requests=True,
+                )
+            )
+            runtime.tasks = {
+                thread_id: TaskFacts(
+                    **{
+                        **task.__dict__,
+                        "runtime_status": "idle",
+                        "active_turn": None,
+                    }
+                )
+                for thread_id, task in runtime.tasks.items()
+            }
+            repeated = asyncio.run(
+                ensure_leadership(
+                    request,
+                    ledger,
+                    runtime,
+                    config,
+                    send_initial_requests=True,
+                )
+            )
             control = ledger.show("fc-system")
             assert control is not None and control.fc
             self.assertEqual(len(runtime.created), 2)
-            self.assertEqual(runtime.turns, [])
+            self.assertEqual(len(runtime.turns), 2)
             self.assertEqual({row["role"] for row in first}, {"vizier", "marshal"})
             self.assertTrue(all(row["created"] is False for row in second))
+            self.assertTrue(all(row["turn_started"] for row in initialized))
+            self.assertTrue(
+                all(row["initial_request"] == "already_sent" for row in repeated)
+            )
             self.assertEqual(control.fc["owner"], control.fc["marshal_thread"])
             self.assertEqual(control.fc["instance_root"], str(instance))
             operations = ledger.list_records(kind="operation", limit=0)

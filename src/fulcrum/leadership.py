@@ -25,12 +25,13 @@ from fulcrum.ledger import (
     LedgerFailure,
     LedgerRecord,
     OperationRecord,
+    operation_id,
     operation_view,
     utc_now,
 )
 from fulcrum.knowledge import select_memory
-from fulcrum.roles import LEADERSHIP_TITLES, RoleService
-from fulcrum.runtime import AppServerError, TaskSpec
+from fulcrum.roles import LEADERSHIP_TITLES, RoleService, fallback_instructions
+from fulcrum.runtime import AppServerError, TaskFacts, TaskSpec
 from fulcrum.work import WorkService, work_view
 
 BRIEF_CHARACTER_LIMIT = 6000
@@ -769,8 +770,10 @@ async def ensure_leadership(
     ledger: Ledger,
     runtime: Any,
     config: Mapping[str, Any],
+    *,
+    send_initial_requests: bool = False,
 ) -> list[dict[str, Any]]:
-    """Provision the two standing native identities without starting a turn."""
+    """Provision standing identities and optionally initialize empty native tasks."""
 
     control = ledger.show("fc-system")
     if control is None:
@@ -877,9 +880,24 @@ async def ensure_leadership(
                     connection_error = error
                 observed = None
             if observed is not None and observed.exists:
-                actions.append(
-                    {"role": role, "thread_id": recorded_thread, "created": False}
-                )
+                action = {
+                    "role": role,
+                    "thread_id": recorded_thread,
+                    "created": False,
+                }
+                if send_initial_requests:
+                    action.update(
+                        await _send_initial_leadership_request(
+                            request,
+                            ledger,
+                            runtime,
+                            config,
+                            role=role,
+                            task=known_tasks[recorded_thread],
+                            native=observed,
+                        )
+                    )
+                actions.append(action)
                 continue
             stale_task = known_tasks[recorded_thread]
         request_id = str(
@@ -1034,7 +1052,7 @@ async def ensure_leadership(
         }
         existing_task = ledger.show(task_record_id)
         if existing_task is None:
-            created_task = ledger.create_record(
+            managed_task = ledger.create_record(
                 record_id=task_record_id,
                 kind="task",
                 title=f"Managed task: {LEADERSHIP_TITLES[role]}",
@@ -1043,7 +1061,7 @@ async def ensure_leadership(
                 fc=task_fc,
                 external_ref=f"fulcrum:thread:{native.id}",
             )
-            known_tasks[native.id] = created_task
+            known_tasks[native.id] = managed_task
         elif existing_task.kind != "task" or (
             existing_task.fc and existing_task.fc.get("thread_id") != native.id
         ):
@@ -1062,6 +1080,8 @@ async def ensure_leadership(
                 {"role": role, "operation_id": operation.id, "state": "uncertain"}
             )
             continue
+        else:
+            managed_task = existing_task
         if stale_task is not None:
             stale_fc = dict(stale_task.fc or {})
             stale_fc["replaced_by"] = task_record_id
@@ -1100,16 +1120,106 @@ async def ensure_leadership(
             },
             next_action="Wait idle until an explicit leadership judgment is requested.",
         )
-        actions.append(
-            {
-                "role": role,
-                "operation_id": operation.id,
-                "thread_id": native.id,
-                "created": created,
-                "turn_started": False,
-            }
-        )
+        action = {
+            "role": role,
+            "operation_id": operation.id,
+            "thread_id": native.id,
+            "created": created,
+            "turn_started": False,
+        }
+        if send_initial_requests:
+            action.update(
+                await _send_initial_leadership_request(
+                    request,
+                    ledger,
+                    runtime,
+                    config,
+                    role=role,
+                    task=managed_task,
+                    native=native,
+                )
+            )
+        actions.append(action)
     return actions
+
+
+async def _send_initial_leadership_request(
+    request: ParsedRequest,
+    ledger: Ledger,
+    runtime: Any,
+    config: Mapping[str, Any],
+    *,
+    role: str,
+    task: LedgerRecord,
+    native: TaskFacts,
+) -> dict[str, Any]:
+    if native.active_turn is not None:
+        return {
+            "turn_started": False,
+            "initial_request": "already_active",
+            "turn_id": native.active_turn,
+        }
+    if native.last_turn is not None:
+        return {
+            "turn_started": False,
+            "initial_request": "already_sent",
+            "turn_id": native.last_turn.get("id"),
+        }
+    assert request.request_id is not None
+    from fulcrum.runtime_service import (
+        _start_or_recover,
+        routing_developer_instructions,
+    )
+
+    models = config["models"]
+    selection = models[role]
+    brain_root = str(request.instance.brain_root)
+    task_fc = task.fc or {}
+    spec = TaskSpec(
+        creation_cwd=str(
+            task_fc.get("creation_cwd")
+            or request.instance.instance_root / "leaders" / role
+        ),
+        cwd=brain_root,
+        project_id=None,
+        workspace_roots=(brain_root,),
+        title=LEADERSHIP_TITLES[role],
+        model=str(selection["model"]),
+        effort=str(selection["effort"]),
+        developer_instructions=routing_developer_instructions(request),
+    )
+    initialization_operation = operation_id(request.request_id)
+    prompt = (
+        fallback_instructions(role)
+        + "\n\nFulcrum setup has created this standing leadership task. Confirm that "
+        + f"the {role.title()} role is ready to receive explicit requests, then wait. "
+        + "Do not change policy, dispatch work, or begin project work from this setup request."
+    )
+    turn = await _start_or_recover(
+        runtime,
+        native.id,
+        spec,
+        initialization_operation,
+        prompt,
+    )
+    current_task = ledger.show(task.id)
+    if current_task is None or not current_task.fc:
+        raise FulcrumError(
+            "TASK_CORRUPT",
+            f"standing {role} task disappeared during setup initialization",
+            exit_code=4,
+        )
+    current_fc = dict(current_task.fc)
+    current_fc["last_turn"] = turn.to_dict()
+    current_fc["initialization_operation"] = initialization_operation
+    current_fc["last_transition"] = initialization_operation
+    ledger.update_fc(current_task.id, current_fc)
+    return {
+        "turn_started": True,
+        "initial_request": "sent",
+        "turn_id": turn.id,
+        "initialization_operation": initialization_operation,
+    }
 
 
 async def _create_or_recover_leader(

@@ -772,7 +772,13 @@ def _runtime_and_leadership(
                         else str(expected) in matching_ids
                     ),
                 }
-            leadership = await ensure_leadership(request, ledger, runtime, config)
+            leadership = await ensure_leadership(
+                request,
+                ledger,
+                runtime,
+                config,
+                send_initial_requests=True,
+            )
             return (
                 {"required": True, **capabilities.to_dict(), "projects": projects},
                 leadership,

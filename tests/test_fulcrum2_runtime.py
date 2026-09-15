@@ -22,6 +22,7 @@ from fulcrum.runtime import (
     RuntimeCapabilities,
     TaskFacts,
     TaskSpec,
+    TURN_START_ACK_TIMEOUT_SECONDS,
     TurnFacts,
 )
 from fulcrum.runtime_service import (
@@ -154,6 +155,27 @@ class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
             runtime = CodexRuntime("ws://unused")
             runtime.request = AsyncMock(return_value={"status": status})
             self.assertEqual(await runtime.unsubscribe("thread-1"), status)
+
+    async def test_turn_start_uses_short_acceptance_timeout(self) -> None:
+        runtime = CodexRuntime("ws://unused")
+        runtime.configure_thread = AsyncMock()
+        runtime.request = AsyncMock(return_value={"turn": {"id": "turn-1"}})
+
+        turn_id = await runtime.start_turn(
+            "thread-1",
+            "Start retained work.",
+            cwd="/work",
+            workspace_root="/work",
+            model="luna",
+            effort="high",
+            correlation="fc-operation",
+        )
+
+        self.assertEqual(turn_id, "turn-1")
+        self.assertEqual(
+            runtime.request.await_args.kwargs["timeout"],
+            TURN_START_ACK_TIMEOUT_SECONDS,
+        )
 
 
 class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):

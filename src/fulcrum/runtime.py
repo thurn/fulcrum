@@ -256,6 +256,9 @@ SOURCE_KINDS: tuple[str, ...] = (
     "unknown",
 )
 MAX_APP_SERVER_FRAME_BYTES = 64 * 1024 * 1024
+# Desktop may keep turn/start open while the accepted turn is already running.
+# Bound only that acknowledgement; callers recover by the exact operation marker.
+TURN_START_ACK_TIMEOUT_SECONDS = 2.0
 
 
 def _critical_event(event: RuntimeEvent) -> bool:
@@ -915,6 +918,7 @@ class CodexRuntime:
                 "turnTrigger": "fulcrum",
                 "clientUserMessageId": correlation,
             },
+            timeout=TURN_START_ACK_TIMEOUT_SECONDS,
         )
         turn = result.get("turn")
         if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
