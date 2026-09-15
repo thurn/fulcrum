@@ -386,6 +386,22 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         await supervisor.run_once(operation_id=exhausted_id)
         self.assertEqual(application.calls[exhausted_id], calls)
 
+    async def test_reconcile_does_not_replay_an_active_ipc_operation(self) -> None:
+        application = RetryApplication(self.ledger)
+        active_id = self.create_operation("still-running")
+        supervisor = ControllerSupervisor(
+            self.request, application, clock=self.clock, runtime=self.runtime  # type: ignore[arg-type]
+        )
+        supervisor._active_ipc_operations[active_id] = 1
+
+        result = await supervisor.run_once(operation_id=active_id)
+
+        self.assertNotIn(active_id, application.calls)
+        self.assertTrue(result.operations[0]["in_flight"])
+        retained = self.ledger.show(active_id)
+        assert retained is not None and retained.fc
+        self.assertEqual(retained.fc["attempts"], 0)
+
     async def test_startup_replaces_missing_standing_leader_identity(self) -> None:
         stale = self.runtime.facts["native-vizier-leader"]
         self.runtime.facts["native-vizier-leader"] = TaskFacts(

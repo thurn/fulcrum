@@ -38,6 +38,7 @@ from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
     OperationRecord,
+    operation_id as operation_id_from_request,
     operation_view,
     utc_now,
 )
@@ -238,6 +239,7 @@ class ControllerSupervisor:
         self.reconcile_lock = asyncio.Lock()
         self._ipc_lock = threading.Lock()
         self._active_ipc_mutations = 0
+        self._active_ipc_operations: dict[str, int] = {}
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self.request: ParsedRequest = replace(
@@ -923,6 +925,11 @@ class ControllerSupervisor:
 
     def _dispatch_from_ipc(self, request: ParsedRequest) -> CommandResult:
         mutating = request.request_id is not None
+        active_operation = (
+            operation_id_from_request(request.request_id)
+            if request.request_id is not None
+            else None
+        )
         if (
             mutating
             and read_maintenance(maintenance_path(self.request.instance.instance_root))
@@ -937,6 +944,10 @@ class ControllerSupervisor:
         if mutating:
             with self._ipc_lock:
                 self._active_ipc_mutations += 1
+                assert active_operation is not None
+                self._active_ipc_operations[active_operation] = (
+                    self._active_ipc_operations.get(active_operation, 0) + 1
+                )
         try:
             return self.application.dispatch(
                 replace(request, runtime_submit=self._runtime_submit)
@@ -945,6 +956,12 @@ class ControllerSupervisor:
             if mutating:
                 with self._ipc_lock:
                     self._active_ipc_mutations -= 1
+                    assert active_operation is not None
+                    remaining = self._active_ipc_operations[active_operation] - 1
+                    if remaining:
+                        self._active_ipc_operations[active_operation] = remaining
+                    else:
+                        self._active_ipc_operations.pop(active_operation)
 
     async def _maintenance_loop(self) -> None:
         request_path = maintenance_path(self.request.instance.instance_root)
@@ -1179,6 +1196,14 @@ class ControllerSupervisor:
                 **operation_view(operation),
                 "advanced": False,
                 "recovery_required": True,
+            }
+        with self._ipc_lock:
+            in_flight = self._active_ipc_operations.get(operation.id, 0) > 0
+        if in_flight:
+            return {
+                **operation_view(operation),
+                "advanced": False,
+                "in_flight": True,
             }
         planned = operation.operation.get("planned")
         due = planned.get("next_retry_at") if isinstance(planned, Mapping) else None
