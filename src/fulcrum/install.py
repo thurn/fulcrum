@@ -6,6 +6,7 @@ import json
 import importlib.metadata
 import os
 import plistlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -26,15 +27,20 @@ class InstallationError(RuntimeError):
 
 
 HUMAN_SKILLS = (
-    "fulcrum-setup",
+    "fulcrum-vizier",
+    "fulcrum-marshal",
     "fulcrum-weaver",
-    "fulcrum-bead",
-    "fulcrum-archon",
+    "fulcrum-executor",
+    "fulcrum-warden",
     "fulcrum-sage",
-    "fulcrum-operative",
+    "fulcrum-mason",
+    "fulcrum-justiciar",
+    "fulcrum-bead",
 )
 REMOVED_SKILLS = (
-    "fulcrum-executor",
+    "fulcrum-setup",
+    "fulcrum-archon",
+    "fulcrum-operative",
     "fulcrum-overseer",
     "fulcrum-inquisitor",
     "fulcrum-night-watchman",
@@ -86,6 +92,227 @@ class ServiceObservation:
     @property
     def running(self) -> bool:
         return self.loaded and self.state == "running" and self.pid is not None
+
+
+@dataclass(frozen=True)
+class InstalledService:
+    """One instance-owned launch service and its exact definition."""
+
+    name: str
+    label: str
+    definition: Path
+
+
+def installation_source_root() -> Path:
+    """Return the retained source when present, otherwise the installed package."""
+
+    package = package_root()
+    candidate = package.parents[1]
+    if (candidate / "pyproject.toml").is_file() and (candidate / "skills").is_dir():
+        return candidate
+    return package
+
+
+def owned_skills_source() -> Path:
+    source = installation_source_root()
+    checkout_skills = source / "skills"
+    if checkout_skills.is_dir():
+        return checkout_skills
+    packaged = Path(sys.prefix) / "share" / "fulcrum" / "skills"
+    return packaged if packaged.is_dir() else package_root() / "skills"
+
+
+def reconcile_fulcrum2_skills(
+    instance_root: Path,
+    *,
+    production: bool,
+    skills_root: Path | None = None,
+) -> dict[str, Any]:
+    """Repair only the nine human-invoked Fulcrum2 skill links."""
+
+    source = owned_skills_source().resolve(strict=True)
+    root = (
+        skills_root
+        or (
+            Path.home() / ".codex" / "skills"
+            if production
+            else instance_root / "codex" / "skills"
+        )
+    ).resolve(strict=False)
+    installed: list[str] = []
+    unchanged: list[str] = []
+    for name in HUMAN_SKILLS:
+        skill = source / name
+        if (
+            not (skill / "SKILL.md").is_file()
+            or not (skill / "agents" / "openai.yaml").is_file()
+        ):
+            raise InstallationError(f"missing packaged skill assets for {name}")
+        target = root / name
+        if target.exists() and not target.is_symlink():
+            raise InstallationError(
+                f"refusing to replace real user skill directory {target}"
+            )
+        if target.is_symlink() and target.resolve(strict=False) == skill.resolve(
+            strict=False
+        ):
+            unchanged.append(str(target))
+            continue
+        _replace_owned_link(skill, target)
+        installed.append(str(target))
+    removed: list[str] = []
+    for name in REMOVED_SKILLS:
+        target = root / name
+        if not target.is_symlink():
+            continue
+        resolved = target.resolve(strict=False)
+        if resolved.is_relative_to(source) or not resolved.exists():
+            target.unlink()
+            removed.append(str(target))
+    return {
+        "root": str(root),
+        "installed": installed,
+        "unchanged": unchanged,
+        "removed": removed,
+        "implicit_invocation": False,
+    }
+
+
+def _service_identity(instance_root: Path, brain_root: Path) -> str:
+    identity_path = instance_root / "service-identity"
+    expected_binding = (
+        f"{instance_root.resolve(strict=False)}\n{brain_root.resolve(strict=False)}\n"
+    )
+    if identity_path.exists() and identity_path.is_dir():
+        raise InstallationError(
+            f"service identity path is a user directory: {identity_path}"
+        )
+    if identity_path.is_file():
+        lines = identity_path.read_text(encoding="utf-8").splitlines()
+        if len(lines) != 3 or "\n".join(lines[:2]) + "\n" != expected_binding:
+            raise InstallationError(
+                "installed service identity is bound to a different instance or brain"
+            )
+        token = lines[2]
+        if re.fullmatch(r"[a-f0-9]{32}", token):
+            return token
+        raise InstallationError(f"invalid installed service identity: {identity_path}")
+    instance_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    token = uuid.uuid4().hex
+    temporary = identity_path.with_name(f".{identity_path.name}.{os.getpid()}")
+    temporary.write_text(expected_binding + token + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, identity_path)
+    return token
+
+
+def fulcrum2_service_definitions(
+    *,
+    instance_root: Path,
+    config_path: Path,
+    brain_root: Path,
+    config: dict[str, Any],
+    controller_executable: Path,
+    production: bool,
+) -> dict[str, dict[str, Any]]:
+    """Build exact per-instance LaunchAgent definitions."""
+
+    token = _service_identity(instance_root, brain_root)
+    prefix = f"dev.fulcrum.{token}"
+    logs = instance_root / "logs"
+    logs.mkdir(parents=True, exist_ok=True, mode=0o700)
+    environment = {
+        "PATH": service_executable_path(),
+        "FULCRUM_INSTANCE": str(instance_root.resolve(strict=False)),
+    }
+    beads = dict(config["beads"])
+    dolt = shutil.which("dolt")
+    if not dolt:
+        raise InstallationError("required Dolt executable is unavailable")
+    definitions: dict[str, dict[str, Any]] = {
+        "dolt": {
+            "Label": f"{prefix}.dolt",
+            "ProgramArguments": [
+                str(Path(dolt).resolve(strict=True)),
+                "sql-server",
+                "-H",
+                str(beads["host"]),
+                "-P",
+                str(beads["port"]),
+                "--data-dir",
+                str(brain_root / ".beads" / "dolt"),
+            ],
+            "WorkingDirectory": str(brain_root),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "StandardOutPath": str(logs / "dolt.log"),
+            "StandardErrorPath": str(logs / "dolt-error.log"),
+            "EnvironmentVariables": environment,
+        },
+        "controller": {
+            "Label": f"{prefix}.controller",
+            "ProgramArguments": [
+                str(controller_executable.resolve(strict=True)),
+                "serve",
+                "--instance",
+                str(instance_root.resolve(strict=False)),
+                "--config",
+                str(config_path.resolve(strict=False)),
+            ],
+            "WorkingDirectory": str(instance_root),
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "StandardOutPath": str(logs / "controller.log"),
+            "StandardErrorPath": str(logs / "controller-error.log"),
+            "EnvironmentVariables": environment,
+        },
+    }
+    runtime = dict(config["runtime"])
+    if production and runtime["kind"] == "codex":
+        executable = runtime.get("executable")
+        if not isinstance(executable, str) or not executable:
+            raise InstallationError("runtime.executable is required for production")
+        definitions["runtime"] = {
+            "Label": f"{prefix}.runtime",
+            "ProgramArguments": [
+                str(Path(executable).resolve(strict=True)),
+                "app-server",
+                "--listen",
+                str(runtime["endpoint"]),
+            ],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "StandardOutPath": str(logs / "runtime.log"),
+            "StandardErrorPath": str(logs / "runtime-error.log"),
+            "EnvironmentVariables": environment,
+            "SoftResourceLimits": {
+                "NumberOfFiles": int(config["resources"]["fd_soft_limit"])
+            },
+        }
+    return definitions
+
+
+def install_fulcrum2_service_definitions(
+    definitions: dict[str, dict[str, Any]], instance_root: Path
+) -> tuple[dict[str, InstalledService], list[str]]:
+    root = instance_root / "services"
+    if root.exists() and not root.is_dir():
+        raise InstallationError(f"service asset path is not a directory: {root}")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    installed: dict[str, InstalledService] = {}
+    changed: list[str] = []
+    for name, definition in definitions.items():
+        label = str(definition["Label"])
+        path = root / f"{name}.plist"
+        encoded = plistlib.dumps(definition, fmt=plistlib.FMT_XML, sort_keys=True)
+        if not path.is_file() or path.read_bytes() != encoded:
+            temporary = path.with_name(f".{path.name}.{os.getpid()}")
+            temporary.write_bytes(encoded)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            changed.append(name)
+        installed[name] = InstalledService(name, label, path)
+    return installed, changed
 
 
 def service_executable_path(*, user_home: Path | None = None) -> str:

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
+import shutil
+import subprocess
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeVar, cast
@@ -33,6 +36,87 @@ T = TypeVar("T")
 
 
 class RuntimeService:
+    def launch_desktop(self, request: ParsedRequest) -> CommandResult:
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        config = manager.effective(document)
+        runtime = config["runtime"]
+        if runtime["kind"] != "codex":
+            raise FulcrumError(
+                "CAPABILITY_UNAVAILABLE",
+                "Desktop launch is unavailable for a deterministic runtime",
+                exit_code=4,
+            )
+        ledger = _ledger(request)
+        operation, reused = ledger.create_operation(
+            request,
+            planned={"endpoint": str(runtime["endpoint"])},
+            next_action="Launch Desktop once without terminating another runtime.",
+        )
+        if reused and operation.operation.get("state") in {
+            "completed",
+            "failed",
+            "cancelled",
+            "uncertain",
+        }:
+            return _operation_result(operation)
+        endpoint = str(runtime["endpoint"])
+        candidates = (
+            Path("/Applications/Codex.app/Contents/MacOS/Codex"),
+            Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
+        )
+        executable = next(
+            (path for path in candidates if path.is_file()),
+            None,
+        )
+        if executable is None:
+            opener = shutil.which("open")
+            if opener is None:
+                raise FulcrumError(
+                    "DESKTOP_UNAVAILABLE",
+                    "no Codex/ChatGPT Desktop executable is installed",
+                    exit_code=4,
+                )
+            argv = [opener, "-a", "ChatGPT"]
+        else:
+            argv = [str(executable.resolve(strict=True))]
+        environment = dict(os.environ)
+        environment["CODEX_APP_SERVER_WS_URL"] = endpoint
+        try:
+            process = subprocess.Popen(
+                argv,
+                env=environment,
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as error:
+            raise FulcrumError(
+                "DESKTOP_LAUNCH_FAILED", str(error), exit_code=4, retryable=True
+            ) from error
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="desktop_process_launched",
+            external={"pid": process.pid, "endpoint": endpoint},
+            result={
+                "launched": True,
+                "pid": process.pid,
+                "endpoint": endpoint,
+                "attachment": {
+                    "state": "unknown",
+                    "reason": (
+                        "the native protocol does not expose proof that this Desktop "
+                        "process attached to the selected endpoint"
+                    ),
+                },
+                "separate_runtime_terminated": False,
+            },
+            next_action="Inspect runtime status for attachment evidence when available.",
+        )
+        return _operation_result(operation)
+
     def capabilities(self, request: ParsedRequest) -> CommandResult:
         try:
             capabilities = _runtime_call(

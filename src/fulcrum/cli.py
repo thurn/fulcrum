@@ -88,9 +88,17 @@ READ_ONLY_COMMANDS = {
     ("fixture", "barrier", "show"),
 }
 BROKEN_CONFIG_COMMANDS = {
+    ("setup",),
     ("service", "status"),
     ("recover", "inspect"),
     ("recover", "repair"),
+}
+LOCAL_COMMANDS = {
+    ("setup",),
+    ("service", "start"),
+    ("service", "stop"),
+    ("service", "restart"),
+    ("service", "status"),
 }
 
 
@@ -331,6 +339,8 @@ def _add_command_options(
         group.add_argument("--operation", default=argparse.SUPPRESS)
     elif path == ("setup",):
         _option(parser, "--non-interactive", action="store_true")
+    elif path in {("service", "stop"), ("service", "restart")}:
+        _option(parser, "--interrupt", action="store_true")
     elif path == ("enter",):
         parser.add_argument("role", choices=ROLES)
         _option(parser, "--description", required=True)
@@ -865,7 +875,11 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     )
     environment_task = os.environ.get("CODEX_THREAD_ID")
     thread_id = values.get("thread_id") or environment_task
-    actor_text = values.get("actor") or (f"task:{thread_id}" if thread_id else "human")
+    actor_text = values.get("actor") or (
+        "human"
+        if command == ("setup",)
+        else f"task:{thread_id}" if thread_id else "human"
+    )
     actor = ActorContext.parse(actor_text)
     common = {
         "_command_path",
@@ -937,6 +951,8 @@ def _execute(request: ParsedRequest) -> dict[str, Any]:
     if request.command == ("serve",):
         return _serve(request).to_dict()
     application = default_application()
+    if request.command in LOCAL_COMMANDS:
+        return application.dispatch(replace(request, offline=True)).to_dict()
     is_read = request.command in READ_ONLY_COMMANDS
     if request.offline or is_read:
         if is_read:

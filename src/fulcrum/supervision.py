@@ -932,6 +932,10 @@ class ControllerSupervisor:
             return {**operation_view(operation), "advanced": False, "corrupt": True}
         command = str(operation.operation.get("command") or "")
         if command.startswith("controller.") or command in {
+            "setup",
+            "service.start",
+            "service.stop",
+            "service.restart",
             "operation.reconcile",
             "operation.cancel",
         }:

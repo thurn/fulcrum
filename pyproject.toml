@@ -20,6 +20,26 @@ dependencies = [
 [tool.setuptools.package-data]
 fulcrum = ["prompts/*.md", "formulas/*.json", "role_fallbacks/*.md"]
 
+[tool.setuptools.data-files]
+"share/fulcrum/skills/fulcrum-vizier" = ["skills/fulcrum-vizier/SKILL.md"]
+"share/fulcrum/skills/fulcrum-vizier/agents" = ["skills/fulcrum-vizier/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-marshal" = ["skills/fulcrum-marshal/SKILL.md"]
+"share/fulcrum/skills/fulcrum-marshal/agents" = ["skills/fulcrum-marshal/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-weaver" = ["skills/fulcrum-weaver/SKILL.md"]
+"share/fulcrum/skills/fulcrum-weaver/agents" = ["skills/fulcrum-weaver/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-executor" = ["skills/fulcrum-executor/SKILL.md"]
+"share/fulcrum/skills/fulcrum-executor/agents" = ["skills/fulcrum-executor/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-warden" = ["skills/fulcrum-warden/SKILL.md"]
+"share/fulcrum/skills/fulcrum-warden/agents" = ["skills/fulcrum-warden/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-sage" = ["skills/fulcrum-sage/SKILL.md"]
+"share/fulcrum/skills/fulcrum-sage/agents" = ["skills/fulcrum-sage/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-mason" = ["skills/fulcrum-mason/SKILL.md"]
+"share/fulcrum/skills/fulcrum-mason/agents" = ["skills/fulcrum-mason/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-justiciar" = ["skills/fulcrum-justiciar/SKILL.md"]
+"share/fulcrum/skills/fulcrum-justiciar/agents" = ["skills/fulcrum-justiciar/agents/openai.yaml"]
+"share/fulcrum/skills/fulcrum-bead" = ["skills/fulcrum-bead/SKILL.md"]
+"share/fulcrum/skills/fulcrum-bead/agents" = ["skills/fulcrum-bead/agents/openai.yaml"]
+
 [project.optional-dependencies]
 dev = [
   "black==26.5.1",
