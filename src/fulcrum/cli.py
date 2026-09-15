@@ -30,10 +30,12 @@ from fulcrum.contracts import (
 from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.instance import WriterLock, resolve_instance
 from fulcrum.ipc import (
+    ControllerTimedOut,
     ControllerUnavailable,
     MAX_MESSAGE_BYTES,
     request_sync,
 )
+from fulcrum.ledger import operation_id
 from fulcrum.supervision import ControllerSupervisor
 
 ROLES = (
@@ -1033,6 +1035,30 @@ def _execute(request: ParsedRequest) -> dict[str, Any]:
         return request_sync(
             request.instance.socket_path, request.to_wire(), timeout=request.timeout
         )
+    except ControllerTimedOut as error:
+        pending_operation = (
+            operation_id(request.request_id) if request.request_id is not None else None
+        )
+        next_command: tuple[str, ...]
+        if pending_operation is not None:
+            next_command = (
+                "fulcrum",
+                "operation",
+                "show",
+                pending_operation,
+                "--json",
+            )
+        else:
+            next_command = ("fulcrum",) + request.command + ("--json",)
+        raise FulcrumError(
+            "WAIT_TIMEOUT",
+            "the controller continues this bounded request after the client deadline",
+            exit_code=3,
+            retryable=True,
+            request_id=request.request_id,
+            operation_id=pending_operation,
+            next_command=next_command,
+        ) from error
     except ControllerUnavailable as error:
         raise FulcrumError(
             "CONTROLLER_UNAVAILABLE",

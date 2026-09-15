@@ -17,6 +17,10 @@ class ControllerUnavailable(RuntimeError):
     pass
 
 
+class ControllerTimedOut(RuntimeError):
+    pass
+
+
 class ControllerRejected(RuntimeError):
     pass
 
@@ -45,6 +49,10 @@ async def request(
         await writer.drain()
         try:
             line = await asyncio.wait_for(reader.readline(), timeout)
+        except TimeoutError as error:
+            raise ControllerTimedOut(
+                "controller request is still running after the client deadline"
+            ) from error
         except (ValueError, asyncio.LimitOverrunError) as error:
             raise ControllerUnavailable(
                 "controller response exceeded the IPC limit"

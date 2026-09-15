@@ -214,6 +214,9 @@ class Driver:
         if self.instance is None:
             raise Failure("fixture instance is unavailable")
         argv = ["--instance", self.instance, *arguments]
+        if "--timeout" not in arguments:
+            process_timeout = timeout or self.command_timeout
+            argv.extend(["--timeout", str(max(1.0, process_timeout - 5.0))])
         if offline is True or (offline is None and not self.service_started):
             argv.append("--offline")
         if actor is not None and "--actor" not in arguments:

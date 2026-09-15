@@ -8,9 +8,17 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
-from fulcrum.contracts import ActorContext, ParsedRequest
+from fulcrum.cli import _execute
+from fulcrum.contracts import (
+    ActorContext,
+    FulcrumError,
+    InstanceContext,
+    ParsedRequest,
+)
 from fulcrum.instance import WriterLock, resolve_instance
+from fulcrum.ipc import ControllerTimedOut
 
 
 class Fulcrum2SpineTest(unittest.TestCase):
@@ -28,6 +36,49 @@ class Fulcrum2SpineTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_controller_timeout_returns_a_retained_operation_locator(self) -> None:
+        request_id = "4811ef16-5848-4713-8c40-063880054864"
+        request = ParsedRequest(
+            command=("plan", "review", "start"),
+            arguments={"bead": "fc-root", "perspective": "requirements"},
+            input={},
+            actor=ActorContext(kind="human"),
+            instance=InstanceContext(
+                instance_root=self.instance,
+                config_path=self.config,
+                brain_root=self.brain,
+                socket_path=self.instance / "controller.sock",
+                lock_path=self.brain / ".fulcrum-controller.lock",
+                explicit_selection=True,
+            ),
+            request_id=request_id,
+        )
+
+        with (
+            patch(
+                "fulcrum.cli.request_sync",
+                side_effect=ControllerTimedOut("request continues"),
+            ),
+            self.assertRaises(FulcrumError) as timed_out,
+        ):
+            _execute(request)
+
+        self.assertEqual(timed_out.exception.code, "WAIT_TIMEOUT")
+        self.assertEqual(
+            timed_out.exception.operation_id,
+            "fc-4811ef16584847138c40063880054864",
+        )
+        self.assertEqual(
+            timed_out.exception.next_command,
+            (
+                "fulcrum",
+                "operation",
+                "show",
+                "fc-4811ef16584847138c40063880054864",
+                "--json",
+            ),
+        )
 
     def invoke(
         self, *arguments: str, input_text: str | None = None
