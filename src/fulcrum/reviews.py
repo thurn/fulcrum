@@ -535,7 +535,8 @@ def _review_prompt(
     return (
         "Complete this bounded independent review and submit its structured result "
         "with the exact finish command before ending the turn. A prose-only answer "
-        "does not complete the review.\n\n"
+        "does not complete the review. You must run the finish command even when "
+        "there are zero findings.\n\n"
         + json.dumps(instructions, separators=(",", ":"), ensure_ascii=False)
     )
 

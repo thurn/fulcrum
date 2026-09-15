@@ -1470,14 +1470,15 @@ class AppServerRuntime:
         current = cursor
         remaining = limit
         resolved_turn_id = turn_id
+        observed_task: TaskFacts | None = None
         if resolved_turn_id is None:
-            task = await self.inspect_task(thread_id)
-            if task.active_turn is not None:
-                resolved_turn_id = task.active_turn
-            elif isinstance(task.last_turn, Mapping) and isinstance(
-                task.last_turn.get("id"), str
+            observed_task = await self.inspect_task(thread_id)
+            if observed_task.active_turn is not None:
+                resolved_turn_id = observed_task.active_turn
+            elif isinstance(observed_task.last_turn, Mapping) and isinstance(
+                observed_task.last_turn.get("id"), str
             ):
-                resolved_turn_id = str(task.last_turn["id"])
+                resolved_turn_id = str(observed_task.last_turn["id"])
             else:
                 return {
                     "thread_id": thread_id,
@@ -1488,19 +1489,9 @@ class AppServerRuntime:
                     "gaps": ["native task has no observable turn"],
                     "bytes": used,
                 }
-        while remaining != 0:
-            page = await self.transport.thread_items_page(
-                thread_id,
-                turn_id=resolved_turn_id,
-                limit=1,
-                cursor=current,
-            )
-            rows = page["items"]
-            next_cursor = page["next_cursor"]
-            if not rows:
-                current = next_cursor
-                break
-            row = dict(rows[0])
+
+        def append(row: dict[str, Any], next_cursor: str | None) -> bool:
+            nonlocal current, remaining, used
             encoded = json.dumps(
                 row, separators=(",", ":"), ensure_ascii=False, sort_keys=True
             ).encode("utf-8")
@@ -1536,12 +1527,53 @@ class AppServerRuntime:
                         "one native output item could not fit at the byte cap and was skipped"
                     )
                 current = next_cursor
-                break
+                return False
             items.append(row)
             used += delimiter + len(encoded)
             current = next_cursor
             if remaining > 0:
                 remaining -= 1
+            return remaining != 0
+
+        while remaining != 0:
+            page = await self.transport.thread_items_page(
+                thread_id,
+                turn_id=resolved_turn_id,
+                limit=1,
+                cursor=current,
+            )
+            rows = page["items"]
+            next_cursor = page["next_cursor"]
+            if not rows:
+                if current is None and not items:
+                    if observed_task is None:
+                        observed_task = await self.inspect_task(thread_id)
+                    last_turn = observed_task.last_turn
+                    history = (
+                        last_turn.get("items")
+                        if isinstance(last_turn, Mapping)
+                        and last_turn.get("id") == resolved_turn_id
+                        else None
+                    )
+                    if isinstance(history, list) and history:
+                        gaps.append(
+                            "native item pagination was empty; returned lossy thread history"
+                        )
+                        for history_item in history:
+                            if not isinstance(history_item, Mapping):
+                                continue
+                            if not append(
+                                {
+                                    "turnId": resolved_turn_id,
+                                    "item": dict(history_item),
+                                },
+                                None,
+                            ):
+                                break
+                current = next_cursor
+                break
+            if not append(dict(rows[0]), next_cursor):
+                break
             if current is None:
                 break
         return {

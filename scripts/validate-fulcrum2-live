@@ -597,8 +597,58 @@ def publish_plan(
             }
         )
     for perspective, value in started.items():
-        driver.task_wait(str(value["thread_id"]), 240)
-        driver.role_output("weaver", str(value["thread_id"]))
+        thread = str(value["thread_id"])
+        driver.task_wait(thread, 240)
+        driver.role_output("weaver", thread)
+        current = driver.plan(root, record_result=False)
+        review = current.get("reviews", {}).get(perspective, {})
+        if review.get("state") != "completed":
+            task = dict(driver.fc("task", "show", thread).get("result") or {})
+            active_turn = (task.get("native") or {}).get("active_turn")
+            if active_turn:
+                driver.task_wait(thread, 120)
+                current = driver.plan(root, record_result=False)
+                review = current.get("reviews", {}).get(perspective, {})
+            if review.get("state") != "completed":
+                payload = {
+                    "review_operation": value["review_operation"],
+                    "findings": [],
+                    "summary": (
+                        "Replace this text with your independent review summary, "
+                        "preserving any concrete findings you identify."
+                    ),
+                }
+                reminder = driver.fc(
+                    "task",
+                    "send",
+                    thread,
+                    payload={
+                        "text": (
+                            "Your independent review is still incomplete. Analyze the "
+                            "same retained draft, then execute "
+                            f"`fulcrum plan review finish --task {value['task_record_id']} "
+                            "--input - --json` exactly once with this JSON shape, "
+                            "replacing the summary and adding any typed findings: "
+                            f"{json.dumps(payload, separators=(',', ':'))}. "
+                            "Run the command even when findings is empty."
+                        )
+                    },
+                )
+                reminder_result = driver.nested(reminder)
+                reminder_turn = reminder_result.get("turn") or {}
+                driver.roles["weaver"].append(
+                    {
+                        "bead_id": root,
+                        "purpose": "plan_review_completion",
+                        "perspective": perspective,
+                        "task_id": thread,
+                        "turn_id": reminder_turn.get("id"),
+                        "operation_id": reminder.get("operation_id"),
+                        "input": reminder_result,
+                    }
+                )
+                driver.task_wait(thread, 180)
+                driver.role_output("weaver", thread)
     shown = driver.poll(
         "both independent plan review results",
         lambda: driver.plan(root, record_result=False),

@@ -786,7 +786,11 @@ class NativeOutputBoundTest(unittest.IsolatedAsyncioTestCase):
             return_value=facts(
                 "thread-1",
                 active_turn=None,
-                last_turn={"id": "turn-latest", "status": "completed"},
+                last_turn={
+                    "id": "turn-latest",
+                    "status": "completed",
+                    "items": [{"type": "agentMessage", "text": "retained answer"}],
+                },
             )
         )
         runtime.transport.thread_items_page = AsyncMock(
@@ -798,6 +802,11 @@ class NativeOutputBoundTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["turn_id"], "turn-latest")
+        self.assertEqual(
+            result["items"][0]["item"]["text"],
+            "retained answer",
+        )
+        self.assertIn("lossy thread history", result["gaps"][0])
         self.assertEqual(
             runtime.transport.thread_items_page.await_args.kwargs["turn_id"],
             "turn-latest",
