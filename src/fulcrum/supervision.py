@@ -69,7 +69,7 @@ from fulcrum.source_refresh import (
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
 RETRY_DELAYS = (2.0, 10.0)
-EXTERNAL_RUNNER_LIMIT = 10
+EXTERNAL_RUNNER_LIMIT = 32
 MAX_SENDS = 3
 REMINDER_NAMESPACE = uuid.UUID("8842f0c3-557a-44d9-8e4a-c8c96f3955d1")
 DELIVERY_NAMESPACE = uuid.UUID("d531e65f-328e-4a90-a1f0-eb56bd09eedb")

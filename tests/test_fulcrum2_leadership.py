@@ -1271,7 +1271,11 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
         manager = ConfigurationManager(self.config)
         document, _ = manager.load()
         config = manager.effective(document)
-        capacity = capacity_snapshot(self.ledger, config)
+        with patch.object(
+            self.ledger, "list_records", wraps=self.ledger.list_records
+        ) as list_records:
+            capacity = capacity_snapshot(self.ledger, config)
+        self.assertEqual(list_records.call_count, 1)
         self.assertIn("native-unknown", capacity["unknown_managed_ids"])
         self.assertIn("fc-human-reservation", capacity["human_bypasses"])
         self.assertNotIn(self.marshal, capacity["active_managed_ids"])

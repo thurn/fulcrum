@@ -523,8 +523,9 @@ class ConcurrencySmoke:
                 f"Concurrency participant {participant}. Run exactly one shell tool "
                 f"command first: `{arrive}`. Wait for its successful release response. "
                 "Then finish this Weaver responsibility with outcome answered, a short "
-                "summary, and evidence naming the barrier participant. Do not edit files "
-                "or start another model turn."
+                "summary, and evidence naming the barrier participant. The finish input "
+                "must contain exactly a summary string and evidence as a one-element "
+                "array of strings. Do not edit files or start another model turn."
             )
             return self.fc(
                 "work",

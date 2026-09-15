@@ -1392,8 +1392,13 @@ def marshal_context(request: ParsedRequest) -> CommandResult:
 def capacity_snapshot(ledger: Ledger, config: Mapping[str, Any]) -> dict[str, Any]:
     policy = _mapping(config["policy"])
     projects = _mapping(config.get("projects", {}))
-    task_records = ledger.list_records(kind="task", limit=0)
-    work_records = _open_work(ledger)
+    records = ledger.list_records(limit=0)
+    task_records = [record for record in records if record.kind == "task"]
+    work_records = [
+        record
+        for record in records
+        if record.status != "closed" and record.kind in {None, "work"}
+    ]
     active_ids: list[str] = []
     unknown_ids: list[str] = []
     human_bypasses: list[str] = []
@@ -1483,10 +1488,11 @@ def capacity_snapshot(ledger: Ledger, config: Mapping[str, Any]) -> dict[str, An
         project_counts[project] = project_counts.get(project, 0) + 1
         if reservation.get("human_bypass"):
             human_bypasses.append(operation_id)
-    for operation_record in ledger.list_records(kind="operation", limit=0):
+    for operation_record in records:
         operation_fc = operation_record.fc or {}
         if (
-            operation_record.id in counted_creation_operations
+            operation_record.kind != "operation"
+            or operation_record.id in counted_creation_operations
             or operation_fc.get("command") != "plan.review.start"
             or operation_fc.get("state") not in {"accepted", "running"}
         ):
