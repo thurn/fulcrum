@@ -39,6 +39,7 @@ from fulcrum.leadership import (
     ensure_leadership,
     normalize_native_intake,
 )
+from fulcrum.publication import LedgerPublicationService
 from fulcrum.runtime import AppServerError, AppServerRuntime, TaskFacts, TurnInput
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
@@ -47,6 +48,7 @@ MAX_SENDS = 3
 REMINDER_NAMESPACE = uuid.UUID("8842f0c3-557a-44d9-8e4a-c8c96f3955d1")
 DELIVERY_NAMESPACE = uuid.UUID("d531e65f-328e-4a90-a1f0-eb56bd09eedb")
 PLAN_COMPLETION_NAMESPACE = uuid.UUID("6d2a024c-9c95-44d6-bf2d-19877ac43a5d")
+PUBLICATION_SHUTDOWN_NAMESPACE = uuid.UUID("05f85606-fb24-46f7-b2a0-10439d42950e")
 
 
 class Clock(Protocol):
@@ -189,6 +191,7 @@ class ControllerSupervisor:
         self.health = HealthFile(
             request.instance.instance_root / "service-health.json", self.clock
         )
+        self.publication = LedgerPublicationService(now=self.clock.now)
         self.external_slots = asyncio.Semaphore(4)
         self.bead_locks: dict[str, asyncio.Lock] = {}
         self._stop = asyncio.Event()
@@ -665,6 +668,10 @@ class ControllerSupervisor:
                 self._supervise("event", self._event_loop),
                 name="fulcrum-events",
             ),
+            asyncio.create_task(
+                self._supervise("publication", self._publication_loop),
+                name="fulcrum-publication",
+            ),
         ]
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
@@ -678,7 +685,7 @@ class ControllerSupervisor:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             try:
-                await asyncio.wait_for(self._shutdown_cleanup(), 5)
+                await asyncio.wait_for(self._shutdown_cleanup(), 35)
             except (TimeoutError, AppServerError, LedgerFailure):
                 pass
             await self.runtime.close()
@@ -722,6 +729,11 @@ class ControllerSupervisor:
             # Keep the inspection socket available while the supervised loops prove
             # whether an unavailable ledger is transient or requires a restart.
             self.health.failure("reconciliation", error)
+        try:
+            publication = await asyncio.to_thread(self.publication.tick, self.request)
+            self.health.success("publication", publication)
+        except Exception as error:
+            self.health.failure("publication", error)
 
     async def _supervise(self, name: str, loop: Callable[[], Awaitable[None]]) -> None:
         failures = 0
@@ -770,6 +782,33 @@ class ControllerSupervisor:
         while not self._stop.is_set():
             self.health.success("runner", {"pending": 0})
             await self._wait(interval)
+
+    async def _publication_loop(self) -> None:
+        cadence = float(_mapping(self.config["brain"])["push_interval_seconds"])
+        while not self._stop.is_set():
+            result = await asyncio.to_thread(self.publication.tick, self.request)
+            self.health.success("publication", result)
+            delay = cadence
+            command_result = result.get("result")
+            if isinstance(command_result, Mapping):
+                operation = command_result.get("result")
+                planned = (
+                    operation.get("planned") if isinstance(operation, Mapping) else None
+                )
+                retry_at = (
+                    planned.get("next_retry_at")
+                    if isinstance(planned, Mapping)
+                    else None
+                )
+                if isinstance(retry_at, str):
+                    delay = min(
+                        cadence,
+                        max(
+                            0.1,
+                            (_parse_time(retry_at) - self.clock.now()).total_seconds(),
+                        ),
+                    )
+            await self._wait(delay)
 
     async def _event_loop(self) -> None:
         silence = float(_mapping(self.config["timing"])["event_silence_seconds"])
@@ -1811,13 +1850,38 @@ class ControllerSupervisor:
                 continue
             await self.runtime.release(thread_id)
             released.append(thread_id)
+        flush_request = replace(
+            self.request,
+            command=("ledger", "sync"),
+            arguments={},
+            input={},
+            request_id=str(
+                uuid.uuid5(
+                    PUBLICATION_SHUTDOWN_NAMESPACE,
+                    _format_time(self.clock.now()),
+                )
+            ),
+            offline=True,
+        )
+        publication_flush: Mapping[str, Any]
+        try:
+            flushed = await asyncio.wait_for(
+                asyncio.to_thread(self.publication.flush, flush_request), 30
+            )
+            publication_flush = flushed.to_dict()
+        except Exception as error:
+            publication_flush = {
+                "state": "failed",
+                "local_work_preserved": True,
+                "error": str(error),
+            }
         self.health.success(
             "runner",
             {
                 "shutdown": "drained",
                 "unresolved_active_tasks": unresolved,
                 "released_idle_subscriptions": released,
-                "publication_flush": "not_yet_available",
+                "publication_flush": publication_flush,
             },
         )
 

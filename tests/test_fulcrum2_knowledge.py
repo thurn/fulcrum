@@ -593,6 +593,13 @@ class Fulcrum2KnowledgeTest(unittest.TestCase):
         )
         config_result = invoke("config", "sync")["result"]["result"]
         self.assertTrue(config_result["publication_ready"])
+        self.assertTrue(config_result["ledger_publication"]["ok"])
+        self.assertNotEqual(
+            config_result["ledger_publication"]["result"]["result"][
+                "target_dolt_commit"
+            ],
+            config_result["ledger_publication"]["result"]["result"]["remote_data_ref"],
+        )
         operation = self.ledger.show(str(config_result["publication"]["operation_id"]))
         assert operation is not None and operation.fc
         retained = operation.fc["planned"]["publication_intent"]

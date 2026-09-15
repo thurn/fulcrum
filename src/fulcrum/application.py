@@ -16,11 +16,13 @@ from fulcrum.delivery_service import DeliveryService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
+    OperationRecord,
     OperationService,
 )
 from fulcrum.leadership import LeadershipService
 from fulcrum.knowledge import KnowledgeService, MemoryService
 from fulcrum.plans import PlanService
+from fulcrum.publication import LedgerPublicationService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.reviews import ReviewService
 from fulcrum.roles import RoleService
@@ -112,6 +114,9 @@ class Application:
         knowledge = KnowledgeService()
         self.register(("knowledge", "publish"), knowledge.publish)
         self.register(("config", "sync"), knowledge.config_sync)
+        publication = LedgerPublicationService()
+        self.register(("ledger", "sync"), publication.sync)
+        self.register(("ledger", "status"), publication.status)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)
@@ -258,6 +263,17 @@ class Application:
         return self._ledger_call(request, "cancel")
 
     def _operation_reconcile(self, request: ParsedRequest) -> CommandResult:
+        service = self._operations(request)
+        target_id = str(request.arguments["id"])
+        target = service.ledger.show(target_id)
+        if (
+            target is not None
+            and target.kind == "operation"
+            and (target.fc or {}).get("command") == "ledger.sync"
+        ):
+            return LedgerPublicationService().reconcile(
+                request, OperationRecord.from_record(target)
+            )
         return self._ledger_call(request, "reconcile")
 
     def _ledger_call(self, request: ParsedRequest, method: str) -> CommandResult:

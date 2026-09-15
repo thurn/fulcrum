@@ -140,6 +140,7 @@ class Ledger:
         executable: str | None = None,
         actor: str = "fulcrum-controller",
         timeout: float = 30.0,
+        dolt_auto_commit: str | None = None,
     ) -> None:
         requested = executable or "bd"
         resolved = (
@@ -155,6 +156,7 @@ class Ledger:
         self.workspace: Path = workspace.resolve(strict=False)
         self.actor = actor
         self.timeout = timeout
+        self.dolt_auto_commit = dolt_auto_commit
         self._write_lock = threading.RLock()
         self._bead_locks: dict[str, threading.RLock] = {}
 
@@ -175,6 +177,11 @@ class Ledger:
             "--json",
             "--actor",
             self.actor,
+            *(
+                ["--dolt-auto-commit", self.dolt_auto_commit]
+                if self.dolt_auto_commit is not None
+                else []
+            ),
             "-C",
             str(self.workspace),
             *[str(item) for item in arguments],

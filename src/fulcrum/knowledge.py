@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from fulcrum.ledger import (
     Ledger,
     LedgerRecord,
     OperationRecord,
+    operation_id,
     operation_view,
     random_record_id,
     utc_now,
@@ -24,6 +27,7 @@ from fulcrum.ledger import (
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "uncertain", "cancelled"}
 MEMORY_SELECTION_LIMIT = 4000
+CONFIG_LEDGER_SYNC_NAMESPACE = uuid.UUID("17bc2d92-d45a-4f92-a8db-3469d4de82a7")
 
 
 class MemoryService:
@@ -363,6 +367,7 @@ class KnowledgeService:
             "require_remote_sync": destination.require_remote_sync,
         }
         ready = _publication_ready(facts)
+        ledger_request_id = str(uuid.uuid5(CONFIG_LEDGER_SYNC_NAMESPACE, operation.id))
         control = ledger.show("fc-system")
         if control is not None and control.fc:
             fc = dict(control.fc)
@@ -381,6 +386,7 @@ class KnowledgeService:
                 "path": str(request.instance.config_path),
                 "publication": facts,
                 "publication_ready": ready,
+                "ledger_publication_operation": operation_id(ledger_request_id),
             },
             error=(
                 None
@@ -400,7 +406,28 @@ class KnowledgeService:
                 else "Repair or retry the retained configuration publication."
             ),
         )
-        return _operation_result(operation)
+        from fulcrum.publication import LedgerPublicationService
+
+        native = LedgerPublicationService().sync(
+            replace(
+                request,
+                command=("ledger", "sync"),
+                arguments={},
+                input={},
+                request_id=ledger_request_id,
+            )
+        )
+        view = operation_view(operation)
+        retained_result = dict(view.get("result") or {})
+        retained_result["ledger_publication"] = native.to_dict()
+        view["result"] = retained_result
+        return CommandResult(
+            ok=operation.operation.get("state") not in {"failed", "uncertain"},
+            state=CommandState(str(operation.operation.get("state"))),
+            operation_id=operation.id,
+            request_id=request.request_id,
+            result=view,
+        )
 
 
 def select_memory(
@@ -811,7 +838,7 @@ def _authorize_publication(
 
 
 def _authorize_config_publication(request: ParsedRequest, ledger: Ledger) -> None:
-    if request.actor.kind == "human":
+    if request.actor.kind in {"human", "controller"}:
         return
     control = ledger.show("fc-system")
     vizier = (control.fc or {}).get("vizier_thread") if control is not None else None
