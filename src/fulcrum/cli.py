@@ -569,6 +569,12 @@ def _add_command_options(
         _option(parser, "--seconds", type=float, required=True)
     elif path == ("smoke", "concurrency"):
         _option(parser, "--workers", type=int, default=30)
+        _option(parser, "--runtime-endpoint")
+        _option(parser, "--codex-executable")
+        _option(parser, "--tollgate-executable")
+        _option(parser, "--command-timeout", type=float)
+        _option(parser, "--fixture-parent")
+        _option(parser, "--report")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1192,6 +1198,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     namespace: argparse.Namespace | None = None
     try:
         namespace = parser.parse_args(argv)
+        if tuple(getattr(namespace, "_command_path", ())) == (
+            "smoke",
+            "concurrency",
+        ):
+            from fulcrum.concurrency_smoke import run_concurrency_smoke
+
+            result = run_concurrency_smoke(
+                namespace, executable=Path(os.path.abspath(sys.argv[0]))
+            )
+            _emit(result, json_output=bool(getattr(namespace, "json", False)))
+            return _exit_code(result)
         request = _build_request(namespace)
         result = _execute(request)
         if request.command == ("hook", "context"):

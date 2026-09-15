@@ -111,6 +111,35 @@ class Fulcrum2SpineTest(unittest.TestCase):
         envelope = json.loads(result.stdout)
         self.assertEqual(envelope["error"]["code"], "LEDGER_UNAVAILABLE")
 
+    def test_concurrency_smoke_is_a_self_selecting_bounded_client(self) -> None:
+        help_result = self.invoke("smoke", "concurrency", "--help")
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn("--workers", help_result.stdout)
+        self.assertIn("--report", help_result.stdout)
+
+        invalid_workers = self.invoke(
+            "smoke", "concurrency", "--workers", "0", "--json"
+        )
+        self.assertEqual(invalid_workers.returncode, 2)
+        self.assertEqual(
+            json.loads(invalid_workers.stdout)["error"]["code"], "INVALID_WORKERS"
+        )
+
+        production_selection = self.invoke(
+            "smoke",
+            "concurrency",
+            "--workers",
+            "1",
+            "--instance",
+            str(self.instance),
+            "--json",
+        )
+        self.assertEqual(production_selection.returncode, 2)
+        self.assertEqual(
+            json.loads(production_selection.stdout)["error"]["code"],
+            "SMOKE_SELECTION_CONFLICT",
+        )
+
     def test_input_errors_are_clean_envelopes_and_name_fields(self) -> None:
         malformed = self.invoke(
             "--instance",
