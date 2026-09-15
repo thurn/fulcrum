@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import Any
 
+from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.ledger import (
@@ -691,12 +692,52 @@ class PlanService:
         root = _root(ledger, str(request.arguments["id"]))
         _authorize_completion(request, root, ledger)
         if root.status == "closed":
+            completion_cost = (root.fc or {}).get("completion_cost")
+            disposition = (root.fc or {}).get("disposition")
+            disposition_values = (
+                dict(disposition) if isinstance(disposition, Mapping) else {}
+            )
+            transition = disposition_values.get("plan_completion_operation")
+            if not isinstance(completion_cost, Mapping):
+                if isinstance(transition, str):
+                    completion_cost = AnalyticsService().finalize_root(
+                        ledger, root, transition
+                    )
+            operation_record = (
+                ledger.show(transition) if isinstance(transition, str) else None
+            )
+            if operation_record is not None and operation_record.kind == "operation":
+                operation = OperationRecord.from_record(operation_record)
+                if operation.operation.get("state") not in TERMINAL_OPERATION_STATES:
+                    planned = operation.operation.get("planned")
+                    planned_values = (
+                        dict(planned) if isinstance(planned, Mapping) else {}
+                    )
+                    operation = ledger.update_operation(
+                        operation,
+                        state="completed",
+                        step="plan_root_closed",
+                        result={
+                            "bead_id": root.id,
+                            "root_closed": True,
+                            "outcome": disposition_values.get("outcome"),
+                            "children": planned_values.get("children", []),
+                            "unsatisfied": [],
+                            "completion_cost": completion_cost,
+                        },
+                        next_action=str(
+                            (root.fc or {}).get("next_action")
+                            or "No plan obligations remain."
+                        ),
+                    )
+                    return _operation_result(operation)
             return CommandResult.query(
                 {
                     "bead_id": root.id,
                     "root_closed": True,
                     "disposition": (root.fc or {}).get("disposition"),
                     "unsatisfied": [],
+                    "completion_cost": completion_cost,
                 }
             )
         unsatisfied, children = _completion_obligations(ledger, root)
@@ -756,7 +797,8 @@ class PlanService:
         fc["next_action"] = (
             "No plan obligations remain unless the root is explicitly reopened."
         )
-        ledger.update_fc(root.id, fc, status="closed")
+        closed = ledger.update_fc(root.id, fc, status="closed")
+        completion_cost = AnalyticsService().finalize_root(ledger, closed, operation.id)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
@@ -767,6 +809,7 @@ class PlanService:
                 "outcome": outcome,
                 "children": current_children,
                 "unsatisfied": [],
+                "completion_cost": completion_cost,
             },
             next_action=fc["next_action"],
         )

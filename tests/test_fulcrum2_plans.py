@@ -303,6 +303,9 @@ class Fulcrum2PlanTest(unittest.TestCase):
         )
         closed = self.ledger.show(root)
         assert closed is not None and closed.fc
+        automatic_cost = closed.fc.get("completion_cost")
+        self.assertEqual(automatic_cost["state"], "finalized")
+        self.assertIsNotNone(self.ledger.show(automatic_cost["summary_bead"]))
         historical_cost = {
             "state": "finalized",
             "summary_bead": "fc-historical-cost",

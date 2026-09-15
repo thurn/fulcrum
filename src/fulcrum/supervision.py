@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import (
     ActorContext,
@@ -192,6 +193,7 @@ class ControllerSupervisor:
             request.instance.instance_root / "service-health.json", self.clock
         )
         self.publication = LedgerPublicationService(now=self.clock.now)
+        self.analytics = AnalyticsService()
         self.external_slots = asyncio.Semaphore(4)
         self.bead_locks: dict[str, asyncio.Lock] = {}
         self._stop = asyncio.Event()
@@ -986,10 +988,9 @@ class ControllerSupervisor:
         work_by_id: Mapping[str, Any],
         facts: TaskFacts | None,
     ) -> tuple[Mapping[str, Any], list[Mapping[str, Any]]]:
-        fc = dict(task.fc or {})
-        original_fc = dict(fc)
         actions: list[Mapping[str, Any]] = []
         if facts is None:
+            fc = dict(task.fc or {})
             return (
                 {
                     "task_record_id": task.id,
@@ -998,6 +999,10 @@ class ControllerSupervisor:
                 },
                 actions,
             )
+        await asyncio.to_thread(self.analytics.observe_task, self.ledger, task, facts)
+        task = await asyncio.to_thread(self.ledger.show, task.id) or task
+        fc = dict(task.fc or {})
+        original_fc = dict(fc)
         previous_observed = fc.get("last_observed")
         previous_turn = (
             previous_observed.get("last_turn")
@@ -1899,7 +1904,15 @@ class ControllerSupervisor:
         ]
         if len(matches) != 1:
             return
-        fc = dict(matches[0].fc or {})
+        await asyncio.to_thread(
+            self.analytics.record_runtime_event,
+            self.ledger,
+            matches[0],
+            event.method,
+            event.params,
+        )
+        current = await asyncio.to_thread(self.ledger.show, matches[0].id)
+        fc = dict((current or matches[0]).fc or {})
         fc["last_runtime_event_at"] = event.observed_at
         fc["last_runtime_event"] = {
             "method": event.method,

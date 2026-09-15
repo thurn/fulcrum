@@ -477,9 +477,33 @@ def _add_command_options(
         _option(parser, "--limit", type=int)
         _option(parser, "--cursor")
     elif path in {("usage",), ("cost",)}:
-        for name in ("scope", "workflow", "role", "task", "turn", "root"):
+        for name in (
+            "bead",
+            "workflow",
+            "operation",
+            "role",
+            "since",
+            "until",
+        ):
             _option(parser, f"--{name}")
-        _option(parser, "--group-by")
+        _option(
+            parser,
+            "--group-by",
+            choices=(
+                "bead",
+                "workflow",
+                "operation",
+                "task",
+                "role",
+                "project",
+                "model",
+            ),
+        )
+    elif path == ("usage", "reconcile"):
+        _option(parser, "--bead")
+    elif path == ("rates", "list"):
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
     elif path == ("fleet", "replace"):
         _option(parser, "--mode", choices=("drain", "interrupt"), required=True)
         _option(parser, "--reason", required=True)
@@ -702,8 +726,14 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "currency",
         "effective_at",
         "retrieved_at",
-        "source",
-        "prices",
+        "source_url",
+        "input_per_million",
+        "cached_input_per_million",
+        "cache_write_input_per_million",
+        "output_per_million",
+        "tiers",
+        "long_context",
+        "tools",
     },
     ("fixture", "create"): {
         "root",
@@ -852,6 +882,13 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
         arguments["model"] = values["model"]
     if "effort" in values:
         arguments["effort"] = values["effort"]
+    if command in {("usage",), ("cost",)}:
+        if values.get("project") is not None:
+            arguments["project"] = values["project"]
+        if values.get("thread_id") is not None:
+            arguments["thread_id"] = values["thread_id"]
+    elif command == ("usage", "reconcile") and values.get("thread_id") is not None:
+        arguments["thread_id"] = values["thread_id"]
     return ParsedRequest(
         command=command,
         arguments=arguments,

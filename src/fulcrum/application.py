@@ -8,9 +8,10 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
-from fulcrum.configuration import ConfigurationService, ProjectService
+from fulcrum.analytics import AnalyticsService
 from fulcrum.completion import CompletionService
+from fulcrum.configuration import ConfigurationService, ProjectService
+from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
 from fulcrum.ledger import (
@@ -117,6 +118,13 @@ class Application:
         publication = LedgerPublicationService()
         self.register(("ledger", "sync"), publication.sync)
         self.register(("ledger", "status"), publication.status)
+        analytics = AnalyticsService()
+        self.register(("usage",), analytics.usage)
+        self.register(("cost",), analytics.cost)
+        self.register(("rates", "list"), analytics.rates_list)
+        self.register(("rates", "show"), analytics.rates_show)
+        self.register(("rates", "add"), analytics.rates_add)
+        self.register(("usage", "reconcile"), analytics.reconcile)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

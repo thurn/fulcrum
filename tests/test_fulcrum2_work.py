@@ -221,6 +221,32 @@ class Fulcrum2WorkTest(unittest.TestCase):
             "--json",
         )
         self.assertEqual(closed.returncode, 0, closed.stderr + closed.stdout)
+        closed_root = Ledger(self.brain).show(bead_id)
+        assert closed_root is not None and closed_root.fc
+        completion_cost = closed_root.fc.get("completion_cost")
+        self.assertEqual(completion_cost["state"], "finalized")
+        self.assertEqual(completion_cost["coverage"], "unknown")
+        self.assertIsNone(completion_cost["estimated_api_cost_usd"])
+        self.assertIsNotNone(Ledger(self.brain).show(completion_cost["summary_bead"]))
+        duplicate = self.invoke(
+            "work",
+            "close",
+            bead_id,
+            "--outcome",
+            "answered",
+            "--summary",
+            "Initial question was answered",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--json",
+        )
+        self.assertEqual(duplicate.returncode, 0, duplicate.stderr + duplicate.stdout)
+        unchanged = Ledger(self.brain).show(bead_id)
+        assert unchanged is not None and unchanged.fc
+        self.assertEqual(unchanged.fc["completion_cost"], completion_cost)
         reopened = self.invoke(
             "work",
             "reopen",

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.delivery_service import DeliveryService, _context
@@ -85,7 +86,8 @@ class CompletionService:
         fc["next_action"] = (
             "No question work remains unless the root is explicitly reopened."
         )
-        ledger.update_fc(work.id, fc, status="closed")
+        closed = ledger.update_fc(work.id, fc, status="closed")
+        completion_cost = AnalyticsService().finalize_root(ledger, closed, operation.id)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
@@ -95,6 +97,7 @@ class CompletionService:
                 "accepted": True,
                 "disposition": fc["disposition"],
                 "report_reminder": _report_reminder(work.id),
+                "completion_cost": completion_cost,
             },
             next_action=fc["next_action"],
         )

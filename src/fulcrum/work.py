@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager, ROLES
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.ledger import (
@@ -522,6 +523,23 @@ class WorkService:
             "cancelled",
         }:
             return _operation_result(operation)
+        existing_cost = (record.fc or {}).get("completion_cost")
+        if record.status == "closed" and (
+            (record.fc or {}).get("workflow_root") != record.id
+            or isinstance(existing_cost, Mapping)
+        ):
+            operation = ledger.update_operation(
+                operation,
+                state="completed",
+                step="work_already_closed",
+                result={
+                    "bead_id": record.id,
+                    "work": work_view(ledger, record),
+                    "completion_cost": existing_cost,
+                },
+                next_action="No further action is required unless the work is explicitly reopened.",
+            )
+            return _operation_result(operation)
         fc = dict(record.fc or {})
         fc["phase"] = "done"
         fc["disposition"] = {
@@ -535,11 +553,21 @@ class WorkService:
         }
         fc["last_transition"] = operation.id
         updated = ledger.update_fc(record.id, fc, status="closed")
+        completion_cost = None
+        if fc.get("workflow_root") == record.id:
+            completion_cost = AnalyticsService().finalize_root(
+                ledger, updated, operation.id
+            )
+            updated = ledger.show(record.id) or updated
         operation = ledger.update_operation(
             operation,
             state="completed",
             step="work_closed",
-            result={"bead_id": record.id, "work": work_view(ledger, updated)},
+            result={
+                "bead_id": record.id,
+                "work": work_view(ledger, updated),
+                "completion_cost": completion_cost,
+            },
             next_action="No further action is required unless the work is explicitly reopened.",
         )
         return _operation_result(operation)
