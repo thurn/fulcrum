@@ -464,9 +464,7 @@ class ResetService:
             if target.get("state") == "completed":
                 continue
             try:
-                _complete_target(
-                    target, _cancel_provider_target(target, config.get("delivery"))
-                )
+                _complete_target(target, _cancel_provider_target(target, config))
             except Exception as error:
                 _fail_target(target, error)
             operation = _persist_targets(
@@ -476,7 +474,7 @@ class ResetService:
             if target.get("state") == "completed":
                 continue
             try:
-                _complete_target(target, _remove_worktree_target(target))
+                _complete_target(target, _remove_worktree_target(target, config))
             except Exception as error:
                 _fail_target(target, error)
             operation = _persist_targets(
@@ -1231,7 +1229,12 @@ def _kinds_completed(operation: OperationRecord, *kinds: str) -> bool:
 async def _delete_native_task(
     runtime: Any, thread_id: str, timeout: float
 ) -> dict[str, Any]:
-    facts = await runtime.inspect_task(thread_id)
+    try:
+        facts = await runtime.inspect_task(thread_id)
+    except Exception as error:
+        if "thread not found:" not in str(error).lower():
+            raise
+        return {"thread_id": thread_id, "exists": False, "already_absent": True}
     if not facts.exists:
         return {"thread_id": thread_id, "exists": False, "already_absent": True}
     if facts.active_turn is not None:
@@ -1263,16 +1266,30 @@ async def _delete_native_task(
 
 
 def _cancel_provider_target(
-    target: Mapping[str, Any], provider_config: Any
+    target: Mapping[str, Any], config: Mapping[str, Any]
 ) -> dict[str, Any]:
     before = target.get("before")
     before = before if isinstance(before, Mapping) else {}
     repository_id, handle = before.get("repository_id"), before.get("handle")
     if not isinstance(repository_id, str) or not repository_id:
-        raise RuntimeError("provider target has no exact repository ID")
+        inferred = {
+            str(delivery["id"])
+            for project in (config.get("projects") or {}).values()
+            if isinstance(project, Mapping)
+            and isinstance((delivery := project.get("delivery")), Mapping)
+            and isinstance(delivery.get("id"), str)
+            and delivery.get("id")
+        }
+        if (
+            before.get("ownership_evidence") != "legacy_operational_store"
+            or len(inferred) != 1
+        ):
+            raise RuntimeError("provider target has no exact repository ID")
+        repository_id = inferred.pop()
     if not isinstance(handle, str) or not handle:
         raise RuntimeError("provider target has no exact handle")
-    provider = provider_config if isinstance(provider_config, Mapping) else {}
+    configured_provider = config.get("delivery")
+    provider = configured_provider if isinstance(configured_provider, Mapping) else {}
     if provider.get("kind") != "tollgate" or not provider.get("executable"):
         raise RuntimeError("configured delivery provider cannot inspect this handle")
     from fulcrum.tollgate import Tollgate
@@ -1313,7 +1330,9 @@ def _provider_row(value: Any, handle: str) -> Mapping[str, Any] | None:
     return None
 
 
-def _remove_worktree_target(target: Mapping[str, Any]) -> dict[str, Any]:
+def _remove_worktree_target(
+    target: Mapping[str, Any], config: Mapping[str, Any]
+) -> dict[str, Any]:
     before = target.get("before")
     before = before if isinstance(before, Mapping) else {}
     path = Path(str(before.get("path") or "")).resolve(strict=False)
@@ -1321,7 +1340,24 @@ def _remove_worktree_target(target: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(root_value, str) or not root_value:
         if not path.exists():
             return {"path": str(path), "exists": False, "already_absent": True}
-        raise RuntimeError("worktree target has no exact project root")
+        roots = {
+            Path(str(project["root"])).resolve(strict=True)
+            for project in (config.get("projects") or {}).values()
+            if isinstance(project, Mapping)
+            and isinstance(project.get("root"), str)
+            and path.is_relative_to(Path(str(project["root"])).resolve(strict=False))
+        }
+        owned = {
+            root
+            for root in roots
+            if any(item.get("worktree") == str(path) for item in _git_worktrees(root))
+        }
+        if (
+            before.get("ownership_evidence") != "legacy_operational_store"
+            or len(owned) != 1
+        ):
+            raise RuntimeError("worktree target has no exact project root")
+        root_value = str(owned.pop())
     root = Path(root_value).resolve(strict=True)
     matches = [
         item for item in _git_worktrees(root) if item.get("worktree") == str(path)
