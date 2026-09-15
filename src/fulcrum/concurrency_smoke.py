@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import resource
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -16,7 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence, TypeVar
+from typing import Any, Callable, IO, Mapping, Sequence, TypeVar
 
 from fulcrum.contracts import FulcrumError
 
@@ -66,8 +68,9 @@ class ConcurrencySmoke:
         self.effort: str = str(values.get("effort", "low"))
         self.budget: float = float(values.get("timeout", 600))
         self.command_timeout: float = float(values.get("command_timeout", 90))
+        self.external_runtime: bool = "runtime_endpoint" in values
         self.runtime_endpoint: str = str(
-            values.get("runtime_endpoint", "ws://127.0.0.1:4500")
+            values.get("runtime_endpoint") or self._available_runtime_endpoint()
         )
         codex_value = values.get("codex_executable") or shutil.which("codex")
         tollgate_value = values.get("tollgate_executable") or shutil.which("tg")
@@ -90,6 +93,14 @@ class ConcurrencySmoke:
             tempfile.mkdtemp(prefix="fulcrum2-concurrency-", dir=fixture_parent)
         ).resolve(strict=True)
         self.fixture_root: Path = self.fixture_parent / "fixture"
+        self.runtime_process: subprocess.Popen[str] | None = None
+        self.runtime_stdout: IO[str] | None = None
+        self.runtime_stderr: IO[str] | None = None
+        self.runtime_process_facts: dict[str, Any] = {
+            "owned": not self.external_runtime,
+            "endpoint": self.runtime_endpoint,
+            "requested_fd_soft_limit": 4096,
+        }
         self.instance: str | None = None
         self.fixture_id: str | None = None
         self.fixture: dict[str, Any] = {}
@@ -121,6 +132,76 @@ class ConcurrencySmoke:
             "effort": self.effort,
             "runtime_endpoint": self.runtime_endpoint,
         }
+
+    @staticmethod
+    def _available_runtime_endpoint() -> str:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = int(listener.getsockname()[1])
+        return f"ws://127.0.0.1:{port}"
+
+    def prepare_runtime(self) -> None:
+        if self.external_runtime:
+            self.runtime_process_facts["state"] = "external"
+            self.report["runtime_process"] = self.runtime_process_facts
+            return
+        port = int(self.runtime_endpoint.rsplit(":", 1)[1])
+        stdout_path = self.report_path.with_suffix(".runtime.log")
+        stderr_path = self.report_path.with_suffix(".runtime-error.log")
+        stdout_handle = stdout_path.open("w", encoding="utf-8")
+        stderr_handle = stderr_path.open("w", encoding="utf-8")
+        self.runtime_stdout = stdout_handle
+        self.runtime_stderr = stderr_handle
+
+        def raise_file_limit() -> None:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            target = 4096 if hard == resource.RLIM_INFINITY else min(4096, hard)
+            if soft < target:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+
+        process = subprocess.Popen(
+            [
+                self.codex_executable,
+                "app-server",
+                "--listen",
+                self.runtime_endpoint,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+            start_new_session=True,
+            preexec_fn=raise_file_limit,
+        )
+        self.runtime_process = process
+        deadline = time.monotonic() + 20
+        connected = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                    connected = True
+                    break
+            except OSError:
+                time.sleep(0.1)
+        self.runtime_process_facts.update(
+            {
+                "pid": process.pid,
+                "state": "listening" if connected else "failed",
+                "stdout": str(stdout_path),
+                "stderr": str(stderr_path),
+            }
+        )
+        self.report["runtime_process"] = self.runtime_process_facts
+        self.save()
+        if not connected:
+            stdout_handle.flush()
+            stderr_handle.flush()
+            raise SmokeFailure(
+                "owned Codex app-server did not become reachable: "
+                + stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            )
 
     def _git(self, *arguments: str) -> str:
         completed = subprocess.run(
@@ -739,6 +820,7 @@ class ConcurrencySmoke:
 
     def cleanup_fixture(self) -> None:
         if self.instance is None or self.fixture_id is None:
+            self.stop_runtime()
             return
         fixture_id: str = self.fixture_id
         try:
@@ -785,6 +867,7 @@ class ConcurrencySmoke:
             self.cleanup = {"root_removed": False, "error": str(error)}
             self.gaps.append(f"fixture cleanup failed: {error}")
         finally:
+            self.stop_runtime()
             try:
                 if self.fixture_parent.exists() and not any(
                     self.fixture_parent.iterdir()
@@ -793,6 +876,26 @@ class ConcurrencySmoke:
             except OSError:
                 pass
 
+    def stop_runtime(self) -> None:
+        process = self.runtime_process
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            self.runtime_process_facts.update(
+                {"state": "stopped", "returncode": process.returncode}
+            )
+        for handle in (self.runtime_stdout, self.runtime_stderr):
+            if handle is not None and not handle.closed:
+                handle.close()
+        cleanup = dict(self.cleanup or {})
+        cleanup["owned_runtime"] = dict(self.runtime_process_facts)
+        self.cleanup = cleanup
+
     def run(self) -> dict[str, Any]:
         try:
             self.check(
@@ -800,6 +903,7 @@ class ConcurrencySmoke:
                 "concurrency smoke runs from clean committed source",
                 self.report["source_status"],
             )
+            self.prepare_runtime()
             self.create_fixture()
             self.start_and_configure()
             self.create_work()
