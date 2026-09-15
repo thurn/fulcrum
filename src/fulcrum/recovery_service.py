@@ -20,6 +20,7 @@ from fulcrum.contracts import (
     FulcrumError,
     ParsedRequest,
 )
+from fulcrum.continuity import exact_successor_record_id, replace_exact_task
 from fulcrum.delivery_service import (
     _call as delivery_call,
     _context as delivery_context,
@@ -741,7 +742,14 @@ class RecoveryService:
         if kind == "adopt_owner":
             return _repair_adopt_owner(ledger, target, arguments, operation_id)
         if kind == "replace_thread":
-            return _repair_replace_thread(ledger, target, arguments, operation_id)
+            return replace_exact_task(
+                request,
+                ledger,
+                target,
+                str(arguments["mode"]),
+                operation_id,
+                index,
+            )
         if kind in {"cancel_delivery", "reconcile_delivery"}:
             delivery_request = replace(request, arguments={"bead": target})
             delivery_ledger, work, project, provider = delivery_context(
@@ -1385,24 +1393,6 @@ def _repair_adopt_owner(
     }
 
 
-def _repair_replace_thread(
-    ledger: Ledger, target: str, arguments: Mapping[str, Any], operation_id: str
-) -> Mapping[str, Any]:
-    task = ledger.show(target)
-    if task is None or task.kind != "task" or not task.fc:
-        raise FulcrumError.invalid("NOT_FOUND", "replace_thread target must be a task")
-    fc = dict(task.fc)
-    fc["replacement"] = {
-        "mode": arguments["mode"],
-        "state": "requested",
-        "operation_id": operation_id,
-        "requested_at": utc_now(),
-    }
-    fc["last_transition"] = operation_id
-    ledger.update_fc(task.id, fc)
-    return {"task_record_id": task.id, "replacement": fc["replacement"]}
-
-
 def _repair_set_disposition(
     ledger: Ledger, target: str, arguments: Mapping[str, Any], operation_id: str
 ) -> Mapping[str, Any]:
@@ -1585,6 +1575,14 @@ def _repair_quarantine(
 def _effect_plan(
     action: Mapping[str, Any], operation_id: str, index: int
 ) -> Mapping[str, Any]:
+    if action.get("action") == "replace_thread":
+        return {
+            "old_task_record_id": action.get("target"),
+            "new_task_record_id": exact_successor_record_id(
+                operation_id, index, str(action.get("target"))
+            ),
+            "mode": (action.get("arguments") or {}).get("mode"),
+        }
     if action.get("action") == "quarantine":
         source = Path(str(action["target"])).resolve(strict=False)
         return {

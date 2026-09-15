@@ -23,6 +23,10 @@ from fulcrum.contracts import (
     FulcrumError,
     ParsedRequest,
 )
+from fulcrum.continuity import (
+    fleet_admission_pause,
+    reconcile_archive_once,
+)
 from fulcrum.ipc import IpcServer
 from fulcrum.ledger import (
     Ledger,
@@ -332,6 +336,19 @@ class ControllerSupervisor:
             for task_row, task_actions in reconciled_tasks:
                 task_rows.append(task_row)
                 actions.extend(task_actions)
+            if recovery_fence is None:
+                archive_actions = await reconcile_archive_once(
+                    self.ledger,
+                    self.runtime,
+                    tasks,
+                    facts,
+                    now=self.clock.now(),
+                    request=self.request,
+                    archive_idle_seconds=float(
+                        _mapping(self.config["timing"])["archive_idle_seconds"]
+                    ),
+                )
+                actions.extend(archive_actions)
             for work in work_by_id.values():
                 fc = work.fc or {}
                 work_rows.append(
@@ -613,6 +630,11 @@ class ControllerSupervisor:
                 continue
             capacity = await asyncio.to_thread(capacity_snapshot, self.ledger, config)
             project = str(fc.get("project") or "")
+            replacement_pause = await asyncio.to_thread(
+                fleet_admission_pause, self.ledger, project
+            )
+            if replacement_pause is not None:
+                continue
             project_row = capacity["projects"].get(project, {})
             if not dispatch.get("human_bypass") and (
                 capacity["occupied"] >= capacity["global_limit"]
@@ -1836,10 +1858,18 @@ class ControllerSupervisor:
                     and (work is None or work.status == "closed")
                 ):
                     try:
-                        await self.runtime.release(thread_id)
+                        release = await self.runtime.release(thread_id)
                     except AppServerError:
                         continue
                     released.append(thread_id)
+                    current = await asyncio.to_thread(self.ledger.show, task.id)
+                    if current is not None and current.fc:
+                        task_fc = dict(current.fc)
+                        task_fc["subscription_state"] = "released"
+                        task_fc["subscription_release"] = release.to_dict()
+                        await asyncio.to_thread(
+                            self.ledger.update_fc, current.id, task_fc
+                        )
         return {
             "paused": paused,
             "reason": "runtime resource pressure" if paused else None,

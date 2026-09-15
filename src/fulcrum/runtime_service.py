@@ -712,8 +712,10 @@ class TaskService:
         fc = dict(record.fc or {})
         if action == "archive":
             fc["archive_state"] = "done"
+            fc["archive_operation"] = operation.id
         elif action == "unarchive":
             fc["archive_state"] = "suppressed"
+            fc["archive_suppressed_reason"] = "explicit unarchive"
         elif action == "delete":
             fc["deleted_at"] = utc_now()
         fc["last_observed"] = facts
@@ -1280,6 +1282,13 @@ def _task_view(record: LedgerRecord, facts: TaskFacts | None) -> dict[str, Any]:
         "replaced_by": fc.get("replaced_by"),
         "archive_state": fc.get("archive_state"),
         "archive_due_at": fc.get("archive_due_at"),
+        "archive_operation": fc.get("archive_operation"),
+        "subscription": {
+            "state": fc.get("subscription_state"),
+            "release": fc.get("subscription_release"),
+            "observed_loaded": facts.loaded if facts else None,
+            "observed_runtime_status": facts.runtime_status if facts else None,
+        },
         "native": facts.to_dict() if facts else fc.get("last_observed"),
         "observation_source": "live" if facts else "retained",
         "gaps": list(facts.gaps) if facts else ["live runtime observation unavailable"],

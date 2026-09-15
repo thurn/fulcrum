@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from fulcrum.analytics import AnalyticsService
 from fulcrum.completion import CompletionService
 from fulcrum.configuration import ConfigurationService, ProjectService
+from fulcrum.continuity import ContinuityService
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
@@ -93,6 +94,9 @@ class Application:
         self.register(("hook", "context"), roles.hook_context)
         leadership = LeadershipService()
         self.register(("leader", "show"), leadership.leader_show)
+        continuity = ContinuityService()
+        self.register(("leader", "replace"), continuity.leader_replace)
+        self.register(("fleet", "replace"), continuity.fleet_replace)
         self.register(("marshal", "brief"), leadership.marshal_brief)
         self.register(("marshal", "request"), leadership.marshal_request)
         self.register(("marshal", "decide"), leadership.marshal_decide)

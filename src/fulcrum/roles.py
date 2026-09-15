@@ -170,6 +170,35 @@ class RoleService:
         )
         existing = _valid_existing_entry(ledger, work, request.thread_id, role)
         if existing is not None and not controller_handoff:
+            config, project = _project_config(request, str(work.fc.get("project")))
+            model, effort, _ = _select_model(request, config, project, work.fc, role)
+            existing_task = next(
+                item
+                for item in ledger.list_records(kind="task", limit=0)
+                if item.fc
+                and item.fc.get("thread_id") == existing[0]
+                and item.fc.get("work_bead") == work.id
+                and item.fc.get("ownership_operation") == existing[1]
+            )
+            if not _entry_configuration_compatible(
+                existing_task, project, model, effort
+            ):
+                raise FulcrumError(
+                    "TASK_CONFIGURATION_CHANGED",
+                    "the current task acquisition is incompatible with current project/model configuration; use fleet replace",
+                    exit_code=5,
+                )
+            if request.thread_id is None:
+                observed = _runtime_call(
+                    request,
+                    lambda runtime: runtime.inspect_task(existing[0]),
+                )
+                if observed.archived or observed.active_turn is not None:
+                    raise FulcrumError(
+                        "TASK_NOT_REUSABLE",
+                        "the current task is not observably idle and unarchived",
+                        exit_code=5,
+                    )
             instructions = _cook_role(
                 ledger,
                 request,
@@ -821,6 +850,28 @@ def _valid_existing_entry(
         if len(tasks) == 1:
             return owner, acquisition
     return None
+
+
+def _entry_configuration_compatible(
+    task: LedgerRecord,
+    project: Mapping[str, Any],
+    model: str,
+    effort: str,
+) -> bool:
+    fc = task.fc or {}
+    if fc.get("model") != model or fc.get("effort") != effort:
+        return False
+    root_value = project.get("root")
+    if not isinstance(root_value, str):
+        return False
+    expected_root = str(Path(root_value).resolve(strict=True))
+    observed = fc.get("last_observed")
+    if not isinstance(observed, Mapping):
+        return False
+    roots = observed.get("workspace_roots")
+    return isinstance(roots, list) and expected_root in {
+        str(Path(str(item)).resolve(strict=False)) for item in roots
+    }
 
 
 def _return_prior_work(
