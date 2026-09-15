@@ -23,7 +23,11 @@ from fulcrum.runtime import (
     TaskSpec,
     TurnFacts,
 )
-from fulcrum.runtime_service import _create_and_configure, _start_or_recover
+from fulcrum.runtime_service import (
+    _create_and_configure,
+    _start_or_recover,
+    _wait_for_task,
+)
 
 
 def task_facts(
@@ -885,6 +889,30 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"id": "project-1", "exists": False, "deleted": True})
         transport.delete_project.assert_awaited_once_with("project-1")
+
+    async def test_task_wait_reconnects_after_transient_disconnect(self) -> None:
+        runtime = AsyncMock()
+        terminal = TaskFacts(
+            **{
+                **task_facts().__dict__,
+                "last_turn": {"id": "turn-1", "status": "completed"},
+            }
+        )
+        runtime.inspect_task.side_effect = [
+            AppServerError("app-server is not connected"),
+            terminal,
+        ]
+
+        result = await _wait_for_task(
+            runtime,
+            "thread-1",
+            turn_id=None,
+            until="terminal",
+            timeout=2,
+        )
+
+        self.assertEqual(result["task"]["id"], "thread-1")
+        runtime.connect.assert_awaited_once()
 
 
 if __name__ == "__main__":

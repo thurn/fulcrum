@@ -885,9 +885,18 @@ async def _wait_for_task(
     last: TaskFacts | None = None
     selected_turn: TurnFacts | None = None
     while True:
-        last = await runtime.inspect_task(thread_id)
-        if turn_id is not None:
-            selected_turn = await runtime.inspect_turn(thread_id, turn_id)
+        try:
+            last = await runtime.inspect_task(thread_id)
+            if turn_id is not None:
+                selected_turn = await runtime.inspect_turn(thread_id, turn_id)
+        except AppServerError as error:
+            if error.category not in {"unavailable", "transient"}:
+                raise
+            if asyncio.get_running_loop().time() >= deadline:
+                raise
+            await asyncio.sleep(0.25)
+            await runtime.connect()
+            continue
         if (
             until == "idle"
             and last.active_turn is None
