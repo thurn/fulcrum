@@ -829,7 +829,12 @@ class ControllerSupervisor:
         loop = self._loop
         if loop is None:
             raise RuntimeError("controller runtime loop is not established")
-        future = asyncio.run_coroutine_threadsafe(action(self.runtime), loop)
+
+        async def invoke() -> Any:
+            await self.runtime.connect()
+            return await action(self.runtime)
+
+        future = asyncio.run_coroutine_threadsafe(invoke(), loop)
         return future.result(timeout=self.request.timeout + 5)
 
     async def serve(self) -> None:

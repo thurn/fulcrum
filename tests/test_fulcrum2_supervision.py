@@ -50,9 +50,10 @@ class FakeRuntime:
         self.fd_usage = 10
         self.overloaded = False
         self.created = 0
+        self.connects = 0
 
     async def connect(self) -> None:
-        pass
+        self.connects += 1
 
     async def close(self) -> None:
         pass
@@ -403,6 +404,20 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
                 for row in actions
             )
         )
+
+    async def test_command_runtime_submission_reconnects_before_action(self) -> None:
+        supervisor = ControllerSupervisor(
+            self.request, RetryApplication(self.ledger), runtime=self.runtime  # type: ignore[arg-type]
+        )
+        supervisor._loop = asyncio.get_running_loop()
+
+        observed = await asyncio.to_thread(
+            supervisor._runtime_submit,
+            lambda runtime: runtime.inspect_task("native-vizier-leader"),
+        )
+
+        self.assertEqual(observed.id, "native-vizier-leader")
+        self.assertEqual(self.runtime.connects, 1)
 
     async def test_crash_reconciliation_and_uncertain_effect_do_not_duplicate(
         self,
