@@ -616,10 +616,13 @@ class RecoveryService:
         unresolved: list[dict[str, Any]] = []
         released: list[dict[str, Any]] = []
         chosen = _select_justiciar_thread(ledger, request, _control(ledger))
-        for task_index, task in enumerate(_tasks_in_scope(ledger, selected)):
+        tasks = list(_tasks_in_scope(ledger, selected))
+        chosen_task = _task_for_thread(ledger, chosen) if chosen else None
+        if chosen_task is not None and all(task.id != chosen_task.id for task in tasks):
+            tasks.append(chosen_task)
+        for task_index, task in enumerate(tasks):
             thread_id = str((task.fc or {}).get("thread_id") or "")
-            if thread_id == chosen:
-                continue
+            is_chosen = thread_id == chosen
             facts = _retained_observation(task)
             if request.runtime_submit is not None:
                 try:
@@ -683,7 +686,7 @@ class RecoveryService:
                         "operation_id": child.operation_id,
                     }
                 )
-            elif request.runtime_submit is not None:
+            elif request.runtime_submit is not None and not is_chosen:
                 child = self.application.dispatch(
                     _child_request(
                         request,

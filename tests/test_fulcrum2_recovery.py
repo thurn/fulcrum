@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -17,13 +18,14 @@ from fulcrum.delivery import DeliveryProviderError, SourceRef, WorkRef
 from fulcrum.ledger import Ledger, random_record_id
 from fulcrum.recovery_service import RecoveryService
 from fulcrum.instance import resolve_instance
-from fulcrum.runtime import ReleaseFacts, TaskFacts
+from fulcrum.runtime import ReleaseFacts, TaskFacts, TurnFacts
 
 
 class IdleRuntime:
     def __init__(self, facts: dict[str, TaskFacts]) -> None:
         self.facts = facts
         self.released: list[str] = []
+        self.interrupted: list[tuple[str, str]] = []
 
     async def inspect_task(self, thread_id: str) -> TaskFacts:
         return self.facts[thread_id]
@@ -35,6 +37,26 @@ class IdleRuntime:
             status="unsubscribed",
             active_terminals=(),
             observed_at="2026-09-14T18:00:00Z",
+        )
+
+    async def interrupt(self, thread_id: str, turn_id: str) -> TurnFacts:
+        self.interrupted.append((thread_id, turn_id))
+        self.facts[thread_id] = replace(
+            self.facts[thread_id],
+            runtime_status="idle",
+            active_turn=None,
+            last_turn={"id": turn_id, "status": "interrupted"},
+        )
+        return TurnFacts(
+            id=turn_id,
+            thread_id=thread_id,
+            state="interrupted",
+            operation_id=None,
+            completed=True,
+            error=None,
+            tools=(),
+            usage=None,
+            observed_at="2026-09-15T16:00:01Z",
         )
 
 
@@ -315,25 +337,13 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
         marshal_fc["effort"] = "low"
         marshal_fc["last_observed"] = {
             "id": self.marshal_thread,
-            "runtime_status": "idle",
-            "active_turn": None,
-            "last_turn": {"id": "retained-turn", "status": "completed"},
+            "runtime_status": "active",
+            "active_turn": "marshal-turn",
+            "last_turn": {"id": "marshal-turn", "status": "inProgress"},
             "workspace_roots": [str(self.brain)],
             "observed_at": "2026-09-15T16:00:00Z",
         }
         self.ledger.update_fc(marshal.id, marshal_fc)
-
-        takeover = self.application.dispatch(
-            self.request(
-                ("recover", "takeover"),
-                arguments={
-                    "scope": f"bead:{root}",
-                    "reason": "Exercise the retained leadership acquisition",
-                },
-            )
-        )
-        self.assertEqual(takeover.state, CommandState.COMPLETED)
-        operation = str(takeover.operation_id)
 
         facts = TaskFacts(
             id=self.marshal_thread,
@@ -344,9 +354,9 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
             archived=False,
             exists=True,
             loaded=True,
-            runtime_status="idle",
-            active_turn=None,
-            last_turn={"id": "retained-turn", "status": "completed"},
+            runtime_status="active",
+            active_turn="marshal-turn",
+            last_turn={"id": "marshal-turn", "status": "inProgress"},
             pending_requests=(),
             observed_at="2026-09-15T16:00:00Z",
         )
@@ -354,6 +364,20 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
 
         def submit(action: Any, _timeout: float) -> Any:
             return asyncio.run(action(runtime))
+
+        takeover = self.application.dispatch(
+            self.request(
+                ("recover", "takeover"),
+                arguments={
+                    "scope": f"bead:{root}",
+                    "reason": "Exercise the retained leadership acquisition",
+                },
+                runtime_submit=submit,
+            )
+        )
+        self.assertEqual(takeover.state, CommandState.COMPLETED)
+        operation = str(takeover.operation_id)
+        self.assertEqual(runtime.interrupted, [(self.marshal_thread, "marshal-turn")])
 
         entered = self.application.dispatch(
             self.request(
@@ -584,6 +608,21 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
                 pending_requests=(),
                 observed_at="2026-09-14T18:00:00Z",
             )
+        facts[self.marshal_thread] = TaskFacts(
+            id=self.marshal_thread,
+            title="marshal fixture",
+            cwd=str(self.brain),
+            project_id=None,
+            workspace_roots=(str(self.brain),),
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="idle",
+            active_turn=None,
+            last_turn={"id": "marshal-turn", "status": "completed"},
+            pending_requests=(),
+            observed_at="2026-09-14T18:00:00Z",
+        )
         runtime = IdleRuntime(facts)
 
         def submit(action: Any, _timeout: float) -> Any:
