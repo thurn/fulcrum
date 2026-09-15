@@ -7,6 +7,7 @@ import re
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -435,14 +436,20 @@ class AdmissionService:
     """Short reservation section followed by idempotent role entry."""
 
     def __init__(self) -> None:
-        self._reservation_lock = threading.RLock()
+        self._capacity_lock = threading.RLock()
+        self._bead_locks_guard = threading.Lock()
+        self._bead_locks: dict[str, threading.RLock] = {}
+
+    def _bead_lock(self, bead_id: str) -> threading.RLock:
+        with self._bead_locks_guard:
+            return self._bead_locks.setdefault(bead_id, threading.RLock())
 
     def dispatch(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["bead"])
         authorize = bool(request.arguments.get("authorize", False))
         human_bypass = bool(request.arguments.get("human", False))
-        with self._reservation_lock:
+        with self._bead_lock(bead_id):
             record = _work(ledger, bead_id)
             fc = dict(record.fc or {})
             if authorize or human_bypass:
@@ -613,62 +620,67 @@ class AdmissionService:
                     next_action=fc["next_action"],
                 )
                 return _operation_result(operation)
-            capacity = capacity_snapshot(ledger, _config(request))
+            config = _config(request)
             project = str(fc.get("project") or "")
-            project_row = capacity["projects"].get(project, {})
-            at_limit = (
-                capacity["occupied"] >= capacity["global_limit"]
-                or int(project_row.get("occupied", 0))
-                >= int(project_row.get("limit", capacity["default_project_limit"]))
-                or project in capacity["paused_projects"]
-            )
-            bypass = bool(dispatch.get("human_bypass"))
-            if at_limit and not bypass:
-                _set_waiting(
-                    fc,
-                    reason_id=f"capacity:{dispatch.get('decision_operation')}",
-                    reason="authorized start is queued at configured capacity",
-                    triggers=[
-                        {"event": "capacity_available", "subject": project or None}
-                    ],
-                    decision_operation=str(dispatch.get("decision_operation")),
+            paused = project in config["policy"].get("paused_projects", [])
+            reservation_lock = nullcontext() if paused else self._capacity_lock
+            with reservation_lock:
+                capacity = capacity_snapshot(ledger, config)
+                project_row = capacity["projects"].get(project, {})
+                at_limit = (
+                    capacity["occupied"] >= capacity["global_limit"]
+                    or int(project_row.get("occupied", 0))
+                    >= int(project_row.get("limit", capacity["default_project_limit"]))
+                    or project in capacity["paused_projects"]
                 )
-                fc["next_action"] = (
-                    "Start mechanically when configured capacity becomes available."
-                )
-                ledger.update_fc(record.id, fc)
-                operation = ledger.update_operation(
-                    operation,
-                    state="completed",
-                    step="authorized_start_queued",
-                    result={
-                        "bead_id": bead_id,
-                        "started": False,
-                        "queued": True,
-                        "capacity": capacity,
-                    },
-                    next_action=fc["next_action"],
-                )
-                return _operation_result(operation)
-            reservation = dispatch.get("reservation")
-            if (
-                not isinstance(reservation, Mapping)
-                or reservation.get("operation_id") != operation.id
-            ):
-                dispatch = dict(dispatch)
-                dispatch["reservation"] = {
-                    "operation_id": operation.id,
-                    "state": "in_flight",
-                    "reserved_at": utc_now(),
-                    "human_bypass": bypass,
-                }
-                fc["dispatch"] = dispatch
-                fc["waiting"] = _remove_waiting_events(
-                    fc.get("waiting"), {"capacity_available", "dependency_closed"}
-                )
-                fc["active_operation"] = operation.id
-                fc["last_transition"] = operation.id
-                ledger.update_fc(record.id, fc)
+                bypass = bool(dispatch.get("human_bypass"))
+                if at_limit and not bypass:
+                    _set_waiting(
+                        fc,
+                        reason_id=f"capacity:{dispatch.get('decision_operation')}",
+                        reason="authorized start is queued at configured capacity",
+                        triggers=[
+                            {"event": "capacity_available", "subject": project or None}
+                        ],
+                        decision_operation=str(dispatch.get("decision_operation")),
+                    )
+                    fc["next_action"] = (
+                        "Start mechanically when configured capacity becomes available."
+                    )
+                    ledger.update_fc(record.id, fc)
+                    operation = ledger.update_operation(
+                        operation,
+                        state="completed",
+                        step="authorized_start_queued",
+                        result={
+                            "bead_id": bead_id,
+                            "started": False,
+                            "queued": True,
+                            "capacity": capacity,
+                        },
+                        next_action=fc["next_action"],
+                    )
+                    return _operation_result(operation)
+                reservation = dispatch.get("reservation")
+                if (
+                    not isinstance(reservation, Mapping)
+                    or reservation.get("operation_id") != operation.id
+                ):
+                    dispatch = dict(dispatch)
+                    dispatch["reservation"] = {
+                        "operation_id": operation.id,
+                        "state": "in_flight",
+                        "reserved_at": utc_now(),
+                        "human_bypass": bypass,
+                    }
+                    fc["dispatch"] = dispatch
+                    fc["waiting"] = _remove_waiting_events(
+                        fc.get("waiting"),
+                        {"capacity_available", "dependency_closed"},
+                    )
+                    fc["active_operation"] = operation.id
+                    fc["last_transition"] = operation.id
+                    ledger.update_fc(record.id, fc)
 
         role = str(dispatch.get("role") or fc.get("requested_role") or "weaver")
         entry_request = ParsedRequest(
@@ -693,7 +705,7 @@ class AdmissionService:
             runtime_submit=request.runtime_submit,
         )
         result = RoleService().enter(entry_request)
-        with self._reservation_lock:
+        with self._bead_lock(bead_id):
             entry_record = (
                 ledger.show(str(result.operation_id)) if result.operation_id else None
             )

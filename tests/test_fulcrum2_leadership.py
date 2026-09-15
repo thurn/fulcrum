@@ -1141,6 +1141,60 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
         assert bypassed is not None and bypassed.fc
         self.assertTrue(bypassed.fc["dispatch"]["human_bypass"])
 
+    def test_distinct_paused_authorizations_do_not_share_a_bead_lock(self) -> None:
+        manager = ConfigurationManager(self.config)
+        document, expected = manager.load()
+        policy = manager.effective(document)["policy"]
+        policy["paused_projects"] = ["toy"]
+        document["policy"] = policy
+        manager.replace(document, expected)
+        for index in range(2):
+            self.create_work(
+                f"fc-paused-authorization-{index}",
+                intake={"benefit": "Known", "uncertainties": []},
+            )
+        service = AdmissionService()
+        entered = 0
+        entered_lock = threading.Lock()
+        overlapped = threading.Event()
+        release = threading.Event()
+
+        def blocked_authorizer(
+            _request: ParsedRequest, _ledger: Ledger, *, human_bypass: bool
+        ) -> None:
+            nonlocal entered
+            self.assertFalse(human_bypass)
+            with entered_lock:
+                entered += 1
+                if entered == 2:
+                    overlapped.set()
+            self.assertTrue(release.wait(120))
+
+        def authorize(index: int) -> CommandResult:
+            return service.dispatch(
+                self.request(
+                    ("dispatch",),
+                    arguments={
+                        "bead": f"fc-paused-authorization-{index}",
+                        "authorize": True,
+                    },
+                )
+            )
+
+        with patch("fulcrum.leadership._require_authorizer", new=blocked_authorizer):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(authorize, index) for index in range(2)]
+                self.assertTrue(overlapped.wait(120))
+                release.set()
+                results = [future.result(timeout=120) for future in futures]
+
+        self.assertEqual(entered, 2)
+        for result in results:
+            operation = self.ledger.show(str(result.operation_id))
+            assert operation is not None and operation.fc
+            self.assertFalse(operation.fc["result"]["started"])
+            self.assertTrue(operation.fc["result"]["queued"])
+
     def test_unknown_activity_counts_human_bypass_is_distinct_and_idle_leader_does_not(
         self,
     ) -> None:

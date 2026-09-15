@@ -578,7 +578,6 @@ class ConcurrencySmoke:
                 "--bead",
                 self.work[participant],
                 "--authorize",
-                offline=True,
                 request_id=str(
                     uuid.uuid5(
                         uuid.UUID("0b7ae019-74d8-4a67-b7df-6d3acfe6fd93"),
