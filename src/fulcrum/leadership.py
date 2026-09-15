@@ -858,10 +858,6 @@ async def ensure_leadership(
                     connection_error = error
                 observed = None
             if observed is not None and observed.exists:
-                retained = known_tasks[recorded_thread]
-                retained_fc = dict(retained.fc or {})
-                retained_fc["last_observed"] = observed.to_dict()
-                ledger.update_fc(retained.id, retained_fc, assignee=recorded_thread)
                 actions.append(
                     {"role": role, "thread_id": recorded_thread, "created": False}
                 )
