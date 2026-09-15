@@ -69,6 +69,7 @@ from fulcrum.source_refresh import (
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
 RETRY_DELAYS = (2.0, 10.0)
+EXTERNAL_RUNNER_LIMIT = 10
 MAX_SENDS = 3
 REMINDER_NAMESPACE = uuid.UUID("8842f0c3-557a-44d9-8e4a-c8c96f3955d1")
 DELIVERY_NAMESPACE = uuid.UUID("d531e65f-328e-4a90-a1f0-eb56bd09eedb")
@@ -234,7 +235,7 @@ class ControllerSupervisor:
         )
         self.publication = LedgerPublicationService(now=self.clock.now)
         self.analytics = AnalyticsService()
-        self.external_slots = asyncio.Semaphore(4)
+        self.external_slots = asyncio.Semaphore(EXTERNAL_RUNNER_LIMIT)
         self.bead_locks: dict[str, asyncio.Lock] = {}
         self.reconcile_lock = asyncio.Lock()
         self._ipc_lock = threading.Lock()
@@ -273,7 +274,7 @@ class ControllerSupervisor:
             # invocations.  Coordination primitives bind lazily to the first loop
             # that contends on them, so rebuild only those process-local primitives
             # at that boundary.  Durable ordering still comes from ledger receipts.
-            self.external_slots = asyncio.Semaphore(4)
+            self.external_slots = asyncio.Semaphore(EXTERNAL_RUNNER_LIMIT)
             self.bead_locks = {}
             self.reconcile_lock = asyncio.Lock()
         self._loop = current_loop
