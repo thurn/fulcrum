@@ -831,6 +831,24 @@ def run(driver: Driver) -> None:
         vizier_closed.get("status") == "closed", "Vizier request closes", vizier_closed
     )
 
+    driver.fc(
+        "policy",
+        "set",
+        payload={
+            "automatic_capacity": 4,
+            "default_project_capacity": 4,
+            "project_capacity": {"fixture": 4},
+            "paused_projects": ["fixture"],
+            "rationale": "Pause automatic fixture starts during explicit Weaver validation.",
+        },
+    )
+    paused = driver.fc("policy", "show").get("result", {}).get("policy", {})
+    driver.check(
+        "fixture" in paused.get("paused_projects", []),
+        "automatic fixture starts pause for explicit Weaver entry",
+        paused,
+    )
+
     plan_root = driver.work_create(
         "Plan ordered aggregation",
         (
@@ -861,6 +879,23 @@ def run(driver: Driver) -> None:
     library = str(children["library"])
     edge_tests = str(children["edge-tests"])
     driver.ids["main_plan"] = {"root": plan_root, "children": children}
+    driver.fc(
+        "policy",
+        "set",
+        payload={
+            "automatic_capacity": 4,
+            "default_project_capacity": 4,
+            "project_capacity": {"fixture": 4},
+            "paused_projects": [],
+            "rationale": "Resume automatic fixture starts after explicit Weaver validation.",
+        },
+    )
+    resumed = driver.fc("policy", "show").get("result", {}).get("policy", {})
+    driver.check(
+        "fixture" not in resumed.get("paused_projects", []),
+        "automatic fixture starts resume after explicit Weaver entry",
+        resumed,
+    )
 
     uncertain = driver.work_create(
         "Clarify aggregation uniqueness",
