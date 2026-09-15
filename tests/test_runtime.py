@@ -18,6 +18,44 @@ from fulcrum.runtime import (
 
 
 class RuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_mutations_resume_an_exact_retained_unloaded_thread(self) -> None:
+        runtime = CodexRuntime("ws://unused")
+        missing = AppServerError(
+            "app-server error: {'code': -32600, 'message': 'thread not found: thread-1'}",
+            category="rejected",
+        )
+        runtime.request = AsyncMock(
+            side_effect=[
+                missing,
+                {"thread": {"id": "thread-1"}},
+                {},
+                missing,
+                {"thread": {"id": "thread-1"}},
+                {},
+            ]
+        )
+
+        await runtime.set_name("thread-1", "Retained leader")
+        await runtime.configure_thread(
+            "thread-1",
+            cwd="/work",
+            workspace_root="/workspace",
+            model="luna",
+            effort="low",
+        )
+
+        self.assertEqual(
+            [item.args[0] for item in runtime.request.await_args_list],
+            [
+                "thread/name/set",
+                "thread/resume",
+                "thread/name/set",
+                "thread/settings/update",
+                "thread/resume",
+                "thread/settings/update",
+            ],
+        )
+
     async def test_archive_unsubscribes_thread_resources(self) -> None:
         runtime = CodexRuntime("ws://unused")
         runtime.request = AsyncMock(side_effect=[{}, {"status": "unsubscribed"}])

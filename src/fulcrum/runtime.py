@@ -815,7 +815,13 @@ class CodexRuntime:
             cursor = next_cursor
 
     async def set_name(self, thread_id: str, name: str) -> None:
-        await self.request("thread/name/set", {"threadId": thread_id, "name": name})
+        try:
+            await self.request("thread/name/set", {"threadId": thread_id, "name": name})
+        except AppServerError as error:
+            if not _unloaded_thread_error(error):
+                raise
+            await self.resume_thread(thread_id)
+            await self.request("thread/name/set", {"threadId": thread_id, "name": name})
 
     async def read_thread(
         self, thread_id: str, *, include_turns: bool = True
@@ -853,24 +859,28 @@ class CodexRuntime:
         effort: str,
         developer_instructions: str | None = None,
     ) -> None:
-        await self.request(
-            "thread/settings/update",
-            {
-                "threadId": thread_id,
-                "cwd": cwd,
-                "model": model,
-                "effort": effort,
-                "summary": "concise",
-                "collaborationMode": {
-                    "mode": "default",
-                    "settings": {
-                        "model": model,
-                        "reasoning_effort": effort,
-                        "developer_instructions": developer_instructions,
-                    },
+        params = {
+            "threadId": thread_id,
+            "cwd": cwd,
+            "model": model,
+            "effort": effort,
+            "summary": "concise",
+            "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                    "model": model,
+                    "reasoning_effort": effort,
+                    "developer_instructions": developer_instructions,
                 },
             },
-        )
+        }
+        try:
+            await self.request("thread/settings/update", params)
+        except AppServerError as error:
+            if not _unloaded_thread_error(error):
+                raise
+            await self.resume_thread(thread_id)
+            await self.request("thread/settings/update", params)
 
     async def start_turn(
         self,
@@ -1714,6 +1724,10 @@ def _empty_history_error(error: AppServerError) -> bool:
     return ("rollout at" in message and "is empty" in message) or (
         "list_turns is not supported yet" in message
     )
+
+
+def _unloaded_thread_error(error: AppServerError) -> bool:
+    return error.category == "rejected" and "thread not found:" in str(error).lower()
 
 
 def _contains_marker(value: Any, marker: str) -> bool:
