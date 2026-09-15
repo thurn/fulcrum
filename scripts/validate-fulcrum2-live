@@ -520,6 +520,25 @@ class Driver:
         finally:
             self.service_started = False
 
+    def capture_failure_diagnostics(self) -> None:
+        if self.report.get("state") != "failed" or self.instance is None:
+            return
+        logs = Path(self.instance) / "logs"
+        retained: dict[str, Any] = {}
+        for name in ("controller.log", "controller-error.log"):
+            path = logs / name
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as error:
+                retained[name] = {"error": str(error)}
+                continue
+            retained[name] = {
+                "path": str(path),
+                "truncated": len(content) > 65536,
+                "tail": content[-65536:],
+            }
+        self.report["failure_diagnostics"] = {"service_logs": retained}
+
 
 def draft_payload(*, future: bool = False) -> dict[str, Any]:
     if future:
@@ -1396,6 +1415,8 @@ def main() -> int:
         driver.report["state"] = "failed"
         driver.report["error"] = {"type": type(error).__name__, "message": str(error)}
     finally:
+        driver.save()
+        driver.capture_failure_diagnostics()
         driver.save()
         driver.cleanup_fixture()
         if not driver.cleanup or driver.cleanup.get("root_removed") is not True:
