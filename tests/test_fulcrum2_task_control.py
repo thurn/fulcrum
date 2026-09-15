@@ -342,10 +342,10 @@ class Fulcrum2TaskControlReviewTest(unittest.TestCase):
         async def run() -> Any:
             loop = asyncio.get_running_loop()
 
-            def submit(action: Any) -> Any:
+            def submit(action: Any, timeout: float) -> Any:
                 return asyncio.run_coroutine_threadsafe(
                     action(self.runtime), loop
-                ).result(timeout=15)
+                ).result(timeout=timeout)
 
             return await asyncio.to_thread(
                 handler, replace(request, runtime_submit=submit)

@@ -515,7 +515,7 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
             )
         runtime = IdleRuntime(facts)
 
-        def submit(action: Any) -> Any:
+        def submit(action: Any, _timeout: float) -> Any:
             return asyncio.run(action(runtime))
 
         scope = "beads:" + ",".join(roots)

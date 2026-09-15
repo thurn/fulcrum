@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -25,6 +26,7 @@ from fulcrum.runtime import (
 )
 from fulcrum.runtime_service import (
     _create_and_configure,
+    _runtime_call,
     _start_or_recover,
     _wait_for_task,
 )
@@ -913,6 +915,22 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["task"]["id"], "thread-1")
         runtime.connect.assert_awaited_once()
+
+    def test_command_timeout_is_forwarded_to_shared_runtime_bridge(self) -> None:
+        observed: list[float] = []
+
+        def submit(_action: Any, timeout: float) -> str:
+            observed.append(timeout)
+            return "completed"
+
+        request = cast(
+            Any,
+            SimpleNamespace(runtime_submit=submit, timeout=300.0),
+        )
+        result = _runtime_call(request, lambda _runtime: AsyncMock())
+
+        self.assertEqual(result, "completed")
+        self.assertEqual(observed, [305.0])
 
 
 if __name__ == "__main__":

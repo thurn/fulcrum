@@ -414,6 +414,7 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         observed = await asyncio.to_thread(
             supervisor._runtime_submit,
             lambda runtime: runtime.inspect_task("native-vizier-leader"),
+            15,
         )
 
         self.assertEqual(observed.id, "native-vizier-leader")

@@ -1251,7 +1251,7 @@ def _runtime_call(
 
     try:
         if request.runtime_submit is not None:
-            return cast(T, request.runtime_submit(action))
+            return cast(T, request.runtime_submit(action, request.timeout + 5))
         try:
             asyncio.get_running_loop()
         except RuntimeError:

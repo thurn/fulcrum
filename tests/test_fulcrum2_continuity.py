@@ -302,7 +302,7 @@ class Fulcrum2ContinuityTest(unittest.IsolatedAsyncioTestCase):
         )
         self.temporary.cleanup()
 
-    def runtime_submit(self, action: Any) -> Any:
+    def runtime_submit(self, action: Any, _timeout: float) -> Any:
         return asyncio.run(action(self.runtime))
 
     def request(

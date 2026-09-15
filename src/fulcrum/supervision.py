@@ -823,6 +823,7 @@ class ControllerSupervisor:
     def _runtime_submit(
         self,
         action: Callable[[Runtime], Awaitable[Any]],
+        timeout: float,
     ) -> Any:
         """Run command-layer runtime work on the controller's shared loop."""
 
@@ -835,7 +836,7 @@ class ControllerSupervisor:
             return await action(self.runtime)
 
         future = asyncio.run_coroutine_threadsafe(invoke(), loop)
-        return future.result(timeout=self.request.timeout + 5)
+        return future.result(timeout=timeout)
 
     async def serve(self) -> None:
         self._loop = asyncio.get_running_loop()
