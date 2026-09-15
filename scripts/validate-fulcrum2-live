@@ -257,8 +257,36 @@ class Driver:
             timeout=30,
         )
         if completed.returncode != 0:
-            raise Failure(completed.stderr.strip() or completed.stdout.strip())
+            detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
+            raise Failure(
+                f"git {' '.join(arguments)} returned {completed.returncode}: {detail}"
+            )
         return completed.stdout.strip()
+
+    @staticmethod
+    def git_is_ancestor(root: Path | str, ancestor: str, descendant: str) -> bool:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode not in {0, 1}:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "no output"
+            raise Failure(
+                "git merge-base --is-ancestor returned "
+                f"{completed.returncode}: {detail}"
+            )
+        return completed.returncode == 0
 
     def create_fixture(self) -> None:
         request_id = str(uuid.uuid4())
@@ -1001,23 +1029,30 @@ def run(driver: Driver) -> None:
     remote_head = driver.git(
         driver.fixture["source_remote"], "rev-parse", "refs/heads/main"
     )
-    delivered_oid = edge_closed.get("fc", {}).get("disposition", {}).get("source_oid")
+    delivery = edge_closed.get("delivery", {})
+    delivered_oid = delivery.get("promotion", {}).get("integration_oid")
     if not delivered_oid:
-        delivered_oid = edge_closed.get("delivery", {}).get("promoted_source")
+        delivered_oid = delivery.get("synchronization", {}).get("integration_oid")
     driver.check(
         bool(remote_head), "source remote has delivered main head", remote_head
     )
     driver.check(
-        driver.git(
-            driver.fixture["project_root"],
-            "merge-base",
-            "--is-ancestor",
-            remote_head,
-            "main",
-        )
-        == "",
-        "fixture integration contains remote delivered ancestry",
-        {"remote_head": remote_head},
+        isinstance(delivered_oid, str)
+        and driver.git_is_ancestor(
+            driver.fixture["source_remote"],
+            delivered_oid,
+            "refs/heads/main",
+        ),
+        "configured source remote contains promoted integration ancestry",
+        {"remote_head": remote_head, "promoted_integration_oid": delivered_oid},
+    )
+    remote_ordering = driver.git(
+        driver.fixture["source_remote"], "show", f"{remote_head}:ordering.py"
+    )
+    driver.check(
+        "def aggregate_ordered" in remote_ordering,
+        "fixture integration content is present in the source remote",
+        {"remote_head": remote_head, "ordering.py": remote_ordering},
     )
     driver.ids["delivery"] = {
         "library": library_closed,
