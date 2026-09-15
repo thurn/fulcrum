@@ -183,7 +183,9 @@ class RoleService:
         existing = _valid_existing_entry(ledger, work, request.thread_id, role)
         if existing is not None and not controller_handoff:
             config, project = _project_config(request, str(work.fc.get("project")))
-            model, effort, _ = _select_model(request, config, project, work.fc, role)
+            model, effort, model_origin = _select_model(
+                request, config, project, work.fc, role
+            )
             existing_task = next(
                 item
                 for item in ledger.list_records(kind="task", limit=0)
@@ -200,6 +202,14 @@ class RoleService:
                     "the current task acquisition is incompatible with current project/model configuration; use fleet replace",
                     exit_code=5,
                 )
+            recovery_entry = (
+                role == "justiciar"
+                and request.thread_id is None
+                and bool((existing_task.fc or {}).get("awaiting_role_entry"))
+                and (existing_task.fc or {}).get("purpose") == "recovery"
+                and (existing_task.fc or {}).get("recovery_operation") == existing[1]
+            )
+            observed: TaskFacts | None = None
             if request.thread_id is None:
                 observed = _runtime_call(
                     request,
@@ -211,6 +221,22 @@ class RoleService:
                         "the current task is not observably idle and unarchived",
                         exit_code=5,
                     )
+            if recovery_entry:
+                assert observed is not None
+                return self._start_recovery_entry(
+                    ledger=ledger,
+                    request=request,
+                    work=work,
+                    task=existing_task,
+                    native=observed,
+                    description=description,
+                    project=project,
+                    model=model,
+                    effort=effort,
+                    model_origin=model_origin,
+                    thread_id=existing[0],
+                    ownership_operation=existing[1],
+                )
             instructions = _cook_role(
                 ledger,
                 request,
@@ -573,6 +599,169 @@ class RoleService:
                 "turn": turn.to_dict() if turn else None,
             },
             next_action="Carry out the complete cooked role responsibility.",
+        )
+        return _operation_result(operation)
+
+    def _start_recovery_entry(
+        self,
+        *,
+        ledger: Ledger,
+        request: ParsedRequest,
+        work: LedgerRecord,
+        task: LedgerRecord,
+        native: TaskFacts,
+        description: str,
+        project: Mapping[str, Any],
+        model: str,
+        effort: str,
+        model_origin: str,
+        thread_id: str,
+        ownership_operation: str,
+    ) -> CommandResult:
+        """Start the explicit Justiciar turn on a recovery-rebound leader task."""
+
+        assert request.request_id is not None
+        receipt_id = operation_id(request.request_id)
+        creation_cwd = str(
+            (task.fc or {}).get("creation_cwd")
+            or request.instance.instance_root / "leaders" / "marshal"
+        )
+        root = str(Path(str(project["root"])).resolve(strict=True))
+        spec = TaskSpec(
+            creation_cwd=creation_cwd,
+            cwd=root,
+            project_id=(
+                str(project["codex_project_id"])
+                if project.get("codex_project_id")
+                else None
+            ),
+            workspace_roots=(root,),
+            title=role_title("justiciar", work.id, work.title),
+            model=model,
+            effort=effort,
+            developer_instructions=routing_developer_instructions(request),
+        )
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "bead_id": work.id,
+                "role": "justiciar",
+                "description": description,
+                "task_record_id": task.id,
+                "thread_id": thread_id,
+                "creation_cwd": creation_cwd,
+                "model": model,
+                "effort": effort,
+                "model_origin": model_origin,
+                "ownership_operation": ownership_operation,
+                "turn_input": None,
+            },
+            next_action="Cook and start the explicit scoped Justiciar turn.",
+        )
+        if reused and operation.operation.get("state") in {
+            "completed",
+            "failed",
+            "uncertain",
+            "cancelled",
+        }:
+            return _operation_result(operation)
+        try:
+            native = _runtime_call(
+                request,
+                lambda runtime: _name_current_task(runtime, thread_id, spec.title),
+            )
+            cooked = _cook_role(
+                ledger,
+                request,
+                work,
+                "justiciar",
+                thread_id,
+                ownership_operation,
+                start_operation=receipt_id,
+            )
+        except (LedgerFailure, FulcrumError) as error:
+            if isinstance(error, FulcrumError) and error.code not in DEGRADABLE_CODES:
+                raise
+            return _entry_degraded(
+                ledger, operation, request, "justiciar", work.id, thread_id, error
+            )
+        instructions = cooked["instructions"]
+        operation = ledger.update_operation(
+            operation,
+            step="role_input_retained",
+            planned={
+                **dict(operation.operation.get("planned") or {}),
+                "turn_input": instructions,
+            },
+            next_action="Persist scoped role context before starting the native turn.",
+        )
+        updated_work = _bind_work(
+            ledger,
+            work,
+            role="justiciar",
+            thread_id=thread_id,
+            ownership_operation=ownership_operation,
+            compiled_description=cooked["description"],
+        )
+        task_fc = dict(task.fc or {})
+        task_fc.update(
+            {
+                "role": "justiciar",
+                "work_bead": updated_work.id,
+                "ownership_operation": ownership_operation,
+                "model": model,
+                "effort": effort,
+                "model_origin": model_origin,
+                "last_observed": native.to_dict(),
+                "role_entry_operation": receipt_id,
+                "last_transition": receipt_id,
+            }
+        )
+        ledger.update_fc(task.id, task_fc, title=f"Managed task: {spec.title}")
+        try:
+            turn = _runtime_call(
+                request,
+                lambda runtime: _start_or_recover(
+                    runtime,
+                    thread_id,
+                    spec,
+                    receipt_id,
+                    instructions,
+                    ownership_operation=ownership_operation,
+                ),
+            )
+        except FulcrumError as error:
+            if error.code not in DEGRADABLE_CODES:
+                raise
+            return _entry_degraded(
+                ledger, operation, request, "justiciar", work.id, thread_id, error
+            )
+        current_task = ledger.show(task.id)
+        assert current_task is not None and current_task.fc
+        task_fc = dict(current_task.fc)
+        task_fc["last_turn"] = turn.to_dict()
+        task_fc["last_transition"] = receipt_id
+        task_fc["awaiting_role_entry"] = False
+        ledger.update_fc(task.id, task_fc)
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="role_turn_started",
+            result={
+                "bead_id": work.id,
+                "thread_id": thread_id,
+                "task_record_id": task.id,
+                "role": "justiciar",
+                "ownership_operation": ownership_operation,
+                "instructions": instructions,
+                "model": model,
+                "effort": effort,
+                "model_origin": model_origin,
+                "turn": turn.to_dict(),
+                "reused": True,
+            },
+            next_action="Carry out the scoped Justiciar responsibility.",
         )
         return _operation_result(operation)
 

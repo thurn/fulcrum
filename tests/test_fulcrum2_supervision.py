@@ -574,6 +574,21 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
             active_turn=None,
             last_turn={"id": "finished-turn", "status": "completed"},
         )
+        task = self.ledger.show("fc-supervised-task")
+        assert task is not None and task.fc
+        awaiting_fc = dict(task.fc)
+        awaiting_fc["awaiting_role_entry"] = True
+        self.ledger.update_fc(task.id, awaiting_fc)
+        awaiting = await supervisor.run_once(bead_id=work_id)
+        self.assertNotIn(
+            "finish_reminder", [item["kind"] for item in awaiting.next_actions]
+        )
+        self.assertEqual(self.runtime.sent, [])
+        task = self.ledger.show("fc-supervised-task")
+        assert task is not None and task.fc
+        awaiting_fc = dict(task.fc)
+        awaiting_fc["awaiting_role_entry"] = False
+        self.ledger.update_fc(task.id, awaiting_fc)
         first = await supervisor.run_once(bead_id=work_id)
         reminders = [
             item[2] for item in self.runtime.sent if "ended without" in item[2]

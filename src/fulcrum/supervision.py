@@ -1480,6 +1480,7 @@ class ControllerSupervisor:
             and work.status != "closed"
             and work.fc
             and work.fc.get("owner") == facts.id
+            and not fc.get("awaiting_role_entry")
         ):
             if (
                 terminal

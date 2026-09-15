@@ -1152,6 +1152,8 @@ async def _start_or_recover(
     spec: TaskSpec,
     operation: str,
     instructions: str,
+    *,
+    ownership_operation: str | None = None,
 ) -> TurnFacts:
     found = await runtime.find_turn(thread_id, operation)
     if found is not None:
@@ -1166,7 +1168,7 @@ async def _start_or_recover(
                 model=spec.model,
                 effort=spec.effort,
                 operation_id=operation,
-                ownership_operation=operation,
+                ownership_operation=ownership_operation or operation,
                 developer_instructions=spec.developer_instructions,
             ),
         )

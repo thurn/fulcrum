@@ -23,9 +23,14 @@ from fulcrum.runtime import ReleaseFacts, TaskFacts, TurnFacts
 
 class IdleRuntime:
     def __init__(self, facts: dict[str, TaskFacts]) -> None:
+        self.transport = self
         self.facts = facts
         self.released: list[str] = []
         self.interrupted: list[tuple[str, str]] = []
+        self.started: list[tuple[str, Any]] = []
+
+    async def set_name(self, thread_id: str, name: str) -> None:
+        self.facts[thread_id] = replace(self.facts[thread_id], title=name)
 
     async def inspect_task(self, thread_id: str) -> TaskFacts:
         return self.facts[thread_id]
@@ -58,6 +63,49 @@ class IdleRuntime:
             usage=None,
             observed_at="2026-09-15T16:00:01Z",
         )
+
+    async def find_turn(
+        self, thread_id: str, operation_id: str
+    ) -> TurnFacts | None:
+        return next(
+            (
+                TurnFacts(
+                    id=f"recovery-turn-{index}",
+                    thread_id=thread,
+                    state="inProgress",
+                    operation_id=turn.operation_id,
+                    completed=False,
+                    error=None,
+                    tools=(),
+                    usage=None,
+                    observed_at="2026-09-15T16:00:02Z",
+                )
+                for index, (thread, turn) in enumerate(self.started, start=1)
+                if thread == thread_id and turn.operation_id == operation_id
+            ),
+            None,
+        )
+
+    async def start_turn(self, thread_id: str, turn: Any) -> TurnFacts:
+        self.started.append((thread_id, turn))
+        facts = TurnFacts(
+            id=f"recovery-turn-{len(self.started)}",
+            thread_id=thread_id,
+            state="inProgress",
+            operation_id=turn.operation_id,
+            completed=False,
+            error=None,
+            tools=(),
+            usage=None,
+            observed_at="2026-09-15T16:00:02Z",
+        )
+        self.facts[thread_id] = replace(
+            self.facts[thread_id],
+            runtime_status="active",
+            active_turn=facts.id,
+            last_turn=facts.to_dict(),
+        )
+        return facts
 
 
 class UncertainDelivery:
@@ -166,6 +214,8 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
         marshal_fc["role"] = "marshal"
         marshal_fc["purpose"] = "leadership"
         marshal_fc["recovery_operation"] = None
+        marshal_fc.pop("awaiting_role_entry", None)
+        marshal_fc.pop("role_entry_operation", None)
         self.ledger.update_fc(marshal.id, marshal_fc)
 
     @classmethod
@@ -378,6 +428,9 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
         self.assertEqual(takeover.state, CommandState.COMPLETED)
         operation = str(takeover.operation_id)
         self.assertEqual(runtime.interrupted, [(self.marshal_thread, "marshal-turn")])
+        rebound = self.ledger.show(self.marshal_task)
+        assert rebound is not None and rebound.fc
+        self.assertTrue(rebound.fc["awaiting_role_entry"])
 
         entered = self.application.dispatch(
             self.request(
@@ -395,9 +448,19 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
             )
         )
         self.assertEqual(entered.state, CommandState.COMPLETED)
-        self.assertTrue(entered.result["reused"])
-        self.assertEqual(entered.result["thread_id"], self.marshal_thread)
-        self.assertEqual(entered.result["ownership_operation"], operation)
+        result = entered.result["result"]
+        self.assertTrue(result["reused"])
+        self.assertEqual(result["thread_id"], self.marshal_thread)
+        self.assertEqual(result["ownership_operation"], operation)
+        self.assertNotEqual(entered.operation_id, operation)
+        self.assertEqual(result["turn"]["id"], "recovery-turn-1")
+        self.assertEqual(len(runtime.started), 1)
+        self.assertEqual(runtime.started[0][1].operation_id, entered.operation_id)
+        self.assertEqual(runtime.started[0][1].ownership_operation, operation)
+        self.assertIn("Fulcrum Justiciar", runtime.started[0][1].text)
+        rebound = self.ledger.show(self.marshal_task)
+        assert rebound is not None and rebound.fc
+        self.assertFalse(rebound.fc["awaiting_role_entry"])
 
     def test_typed_repairs_reject_before_effect_retain_failure_and_close_reduced_scope(
         self,

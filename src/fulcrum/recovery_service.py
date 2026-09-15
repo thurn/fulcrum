@@ -259,6 +259,7 @@ class RecoveryService:
                 task_fc["role"] = "justiciar"
                 task_fc["purpose"] = "recovery"
                 task_fc["recovery_operation"] = operation.id
+                task_fc["awaiting_role_entry"] = True
                 task_fc["associated_beads"] = list(selected["bead_ids"])
                 task_fc["work_bead"] = (
                     selected["bead_ids"][0] if len(selected["bead_ids"]) == 1 else None
@@ -579,6 +580,7 @@ class RecoveryService:
                 ):
                     task_fc[field] = prior.get(field)
             task_fc["recovery_operation"] = None
+            task_fc.pop("awaiting_role_entry", None)
             task_fc["pre_recovery_task"] = None
             task_fc["last_transition"] = operation.id
             ledger.update_fc(task.id, task_fc)

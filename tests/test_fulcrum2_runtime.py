@@ -805,11 +805,19 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
         )
 
         result = await _start_or_recover(
-            runtime, "thread-1", task_spec(), "fc-op-1", "Do the work."
+            runtime,
+            "thread-1",
+            task_spec(),
+            "fc-op-1",
+            "Do the work.",
+            ownership_operation="fc-owner-1",
         )
 
         self.assertEqual(result.id, "turn-1")
         runtime.start_turn.assert_awaited_once()
+        turn_input = runtime.start_turn.await_args.args[1]
+        self.assertEqual(turn_input.operation_id, "fc-op-1")
+        self.assertEqual(turn_input.ownership_operation, "fc-owner-1")
         self.assertEqual(runtime.find_turn.await_count, 2)
 
     async def test_find_turn_requires_exact_persisted_marker(self) -> None:
