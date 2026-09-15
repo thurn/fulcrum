@@ -31,6 +31,37 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _runtime_component(request: ParsedRequest) -> dict[str, Any]:
+    from fulcrum.runtime_service import RuntimeService
+
+    try:
+        result = RuntimeService().capabilities(request).result
+        facts = dict(result) if isinstance(result, Mapping) else {}
+        available = bool(facts.get("available"))
+        models = facts.get("models")
+        evidence = {
+            "endpoint": facts.get("endpoint"),
+            "available": available,
+            "methods": list(facts.get("methods") or []),
+            "models": sorted(models) if isinstance(models, Mapping) else [],
+            "gaps": list(facts.get("gaps") or []),
+        }
+        state = "healthy" if available else "unavailable"
+    except FulcrumError as error:
+        state = "unsupported" if error.code == "RUNTIME_UNSUPPORTED" else "unavailable"
+        evidence = {"error": error.message}
+    healthy = state == "healthy"
+    return _health(
+        "runtime",
+        state,
+        evidence=evidence,
+        affected_commands=[] if healthy else ["enter", "task", "dispatch"],
+        next_commands=(
+            [] if healthy else [["fulcrum", "runtime", "capabilities", "--json"]]
+        ),
+    )
+
+
 class DiagnosticLog:
     def __init__(
         self,
@@ -411,15 +442,7 @@ class DiagnosticService:
                 next_commands=[["fulcrum", "config", "show", "--json"]],
             )
         )
-        components.append(
-            _health(
-                "runtime",
-                "unsupported",
-                evidence={"reason": "runtime adapter is introduced by task 06"},
-                affected_commands=["enter", "task", "dispatch"],
-                next_commands=[["fulcrum", "runtime", "capabilities", "--json"]],
-            )
-        )
+        components.append(_runtime_component(request))
         loops = _loop_health(request, config, now)
         return CommandResult.query({"components": components, "loops": loops})
 

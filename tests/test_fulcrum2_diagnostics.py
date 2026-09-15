@@ -6,11 +6,33 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
-from fulcrum.diagnostics import DiagnosticLog
+from fulcrum.contracts import CommandResult
+from fulcrum.diagnostics import DiagnosticLog, _runtime_component
+from tests.support import request
 
 
 class DiagnosticLogTest(unittest.TestCase):
+    def test_runtime_component_uses_live_capabilities(self) -> None:
+        capabilities = {
+            "available": True,
+            "endpoint": "ws://127.0.0.1:4500",
+            "methods": ["thread/list", "turn/start"],
+            "models": {"gpt-test": ["medium"]},
+            "gaps": [],
+        }
+        with patch(
+            "fulcrum.runtime_service.RuntimeService.capabilities",
+            return_value=CommandResult.query(capabilities),
+        ):
+            component = _runtime_component(request(("doctor",)))
+
+        self.assertEqual(component["state"], "healthy")
+        self.assertEqual(component["affected_commands"], [])
+        self.assertEqual(component["next_commands"], [])
+        self.assertEqual(component["evidence"]["models"], ["gpt-test"])
+
     def test_redaction_stream_caps_rotation_and_pruning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
