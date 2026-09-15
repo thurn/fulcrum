@@ -5,12 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+IPC_HANDLER_LIMIT = 64
+_IPC_HANDLERS = ThreadPoolExecutor(
+    max_workers=IPC_HANDLER_LIMIT, thread_name_prefix="fulcrum-ipc"
+)
 
 
 class ControllerUnavailable(RuntimeError):
@@ -139,7 +144,11 @@ class IpcServer:
                     "INVALID_REQUEST", "request must be an object"
                 )
             parsed = ParsedRequest.from_wire(payload)
-            response = (await asyncio.to_thread(self.handler, parsed)).to_dict()
+            response = (
+                await asyncio.get_running_loop().run_in_executor(
+                    _IPC_HANDLERS, self.handler, parsed
+                )
+            ).to_dict()
         except FulcrumError as error:
             response = error.to_result().to_dict()
         except Exception as error:  # pragma: no cover - last-resort protocol boundary
