@@ -23,7 +23,7 @@ from fulcrum.ledger import (
     utc_now,
 )
 from fulcrum.knowledge import render_selected_memory, select_memory
-from fulcrum.runtime import TaskFacts, TaskSpec
+from fulcrum.runtime import AppServerError, TaskFacts, TaskSpec, TurnFacts
 from fulcrum.runtime_service import (
     _create_and_configure,
     _phase_for,
@@ -506,11 +506,47 @@ class RoleService:
                     ),
                 )
             except FulcrumError as error:
-                if error.code not in DEGRADABLE_CODES:
-                    raise
-                return _entry_degraded(
-                    ledger, operation, request, role, bead_id, thread_id, error
-                )
+                if (
+                    routed_leader
+                    and _missing_thread_error(error)
+                    and leadership_config is not None
+                ):
+                    (
+                        thread_id,
+                        native,
+                        task_record_id,
+                        creation_cwd,
+                        spec,
+                        operation,
+                        turn,
+                        instructions,
+                    ) = _runtime_call(
+                        request,
+                        lambda runtime: _repair_bind_and_start_leader(
+                            runtime,
+                            request=request,
+                            ledger=ledger,
+                            config=leadership_config,
+                            role=role,
+                            title=role_title(role, bead_id, work.title),
+                            work_id=bead_id,
+                            operation=operation,
+                            ownership_operation=receipt_id,
+                            instructions=instructions,
+                            project=project,
+                            model=model,
+                            effort=effort,
+                            model_origin=model_origin,
+                            routing_instructions=routing_instructions,
+                        ),
+                    )
+                    request = replace(request, thread_id=thread_id)
+                else:
+                    if error.code not in DEGRADABLE_CODES:
+                        raise
+                    return _entry_degraded(
+                        ledger, operation, request, role, bead_id, thread_id, error
+                    )
             task = ledger.show(task_record_id)
             if task is not None and task.fc:
                 task_fc = dict(task.fc)
@@ -788,6 +824,147 @@ async def _repair_and_name_leader(
             retryable=True,
         )
     return thread_id, await _name_current_task(runtime, thread_id, title)
+
+
+async def _repair_bind_and_start_leader(
+    runtime: Any,
+    *,
+    request: ParsedRequest,
+    ledger: Ledger,
+    config: Mapping[str, Any],
+    role: str,
+    title: str,
+    work_id: str,
+    operation: OperationRecord,
+    ownership_operation: str,
+    instructions: str,
+    project: Mapping[str, Any],
+    model: str,
+    effort: str,
+    model_origin: str,
+    routing_instructions: str,
+) -> tuple[str, TaskFacts, str, str, TaskSpec, OperationRecord, TurnFacts, str]:
+    from fulcrum.leadership import ensure_leadership
+
+    last_error: AppServerError | None = None
+    repaired_instructions = instructions
+    for _ in range(3):
+        await ensure_leadership(request, ledger, runtime, config)
+        thread_id = _leader_thread(ledger, role)
+        if thread_id is None:
+            raise FulcrumError(
+                "RUNTIME_UNAVAILABLE",
+                f"standing {role} leadership could not be repaired",
+                exit_code=4,
+                retryable=True,
+            )
+        try:
+            native = await _name_current_task(runtime, thread_id, title)
+        except AppServerError as error:
+            if _missing_thread_error(error):
+                last_error = error
+                continue
+            raise
+        replacement_tasks = [
+            item
+            for item in ledger.list_records(kind="task", limit=0)
+            if item.fc and item.fc.get("thread_id") == thread_id
+        ]
+        if len(replacement_tasks) != 1:
+            raise FulcrumError(
+                "TASK_CORRUPT",
+                "replacement leader has no unique managed task record",
+                exit_code=4,
+            )
+        task_record_id = replacement_tasks[0].id
+        creation_cwd = str(
+            (replacement_tasks[0].fc or {}).get("creation_cwd")
+            or request.instance.instance_root / "leaders" / role
+        )
+        current_work = ledger.show(work_id)
+        if current_work is None or current_work.kind != "work" or not current_work.fc:
+            raise FulcrumError.invalid("NOT_FOUND", f"unknown work {work_id}")
+        previous_owner = str((current_work.fc or {}).get("owner") or "")
+        repaired_instructions = repaired_instructions.replace(previous_owner, thread_id)
+        updated_work = _bind_work(
+            ledger,
+            current_work,
+            role=role,
+            thread_id=thread_id,
+            ownership_operation=ownership_operation,
+            compiled_description=repaired_instructions.rsplit(
+                "\n\n[Fulcrum operation", 1
+            )[0],
+        )
+        _bind_task(
+            ledger,
+            task_record_id=task_record_id,
+            work=updated_work,
+            role=role,
+            native=native,
+            ownership_operation=ownership_operation,
+            creation_cwd=creation_cwd,
+            model=model,
+            effort=effort,
+            model_origin=model_origin,
+        )
+        spec = TaskSpec(
+            creation_cwd=creation_cwd,
+            cwd=str(Path(str(project["root"])).resolve(strict=True)),
+            project_id=(
+                str(project["codex_project_id"])
+                if project.get("codex_project_id")
+                else None
+            ),
+            workspace_roots=(str(Path(str(project["root"])).resolve(strict=True)),),
+            title=title,
+            model=model,
+            effort=effort,
+            developer_instructions=routing_instructions,
+        )
+        planned = {
+            **dict(operation.operation.get("planned") or {}),
+            "task_record_id": task_record_id,
+            "creation_cwd": creation_cwd,
+            "thread_id": thread_id,
+            "turn_input": repaired_instructions,
+        }
+        operation = ledger.update_operation(
+            operation,
+            step="missing_leader_rebound",
+            planned=planned,
+            next_action="Start the retained role turn on the replacement leader.",
+        )
+        repaired_instructions = str(planned["turn_input"])
+        try:
+            turn = await _start_or_recover(
+                runtime,
+                thread_id,
+                spec,
+                ownership_operation,
+                repaired_instructions,
+            )
+        except AppServerError as error:
+            if _missing_thread_error(error):
+                last_error = error
+                continue
+            raise
+        return (
+            thread_id,
+            native,
+            task_record_id,
+            creation_cwd,
+            spec,
+            operation,
+            turn,
+            repaired_instructions,
+        )
+    assert last_error is not None
+    raise last_error
+
+
+def _missing_thread_error(error: Exception) -> bool:
+    return "thread not found" in str(error).lower()
 
 
 def _bind_work(
