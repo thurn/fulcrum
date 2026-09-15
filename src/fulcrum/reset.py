@@ -433,7 +433,17 @@ class ResetService:
                             runtime, str(target["id"]), request.timeout
                         )
                     except Exception as error:
-                        _fail_target(target, error)
+                        if "thread not found:" in str(error).lower():
+                            _complete_target(
+                                target,
+                                {
+                                    "thread_id": str(target["id"]),
+                                    "exists": False,
+                                    "already_absent": True,
+                                },
+                            )
+                        else:
+                            _fail_target(target, error)
                     else:
                         _complete_target(target, after)
                     _persist_targets(
