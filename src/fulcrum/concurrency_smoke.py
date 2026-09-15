@@ -395,7 +395,7 @@ class ConcurrencySmoke:
 
     def parallel(self, function: Callable[[T], Any], items: Sequence[T]) -> list[Any]:
         results: list[Any] = [None] * len(items)
-        with ThreadPoolExecutor(max_workers=min(10, max(1, len(items)))) as pool:
+        with ThreadPoolExecutor(max_workers=min(32, max(1, len(items)))) as pool:
             futures = {
                 pool.submit(function, item): index for index, item in enumerate(items)
             }
@@ -710,22 +710,8 @@ class ConcurrencySmoke:
             _nested(released),
         )
 
-        def terminal_rows() -> dict[str, dict[str, Any]]:
-            return self.task_rows()
-
-        settled = self.poll(
-            f"{self.workers} native turns to become terminal",
-            terminal_rows,
-            lambda rows: len(rows) == self.workers
-            and all(
-                _task_native(row).get("active_turn") is None
-                and isinstance(_task_native(row).get("last_turn"), Mapping)
-                for row in rows.values()
-            ),
-            seconds=min(240, self.remaining()),
-        )
-        self.parallel(
-            lambda participant: self.fc(
+        def settle_participant(participant: str) -> dict[str, Any]:
+            waited = self.fc(
                 "task",
                 "wait",
                 self.tasks[participant],
@@ -734,8 +720,26 @@ class ConcurrencySmoke:
                 "--until",
                 "terminal",
                 timeout=min(60, self.remaining()),
-            ),
-            self.participants,
+            )
+            output = self.fc(
+                "task",
+                "output",
+                self.tasks[participant],
+                "--turn-id",
+                self.turns[participant],
+                "--limit",
+                "0",
+                "--max-bytes",
+                "1048576",
+            ).get("result", {})
+            released = self.fc("task", "release", self.tasks[participant])
+            return {"wait": waited, "output": output, "release": released}
+
+        settlements = self.parallel(settle_participant, self.participants)
+        self.check(
+            all(_nested(row["wait"]).get("satisfied") is True for row in settlements),
+            "all exact native turns are observed terminal",
+            [_nested(row["wait"]) for row in settlements],
         )
 
         def work_rows() -> list[dict[str, Any]]:
@@ -762,20 +766,7 @@ class ConcurrencySmoke:
             closed,
         )
 
-        outputs = self.parallel(
-            lambda participant: self.fc(
-                "task",
-                "output",
-                self.tasks[participant],
-                "--turn-id",
-                self.turns[participant],
-                "--limit",
-                "0",
-                "--max-bytes",
-                "1048576",
-            ).get("result", {}),
-            self.participants,
-        )
+        outputs = [row["output"] for row in settlements]
         tool_evidence: dict[str, Any] = {}
         for participant, output in zip(self.participants, outputs):
             serialized = json.dumps(output, sort_keys=True).lower()
@@ -795,14 +786,10 @@ class ConcurrencySmoke:
             tool_evidence,
         )
 
-        releases = self.parallel(
-            lambda participant: self.fc("task", "release", self.tasks[participant]),
-            self.participants,
-        )
         self.check(
-            all(envelope.get("ok") is True for envelope in releases),
+            all(row["release"].get("ok") is True for row in settlements),
             "all worker subscriptions release through the public CLI",
-            [_nested(envelope) for envelope in releases],
+            [_nested(row["release"]) for row in settlements],
         )
         final_rows = self.task_rows()
         final_status = self.fc("status").get("result", {})
