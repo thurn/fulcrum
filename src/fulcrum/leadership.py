@@ -1626,6 +1626,8 @@ def _decision_row(
         "outcome": fc.get("outcome") or record.native.get("description"),
         "owner": fc.get("owner") or _marshal_owner(ledger),
         "phase": phase,
+        "expected_ownership_operation": fc.get("ownership_operation"),
+        "expected_phase": phase,
         "decision_needed": needed,
         "decision_context": {
             "dependencies_ready": ready,

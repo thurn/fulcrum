@@ -516,6 +516,11 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
         )
         dependent_row = dispatch["rows"][1]
         self.assertEqual(
+            dependent_row["expected_ownership_operation"],
+            dependent_fc["ownership_operation"],
+        )
+        self.assertEqual(dependent_row["expected_phase"], dependent_fc["phase"])
+        self.assertEqual(
             dependent_row["decision_context"]["dependency_blockers"],
             [prerequisite.id],
         )
