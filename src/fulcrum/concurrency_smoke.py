@@ -393,9 +393,17 @@ class ConcurrencySmoke:
             expected=expected,
         )
 
-    def parallel(self, function: Callable[[T], Any], items: Sequence[T]) -> list[Any]:
+    def parallel(
+        self,
+        function: Callable[[T], Any],
+        items: Sequence[T],
+        *,
+        max_workers: int = 10,
+    ) -> list[Any]:
         results: list[Any] = [None] * len(items)
-        with ThreadPoolExecutor(max_workers=min(32, max(1, len(items)))) as pool:
+        with ThreadPoolExecutor(
+            max_workers=min(max_workers, max(1, len(items)))
+        ) as pool:
             futures = {
                 pool.submit(function, item): index for index, item in enumerate(items)
             }
@@ -735,7 +743,9 @@ class ConcurrencySmoke:
             released = self.fc("task", "release", self.tasks[participant])
             return {"wait": waited, "output": output, "release": released}
 
-        settlements = self.parallel(settle_participant, self.participants)
+        settlements = self.parallel(
+            settle_participant, self.participants, max_workers=32
+        )
         self.check(
             all(_nested(row["wait"]).get("satisfied") is True for row in settlements),
             "all exact native turns are observed terminal",
