@@ -747,7 +747,6 @@ class ControllerSupervisor:
         }
 
     async def _start_authorized_work(self) -> list[Mapping[str, Any]]:
-        results: list[Mapping[str, Any]] = []
         records = await asyncio.to_thread(
             self.ledger.list_records, kind="work", limit=0
         )
@@ -757,33 +756,52 @@ class ControllerSupervisor:
         candidates = sorted(
             records, key=lambda item: (int(item.native.get("priority", 2)), item.id)
         )
-        for record in candidates:
+        candidates = [
+            record
+            for record in candidates
+            if record.status != "closed"
+            and (record.fc or {}).get("phase") == "backlog"
+            and isinstance((record.fc or {}).get("dispatch"), Mapping)
+            and not (
+                isinstance(
+                    (record.fc or {}).get("dispatch", {}).get("reservation"), Mapping
+                )
+                and (record.fc or {})["dispatch"]["reservation"].get("state")
+                in {"in_flight", "unknown", "started"}
+            )
+        ]
+        if not candidates:
+            return []
+        readiness = await asyncio.gather(
+            *(
+                asyncio.to_thread(dependency_readiness, self.ledger, record)
+                for record in candidates
+            )
+        )
+        capacity = await asyncio.to_thread(capacity_snapshot, self.ledger, config)
+        projects = sorted(
+            {str((record.fc or {}).get("project") or "") for record in candidates}
+        )
+        replacement_pauses = dict(
+            zip(
+                projects,
+                await asyncio.gather(
+                    *(
+                        asyncio.to_thread(fleet_admission_pause, self.ledger, project)
+                        for project in projects
+                    )
+                ),
+            )
+        )
+        requests: list[tuple[str, ParsedRequest]] = []
+        for record, (ready, _) in zip(candidates, readiness):
             fc = record.fc or {}
             dispatch = fc.get("dispatch")
-            if (
-                record.status == "closed"
-                or fc.get("phase") != "backlog"
-                or not isinstance(dispatch, Mapping)
-            ):
-                continue
-            reservation = dispatch.get("reservation")
-            if isinstance(reservation, Mapping) and reservation.get("state") in {
-                "in_flight",
-                "unknown",
-                "started",
-            }:
-                continue
-            ready, _ = await asyncio.to_thread(
-                dependency_readiness, self.ledger, record
-            )
+            assert isinstance(dispatch, Mapping)
             if not ready:
                 continue
-            capacity = await asyncio.to_thread(capacity_snapshot, self.ledger, config)
             project = str(fc.get("project") or "")
-            replacement_pause = await asyncio.to_thread(
-                fleet_admission_pause, self.ledger, project
-            )
-            if replacement_pause is not None:
+            if replacement_pauses[project] is not None:
                 continue
             project_row = capacity["projects"].get(project, {})
             if not dispatch.get("human_bypass") and (
@@ -810,17 +828,23 @@ class ControllerSupervisor:
                 offline=True,
                 runtime_submit=self._runtime_submit,
             )
+            requests.append((record.id, request))
+
+        async def start(bead_id: str, request: ParsedRequest) -> Mapping[str, Any]:
             async with self.external_slots:
                 result = await asyncio.to_thread(self.application.dispatch, request)
-            results.append(
-                {
-                    "kind": "authorized_start",
-                    "bead_id": record.id,
-                    "operation_id": result.operation_id,
-                    "state": result.state.value,
-                }
+            return {
+                "kind": "authorized_start",
+                "bead_id": bead_id,
+                "operation_id": result.operation_id,
+                "state": result.state.value,
+            }
+
+        return list(
+            await asyncio.gather(
+                *(start(bead_id, request) for bead_id, request in requests)
             )
-        return results
+        )
 
     def _runtime_submit(
         self,

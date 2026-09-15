@@ -185,6 +185,23 @@ class RetryApplication:
         return CommandResult.query({"operation": settled.id})
 
 
+class ConcurrentDispatchApplication:
+    def __init__(self) -> None:
+        self.gate = threading.Event()
+        self.overlap = threading.Event()
+        self.started = 0
+        self.lock = threading.Lock()
+
+    def dispatch(self, request: ParsedRequest) -> CommandResult:
+        with self.lock:
+            self.started += 1
+            if self.started >= 2:
+                self.overlap.set()
+        if not self.gate.wait(20):
+            raise RuntimeError("concurrent dispatch fixture timed out")
+        return CommandResult.query({"bead_id": request.arguments["bead"]})
+
+
 class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -664,6 +681,44 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         assert blocked is not None and blocked.fc
         self.assertEqual(independent.fc["state"], "completed")
         self.assertEqual(blocked.fc["state"], "completed")
+
+    async def test_authorized_starts_use_external_slots_concurrently(self) -> None:
+        for index in range(4):
+            self.ledger.create_record(
+                record_id=f"fc-authorized-{index}",
+                kind="work",
+                title=f"Authorized work {index}",
+                description="Ready for mechanical admission.",
+                owner=None,
+                fc={
+                    "kind": "work",
+                    "owner": None,
+                    "project": "toy",
+                    "phase": "backlog",
+                    "dispatch": {
+                        "decision_operation": f"fc-decision-{index}",
+                        "human_bypass": False,
+                    },
+                },
+            )
+        application = ConcurrentDispatchApplication()
+        supervisor = ControllerSupervisor(
+            self.request,
+            application,
+            clock=self.clock,
+            runtime=self.runtime,  # type: ignore[arg-type]
+        )
+
+        running = asyncio.create_task(supervisor._start_authorized_work())
+        overlapped = await asyncio.wait_for(
+            asyncio.to_thread(application.overlap.wait, 10), 15
+        )
+        self.assertTrue(overlapped, application.started)
+        application.gate.set()
+        results = await asyncio.wait_for(running, 20)
+
+        self.assertEqual(len(results), 4)
+        self.assertEqual(application.started, 4)
 
     async def test_active_recovery_fence_pauses_ordinary_dispatch(self) -> None:
         control = self.ledger.show("fc-system")

@@ -51,11 +51,12 @@ def _task_native(row: Mapping[str, Any]) -> dict[str, Any]:
     return dict(native) if isinstance(native, Mapping) else {}
 
 
-def _capacity_policy(workers: int) -> dict[str, Any]:
+def _capacity_policy(workers: int, *, paused: bool) -> dict[str, Any]:
     return {
         "automatic_capacity": workers,
         "default_project_capacity": workers,
         "project_capacity": {"fixture": workers},
+        "paused_projects": ["fixture"] if paused else [],
         "rationale": "Explicit disposable native concurrency smoke.",
     }
 
@@ -468,7 +469,7 @@ class ConcurrencySmoke:
         policy = self.fc(
             "policy",
             "set",
-            payload=_capacity_policy(self.workers),
+            payload=_capacity_policy(self.workers, paused=True),
         )
         self.check(policy.get("ok") is True, "fixture capacity is authorized", policy)
         status = self.fc("status")
@@ -477,6 +478,11 @@ class ConcurrencySmoke:
             capacity.get("global_limit") == self.workers
             and capacity.get("default_project_limit") == self.workers,
             "only the disposable fixture has the requested capacity",
+            capacity,
+        )
+        self.check(
+            capacity.get("paused_projects") == ["fixture"],
+            "fixture admission is paused while authorizations are recorded",
             capacity,
         )
         self.observations["baseline"] = {
@@ -572,6 +578,7 @@ class ConcurrencySmoke:
                 "--bead",
                 self.work[participant],
                 "--authorize",
+                offline=True,
                 request_id=str(
                     uuid.uuid5(
                         uuid.UUID("0b7ae019-74d8-4a67-b7df-6d3acfe6fd93"),
@@ -585,11 +592,21 @@ class ConcurrencySmoke:
         starts = [_nested(envelope) for envelope in results]
         self.check(
             all(
-                row.get("started") is True and row.get("queued") is False
+                row.get("started") is False and row.get("queued") is True
                 for row in starts
             ),
-            f"all {self.workers} starts use normal authorized admission",
+            f"all {self.workers} starts are durably authorized while paused",
             starts,
+        )
+        policy = self.fc(
+            "policy",
+            "set",
+            payload=_capacity_policy(self.workers, paused=False),
+        )
+        self.check(
+            policy.get("ok") is True,
+            "fixture admission is unpaused for controller reconciliation",
+            policy,
         )
 
     def task_rows(self) -> dict[str, dict[str, Any]]:
