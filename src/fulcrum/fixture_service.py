@@ -79,6 +79,7 @@ class FixtureService:
         ledger: Ledger | None = None
         operation: OperationRecord | None = None
         project_result: CommandResult | None = None
+        project_attempted = False
         port = 0
         setup_operation = ""
         try:
@@ -132,7 +133,27 @@ class FixtureService:
                     offline=True,
                 )
                 setup = run_setup(setup_request)
+                setup_operation = str(
+                    setup.operation_id
+                    or operation_id(_derived_request_id(request, "fixture-setup"))
+                )
                 if not setup.ok:
+                    ledger = Ledger(paths["brain"], timeout=request.timeout)
+                    operation, _ = ledger.create_operation(
+                        request,
+                        planned={
+                            "fixture_root": str(root),
+                            "owned_paths": [str(path) for path in paths.values()],
+                            "provider_state": str(state_path),
+                            "provider_kinds": {
+                                "runtime": runtime_input["kind"],
+                                "delivery": delivery_input["kind"],
+                            },
+                            "beads_port": port,
+                            "setup_operation": setup_operation,
+                        },
+                        next_action="Clean up the incomplete fixture before retrying.",
+                    )
                     raise RuntimeError(
                         f"fixture setup did not satisfy required capabilities: {setup.result}"
                     )
@@ -164,7 +185,6 @@ class FixtureService:
                     },
                     next_action="Enroll the committed toy project through the normal project operation.",
                 )
-                setup_operation = setup.operation_id
             else:
                 paths = _fixture_paths(root)
                 planned = existing.operation.get("planned") or {}
@@ -202,6 +222,7 @@ class FixtureService:
                 input=project_payload,
                 offline=True,
             )
+            project_attempted = True
             project_result = ProjectService().add(project_request)
             project = _project_from_result(project_result)
             runtime_project_id = str(project["codex_project_id"])
@@ -287,6 +308,7 @@ class FixtureService:
                     source_sync=source_sync,
                     port=port,
                     setup_operation=setup_operation,
+                    project_attempted=project_attempted,
                 )
                 operation = ledger.update_operation(
                     operation,
@@ -427,7 +449,14 @@ class FixtureService:
                             await runtime.delete(thread_id)
                         removed.append(thread_id)
                     except Exception as error:
-                        errors.append(f"task {thread_id}: {error}")
+                        try:
+                            await runtime.delete(thread_id)
+                            removed.append(thread_id)
+                        except Exception as delete_error:
+                            errors.append(
+                                f"task {thread_id}: inspect failed ({error}); "
+                                f"delete failed ({delete_error})"
+                            )
             finally:
                 await runtime.close()
             return removed, errors
@@ -1051,6 +1080,7 @@ def _partial_fixture_inventory(
     source_sync: bool,
     port: int,
     setup_operation: str,
+    project_attempted: bool,
 ) -> dict[str, Any]:
     project_operation = (
         project_result.operation_id
@@ -1063,9 +1093,9 @@ def _partial_fixture_inventory(
         if isinstance(external, Mapping) and external.get("project_id"):
             runtime_project_id = str(external["project_id"])
     delivery_repository_id: str | None = None
-    delivery_ownership = "unknown"
+    delivery_ownership = "unknown" if project_attempted else "absent"
     provider_gaps: list[str] = []
-    if delivery_input.get("kind") == "tollgate":
+    if delivery_input.get("kind") == "tollgate" and project_attempted:
         try:
             repositories = Tollgate(
                 delivery_input.get("executable"),
@@ -1110,7 +1140,11 @@ def _partial_fixture_inventory(
             "delivery_repository": delivery_repository_id,
         },
         "provider_ownership": {
-            "runtime_project": "created" if runtime_project_id else "unknown",
+            "runtime_project": (
+                "created"
+                if runtime_project_id
+                else "unknown" if project_attempted else "absent"
+            ),
             "delivery_repository": delivery_ownership,
         },
         "provider_observation_gaps": provider_gaps,
