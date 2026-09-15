@@ -65,6 +65,34 @@ def task_spec() -> TaskSpec:
 
 
 class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_rich_native_history_frame_is_observable(self) -> None:
+        padding = "x" * (17 * 1024 * 1024)
+
+        async def handler(connection: Any) -> None:
+            async for raw in connection:
+                message = json.loads(raw)
+                if "id" not in message:
+                    continue
+                if message.get("method") == "initialize":
+                    result: dict[str, Any] = {}
+                elif message.get("method") == "model/list":
+                    result = {"data": [{"model": "luna", "history": padding}]}
+                else:
+                    result = {}
+                await connection.send(
+                    json.dumps({"id": message["id"], "result": result})
+                )
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            runtime = CodexRuntime(f"ws://127.0.0.1:{port}")
+            await runtime.connect()
+            models = await runtime.list_models()
+            await runtime.close()
+
+        self.assertEqual(models[0]["model"], "luna")
+        self.assertEqual(len(models[0]["history"]), len(padding))
+
     async def test_malformed_response_fails_pending_call_as_uncertain(self) -> None:
         async def handler(connection: Any) -> None:
             async for raw in connection:

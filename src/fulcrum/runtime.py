@@ -255,6 +255,7 @@ SOURCE_KINDS: tuple[str, ...] = (
     "subAgentOther",
     "unknown",
 )
+MAX_APP_SERVER_FRAME_BYTES = 64 * 1024 * 1024
 
 
 def _critical_event(event: RuntimeEvent) -> bool:
@@ -376,7 +377,7 @@ class CodexRuntime:
                     open_timeout=10,
                     ping_interval=20,
                     ping_timeout=20,
-                    max_size=16 * 1024 * 1024,
+                    max_size=MAX_APP_SERVER_FRAME_BYTES,
                 )
             except Exception as error:
                 self.websocket = None
