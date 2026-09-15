@@ -171,6 +171,66 @@ class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(captured.exception.uncertain)
             await runtime.close()
 
+    async def test_reset_deletes_persisted_unloaded_task(self) -> None:
+        from fulcrum.reset import _delete_native_task
+
+        loaded = False
+        deleted = False
+        calls = []
+
+        async def request(method, params):
+            nonlocal loaded, deleted
+            calls.append(method)
+            if method == "thread/read":
+                if deleted:
+                    raise AppServerError(
+                        "thread not found: thread-1", category="rejected"
+                    )
+                return {
+                    "thread": {
+                        "id": "thread-1",
+                        "turns": [],
+                        "status": {"type": "idle" if loaded else "notLoaded"},
+                    }
+                }
+            if method == "thread/loaded/list":
+                return {"data": ["thread-1"] if loaded else []}
+            if method == "thread/backgroundTerminals/list":
+                if not loaded:
+                    raise AppServerError(
+                        "thread not found: thread-1", category="rejected"
+                    )
+                return {"data": []}
+            if method == "thread/resume":
+                loaded = True
+                return {}
+            if method == "thread/delete":
+                deleted = True
+                loaded = False
+                return {}
+            self.fail(f"unexpected method {method}")
+
+        transport = CodexRuntime("ws://unused")
+        transport.request = AsyncMock(side_effect=request)
+        runtime = AppServerRuntime("ws://unused", transport=transport)
+        result = await _delete_native_task(runtime, "thread-1", 1)
+        self.assertTrue(deleted)
+        self.assertFalse(result["exists"])
+        self.assertEqual(result["runtime_state"], "deleted")
+        self.assertLess(calls.index("thread/resume"), calls.index("thread/delete"))
+        self.assertEqual(calls[-1], "thread/read")
+
+    async def test_inspection_rejection_is_not_proof_task_is_absent(self) -> None:
+        transport = AsyncMock()
+        transport.read_thread.side_effect = AppServerError(
+            "permission denied", category="rejected"
+        )
+        runtime = AppServerRuntime(
+            "ws://unused", transport=cast(CodexRuntime, transport)
+        )
+        with self.assertRaisesRegex(AppServerError, "permission denied"):
+            await runtime.inspect_task("thread-1")
+
     async def test_all_idempotent_unsubscribe_outcomes_are_successful(self) -> None:
         for status in ("unsubscribed", "notSubscribed", "notLoaded"):
             runtime = CodexRuntime("ws://unused")

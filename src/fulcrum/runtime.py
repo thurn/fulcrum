@@ -992,10 +992,14 @@ class CodexRuntime:
     async def background_terminals_page(
         self, thread_id: str, *, limit: int, cursor: str | None
     ) -> dict[str, Any]:
-        result = await self.request(
-            "thread/backgroundTerminals/list",
-            {"threadId": thread_id, "limit": limit, "cursor": cursor},
-        )
+        params = {"threadId": thread_id, "limit": limit, "cursor": cursor}
+        try:
+            result = await self.request("thread/backgroundTerminals/list", params)
+        except AppServerError as error:
+            if not _unloaded_thread_error(error):
+                raise
+            await self.resume_thread(thread_id)
+            result = await self.request("thread/backgroundTerminals/list", params)
         data = result.get("data") or result.get("terminals")
         return {
             "items": (
@@ -1278,7 +1282,7 @@ class AppServerRuntime:
                     thread_id, include_turns=False
                 )
                 gaps = ("native task has no first rollout",)
-            elif error.category != "rejected":
+            elif not _unloaded_thread_error(error):
                 raise
             else:
                 return TaskFacts(

@@ -204,3 +204,42 @@ class ResetTests(unittest.TestCase):
             )
         self.assertIs(result, operation)
         stop.assert_not_called()
+
+    def test_native_cleanup_retries_not_found_errors_instead_of_assuming_deletion(self):
+        from fulcrum.reset import ResetService
+        from fulcrum.runtime import AppServerError
+
+        target = {
+            "kind": "native_task",
+            "id": "old-marshal",
+            "state": "failed",
+            "error": {"message": "thread not found: old-marshal"},
+        }
+        operation = OperationRecord.from_record(
+            LedgerRecord.from_native(
+                {
+                    "id": "fc-reset",
+                    "metadata": {
+                        "fc": {"kind": "operation", "planned": {"targets": [target]}}
+                    },
+                }
+            )
+        )
+        runtime = AsyncMock()
+        with (
+            patch.object(ResetService, "_runtime", return_value=runtime),
+            patch("fulcrum.reset._persist_targets", return_value=operation),
+            patch(
+                "fulcrum.reset._delete_native_task",
+                new_callable=AsyncMock,
+                side_effect=AppServerError(
+                    "thread not found: old-marshal", category="rejected"
+                ),
+            ) as delete,
+        ):
+            ResetService()._cleanup_native(
+                self.request(), self.config, MagicMock(), operation, []
+            )
+        delete.assert_awaited_once()
+        self.assertEqual(target["state"], "failed")
+        runtime.close.assert_awaited_once()
