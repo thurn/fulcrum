@@ -1,6 +1,6 @@
 # 23 — Luna end-to-end validation
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [05](05-observability-and-inspection.md), [10](10-task-control-and-reviews.md), [12](12-executor-warden-delivery.md), [13](13-plans-and-root-completion.md), [14](14-memory-and-document-publication.md), [15](15-brain-publication.md), [16](16-usage-and-completion-cost.md), [17](17-recovery-and-human-resolution.md), [18](18-task-continuity-and-fleet.md), [19](19-installation-and-service.md), [20](20-source-refresh-and-recovery-launcher.md), [21](21-hard-reset-and-cutover.md), [22](22-deterministic-cli-validation.md)
 

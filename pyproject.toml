@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [tool.setuptools.package-data]
-fulcrum = ["prompts/*.md", "formulas/*.json", "role_fallbacks/*.md"]
+fulcrum = ["formulas/*.json", "role_fallbacks/*.md"]
 
 [tool.setuptools.data-files]
 "share/fulcrum/skills/fulcrum-vizier" = ["skills/fulcrum-vizier/SKILL.md"]

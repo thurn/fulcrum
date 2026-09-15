@@ -1,6 +1,6 @@
 # 08 — Controller supervision
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [04](04-work-and-ownership.md), [05](05-observability-and-inspection.md), [06](06-codex-runtime-adapter.md)
 

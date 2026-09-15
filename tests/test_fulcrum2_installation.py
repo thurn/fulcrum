@@ -115,11 +115,19 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self,
     ) -> None:
         root = self.root / "skills"
+        executable = self.instance / "runtime" / "current" / "bin" / "fulcrum"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o700)
         result = reconcile_fulcrum2_skills(
             self.instance, production=False, skills_root=root
         )
         self.assertEqual(len(HUMAN_SKILLS), 9)
         self.assertEqual(len(result["installed"]), 9)
+        self.assertTrue(result["hook"]["installed"])
+        hooks = (root.parent / "hooks.json").read_text(encoding="utf-8")
+        self.assertIn("hook context --input - --instance", hooks)
+        self.assertNotIn("fulcrum.hook", hooks)
         broken = root / HUMAN_SKILLS[0]
         broken.unlink()
         broken.symlink_to(self.root / "missing")

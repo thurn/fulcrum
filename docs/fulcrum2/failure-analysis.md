@@ -18,8 +18,10 @@ change the database, or reset the installation to obtain this evidence.
 
 The original incident report provides a narrative and 28 distinct failure
 observations: [September 12 runtime incident](../postmortems/2026-09-12-python-runtime-first-test.md).
-The FD analysis records process measurements and distinguishes demonstrated
-behavior from proposed remedies: [Desktop concurrency analysis](../codex-desktop-concurrency.md).
+The superseded Desktop concurrency analysis recorded process measurements and
+distinguished demonstrated behavior from proposed remedies; it remains available
+in repository history at the cited historical baseline rather than in the shipped
+operator documentation.
 
 The hard reset deliberately deletes old operational data. This appendix preserves
 the relevant findings and their provenance; implementation must not require the
@@ -50,18 +52,15 @@ re-parking mechanism, not proof of that exact timer sequence.
 
 Relevant old implementation areas:
 
-- [Resource reconciliation and direct Sage registration](../../src/fulcrum/controller.py),
-  particularly the old resource-reconciliation pass, direct-target resolver, and
-  role-binding checks.
-- [Resource limits](../../src/fulcrum/resources.py): four-active/four-idle ceilings,
-  FD reserve, and admission assumptions.
-- [Sage instructions](../../src/fulcrum/prompts/sage.md): mandatory Executor/Overseer
-  interview round.
-- [Prompt assembly](../../src/fulcrum/prompts.py): large prompt budgets and layers
-  of clipping/reference assembly.
-- [CLI](../../src/fulcrum/cli.py) and [CLI tests](../../tests/test_cli.py): task identity
-  inference and tests that commonly call `main()` with the request transport
-  patched, rather than exercise an installed command through the complete system.
+- Removed `controller.py`, particularly its resource-reconciliation pass,
+  direct-target resolver, and role-binding checks.
+- Removed `resources.py`: four-active/four-idle ceilings, FD reserve, and admission
+  assumptions.
+- Removed Sage prompt and nested prompt assembler: mandatory interview rounds,
+  large prompt budgets, and layers of clipping/reference assembly.
+- The retained [CLI](../../src/fulcrum/cli.py) and removed legacy CLI tests: task
+  identity inference and tests that commonly called `main()` with transport patched
+  rather than exercising an installed command through the complete system.
 
 ### Cost and context claims that the evidence does not support
 

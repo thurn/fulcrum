@@ -1,6 +1,6 @@
 # 07 — Role context and entry
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [04](04-work-and-ownership.md), [06](06-codex-runtime-adapter.md)
 

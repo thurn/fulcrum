@@ -1,6 +1,7 @@
 # Fulcrum2 implementation plan
 
-Status: documentation complete; implementation and replacement validation pending.
+Status: implementation complete through task 23; task 24 final closeout validation
+and task 25 replacement audit are in progress.
 
 This is a ground-up replacement plan, not evidence that the current executable
 implements the specified commands. Read [design.md](../design.md) for architecture,

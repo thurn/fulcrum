@@ -1,6 +1,6 @@
 # 20 — Source refresh and recovery launcher
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [17](17-recovery-and-human-resolution.md), [19](19-installation-and-service.md)
 

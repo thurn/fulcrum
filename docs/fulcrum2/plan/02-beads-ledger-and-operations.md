@@ -1,6 +1,6 @@
 # 02 — Beads ledger and operations
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [01](01-cli-application-spine.md)
 

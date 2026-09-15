@@ -64,9 +64,7 @@ class IdleRuntime:
             observed_at="2026-09-15T16:00:01Z",
         )
 
-    async def find_turn(
-        self, thread_id: str, operation_id: str
-    ) -> TurnFacts | None:
+    async def find_turn(self, thread_id: str, operation_id: str) -> TurnFacts | None:
         return next(
             (
                 TurnFacts(

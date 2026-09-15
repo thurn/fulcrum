@@ -1,9 +1,10 @@
 # Fulcrum 2.0 technical design
 
-Status: reviewed replacement specification; implementation and live validation
-remain outstanding. The [implementation plan](plan/README.md) assigns every
-capability and verification obligation. Commands below describe the replacement,
-not the current executable.
+Status: implemented. Deterministic and eight-role live validation passed; the
+30-task closeout gate remains tracked in
+[validation-results.md](validation-results.md). The
+[implementation plan](plan/README.md) assigns every capability and verification
+obligation. Commands below describe the installed replacement.
 
 Read [contracts.md](contracts.md) for the complete executable interfaces and data
 contracts, and [failure-analysis.md](failure-analysis.md) for the operational

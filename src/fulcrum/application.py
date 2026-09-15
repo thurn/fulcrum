@@ -175,6 +175,7 @@ class Application:
         self.register(("work", "children"), work.children)
         self.register(("work", "adopt"), work.adopt)
         self.register(("work", "update"), work.update)
+        self.register(("work", "transfer"), work.transfer)
         self.register(("work", "dependencies"), work.dependencies)
         self.register(("work", "close"), work.close)
         self.register(("work", "reopen"), work.reopen)

@@ -1,6 +1,6 @@
 # 01 — CLI and application spine
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: None; establish the replacement interfaces first.
 

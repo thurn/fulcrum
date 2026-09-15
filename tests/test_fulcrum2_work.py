@@ -316,6 +316,63 @@ class Fulcrum2WorkTest(unittest.TestCase):
         )
         self.assertEqual(accepted.returncode, 0, accepted.stderr + accepted.stdout)
 
+    def test_human_transfer_establishes_one_new_acquisition_and_is_retryable(
+        self,
+    ) -> None:
+        bead_id, _ = self.create_work("Controlled transfer")
+        ledger = Ledger(self.brain)
+        ledger.create_record(
+            record_id="fc-transfer-task",
+            kind="task",
+            title="Managed destination",
+            description="Idle executor destination",
+            owner="destination-thread",
+            fc={
+                "kind": "task",
+                "owner": "destination-thread",
+                "thread_id": "destination-thread",
+                "role": "executor",
+                "work_bead": None,
+                "ownership_operation": None,
+                "deleted_at": None,
+            },
+        )
+        request_id = str(uuid.uuid4())
+        arguments = (
+            "work",
+            "transfer",
+            bead_id,
+            "--to-thread",
+            "destination-thread",
+            "--role",
+            "executor",
+            "--reason",
+            "The prepared destination is now responsible",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--actor",
+            "human",
+            "--request-id",
+            request_id,
+            "--json",
+        )
+        first = self.invoke(*arguments)
+        repeated = self.invoke(*arguments)
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.assertEqual(repeated.returncode, 0, repeated.stderr + repeated.stdout)
+        result = json.loads(first.stdout)["result"]["result"]
+        self.assertEqual(json.loads(repeated.stdout)["result"]["result"], result)
+        self.assertEqual(result["to_thread"], "destination-thread")
+        current = Ledger(self.brain).show(bead_id)
+        assert current is not None and current.fc
+        self.assertEqual(current.assignee, "destination-thread")
+        self.assertEqual(current.fc["owner"], "destination-thread")
+        self.assertEqual(
+            current.fc["ownership_operation"], result["ownership_operation"]
+        )
+        self.assertEqual(current.fc["handoff"]["reason"], arguments[8])
+
     def test_native_intake_adoption_preserves_original_and_detects_assignee_interference(
         self,
     ) -> None:

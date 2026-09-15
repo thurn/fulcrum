@@ -1,6 +1,6 @@
 # 11 — Workspaces and delivery adapter
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [02](02-beads-ledger-and-operations.md), [03](03-configuration-and-projects.md), [04](04-work-and-ownership.md)
 

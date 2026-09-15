@@ -1,6 +1,6 @@
 # 13 — Plans and root completion
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [04](04-work-and-ownership.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [11](11-workspaces-and-delivery-adapter.md), [12](12-executor-warden-delivery.md)
 

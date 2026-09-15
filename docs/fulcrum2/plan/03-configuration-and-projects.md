@@ -1,6 +1,6 @@
 # 03 — Configuration and projects
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [01](01-cli-application-spine.md), [02](02-beads-ledger-and-operations.md)
 

@@ -1,83 +1,60 @@
 # Setup
 
-Setup atomically installs and smoke-tests the private Operative recovery artifact
-before switching its `current` symlink. A failed copy or smoke test leaves the
-previous launcher active. `fulcrum doctor --json` reports `operative_recovery`
-for this mode-0700 isolated artifact independently of the editable checkout and
-controller snapshot.
+Fulcrum setup is rerunnable and Beads-only. It never imports an earlier workflow
+database or replay journal.
 
-The supported entry point is `./scripts/setup`. It creates or reuses `.venv`,
-installs `requirements-dev.lock` and the editable checkout, then runs the Python
-installer. First use asks only for missing brain, project, validation, and Archon
-model choices. `--config <absolute-json> --non-interactive` supplies the same
-fields unattended.
+## Prerequisites
 
-Setup owns both background services; users do not start the app-server or controller manually.
+- macOS and Python 3.12
+- authenticated Codex Desktop/CLI with an available app-server
+- Git, `bd`, and `dolt`
+- `tg` when using the Tollgate delivery adapter
+- a retained Fulcrum checkout and a Git-backed brain destination
 
-Static configuration is stored at `~/Library/Application Support/Fulcrum/config.json`
-unless `FULCRUM_CONFIG` selects another environment. It contains source, brain,
-state, Codex, desktop, endpoint, model, and enrolled-project connection facts.
-Reset preserves this file and the adjacent `control/` directory.
-
-Setup installs two independent user LaunchAgents:
-
-- `dev.fulcrum.codex-app-server` runs the installed Codex binary with
-  `app-server --listen ws://127.0.0.1:4500`.
-- `dev.fulcrum.controller` runs the checkout's editable Python environment with
-  `-m fulcrum.cli serve`.
-
-Both definitions set a deterministic executable `PATH` rather than inheriting
-the shell that ran setup. It includes `~/.local/bin` and `~/bin` for the
-configured macOS user, the standard Apple Silicon and Intel Homebrew locations,
-and the macOS system executable directories. This lets the controller find
-user-installed dependencies such as `bd` and `tg` after a clean login. When a
-rerun changes an installed definition, setup unloads and bootstraps that service
-so the running job receives the repaired environment; unchanged jobs are reused.
-
-After setup completes, launch Codex desktop from the retained checkout with:
+Run setup from the retained checkout:
 
 ```sh
-./scripts/launch_codex.sh
+scripts/setup --input setup.json --non-interactive --json
 ```
 
-This is the user-facing desktop command. It honors `FULCRUM_CONFIG` and
-`FULCRUM_CONTROL_ROOT`, then delegates to the configuration-aware launcher that
-setup installed in the selected control directory. The installed launcher sets
-`CODEX_APP_SERVER_WS_URL` before starting the configured desktop executable; its
-path and contents are internal implementation details. Existing private-runtime
-work must be drained and the desktop relaunched with `./scripts/launch_codex.sh`;
-setup never terminates or silently migrates it.
+The input document supplies any non-default configuration and initial projects.
+`brain.root` is the directory containing the authoritative `fulcrum.yaml`. Runtime
+and delivery provider identities are explicit; projects include absolute roots,
+validation commands, exact provider IDs when already registered, and whether
+source synchronization is required. Use `fulcrum config validate --json` to inspect
+the effective document and missing prerequisites.
 
-Setup checks `/readyz`, the protocol handshake, configured models, native Codex
-project and Tollgate identities, Git/Beads connectivity, linked assets, SQLite,
-and initial Archon policies. It prints `setup incomplete` with the exact remaining
-condition and exits nonzero until all required checks pass.
+Setup performs these bounded operations:
 
-To repair only the links under `~/.codex/skills` after a disposable checkout has
-replaced them, run this from the retained Fulcrum checkout:
+1. Creates only declared instance and brain paths and installs locked dependencies.
+2. Builds an installed controller environment separate from the development `.venv`.
+3. Installs an independent recovery environment and `fulcrum-recover` launcher.
+4. Installs uniquely named controller, Dolt, optional runtime, and updater services.
+5. Initializes one externally served `fulcrum` Beads database, then receipts all
+   subsequent external effects.
+6. Reconciles the nine human-invoked skills and the read-only compaction hook without
+   replacing real user directories or unrelated hooks.
+7. Validates runtime models/efforts and exact project/delivery registrations.
+8. Creates or reuses standing Vizier and Marshal identities without model turns.
+
+Automatic capacity defaults to four globally and four per project. The owned shared
+runtime service uses an FD soft limit of 4096. Setup reports actual capability facts;
+a protocol handshake does not by itself claim Desktop attachment.
+
+Rerun the same command after repairing any named prerequisite. Existing valid YAML,
+leadership IDs, service identity, provider registrations, and completed operation
+receipts are reused. Test fixtures use isolated roots/services and never rewrite
+production links or configuration.
+
+Useful checks:
 
 ```sh
-./scripts/reconcile_skills
+fulcrum service status --instance INSTANCE --json
+fulcrum runtime capabilities --instance INSTANCE --json
+fulcrum project list --instance INSTANCE --json
+fulcrum skills reconcile --instance INSTANCE --json
+fulcrum doctor --instance INSTANCE --json
 ```
 
-The script links every current human-facing Fulcrum skill and refuses to replace
-a real file or directory. It does not remove any other installed skill.
-
-Structured `fulcrum finish --input` files use exact action-scoped destinations
-under the configured control root. The destination follows `FULCRUM_CONFIG`
-adjacency or `FULCRUM_CONTROL_ROOT`; it is never derived from a repository or
-worktree. Author the complete JSON in a sibling temporary file and atomically
-rename it to the destination supplied in the current action.
-
-For service diagnostics, run `fulcrum doctor --json`, inspect the installed and
-loaded controller definitions, and read its error log:
-
-```sh
-plutil -p "$HOME/Library/LaunchAgents/dev.fulcrum.controller.plist"
-launchctl print "gui/$(id -u)/dev.fulcrum.controller"
-tail -n 100 "$HOME/Library/Application Support/Fulcrum/logs/controller-error.log"
-```
-
-If the plist or loaded job has a missing or stale `PATH`, rerun
-`./scripts/setup`; do not repair the session with `launchctl setenv`, because
-that change is transient and is not part of the installed service definition.
+After changing `pyproject.toml` or `requirements-dev.lock`, reinstall both locked
+requirements and the editable package in `.venv`; `scripts/setup` does this.

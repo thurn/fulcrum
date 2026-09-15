@@ -1,6 +1,6 @@
 # 10 — Task control and independent reviews
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md)
 

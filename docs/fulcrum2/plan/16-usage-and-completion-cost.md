@@ -1,6 +1,6 @@
 # 16 — Usage and completion cost
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [06](06-codex-runtime-adapter.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [13](13-plans-and-root-completion.md)
 

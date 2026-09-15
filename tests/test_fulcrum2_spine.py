@@ -10,7 +10,8 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from fulcrum.cli import _execute
+from fulcrum.application import Application
+from fulcrum.cli import COMMANDS, _execute
 from fulcrum.contracts import (
     ActorContext,
     FulcrumError,
@@ -110,6 +111,21 @@ class Fulcrum2SpineTest(unittest.TestCase):
         self.assertEqual(result.returncode, 4)
         envelope = json.loads(result.stdout)
         self.assertEqual(envelope["error"]["code"], "LEDGER_UNAVAILABLE")
+
+    def test_every_public_command_is_discoverable_and_has_an_application_path(
+        self,
+    ) -> None:
+        for definition in COMMANDS:
+            with self.subTest(command=definition.path):
+                result = self.invoke(*definition.path, "--help")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage:", result.stdout)
+
+        resource_clients = {("serve",), ("smoke", "concurrency")}
+        self.assertEqual(
+            {definition.path for definition in COMMANDS} - resource_clients,
+            set(Application()._handlers),
+        )
 
     def test_concurrency_smoke_is_a_self_selecting_bounded_client(self) -> None:
         help_result = self.invoke("smoke", "concurrency", "--help")

@@ -1,15 +1,17 @@
 # Fulcrum2 specification and capability audit
 
-Status: specification review and implementation-plan authoring complete;
-implementation and replacement validation remain pending.
+Status: implementation complete through task 23. Task 24 has observed the required
+30-task overlap, but its final terminal-closeout acceptance run remains pending;
+task 25 removal and final checks are in progress.
 
 This audit covers [design.md](design.md), [contracts.md](contracts.md), the current
 repository implementation, [historical failure evidence](failure-analysis.md), and
 the decisions made during the grill-me review. The [implementation index](plan/README.md)
 assigns every command family and retained requirement to implementation tasks and
-verification. The 25 task files are implementation instructions, not evidence of
-completed product work. No native workers were started, installation reset, or
-product code changed during this documentation work.
+verification. The 25 task files remain instructions rather than evidence. Actual
+deterministic and live evidence is recorded separately in
+[validation-results.md](validation-results.md); incomplete runs remain explicitly
+identified there.
 
 ## Specification findings and resolutions
 
@@ -59,24 +61,24 @@ baseline cited by the previous audit was `e89ae32`; its original redesign docume
 were committed as `8aca63a`. Preserve the operational evidence in the failure
 appendix while replacing the mechanisms explicitly changed by the user.
 
-| Capability | Existing evidence | Replacement implementation and verification |
+| Capability | Delivered implementation | Replacement verification |
 | --- | --- | --- |
-| Stock Beads intake and durable filing independent of publication | [Beads adapter](../../src/fulcrum/beads.py), [intake](../../src/fulcrum/intake.py) | Tasks 02–04, 15, 22; real isolated ledger, native actor/project resolution and response-loss checks. |
+| Stock Beads intake and durable filing independent of publication | [Ledger](../../src/fulcrum/ledger.py), [work](../../src/fulcrum/work.py) | Tasks 02–04, 15, 22; real isolated ledger, native actor/project resolution and response-loss checks. |
 | Native task runtime and project attachment | [Runtime](../../src/fulcrum/runtime.py) | Task 06 retains the existing maintained WebSocket transport and replaces request rejection/recovery assumptions; task 23 provides real execution evidence. |
-| Request/operation recovery, current responsibility and progress | [Controller](../../src/fulcrum/controller.py), [lifecycle](../../src/fulcrum/lifecycle.py) | Tasks 01–02, 04, 08–09, 12, 17 use Beads receipts, acquisition IDs and bounded supervision. |
-| Human role entry, specialist investigation and incidental reports | [CLI](../../src/fulcrum/cli.py), [prompts](../../src/fulcrum/prompts.py), [recovery](../../src/fulcrum/recovery.py) | Tasks 04, 07, 17, 23 implement all eight roles and degraded investigation without healthy-world gates. |
-| Substantial plans, future work and stable refinement | [Weaver prompt](../../src/fulcrum/prompts/weaver.md), [intake](../../src/fulcrum/intake.py) | Tasks 10, 13–14 retain approved scope, independent ordinary-task reviews, explicit activation and selected publication. |
+| Request/operation recovery, current responsibility and progress | [Supervision](../../src/fulcrum/supervision.py), [recovery](../../src/fulcrum/recovery_service.py) | Tasks 01–02, 04, 08–09, 12, 17 use Beads receipts, acquisition IDs and bounded supervision. |
+| Human role entry, specialist investigation and incidental reports | [CLI](../../src/fulcrum/cli.py), [roles](../../src/fulcrum/roles.py), [recovery](../../src/fulcrum/recovery_service.py) | Tasks 04, 07, 17, 23 implement all eight roles and degraded investigation without healthy-world gates. |
+| Substantial plans, future work and stable refinement | [Plans](../../src/fulcrum/plans.py), [reviews](../../src/fulcrum/reviews.py) | Tasks 10, 13–14 retain approved scope, independent ordinary-task reviews, explicit activation and selected publication. |
 | Delivery review, current-source validation and cleanup | [Tollgate adapter](../../src/fulcrum/tollgate.py), [provider fixtures](../../tests/fixtures/tollgate/README.md) | Tasks 11–12, 23 prove Warden fixes, source identity, promotion, configured synchronization and cleanup separately. |
-| Brain source/knowledge persistence | [Brain publication](../../src/fulcrum/brain.py) | Tasks 14–15 retain ordinary Git documents and native Beads Git transport with actual remote inspection and five-minute dirty-only cadence. |
-| Curated memory and persistent policy | [Prior Vizier design](../vizier.md), [configuration](../../src/fulcrum/config.py) | Tasks 03, 14, 18 retain curated Beads memory and human/Vizier-owned YAML; prior complete Vizier implementation was not established. |
-| API-equivalent cost and native usage | [Store calculations](../../src/fulcrum/store.py), [CLI](../../src/fulcrum/cli.py) | Task 16 replaces SQLite facts with bounded Beads analytics, managed-task attribution, decimal provenance, partial coverage and root completion metadata. |
-| Dependencies, priorities, overlaps and capacity | [Scheduling](../../src/fulcrum/scheduling.py) | Tasks 04, 09 replace old scheduler records with native dependencies, composed waiting reasons, decisions and four-slot admission. |
-| Native output, input responses and terminal observation | [Runtime](../../src/fulcrum/runtime.py), [resource checks](../../src/fulcrum/resources.py) | Tasks 05–06, 10 expose typed terminal control and observable capability gaps; no native-subagent subsystem is retained. |
-| Archive visibility, same-work continuity and fleet replacement | [Lifecycle](../../src/fulcrum/lifecycle.py), [operations guide](../operations.md) | Task 18 uses task records, archive-once lifetime state, manual suppression and exact replacement maps. |
-| Compaction and one missing-outcome reminder | [Hook](../../src/fulcrum/hook.py), [hook guide](../hooks.md) | Tasks 07–08 keep advisory read-only context and one scoped reminder, without tool denial or scope replay loops. |
+| Brain source/knowledge persistence | [Knowledge](../../src/fulcrum/knowledge.py), [publication](../../src/fulcrum/publication.py) | Tasks 14–15 retain ordinary Git documents and native Beads Git transport with actual remote inspection and five-minute dirty-only cadence. |
+| Curated memory and persistent policy | [Configuration](../../src/fulcrum/configuration.py), [knowledge](../../src/fulcrum/knowledge.py) | Tasks 03, 14, 18 retain curated Beads memory and human/Vizier-owned YAML. |
+| API-equivalent cost and native usage | [Analytics](../../src/fulcrum/analytics.py) | Task 16 uses bounded Beads analytics, managed-task attribution, decimal provenance, partial coverage and root completion metadata. |
+| Dependencies, priorities, overlaps and capacity | [Work](../../src/fulcrum/work.py), [leadership](../../src/fulcrum/leadership.py) | Tasks 04, 09 use native dependencies, composed waiting reasons, decisions and four-slot admission. |
+| Native output, input responses and terminal observation | [Runtime](../../src/fulcrum/runtime.py), [task service](../../src/fulcrum/runtime_service.py) | Tasks 05–06, 10 expose typed terminal control and observable capability gaps; no native-subagent subsystem is retained. |
+| Archive visibility, same-work continuity and fleet replacement | [Continuity](../../src/fulcrum/continuity.py), [operations guide](../operations.md) | Task 18 uses task records, archive-once lifetime state, manual suppression and exact replacement maps. |
+| Compaction and one missing-outcome reminder | [Role context](../../src/fulcrum/roles.py), [hook guide](../hooks.md) | Tasks 07–08 keep advisory read-only context and one scoped reminder, without tool denial or scope replay loops. |
 | Installation, skill links, shared runtime and quiescent updates | [Installer](../../src/fulcrum/install.py), [setup](../../src/fulcrum/setup.py) | Tasks 19–20 retain owned service repair and installed environments; dependency failure is capability-specific. |
-| Independent emergency launcher and scoped repairs | [Recovery](../../src/fulcrum/recovery.py), [operative](../../src/fulcrum/operative.py) | Tasks 17, 20 preserve essential repair with broken main import and no additional workflow journal. |
-| Diagnostic service/loop/resource evidence | [Doctor](../../src/fulcrum/doctor.py), [readiness](../../src/fulcrum/readiness.py) | Tasks 05, 08 expose useful operator JSON from the first milestones, with retained outcome facts after log pruning. |
+| Independent emergency launcher and scoped repairs | [Recovery entry](../../src/fulcrum/recovery_entry.py), [recovery service](../../src/fulcrum/recovery_service.py) | Tasks 17, 20 preserve essential repair with broken main import and no additional workflow journal. |
+| Diagnostic service/loop/resource evidence | [Diagnostics](../../src/fulcrum/diagnostics.py), [supervision](../../src/fulcrum/supervision.py) | Tasks 05, 08 expose useful operator JSON from the first milestones, with retained outcome facts after log pruning. |
 | Hard reset | [Current reset](../../src/fulcrum/reset.py) | Task 21 replaces broad brain deletion/history rewriting; old-store reads are deletion inventory only, never migration. |
 
 ## Intentional removals
@@ -95,12 +97,13 @@ appendix while replacing the mechanisms explicitly changed by the user.
 - A mandatory validation bead for small plans or a full live role suite on every
   ordinary task promotion. Replacement acceptance itself still requires live evidence.
 
-## Evidence required before shipping
+## Delivered evidence and remaining shipping gate
 
-The documentation review checked the current CLI/code and installed CLI help/schema
-for relevant stock Beads, Tollgate and Codex interfaces. A generated schema proves
-field availability, not complete operational behavior. These tasks retain explicit
-implementation verification obligations:
+The implementation and public CLI now cover the command and requirement maps.
+Unit/integration tests and the deterministic installed-CLI suite cover the typed
+interfaces and failure boundaries below; native execution and provider facts come
+only from recorded live reports. A generated schema alone is never treated as
+operational evidence:
 
 - Tasks 02/15: stock Beads full metadata writes, change inspection and Git-transport
   remote commit proof without a parallel state store.
@@ -113,8 +116,11 @@ implementation verification obligations:
 - Tasks 22–24: public-CLI failure coverage, all eight Luna roles, actual source
   delivery and observed thirty-task overlap/tool use/subscription release.
 
-Unsupported required capabilities remain explicit blockers; implementers may not
-invent successful facts, add an unauthorized compatibility store or silently use
-fake providers for required live evidence. Partial usage telemetry is allowed only
-with accurate coverage. Documentation readiness does not establish implementation
-readiness, production cutover, or completed validation.
+The deterministic suite and eight-role Luna/Tollgate workflow have passed. The
+30-worker run has separately observed the required simultaneous native overlap,
+tool calls, responsive status and no supported overload condition; its one remaining
+shipping gate is a single run that also completes terminal closeout and cleanup
+within the ten-minute envelope. Unsupported required capabilities remain blockers;
+partial usage telemetry is allowed only with accurate coverage. Production cutover
+is never implied by implementation readiness and still requires explicit human
+authorization.

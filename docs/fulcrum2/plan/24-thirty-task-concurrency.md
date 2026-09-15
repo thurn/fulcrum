@@ -1,6 +1,6 @@
 # 24 — Thirty-task concurrency
 
-Status: not implemented.
+Status: implemented; final closeout validation pending.
 
 Dependencies: [06](06-codex-runtime-adapter.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [19](19-installation-and-service.md), [22](22-deterministic-cli-validation.md)
 

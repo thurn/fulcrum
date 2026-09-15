@@ -1,8 +1,8 @@
 # Fulcrum contracts
 
 This is the normative implementation contract for the replacement described in
-[design.md](design.md). Commands shown as `fulcrum ...` are to be implemented.
-Examples using `bd` describe stock Beads capabilities inspected during design.
+[design.md](design.md). Commands shown as `fulcrum ...` are installed product
+interfaces. Examples using `bd` describe stock Beads capabilities used by the product.
 No CLI, record, or adapter compatibility/version negotiation is introduced.
 
 ## 1. Instance and command conventions

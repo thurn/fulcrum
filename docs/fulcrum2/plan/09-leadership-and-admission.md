@@ -1,6 +1,6 @@
 # 09 — Leadership and admission
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [07](07-role-context-and-entry.md), [08](08-controller-supervision.md)
 

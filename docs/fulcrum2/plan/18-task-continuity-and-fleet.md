@@ -1,6 +1,6 @@
 # 18 — Task continuity and fleet
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [13](13-plans-and-root-completion.md), [17](17-recovery-and-human-resolution.md)
 

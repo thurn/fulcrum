@@ -1,6 +1,6 @@
 # 19 — Installation and service
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [03](03-configuration-and-projects.md), [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [17](17-recovery-and-human-resolution.md)
 

@@ -1,6 +1,6 @@
 # 21 — Hard reset and cutover
 
-Status: not implemented.
+Status: implemented and validated.
 
 Dependencies: [15](15-brain-publication.md), [17](17-recovery-and-human-resolution.md), [18](18-task-continuity-and-fleet.md), [19](19-installation-and-service.md), [20](20-source-refresh-and-recovery-launcher.md)
 
