@@ -129,6 +129,15 @@ class Fulcrum2LedgerTest(unittest.TestCase):
         self.assertEqual(conflict.exception.code, "REQUEST_CONFLICT")
         self.assertEqual(conflict.exception.exit_code, 5)
 
+    def test_record_locks_are_shared_across_workspace_ledger_instances(self) -> None:
+        first = Ledger(self.brain)
+        second = Ledger(self.brain)
+
+        self.assertIs(first._lock_for("fc-shared"), second._lock_for("fc-shared"))
+        self.assertIsNot(
+            first._lock_for("fc-shared"), second._lock_for("fc-independent")
+        )
+
     def test_fc_replacement_preserves_unrelated_metadata(self) -> None:
         request = self.request(
             ("policy", "set"),

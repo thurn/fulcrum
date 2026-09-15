@@ -133,6 +133,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+_LEDGER_LOCK_GUARD = threading.RLock()
+_LEDGER_RECORD_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+
+
 class Ledger:
     def __init__(
         self,
@@ -158,13 +162,11 @@ class Ledger:
         self.actor = actor
         self.timeout = timeout
         self.dolt_auto_commit = dolt_auto_commit
-        self._write_lock = threading.RLock()
-        self._bead_locks: dict[str, threading.RLock] = {}
 
     def _lock_for(self, bead_id: str | None) -> threading.RLock:
-        key = bead_id or "__global__"
-        with self._write_lock:
-            return self._bead_locks.setdefault(key, threading.RLock())
+        key = (str(self.workspace), bead_id or "__global__")
+        with _LEDGER_LOCK_GUARD:
+            return _LEDGER_RECORD_LOCKS.setdefault(key, threading.RLock())
 
     def run(
         self,
