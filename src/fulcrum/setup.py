@@ -260,6 +260,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         command=("service", "start"),
         input={},
         arguments={},
+        timeout=max(120.0, setup_request.timeout),
         request_id=str(
             uuid.uuid5(uuid.UUID(setup_request.request_id), "setup-service-start")
         ),
