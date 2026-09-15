@@ -133,6 +133,16 @@ class RoleService:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
         routed_leader = False
         if role in LEADERSHIP_TITLES and request.thread_id is None:
+            from fulcrum.leadership import ensure_leadership
+
+            manager = ConfigurationManager(request.instance.config_path)
+            leadership_config = manager.effective(manager.load()[0])
+            _runtime_call(
+                request,
+                lambda runtime: ensure_leadership(
+                    request, ledger, runtime, leadership_config
+                ),
+            )
             leader_thread = _leader_thread(ledger, role)
             if leader_thread is None:
                 return _degraded(

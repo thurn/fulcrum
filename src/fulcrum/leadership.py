@@ -841,6 +841,12 @@ async def ensure_leadership(
         for record in ledger.list_records(kind="task", limit=0)
         if record.fc and record.fc.get("thread_id")
     }
+    retired_threads = {
+        thread_id
+        for thread_id, record in known_tasks.items()
+        if (record.fc or {}).get("deleted_at") is not None
+        or (record.fc or {}).get("replaced_by") is not None
+    }
     current_control = control
     for role in ("vizier", "marshal"):
         current = current_control
@@ -938,7 +944,15 @@ async def ensure_leadership(
             if connection_error is not None:
                 raise connection_error
             await runtime.connect()
-            native, created = await _create_or_recover_leader(runtime, spec)
+            native, created = await _create_or_recover_leader(
+                runtime,
+                spec,
+                excluded_threads=(
+                    retired_threads.union({recorded_thread})
+                    if stale_task is not None and recorded_thread is not None
+                    else retired_threads
+                ),
+            )
         except AppServerError as error:
             if error.category in {"unavailable", "transient"}:
                 connection_error = error
@@ -1085,8 +1099,17 @@ async def ensure_leadership(
     return actions
 
 
-async def _create_or_recover_leader(runtime: Any, spec: TaskSpec) -> tuple[Any, bool]:
-    matches = await runtime.find_tasks(spec.creation_cwd)
+async def _create_or_recover_leader(
+    runtime: Any,
+    spec: TaskSpec,
+    *,
+    excluded_threads: set[str],
+) -> tuple[Any, bool]:
+    matches = [
+        task
+        for task in await runtime.find_tasks(spec.creation_cwd)
+        if task.id not in excluded_threads
+    ]
     if len(matches) == 1:
         return matches[0], False
     if len(matches) > 1:
@@ -1100,7 +1123,11 @@ async def _create_or_recover_leader(runtime: Any, spec: TaskSpec) -> tuple[Any, 
     except AppServerError as error:
         if not error.uncertain:
             raise
-        observed = await runtime.find_tasks(spec.creation_cwd)
+        observed = [
+            task
+            for task in await runtime.find_tasks(spec.creation_cwd)
+            if task.id not in excluded_threads
+        ]
         if len(observed) == 1:
             return observed[0], True
         raise AppServerError(

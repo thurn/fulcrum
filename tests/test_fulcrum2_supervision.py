@@ -381,7 +381,10 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(application.calls[exhausted_id], calls)
 
     async def test_startup_replaces_missing_standing_leader_identity(self) -> None:
-        del self.runtime.facts["native-vizier-leader"]
+        stale = self.runtime.facts["native-vizier-leader"]
+        self.runtime.facts["native-vizier-leader"] = TaskFacts(
+            **{**stale.__dict__, "exists": False}
+        )
         config = ConfigurationManager(self.config).effective(
             ConfigurationManager(self.config).load()[0]
         )
