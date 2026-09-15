@@ -304,6 +304,77 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
             self.application.dispatch(conflicting)
         self.assertEqual(raised.exception.code, "RECOVERY_SCOPE_CONFLICT")
 
+    def test_scoped_justiciar_reuses_leader_acquisition_across_project_root(
+        self,
+    ) -> None:
+        root = self.work("Post-restart scoped recovery")
+        marshal = self.ledger.show(self.marshal_task)
+        assert marshal is not None and marshal.fc
+        marshal_fc = dict(marshal.fc)
+        marshal_fc["model"] = "gpt-5.6-luna"
+        marshal_fc["effort"] = "low"
+        marshal_fc["last_observed"] = {
+            "id": self.marshal_thread,
+            "runtime_status": "idle",
+            "active_turn": None,
+            "last_turn": {"id": "retained-turn", "status": "completed"},
+            "workspace_roots": [str(self.brain)],
+            "observed_at": "2026-09-15T16:00:00Z",
+        }
+        self.ledger.update_fc(marshal.id, marshal_fc)
+
+        takeover = self.application.dispatch(
+            self.request(
+                ("recover", "takeover"),
+                arguments={
+                    "scope": f"bead:{root}",
+                    "reason": "Exercise the retained leadership acquisition",
+                },
+            )
+        )
+        self.assertEqual(takeover.state, CommandState.COMPLETED)
+        operation = str(takeover.operation_id)
+
+        facts = TaskFacts(
+            id=self.marshal_thread,
+            title="retained marshal",
+            cwd=str(self.brain),
+            project_id=None,
+            workspace_roots=(str(self.brain),),
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="idle",
+            active_turn=None,
+            last_turn={"id": "retained-turn", "status": "completed"},
+            pending_requests=(),
+            observed_at="2026-09-15T16:00:00Z",
+        )
+        runtime = IdleRuntime({self.marshal_thread: facts})
+
+        def submit(action: Any, _timeout: float) -> Any:
+            return asyncio.run(action(runtime))
+
+        entered = self.application.dispatch(
+            self.request(
+                ("enter",),
+                arguments={
+                    "role": "justiciar",
+                    "model": "gpt-5.6-luna",
+                    "effort": "low",
+                },
+                payload={
+                    "bead": root,
+                    "description": "Resolve only the retained scoped recovery.",
+                },
+                runtime_submit=submit,
+            )
+        )
+        self.assertEqual(entered.state, CommandState.COMPLETED)
+        self.assertTrue(entered.result["reused"])
+        self.assertEqual(entered.result["thread_id"], self.marshal_thread)
+        self.assertEqual(entered.result["ownership_operation"], operation)
+
     def test_typed_repairs_reject_before_effect_retain_failure_and_close_reduced_scope(
         self,
     ) -> None:

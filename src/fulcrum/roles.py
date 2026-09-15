@@ -1141,6 +1141,17 @@ def _entry_configuration_compatible(
     fc = task.fc or {}
     if fc.get("model") != model or fc.get("effort") != effort:
         return False
+    if (
+        fc.get("role") == "justiciar"
+        and fc.get("purpose") == "recovery"
+        and isinstance(fc.get("recovery_operation"), str)
+        and bool(fc.get("recovery_operation"))
+    ):
+        # A scoped takeover intentionally reuses the standing Marshal task even
+        # when that leadership task was created outside the recovered project's
+        # workspace.  The recovery fence, rebound work identity, and retained
+        # acquisition authorize the narrower scope; model/effort must still match.
+        return True
     root_value = project.get("root")
     if not isinstance(root_value, str):
         return False
