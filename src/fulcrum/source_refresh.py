@@ -624,7 +624,8 @@ def _source_observation(source: Path) -> tuple[tuple[str, int, int], ...]:
     for path in source.rglob("*"):
         relative = path.relative_to(source)
         if any(
-            part in {".git", ".venv", "__pycache__", "build", "dist"}
+            part in {".git", ".venv", ".pyre", "__pycache__", "build", "dist"}
+            or part.endswith(".egg-info")
             for part in relative.parts
         ):
             continue
