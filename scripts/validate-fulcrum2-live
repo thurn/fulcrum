@@ -874,11 +874,6 @@ def run(driver: Driver) -> None:
         "Weaver retains exactly two concrete deliverables",
         draft,
     )
-    published = publish_plan(driver, plan_root, draft_payload(), activation="active")
-    children = published["children_by_key"]
-    library = str(children["library"])
-    edge_tests = str(children["edge-tests"])
-    driver.ids["main_plan"] = {"root": plan_root, "children": children}
     driver.fc(
         "policy",
         "set",
@@ -896,6 +891,11 @@ def run(driver: Driver) -> None:
         "automatic fixture starts resume after explicit Weaver entry",
         resumed,
     )
+    published = publish_plan(driver, plan_root, draft_payload(), activation="active")
+    children = published["children_by_key"]
+    library = str(children["library"])
+    edge_tests = str(children["edge-tests"])
+    driver.ids["main_plan"] = {"root": plan_root, "children": children}
 
     uncertain = driver.work_create(
         "Clarify aggregation uniqueness",
