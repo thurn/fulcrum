@@ -1,17 +1,10 @@
 #!/bin/sh
 set -eu
-
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-check_venv=${FULCRUM_CHECK_VENV:-"$repo_root/.venv-check"}
-python_command=${FULCRUM_PYTHON:-python3.12}
-
-"$python_command" -m venv --clear "$check_venv"
-"$check_venv/bin/python" -m pip install --disable-pip-version-check --quiet \
-  --requirement "$repo_root/requirements-dev.lock"
-"$check_venv/bin/python" -m pip install --disable-pip-version-check --quiet \
-  --no-deps --editable "$repo_root"
-
+check_venv=${FULCRUM_CHECK_VENV:-"$repo_root/.venv"}
+if [ ! -x "$check_venv/bin/python" ]; then
+  echo "Run scripts/prepare-check first to install check dependencies." >&2
+  exit 2
+fi
 cd "$repo_root"
-"$check_venv/bin/black" --check src tests
-"$check_venv/bin/pyre" --noninteractive check
-"$check_venv/bin/python" -m unittest discover --start-directory tests
+exec "$check_venv/bin/python" "$repo_root/scripts/check.py"

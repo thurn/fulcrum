@@ -60,7 +60,7 @@ class DeliveryService:
             state="completed",
             step="workspace_verified",
             external={
-                "provider": _provider_name(provider),
+                "provider": "tollgate",
                 "repository_id": reference.repository_id,
                 "path": facts.path,
                 "branch": facts.branch,
@@ -151,9 +151,7 @@ class DeliveryService:
             facts = _call(provider.submit(source))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "validation_submit")
-        from fulcrum.deterministic import trigger_crash_boundary
 
-        trigger_crash_boundary(request, operation.id, "delivery_effect_observed")
         _retain_delivery(
             ledger,
             work,
@@ -186,7 +184,7 @@ class DeliveryService:
             state="completed",
             step="validation_submission_observed",
             external={
-                "provider": _provider_name(provider),
+                "provider": "tollgate",
                 "repository_id": source.work.repository_id,
                 "handle": facts.handle,
             },
@@ -301,7 +299,7 @@ class DeliveryService:
             state="completed",
             step="review_source_approved",
             external={
-                "provider": _provider_name(provider),
+                "provider": "tollgate",
                 "repository_id": source.work.repository_id,
                 "handle": handle,
             },
@@ -364,16 +362,14 @@ class DeliveryService:
             facts = _call(provider.promote(source, handle))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "promotion_request")
-        from fulcrum.deterministic import trigger_crash_boundary
 
-        trigger_crash_boundary(request, operation.id, "delivery_effect_observed")
         _retain_delivery(ledger, work, _delivery_update(facts), operation.id)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
             step="promotion_request_observed",
             external={
-                "provider": _provider_name(provider),
+                "provider": "tollgate",
                 "repository_id": source.work.repository_id,
                 "handle": handle,
             },
@@ -417,7 +413,7 @@ class DeliveryService:
             state="completed",
             step="source_synchronization_observed",
             external={
-                "provider": _provider_name(provider),
+                "provider": "tollgate",
                 "repository_id": source.work.repository_id,
                 "handle": handle,
                 "integration_oid": facts.integration_oid,
@@ -459,17 +455,6 @@ def _context(
             "PROJECT_NOT_FOUND", f"work {bead_id} has no enrolled project"
         )
     delivery_config = config["delivery"]
-    if delivery_config.get("kind") == "deterministic":
-        endpoint = delivery_config.get("endpoint")
-        if not isinstance(endpoint, str) or not endpoint:
-            raise FulcrumError(
-                "DELIVERY_UNAVAILABLE",
-                "deterministic delivery endpoint is not configured",
-                exit_code=4,
-            )
-        from fulcrum.deterministic import DeterministicDelivery
-
-        return ledger, work, project, DeterministicDelivery(endpoint)
     try:
         tollgate = Tollgate(
             delivery_config.get("executable"), timeout=max(1, int(request.timeout))
@@ -479,14 +464,6 @@ def _context(
             "DELIVERY_UNAVAILABLE", str(error), exit_code=4, retryable=False
         ) from error
     return ledger, work, project, TollgateDelivery(tollgate)
-
-
-def _provider_name(provider: Delivery) -> str:
-    return (
-        "deterministic"
-        if provider.__class__.__name__ == "DeterministicDelivery"
-        else "tollgate"
-    )
 
 
 def _work_ref(

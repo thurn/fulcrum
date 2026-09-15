@@ -1,7 +1,10 @@
 # Fulcrum2 implementation plan
 
-Status: implementation complete through task 23; task 24 final closeout validation
-and task 25 replacement audit are in progress.
+The testing policy supersedes the original implementation-era validation tasks:
+22–24 and their native rerun requirements are retired. Current acceptance is the
+complete 55-second `scripts/check`; see [validation](../../validation.md).
+
+Status: historical implementation ordering; validation tasks 22–24 are retired.
 
 This is a ground-up replacement plan, not evidence that the current executable
 implements the specified commands. Read [design.md](../design.md) for architecture,
@@ -27,11 +30,9 @@ workflow store. Task numbers order implementation work; they are not versions.
 - Only human/Vizier authorizes future-plan activation. Root completion is mechanical
   over approved obligations; cancelled children do not imply success. A separate
   validation child is a judgment call, never a default for small plans.
-- Replacement evidence requires deterministic installed-CLI checks and live Luna/low
-  work across all eight roles with real delivery (50 minutes), plus thirty-task
-  concurrency (10 minutes). Ordinary promotions use proportionate checks.
-- Validation scripts own assertions/reports. Test utilities expose fixture/provider
-  controls but create no acceptance work kind, workflow engine, or retry subsystem.
+- Acceptance requires the complete prepared-environment check within 55 seconds.
+  Tests use in-process decisions, small record stores, and mocked external results.
+  Integration/live harnesses and public testing controls have been deleted.
 - Hard reset replaces dedicated remote ledger history, preserving ordinary brain
   history/documents/configuration and unrelated resources. It does not promise
   physical erasure from hosting-provider retention.
@@ -55,8 +56,8 @@ Use existing transport, provider parsing, decimal arithmetic and service mechani
 where they fit; remove obsolete responsibility when replaced. The current runtime
 already uses `websockets`; do not invent a rewrite of nonexistent framing code.
 Tests must prove behavior, not internal module layout or prompt spelling. Add CLI
-behavior checks with each task, consolidating fixtures/cases in task 22. Tests that
-need a later adapter must expose the dependency honestly until it is integrated.
+behavior checks with each task. Keep test support local and small; do not recreate
+external databases, Git repositories, or installed workflows.
 
 Follow the repository's active workflow and Conventional Commits. For one-off work,
 AGENTS.md requires committing and pushing changes. Dependency/lock edits require
@@ -65,13 +66,9 @@ plan does not authorize production reset or run native tasks during authoring.
 
 ## Task inventory and dependencies
 
-Dependency lists are completion dependencies. Task 22's fixture foundation starts
-alongside task 02 and grows with the implementation; its final completion depends
-on tasks 01–21. Early tasks own the narrow test support they need, so the final
-validation task is not a circular prerequisite. Likewise tasks 06/10 define runtime
-and review interfaces before task 13's complete plan lifecycle; task 13 implements
-publication through a boundary fulfilled by task 14, exposing unavailable remote
-publication until then. No false positive completes those integration obligations.
+The table records the original implementation ordering. Tasks 22–24 are retired;
+references to them no longer impose completion dependencies. Current testing
+requirements are defined in [validation](../../validation.md).
 
 | Task | Responsibility | Dependencies |
 | --- | --- | --- |
@@ -96,9 +93,9 @@ publication until then. No false positive completes those integration obligation
 | [19 — Installation and service](19-installation-and-service.md) | Rerunnable installation, services and Desktop attachment. | [03](03-configuration-and-projects.md), [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [17](17-recovery-and-human-resolution.md) |
 | [20 — Source refresh and recovery launcher](20-source-refresh-and-recovery-launcher.md) | Quiescent installed swap and independent repair runtime. | [17](17-recovery-and-human-resolution.md), [19](19-installation-and-service.md) |
 | [21 — Hard reset and cutover](21-hard-reset-and-cutover.md) | Enumerated resumable reset and dedicated remote history replacement. | [15](15-brain-publication.md), [17](17-recovery-and-human-resolution.md), [18](18-task-continuity-and-fleet.md), [19](19-installation-and-service.md), [20](20-source-refresh-and-recovery-launcher.md) |
-| [22 — Deterministic CLI validation](22-deterministic-cli-validation.md) | Installed CLI regression scripts and isolated deterministic providers. | [01](01-cli-application-spine.md), [02](02-beads-ledger-and-operations.md), [03](03-configuration-and-projects.md), [04](04-work-and-ownership.md), [05](05-observability-and-inspection.md), [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [11](11-workspaces-and-delivery-adapter.md), [12](12-executor-warden-delivery.md), [13](13-plans-and-root-completion.md), [14](14-memory-and-document-publication.md), [15](15-brain-publication.md), [16](16-usage-and-completion-cost.md), [17](17-recovery-and-human-resolution.md), [18](18-task-continuity-and-fleet.md), [19](19-installation-and-service.md), [20](20-source-refresh-and-recovery-launcher.md), [21](21-hard-reset-and-cutover.md) |
-| [23 — Luna end-to-end validation](23-luna-end-to-end-validation.md) | Real eight-role Luna synthetic workflows and actual delivery. | [05](05-observability-and-inspection.md), [10](10-task-control-and-reviews.md), [12](12-executor-warden-delivery.md), [13](13-plans-and-root-completion.md), [14](14-memory-and-document-publication.md), [15](15-brain-publication.md), [16](16-usage-and-completion-cost.md), [17](17-recovery-and-human-resolution.md), [18](18-task-continuity-and-fleet.md), [19](19-installation-and-service.md), [20](20-source-refresh-and-recovery-launcher.md), [21](21-hard-reset-and-cutover.md), [22](22-deterministic-cli-validation.md) |
-| [24 — Thirty-task concurrency](24-thirty-task-concurrency.md) | Bounded real 30-task overlap, tool execution and release. | [06](06-codex-runtime-adapter.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [19](19-installation-and-service.md), [22](22-deterministic-cli-validation.md) |
+| [22 — Deterministic CLI validation](22-deterministic-cli-validation.md) | Retired; use the complete fast repository check. | None. |
+| [23 — Luna end-to-end validation](23-luna-end-to-end-validation.md) | Retired; use the complete fast repository check. | None. |
+| [24 — Thirty-task concurrency](24-thirty-task-concurrency.md) | Retired; use the complete fast repository check. | None. |
 | [25 — Replacement completion](25-replacement-completion.md) | Obsolete-code removal, documentation and actual readiness evidence. | [01](01-cli-application-spine.md), [02](02-beads-ledger-and-operations.md), [03](03-configuration-and-projects.md), [04](04-work-and-ownership.md), [05](05-observability-and-inspection.md), [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [10](10-task-control-and-reviews.md), [11](11-workspaces-and-delivery-adapter.md), [12](12-executor-warden-delivery.md), [13](13-plans-and-root-completion.md), [14](14-memory-and-document-publication.md), [15](15-brain-publication.md), [16](16-usage-and-completion-cost.md), [17](17-recovery-and-human-resolution.md), [18](18-task-continuity-and-fleet.md), [19](19-installation-and-service.md), [20](20-source-refresh-and-recovery-launcher.md), [21](21-hard-reset-and-cutover.md), [22](22-deterministic-cli-validation.md), [23](23-luna-end-to-end-validation.md), [24](24-thirty-task-concurrency.md) |
 
 ### Milestones
@@ -111,8 +108,8 @@ publication until then. No false positive completes those integration obligation
    closure, memory and remote database/document persistence. Task 11 can start after 04.
 4. **Operable installation — 16–21:** costs, recovery, archive/fleet continuity,
    installed services, independent repair, source refresh and safe cutover machinery.
-5. **Replacement evidence — 22–25:** completed deterministic coverage, live all-role
-   delivery and 30-task concurrency, then final removal/packaging/documentation audit.
+5. **Replacement completion — 25:** complete fast checks and the final
+   removal/packaging/documentation audit. Validation tasks 22–24 are retired.
 
 These milestones organize dependencies; they do not create new product workflow
 stages or request parallel agents. Each task is implemented under its assigned scope.
@@ -163,18 +160,13 @@ an explicit bootstrap, degraded repair, hook, or test-provider exception applies
 | `usage`, `cost`, `rates list/show/add`, `usage reconcile` | analytics projection / resource reconcile | [16](16-usage-and-completion-cost.md) | Unique turns, provenance, partial coverage and corrections |
 | `fleet replace --mode drain\|interrupt` | task resource / transfer | [18](18-task-continuity-and-fleet.md) | Interrupted replacement map and no timeout escalation |
 | `reset --hard --yes` | exclusive reset resource operation | [21](21-hard-reset-and-cutover.md) | Temporary Beads authority, remote history and preserved sentinels |
-| `fixture create/show/cleanup` | test utility using setup/resources | [22](22-deterministic-cli-validation.md) | No production fallback; exact inventory and caller evidence |
-| `fixture barrier prepare/arrive/show/release` | external fixture resource control | [22](22-deterministic-cli-validation.md), [24](24-thirty-task-concurrency.md) | Real overlapping native/tool observations |
-| `scenario emit/advance/fault/crash` | deterministic provider/controller test controls | [22](22-deterministic-cli-validation.md) | Named crash boundaries; no arbitrary work-state injection |
-| `smoke concurrency` | bounded public-CLI test client | [24](24-thirty-task-concurrency.md) | 30 automatic starts, native overlap, tools and release |
 
-## Requirement and verification map
+## Historical requirement and verification map
 
-The command map above covers executable access. This table covers cross-cutting
-behavior and retained capabilities; together with the numbered tasks it is the
-replacement acceptance checklist, not a new acceptance concept in Fulcrum.
+The following table records former validation expectations, not current gates.
+Current acceptance and retained coverage are defined in [validation](../../validation.md).
 
-| Requirement | Implementation | Required evidence |
+| Requirement | Implementation | Former evidence |
 | --- | --- | --- |
 | One stock Beads ledger, native fields, no private workflow database | [02](02-beads-ledger-and-operations.md), [03](03-configuration-and-projects.md), [04](04-work-and-ownership.md), [25](25-replacement-completion.md) | Real native intake and ordinary bd reads; source/packaging audit |
 | One writer across instance aliases; explicit isolation and configuration repair | [01](01-cli-application-spine.md), [03](03-configuration-and-projects.md), [19](19-installation-and-service.md) | Concurrent locks, dangling config, unavailable Beads repair |
@@ -198,38 +190,12 @@ replacement acceptance checklist, not a new acceptance concept in Fulcrum.
 
 ## Validation execution and reporting
 
-Implement `scripts/validate-fulcrum2-cli` for deterministic cases and
-`scripts/validate-fulcrum2-live` for functional native work. The CLI smoke utility
-uses the same public fixture/task commands. Fixture/provider setup is exposed by
-Fulcrum; scripts can use independent Git/content assertions as oracles but cannot
-advance workflows through hidden SQL, monkeypatches or fabricated native outcomes.
-
-Deterministic cases run against an installed executable, real disposable stock
-Beads and persisted fake external providers. Run served/offline paths, response
-loss, finite retries, crash boundaries and event/timer recovery. Native calls are
-excluded from routine deterministic checks. Start this evidence incrementally.
-
-Explicit native replacement validation uses Luna/low for all eight roles and review
-tasks, real Tollgate/Git, required fixture source sync and normal four-slot admission.
-Functional budget is 3,000 seconds, reserving its final 120 seconds for evidence and
-bounded cleanup. Native turn counts are reported; the driver does not silently rerun failed cases
-or introduce a production turn-budget policy. Native concurrency uses a 600-second total budget, begins cleanup by
-second 540, and temporarily configures both fixture limits to 30 without changing
-production defaults. Idle leaders do not dilute its measured active-task interval.
-
-Reports retain invocation/source commit, fixture/provider/runtime/model facts,
-public command/result references, actual bead/task/turn/operation/source IDs,
-assertions, observation gaps, API-equivalent cost coverage, and cleanup outcome.
-Missing required capability/evidence or exhausted time cannot be called a pass.
-Ordinary bounded workflow recovery may run; reports remain external to workflow
-state. Preserve failed evidence and require an explicit rerun rather than quietly
-resetting failures until a passing result appears. No physical dollar estimate is
-used as an enforceable subscription-spend claim.
-
-Before declaring replacement readiness, run appropriate repository checks and
-complete both forms of native evidence. Neither this plan nor the historical audit
-claims those tests have passed. Production cutover is a separately explicit user
-action; destructive tests target only enumerated disposable fixtures.
+Run the complete `scripts/check` after preparing dependencies separately. The gate
+includes formatting, strict types, and all focused tests, with a 55-second total
+deadline. Test external observations through adapter boundaries and in-memory
+records. Do not rebuild databases, repositories, installations, or live workflows.
+No native/model run or retired deterministic harness is a replacement-readiness
+requirement. Historical reports remain historical evidence only.
 
 ## Documentation review record
 
@@ -238,7 +204,7 @@ prompt instead of direct input, redundant ownership tokens, a mistaken 30-task
 default/recovery reserve, native-subagent requirements, incomplete CLI actions,
 and no precise root-completion rule. Those are corrected in the normative docs.
 Writer isolation, bootstrap/degraded paths, decision freshness, publication feedback,
-fixture controls and machine-readable observability are now specified as well.
+and machine-readable observability remain specified; fixture controls are retired.
 
 Remaining unknowns are implementation verification obligations, not permission for
 workers to select a different architecture: stock Beads field/history behavior,

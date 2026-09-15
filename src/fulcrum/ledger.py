@@ -592,9 +592,7 @@ class Ledger:
             owner=responsible,
             fc=fc,
         )
-        from fulcrum.deterministic import trigger_crash_boundary
 
-        trigger_crash_boundary(request, record_id, "receipt_created")
         return OperationRecord.from_record(created), False
 
     def update_operation(

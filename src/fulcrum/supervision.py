@@ -216,18 +216,10 @@ class ControllerSupervisor:
         self.runtime: Runtime
         if clock is not None:
             self.clock = clock
-        elif runtime_config.get("kind") == "deterministic":
-            from fulcrum.deterministic import DeterministicClock
-
-            self.clock = DeterministicClock(endpoint)
         else:
             self.clock = SystemClock()
         if runtime is not None:
             self.runtime = runtime
-        elif runtime_config.get("kind") == "deterministic":
-            from fulcrum.deterministic import DeterministicRuntime
-
-            self.runtime = DeterministicRuntime(endpoint)
         else:
             self.runtime = AppServerRuntime(endpoint)
         self.health = HealthFile(

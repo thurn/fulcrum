@@ -679,8 +679,6 @@ def _asset_capability(controller: Path) -> dict[str, Any]:
 
 def _delivery_capability(config: Mapping[str, Any]) -> dict[str, Any]:
     delivery = config["delivery"]
-    if delivery["kind"] == "deterministic":
-        return {"required": True, "available": True, "kind": "deterministic"}
     executable = delivery.get("executable")
     available = isinstance(executable, str) and Path(executable).is_file()
     invalid: list[str] = []
@@ -727,25 +725,6 @@ def _runtime_and_leadership(
     services: Mapping[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     runtime_config: Mapping[str, Any] = config["runtime"]
-    if runtime_config["kind"] == "deterministic":
-        supported: dict[str, list[str]] = {}
-        for row in config["models"].values():
-            efforts = supported.setdefault(str(row["model"]), [])
-            if str(row["effort"]) not in efforts:
-                efforts.append(str(row["effort"]))
-        return (
-            {
-                "required": True,
-                "available": True,
-                "kind": "deterministic",
-                "models": supported,
-                "projects": {
-                    project_id: {"available": True, "kind": "deterministic"}
-                    for project_id in config["projects"]
-                },
-            },
-            [],
-        )
     runtime_service = services.get("runtime")
     if runtime_service is not None:
         _start_one(runtime_service, endpoint=str(runtime_config["endpoint"]))

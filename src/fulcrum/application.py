@@ -16,7 +16,6 @@ from fulcrum.continuity import ContinuityService
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
-from fulcrum.fixture_service import BarrierService, FixtureService, ScenarioService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -60,20 +59,6 @@ class Application:
         self.register(("service", "status"), services.status)
         self.register(("service", "update"), SourceRefreshService().update)
         self.register(("reset",), ResetService().hard_reset)
-        fixtures = FixtureService()
-        self.register(("fixture", "create"), fixtures.create)
-        self.register(("fixture", "show"), fixtures.show)
-        self.register(("fixture", "cleanup"), fixtures.cleanup)
-        barriers = BarrierService()
-        self.register(("fixture", "barrier", "prepare"), barriers.prepare)
-        self.register(("fixture", "barrier", "arrive"), barriers.arrive)
-        self.register(("fixture", "barrier", "show"), barriers.show)
-        self.register(("fixture", "barrier", "release"), barriers.release)
-        scenarios = ScenarioService()
-        self.register(("scenario", "emit"), scenarios.emit)
-        self.register(("scenario", "advance"), scenarios.advance)
-        self.register(("scenario", "fault"), scenarios.fault)
-        self.register(("scenario", "crash"), scenarios.crash)
         self.register(("skills", "reconcile"), SkillsService().reconcile)
         configuration = ConfigurationService()
         self.register(("config", "show"), configuration.show)
@@ -254,16 +239,6 @@ class Application:
         error: Exception | None = None,
         adapter_error: LedgerFailure | None = None,
     ) -> None:
-        if (
-            request.command == ("fixture", "cleanup")
-            and result is not None
-            and result.ok
-            and isinstance(result.result, dict)
-            and result.result.get("root_removed") is True
-        ):
-            # Successful fixture cleanup deliberately removes its own diagnostic
-            # root. Recreating it to log the cleanup would contradict the result.
-            return
         public_error = error if isinstance(error, FulcrumError) else None
         event = {
             "event": "command_completed",

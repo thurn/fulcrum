@@ -1,76 +1,66 @@
 # Validation
 
-Validation reports are evidence, not workflow state. Public scripts drive the
-installed CLI and public fixture/provider controls; they do not add an acceptance
-work kind, retry engine, or hidden state injector.
+## Prepare dependencies
 
-## Repository checks
+Run once in each checkout, and again after changing dependency or packaging inputs:
+
+```sh
+scripts/prepare-check
+```
+
+This installs `requirements-dev.lock` and the editable package into `.venv` without
+starting Fulcrum services. Set `FULCRUM_CHECK_VENV` to select a different prepared
+environment or `FULCRUM_PYTHON` to select Python 3.12 for environment creation.
+Dependency provisioning is outside the check's runtime budget.
+
+## Complete repository check
 
 ```sh
 scripts/check
 ```
 
-This builds a clean check environment from `requirements-dev.lock`, installs the
-package, checks formatting and types, and discovers the complete unit/integration
-test suite.
+The command checks formatting, performs full strict type checking, and discovers
+all tests. It prints phase durations and the five slowest tests. Normal execution
+should finish within 30 seconds; the hard deadline is 55 seconds, including child
+process termination. Failed, skipped, empty, or timed-out tests cannot produce a
+passing check. Dependencies are never installed or environments rebuilt here.
 
-## Deterministic installed CLI
+Tests exercise real Fulcrum decision logic with small in-memory record stores and
+mocked external adapter results. Coverage prioritizes request reuse and conflicts,
+ownership, dependencies, capacity and admission, exact recovery matching, delivery
+evidence, runtime protocols, CLI contracts, and resource cleanup boundaries.
+Small temporary-file and local-socket tests remain where they test those interfaces.
+Unexpected process execution fails immediately; the only exception is the launcher
+test's copied shell script invoking its local argument-printing stub.
 
-```sh
-scripts/validate-fulcrum2-cli --report /absolute/report.json
-```
+Beads, Dolt, Git, Tollgate, Codex, remote services, and model calls are not required
+to run the tests. These checks do not establish live provider compatibility or
+prove complete production workflows. New regressions should be expressed through
+the narrowest relevant production boundary, using clocks/events instead of long
+waits and adapter results instead of external installations.
 
-The suite uses isolated real Beads state and deterministic runtime/delivery adapters.
-It covers normal delivery plus invalid input, actor denial, duplicate/conflicting
-requests, lost responses, restart/reconciliation, dependency and review paths,
-publication/analytics, recovery, reset boundaries, and exact fixture cleanup.
+## Retired validation
 
-## Live eight-role workflow
+The former deterministic CLI, eight-role live workflow, and thirty-task smoke
+harnesses were deleted, together with their expensive integration suites. There
+is no optional or nightly copy. The `fixture`, `scenario`, and `smoke concurrency`
+commands, file-backed simulated providers, and crash-injection hooks were removed.
+Runtime configuration now requires `codex`; delivery configuration requires
+`tollgate`. Invalid retired kinds are rejected rather than migrated.
 
-```sh
-scripts/validate-fulcrum2-live \
-  --model gpt-5.6-luna --effort low --timeout 3000 \
-  --report /absolute/live-report.json
-```
+[Historical replacement reports](fulcrum2/validation-results.md) describe earlier
+observations only. They impose no rerun or shipping requirement. The repository
+acceptance gate is the complete check above.
 
-This starts real Luna work for Vizier, Marshal, Weaver, Executor, Warden, Sage,
-Mason, and Justiciar and proves an actual Tollgate/Git delivery. The report records
-native task/turn IDs, prompts, tool evidence, ownership, source identities,
-provider facts, usage coverage, cleanup, and observation gaps. The acceptance
-budget is 50 minutes.
+## Measured acceptance
 
-## Thirty-task concurrency
+On 2026-09-15, the complete check passed locally in **3.55 seconds with cold
+formatter/type-check caches**, then **3.14 and 3.44 seconds** on repeated runs.
+Each run included formatting, full strict type checking, and all **79 tests**.
+The tests also passed with Beads, Dolt, Git, Tollgate, and Codex unavailable on PATH.
 
-```sh
-scripts/validate-fulcrum2-concurrency \
-  --workers 30 --model gpt-5.6-luna --effort low --timeout 600 \
-  --report /absolute/concurrency-report.json
-```
-
-The smoke pauses admission while recording 30 normal authorizations, unpauses for
-controller reconciliation, and requires 30 distinct native task and turn IDs active
-together at a public barrier. Every worker must call the barrier tool and later
-finish with evidence. Status must remain responsive, the runtime must report no
-supported overload signal, and every subscription/task/provider/fixture owned by the
-run must be released or removed. Work creation/admission, ledger subprocesses,
-external runtime calls, and IPC all remain explicitly bounded.
-
-The ten-minute budget includes fixture installation and cleanup. A report remains
-failed if only the overlap assertions pass but terminal closeout or cleanup is
-incomplete. To avoid repeating a known-good long setup while diagnosing a later
-phase, retain and inspect the per-phase report and use focused unit/integration
-tests; do not relabel partial evidence as a pass. A reusable live fixture may be
-added only if it preserves exact ownership, source identity, and cleanup semantics.
-
-## Evidence rules
-
-Every report records its invocation, installed source commit, fixture/runtime and
-delivery-provider facts, assertions, explicit gaps, cleanup results, and JSON plus
-Markdown paths. Keep successful reports; do not overwrite them with later attempts.
-Any source change that can affect the exercised path requires proportionate retest.
-Documentation-only changes and deletion of unreachable replacement code do not
-invalidate already-recorded native execution evidence, but the final repository
-checks and deterministic installed-CLI suite still run after cleanup.
-
-Actual replacement runs are listed in
-[validation-results.md](fulcrum2/validation-results.md).
+An intentionally failing test returned exit 1. An intentionally stalled test was
+terminated after 53.11 seconds with exit 124; a separate process-tree probe verified
+that timeout cleanup terminates grandchildren too. Those temporary acceptance
+probes were removed. These timings exclude dependency provisioning and describe
+this local execution environment, not an unmeasured remote runner.

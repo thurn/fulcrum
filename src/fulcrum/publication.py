@@ -662,9 +662,7 @@ class LedgerPublicationService:
                 completed = self._complete(
                     ledger, config, adapter, operation, target_commit, planned, now
                 )
-                from fulcrum.deterministic import trigger_crash_boundary
 
-                trigger_crash_boundary(request, operation.id, "publication_pushed")
                 return completed
         assert error is not None
         return self._fail(ledger, operation, publication, planned, error, now)

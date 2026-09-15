@@ -24,7 +24,6 @@ from fulcrum.contracts import (
     ActorContext,
     CommandResult,
     FulcrumError,
-    InstanceContext,
     ParsedRequest,
 )
 from fulcrum.diagnostics import DiagnosticLog
@@ -92,8 +91,6 @@ READ_ONLY_COMMANDS = {
     ("cost",),
     ("rates", "list"),
     ("rates", "show"),
-    ("fixture", "show"),
-    ("fixture", "barrier", "show"),
 }
 BROKEN_CONFIG_COMMANDS = {
     ("setup",),
@@ -109,8 +106,6 @@ LOCAL_COMMANDS = {
     ("service", "status"),
     ("service", "update"),
     ("reset",),
-    ("fixture", "create"),
-    ("fixture", "cleanup"),
 }
 
 
@@ -244,22 +239,6 @@ COMMANDS = (
     CommandDefinition(("rates", "add"), "add an immutable documented rate card"),
     CommandDefinition(("fleet", "replace"), "replace a scoped managed task fleet"),
     CommandDefinition(("reset",), "perform an explicitly authorized hard reset"),
-    CommandDefinition(("fixture", "create"), "create an isolated test fixture"),
-    CommandDefinition(("fixture", "show"), "show retained fixture inventory"),
-    CommandDefinition(("fixture", "cleanup"), "clean an exact disposable fixture"),
-    CommandDefinition(("fixture", "barrier", "prepare"), "prepare a fixture barrier"),
-    CommandDefinition(("fixture", "barrier", "arrive"), "arrive at a fixture barrier"),
-    CommandDefinition(("fixture", "barrier", "show"), "show a fixture barrier"),
-    CommandDefinition(("fixture", "barrier", "release"), "release a fixture barrier"),
-    CommandDefinition(("scenario", "emit"), "emit a deterministic provider event"),
-    CommandDefinition(("scenario", "advance"), "advance the deterministic clock"),
-    CommandDefinition(("scenario", "fault"), "arm a deterministic provider fault"),
-    CommandDefinition(
-        ("scenario", "crash"), "arm a persisted controller crash boundary"
-    ),
-    CommandDefinition(
-        ("smoke", "concurrency"), "run bounded native concurrency validation"
-    ),
 )
 
 
@@ -303,8 +282,6 @@ POSITIONAL_ID: set[tuple[str, ...]] = {
         ("memory", "show"),
         ("rates", "show"),
         ("human", "resolve"),
-        ("fixture", "show"),
-        ("fixture", "cleanup"),
     }
 }
 
@@ -545,36 +522,6 @@ def _add_command_options(
     elif path == ("reset",):
         _option(parser, "--hard", action="store_true", required=True)
         _option(parser, "--yes", action="store_true", required=True)
-    elif path in {
-        ("fixture", "cleanup"),
-    }:
-        _option(parser, "--yes", action="store_true", required=True)
-    elif path[:3] == ("fixture", "barrier", "prepare"):
-        parser.add_argument("id")
-        _option(parser, "--name", required=True)
-    elif path[:3] == ("fixture", "barrier", "arrive"):
-        parser.add_argument("id")
-        _option(parser, "--name", required=True)
-        _option(parser, "--participant", required=True)
-    elif path[:3] in {
-        ("fixture", "barrier", "show"),
-        ("fixture", "barrier", "release"),
-    }:
-        parser.add_argument("id")
-        _option(parser, "--name", required=True)
-    elif path == ("scenario", "crash"):
-        _option(parser, "--operation", required=True)
-        _option(parser, "--boundary", required=True)
-    elif path == ("scenario", "advance"):
-        _option(parser, "--seconds", type=float, required=True)
-    elif path == ("smoke", "concurrency"):
-        _option(parser, "--workers", type=int, default=30)
-        _option(parser, "--runtime-endpoint")
-        _option(parser, "--codex-executable")
-        _option(parser, "--tollgate-executable")
-        _option(parser, "--command-timeout", type=float)
-        _option(parser, "--fixture-parent")
-        _option(parser, "--report")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -783,24 +730,6 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "long_context",
         "tools",
     },
-    ("fixture", "create"): {
-        "root",
-        "runtime",
-        "delivery",
-        "model",
-        "effort",
-        "capacity",
-        "source_sync",
-    },
-    ("fixture", "barrier", "prepare"): {"participants"},
-    ("scenario", "emit"): {"provider", "event", "target", "data"},
-    ("scenario", "fault"): {
-        "provider",
-        "method",
-        "occurrence",
-        "effect",
-        "response",
-    },
 }
 
 
@@ -898,38 +827,12 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     timeout = float(values.get("timeout", 30.0))
     if timeout <= 0:
         raise FulcrumError.invalid("INVALID_TIMEOUT", "timeout must be positive")
-    if command == ("fixture", "create"):
-        if values.get("instance") is not None or values.get("config") is not None:
-            raise FulcrumError.invalid(
-                "FIXTURE_SELECTION_CONFLICT",
-                "fixture create selects its instance only from input.root",
-            )
-        root_value = payload.get("root")
-        if (
-            not isinstance(root_value, str)
-            or not Path(root_value).expanduser().is_absolute()
-        ):
-            raise FulcrumError.invalid(
-                "INVALID_PATH", "fixture input.root must be an absolute path"
-            )
-        root = Path(root_value).expanduser().resolve(strict=False)
-        brain = root / "brain"
-        instance_root = root / "instance"
-        instance = InstanceContext(
-            instance_root=instance_root,
-            config_path=brain / "fulcrum.yaml",
-            brain_root=brain,
-            socket_path=instance_root / "controller.sock",
-            lock_path=brain / ".fulcrum-controller.lock",
-            explicit_selection=True,
-        )
-    else:
-        allow_broken = command in BROKEN_CONFIG_COMMANDS
-        instance = resolve_instance(
-            instance=values.get("instance"),
-            config=values.get("config"),
-            allow_broken_config=allow_broken,
-        )
+    allow_broken = command in BROKEN_CONFIG_COMMANDS
+    instance = resolve_instance(
+        instance=values.get("instance"),
+        config=values.get("config"),
+        allow_broken_config=allow_broken,
+    )
     environment_task = os.environ.get("CODEX_THREAD_ID")
     explicit_actor = values.get("actor")
     thread_id = values.get("thread_id") or (
@@ -937,7 +840,7 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     )
     actor_text = values.get("actor") or (
         "human"
-        if command in {("setup",), ("fixture", "create"), ("fixture", "cleanup")}
+        if command == ("setup",)
         else f"task:{thread_id}" if thread_id else "human"
     )
     actor = ActorContext.parse(actor_text)
@@ -1198,17 +1101,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     namespace: argparse.Namespace | None = None
     try:
         namespace = parser.parse_args(argv)
-        if tuple(getattr(namespace, "_command_path", ())) == (
-            "smoke",
-            "concurrency",
-        ):
-            from fulcrum.concurrency_smoke import run_concurrency_smoke
-
-            result = run_concurrency_smoke(
-                namespace, executable=Path(os.path.abspath(sys.argv[0]))
-            )
-            _emit(result, json_output=bool(getattr(namespace, "json", False)))
-            return _exit_code(result)
         request = _build_request(namespace)
         result = _execute(request)
         if request.command == ("hook", "context"):

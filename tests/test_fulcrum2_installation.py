@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-from fulcrum.configuration import ConfigurationManager, default_config
+from tests import local_launcher_stub
+
+from fulcrum.configuration import default_config
 from fulcrum.contracts import (
     ActorContext,
     CommandResult,
@@ -56,8 +57,8 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             "executable": "/usr/bin/true",
         }
         self.config["delivery"] = {
-            "kind": "deterministic",
-            "executable": None,
+            "kind": "tollgate",
+            "executable": "/usr/bin/true",
         }
 
     def tearDown(self) -> None:
@@ -81,6 +82,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             offline=True,
         )
 
+    @patch("fulcrum.install.shutil.which", new=lambda _name: "/usr/bin/true")
     def test_service_identity_is_stable_unique_and_definitions_are_rerunnable(
         self,
     ) -> None:
@@ -162,11 +164,11 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             {
                 "beads": {"executable": "/usr/bin/true"},
                 "runtime": {
-                    "kind": "deterministic",
+                    "kind": "codex",
                     "endpoint": "ws://127.0.0.1:1",
-                    "executable": None,
+                    "executable": "/usr/bin/true",
                 },
-                "delivery": {"kind": "deterministic", "executable": None},
+                "delivery": {"kind": "tollgate", "executable": "/usr/bin/true"},
             },
             non_interactive=True,
         )
@@ -213,9 +215,10 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         executable.write_text('#!/bin/sh\nprintf "<%s>\\n" "$@"\n', encoding="utf-8")
         executable.chmod(0o700)
 
-        launched = subprocess.run(
-            [str(script), "--json"], capture_output=True, text=True, check=False
-        )
+        with local_launcher_stub(script):
+            launched = subprocess.run(
+                [str(script), "--json"], capture_output=True, text=True, check=False
+            )
 
         self.assertEqual(launched.returncode, 0, launched.stderr)
         self.assertEqual(launched.stdout, "<runtime>\n<launch-desktop>\n<--json>\n")
@@ -244,6 +247,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
                 _start_one(service, endpoint="tcp://127.0.0.1:48765")
             run.assert_not_called()
 
+    @patch("fulcrum.install.shutil.which", new=lambda _name: "/usr/bin/true")
     def test_status_is_socket_independent_and_uses_owned_artifacts(self) -> None:
         definitions = fulcrum2_service_definitions(
             instance_root=self.instance,

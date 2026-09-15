@@ -93,7 +93,7 @@ mandatory validation task for every small plan or run the full live role suite f
 ordinary delivery.
 
 Runtime control, provider delivery, operation recovery, memory/publication,
-analytics, fleet continuity, fixture controls, and every other command family are
+analytics, fleet continuity, and every other command family are
 listed in the [CLI coverage map](docs/fulcrum2/plan/README.md#complete-cli-and-application-map).
 
 ## Recovery and cutover
@@ -125,23 +125,16 @@ explicit cutover instruction.
 
 ## Validation
 
-Repository checks and public installed-CLI validation are:
+Prepare dependencies initially and when they change, then run the complete check:
 
 ```sh
+scripts/prepare-check
 scripts/check
-scripts/validate-fulcrum2-cli
-scripts/validate-fulcrum2-live --model gpt-5.6-luna --effort low --timeout 3000
-scripts/validate-fulcrum2-concurrency --workers 30 --model gpt-5.6-luna --effort low --timeout 600
 ```
 
-The deterministic suite covers success, denial, conflicts, uncertain effects,
-restarts, cutover boundaries, and exact fixture cleanup. Live validation exercises
-all eight roles plus real Tollgate/Git delivery. The concurrency smoke requires 30
-distinct native tasks and turns active together, observed barrier tool calls,
-responsive status, no supported overload signal, and exact subscription/provider
-cleanup. Reports contain the invocation, installed source commit, provider facts,
-assertions, gaps, cleanup, and evidence paths; a partial or timed-out run remains a
-failure.
+The check runs formatting, full strict type checking, and all tests in a prepared
+Python environment with a 55-second deadline. Tests use in-memory records and
+mocked providers, with small local file/socket checks. Expensive integration and
+live validation harnesses have been permanently removed.
 
-See [recorded replacement evidence](docs/fulcrum2/validation-results.md) for the
-actual acceptance runs and any still-open validation gap.
+See [validation instructions](docs/validation.md) for coverage and timing policy.

@@ -33,7 +33,7 @@ identified there.
 | Publication bookkeeping could create endless pushes. | Exclude only publication fields and ledger-sync receipts when identifying real pending changes; preserve native/control/YAML writes. Task 15. |
 | Reset text did not distinguish empty current state from removed remote ledger history. | Replace dedicated remote ledger history and verify fresh-clone absence, preserving ordinary brain Git history/documents. No host physical-erasure claim. Task 21. |
 | Deterministic delivery plus optional concurrency did not prove assembled role behavior. | Require live Luna/low functional testing for all eight roles and actual Tollgate/Git delivery within 50 minutes, plus the ten-minute 30-task smoke. Tasks 23–24. |
-| Testing risked becoming another product workflow engine. | External scripts own assertions and reports. Public fixture/provider controls and normal CLI actions manage the test; there is no acceptance work kind or scenario state machine. Task 22. |
+| Testing risked becoming another product workflow engine. | The complete check runs focused in-process tests within 55 seconds. Public fixture/provider controls and external workflow harnesses have been deleted. |
 
 ## Targeted Marshal revisions
 
@@ -95,32 +95,16 @@ appendix while replacing the mechanisms explicitly changed by the user.
 - Unrelated closed-task worker pools, repeated archival timers, assumed process-name
   resource accounting, routine source force-push and broad brain reset.
 - A mandatory validation bead for small plans or a full live role suite on every
-  ordinary task promotion. Replacement acceptance itself still requires live evidence.
+  ordinary task promotion. Replacement acceptance uses the complete fast check.
 
-## Delivered evidence and remaining shipping gate
+## Current acceptance and historical evidence
 
-The implementation and public CLI now cover the command and requirement maps.
-Unit/integration tests and the deterministic installed-CLI suite cover the typed
-interfaces and failure boundaries below; native execution and provider facts come
-only from recorded live reports. A generated schema alone is never treated as
-operational evidence:
+The current acceptance gate is the complete prepared-environment `scripts/check`,
+including formatting, strict types, and focused behavior tests within 55 seconds.
+Tests cover critical request, ownership, admission, recovery, delivery, and adapter
+contracts using test-local doubles. They do not claim live provider compatibility.
 
-- Tasks 02/15: stock Beads full metadata writes, change inspection and Git-transport
-  remote commit proof without a parallel state store.
-- Tasks 06/10/19: indexed task recovery before first rollout, actual project/workspace
-  context, complete native prompts, pending requests, resource control and attachment.
-- Tasks 11/12: provider source regeneration, lost-response handling, promotion and
-  configured remote synchronization against real provider facts.
-- Tasks 20/21: independent recovery under broken imports, quiescent activation,
-  resumable reset authority and dedicated remote history replacement.
-- Tasks 22–24: public-CLI failure coverage, all eight Luna roles, actual source
-  delivery and observed thirty-task overlap/tool use/subscription release.
-
-The deterministic suite and eight-role Luna/Tollgate workflow have passed. The
-30-worker run has separately observed the required simultaneous native overlap,
-tool calls, responsive status and no supported overload condition; its one remaining
-shipping gate is a single run that also completes terminal closeout and cleanup
-within the ten-minute envelope. Unsupported required capabilities remain blockers;
-partial usage telemetry is allowed only with accurate coverage. Production cutover
-is never implied by implementation readiness and still requires explicit human
-authorization.
+Previous deterministic/live/concurrency validation reports are historical only.
+Their harnesses, public test controls, and outstanding rerun requirements have
+been retired. Production cutover remains a separately authorized action. See
+[validation](../validation.md) for current coverage and execution instructions.

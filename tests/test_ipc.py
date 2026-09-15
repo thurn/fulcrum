@@ -22,7 +22,7 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         parsed = ParsedRequest(
-            command=("fixture", "barrier", "arrive"),
+            command=("task", "wait"),
             arguments={},
             input={},
             actor=ActorContext(kind="task", task_id="fixture-task"),
@@ -51,8 +51,8 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
         server = IpcServer(Path("/tmp/not-created.sock"), wait_at_barrier)
         handlers = []
         writers = []
-        # Exercise the worst expected live-smoke fanout: one barrier, task-wait,
-        # and admission request per worker, plus a status/release control lane.
+        # Keep control traffic responsive with three concurrent requests per
+        # worker, plus a status/release control lane.
         expected_concurrent_requests = 30 * 3 + 2
         self.assertGreaterEqual(IPC_HANDLER_LIMIT, expected_concurrent_requests)
         for _ in range(expected_concurrent_requests):

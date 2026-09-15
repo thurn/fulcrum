@@ -138,8 +138,7 @@ should supply it themselves. Normal stdout stays one parseable JSON document.
 ## 2. Complete command surface
 
 All workflow mutation commands use operation receipts and common options unless
-the bootstrap/reset/degraded-repair exception is expressly documented. Test-provider
-clock/event/crash/barrier controls change external fixture facts only; the hook is
+the bootstrap/reset/degraded-repair exception is expressly documented. The hook is
 read-only and uses its native response format. All listing commands
 accept `--limit N` (default 20, `0` means all) and `--cursor CURSOR` and return
 `items` plus `next_cursor`. File/log data is paginated by count or byte limit.
@@ -183,9 +182,8 @@ not scheduled agent work.
 Production defaults use a dedicated loopback Dolt server on port 3309, database
 `fulcrum`, and the configured shared Codex endpoint (default port 4500). Bind only
 to loopback. An occupied port belonging to another installation is a configuration
-error, not permission to kill that process. Test setup chooses unused ports and
-records them in its own config. `kind` is `codex` or `deterministic` for runtime,
-`tollgate` or `deterministic` for delivery.
+error, not permission to kill that process. `kind` must be `codex` for runtime
+and `tollgate` for delivery.
 
 Project preparation and validation are argument arrays, never arbitrary shell
 fragments generated from a bead. For a shell-based repository check, configure
@@ -895,149 +893,21 @@ multi-resource destructive reset without a durable Beads receipt. The emergency
 role still investigates and repairs the dependency; this is not a refusal to
 perform useful work.
 
-## 7. CLI-driven validation
+## 7. Repository validation
 
-These are executable acceptance examples for the future CLI. Use `jq` only to
-extract returned identifiers. The scenario suite invokes the installed executable
-as a subprocess; it does not import controller internals or patch `_request`.
-
-### Isolated setup and intake through promotion
-
-```sh
-FC_TEST_PARENT="$(mktemp -d /tmp/fulcrum-cli.XXXXXX)"
-fixture=$(fulcrum fixture create --input - --json <<JSON
-{"root":"$FC_TEST_PARENT/fixture","runtime":{"kind":"deterministic"},"delivery":{"kind":"deterministic"},"model":"gpt-5.6-luna","effort":"low","capacity":4,"source_sync":true}
-JSON
-)
-FC_INSTANCE=$(printf '%s' "$fixture" | jq -r '.result.instance')
-project=$(printf '%s' "$fixture" | jq -r '.result.project_id')
-created=$(fulcrum --instance "$FC_INSTANCE" work create --project "$project" --json --input - <<'JSON'
-{"title":"Fix ordering","outcome":"Return values in ascending order.","acceptance":["Ordering tests pass."],"requested_role":"executor"}
-JSON
-)
-bead=$(printf '%s' "$created" | jq -r '.result.bead_id')
-entry=$(fulcrum --instance "$FC_INSTANCE" enter executor --bead "$bead" \
-  --description 'Fix ordering' --project "$project" --json --wait)
-thread=$(printf '%s' "$entry" | jq -r '.result.thread_id')
-ownership=$(printf '%s' "$entry" | jq -r '.result.ownership_operation')
-scripts/validate-fulcrum2-cli --instance "$FC_INSTANCE" --case delivery-happy --bead "$bead"
-fulcrum --instance "$FC_INSTANCE" wait --bead "$bead" --until closed --timeout 30 --json
-fulcrum --instance "$FC_INSTANCE" trace --bead "$bead" --json
-```
-
-The fixture utility creates committed disposable source/brain Git repositories and
-a disposable remote served through stock Beads' supported Git transport. It provides
-isolated credentials/ports, returns actual IDs and never reuses production paths.
-The suite uses a **real stock Beads** backend even with deterministic runtime/delivery.
-Native-looking fake provider IDs are scoped only to that fixture.
-
-### Script the same role and delivery operations directly
-
-Given a source commit in the prepared fixture worktree, these commands exercise
-the same public operations as an agent. Obtain `source` with `git rev-parse HEAD`
-in that worktree; the source below is a shell variable, not an invented OID.
-
-```sh
-fulcrum --instance "$FC_INSTANCE" finish --bead "$bead" \
-  --thread-id "$thread" --ownership-operation "$ownership" --outcome ready_for_review --json \
-  --input - <<JSON
-{"summary":"Ordering fixed.","source_oid":"$source","checks":[{"name":"ordering","status":"passed","evidence":"fixture test output"}],"evidence":[]}
-JSON
-fulcrum --instance "$FC_INSTANCE" reconcile --bead "$bead" --json
-warden=$(fulcrum --instance "$FC_INSTANCE" work show "$bead" --json | jq -r '.result.fc.owner')
-wownership=$(fulcrum --instance "$FC_INSTANCE" work show "$bead" --json | jq -r '.result.fc.ownership_operation')
-fulcrum --instance "$FC_INSTANCE" review approve --bead "$bead" \
-  --thread-id "$warden" --ownership-operation "$wownership" --source "$source" --summary 'Reviewed current source' --json
-fulcrum --instance "$FC_INSTANCE" promotion start --bead "$bead" \
-  --thread-id "$warden" --ownership-operation "$wownership" --source "$source" --json
-```
-
-For deterministic mode, terminal-turn events and provider completion are supplied
-through `scenario emit`, below. In native mode, the adapter observes real turns
-and provider state. The examples are separate flows: do not close a bead in the
-first example and then reuse it as open work for the second.
-
-### Role transition, uncertain delivery, and HUMAN resolution
-
-```sh
-fulcrum --instance "$FC_INSTANCE" enter sage --bead "$bead" \
-  --thread-id "$thread" --description 'Inspect workflow failures' --json
-fulcrum --instance "$FC_INSTANCE" context --bead "$bead" --json
-
-fulcrum --instance "$FC_INSTANCE" operation reconcile "$promotion_op" --json
-fulcrum --instance "$FC_INSTANCE" promotion show --bead "$bead" --json
-
-fulcrum --instance "$FC_INSTANCE" human list --json
-fulcrum --instance "$FC_INSTANCE" human resolve "$blocked_bead" --input - --json <<'JSON'
-{"answer":"The unavailable external service is restored.","resume_role":"warden"}
-JSON
-```
-
-Each command uses IDs from the corresponding scenario's prior output, not IDs
-hardcoded from a live installation. The integration tests supply an unfinished
-Executor for the role-transition case, an uncertain promotion receipt for the
-second case, and a genuinely HUMAN-owned bead for the third.
-
-### Deterministic provider controls
-
-The `scenario` controls below require explicitly selected deterministic adapters.
-The separately listed `smoke concurrency` utility requires native fixture adapters.
-Deterministic controls inject **external-provider events/facts**, never arbitrary work-bead
-state or privileged transition bypasses.
-
-| Command | Contract |
-| --- | --- |
-| `scenario emit --input FILE` | Inject `{provider, event, target, data}` into the configured deterministic adapter |
-| `scenario advance --seconds N` | Advance the injected test clock so timeout/archive behavior needs no real sleep |
-| `scenario fault --input FILE` | Set `{provider, method, occurrence, effect, response}` on the deterministic provider |
-| `smoke concurrency --workers 30 --model gpt-5.6-luna --effort low --timeout 600` | Explicit real-runtime smoke; requires an isolated native test instance |
-
-Events are `runtime.turn_completed`, `runtime.turn_failed`,
-`runtime.input_requested`, `runtime.unarchived`, `delivery.validation_passed`,
-`delivery.validation_failed`, and `delivery.promoted`. `target` is the actual task
-or provider handle returned by the fake adapter. Fault responses are `timeout`,
-`disconnect`, `reject`, or `malformed`; `effect` is `applied` or `not_applied`.
-Provider observations after an applied-but-lost response expose the real fake
-side effect so production reconciliation can discover it. Deterministic adapter
-state may persist as **external test-provider state** across controller restarts;
-it is not an additional Fulcrum workflow ledger.
-
-Checked-in script cases: `delivery-happy`, `retry-same-request`, `handoff-crash`,
-`promotion-response-lost`, `controller-restart`, `archive-once`, `role-transition`,
-and `human-resolution`. Scripts return assertions and trace references; Fulcrum
-has no acceptance-scenario record, pass/fail state machine, or retry engine.
-`scenario emit/advance/fault` are only deterministic provider test controls.
-
-The explicit `smoke concurrency` utility creates a disposable fixture and invokes
-public task/work operations. It is a bounded test client, not a controller workflow.
-It raises global and project limits to 30 in that fixture only, leaves leaders idle
-during measurement, and starts 30 distinct native tasks through normal admission,
-with a shared start barrier to observe overlapping active turns. Each performs one
-trivial shell operation in a disposable fixture and finishes. Observe native
-start/completion and release Fulcrum subscriptions. The whole command is capped
-at ten minutes; on timeout, interrupt only its own tasks and report incomplete
-coverage. Collect the final report before cleanup. Retain failed-run evidence and report
-any cleanup failure; use fixture cleanup to remove disposable resources.
-Do not wait 30 minutes for the runtime's unload grace or turn this into a repeated
-soak suite. An explicit smoke command authorizes its finite native model calls;
-ordinary automated tests make none. The functional live script additionally
-exercises all eight roles with real Luna/low tasks and observed Tollgate/Git delivery
-in at most 50 minutes. Both commands are required for replacement acceptance,
-not ordinary delivery promotion. Missing capabilities or incomplete coverage fail
-the test report; they are not passes or reasons to fabricate native events.
+Run `scripts/prepare-check` when dependencies change and `scripts/check` for the
+complete formatting, strict types, and behavior gate. The check has a 55-second
+wall-clock budget in a prepared environment. Tests use small in-memory records,
+mocked external adapters, and bounded local file/socket checks. There are no
+public test-provider, scenario, fixture, or smoke commands.
 
 ## 8. Contract acceptance
 
-Implementation is ready only after every command family works from a terminal,
-structured results are consistent, the required all-role Luna and 30-task live
-checks pass, and the deterministic CLI cases prove these
-behaviors: exact retries do not duplicate work; old ownership references cannot finish new
-ownership; destination work waits for old writers to stop; successful external
-effects survive response loss/restart; manual unarchive remains visible; degraded
-investigation returns usable evidence; and a complete CLI-driven delivery closes
-the correct bead. Keep provider integration probes proportionate and use real
-stock Beads for the core scenarios. Do not replace this with snapshot tests of
-generated prompts or a large manual validation program.
+Focused tests verify request reuse and conflicts, current ownership, dependency
+and capacity admission, exact task/turn recovery, safe cleanup, and current
+validated delivery evidence. CLI parsing/dispatch and adapter error contracts are
+checked in-process. No real Beads database, Git worktree, installed workflow, or
+live model run is required for acceptance. See [validation](../validation.md).
 
 ## 9. Knowledge, analytics, and maintenance
 
@@ -1426,11 +1296,8 @@ removal of unreachable objects retained by a host, and creates no backup/export.
 An inaccessible remote leaves reset incomplete. Task 21 specifies the disposable
 proof required before production cutover.
 
-Extend the deterministic restart/duplicate scenario with a disposable Git
-remote fixture and the same stock Beads Git transport. With an injected clock, prove a
-native `bd` change is pushed by the next five-minute tick, an idle tick produces
-no new commit, and an applied-but-unacknowledged push is reconciled without a
-duplicate operation. This requires no native model calls or wall-clock five-minute wait.
+Publication regression tests use observed adapter results and injected clocks;
+they do not build disposable Git/Dolt remotes or wait for publication intervals.
 
 ### Authoritative system configuration
 
@@ -1852,81 +1719,11 @@ connectivity-recovery retry authorization is a recorded transition from failed t
 successful capability observation, not every successful poll. Compare these facts
 directly and retain retry grants on the existing operation.
 
-### Disposable fixtures and test controls
+### Provider configuration
 
-These are explicit test utilities; they are not work kinds or an acceptance-state
-engine. Checked-in scripts own assertions and reports. Fixture resource operations
-use normal application/adapters and operation receipts once bootstrap Beads exists.
-
-| Command | Contract |
-| --- | --- |
-| `fixture create --input FILE` | Input `{root, runtime, delivery, model, effort, capacity, source_sync}`; root is a new absolute disposable directory, runtime/delivery explicitly select their kinds/endpoints, defaults for model/effort/capacity are Luna/low/4, source_sync is explicit. Return fixture operation, instance/config/brain/project/remote paths and provider IDs. |
-| `fixture show ID` | Read recorded inventory, resource observations, pending operations and evidence/cleanup references. |
-| `fixture cleanup ID --yes` | Stop/observe only fixture managed work, remove exact registered resources, preserve caller-owned report files, and report incomplete cleanup. Unresolved or dirty evidence is retained unless the explicit fixture cleanup requests its disposable deletion; no production target is eligible. |
-| `fixture barrier arrive ID --name NAME --participant TASK [--wait]` | Test-only tool operation records that participant in external fixture state; optionally waits within client timeout. No work ownership/phase mutation. |
-| `fixture barrier show ID --name NAME` | Read expected/arrived participants and released state. |
-| `fixture barrier prepare ID --name NAME --input FILE` | Set expected participants from `{participants:[task_id]}`; exact repeat is a no-op, changed membership conflicts. |
-| `fixture barrier release ID --name NAME` | Release that fixture barrier; repeat is a no-op. Human test client only. |
-| `scenario crash --operation ID --boundary NAME` | Deterministic instances only: arm one controller crash at the named persisted boundary; returns the armed target. |
-
-`fixture create` is a bootstrap command: its explicit input root selects the new
-instance, without reading production configuration. Fixture creation scaffolds a
-committed toy source repository and brain plus disposable
-Git/Dolt remotes using the supported Git transport, allocates isolated Beads ports,
-and invokes normal setup/project enrollment. It leaves the fixture controller
-stopped; scripts explicitly call `service start` after preparing their work and
-barriers. Creation returns `instance`, `config`, `brain`, `project_id`, `project_root`,
-`remote`, `fixture_id` (the creation receipt), and `service_started=false`.
-The fixture root must be absent, or
-belong to an exact retry of recorded creation; no fixed shared `/tmp` sample paths
-may overwrite prior work. Failed pre-ledger bootstrap returns created resource facts
-and safe cleanup commands; it creates no unrecorded model task. After ledger setup,
-retain resource inventory in the fixture-creation receipt. `fixture show/cleanup`
-use that ID and explicit instance so discovery does not depend on an external test
-state database. Caller reports live outside deleted fixture directories.
-
-Native fixtures attach ordinary test tasks to the explicitly configured shared
-runtime; they do not install/modify shared runtime services, production skill links
-or YAML. Toy project setup/removal uses native project API and Tollgate enrollment
-through adapters. `project remove ID --remove-owned-registrations` exposes provider registration
-cleanup after open work/worktrees have settled; normal removal only unenrolls YAML.
-It removes only registrations created by this installation, never discovered/reused
-ones or source repositories. Native project deletion is a provider resource operation: record
-and inspect exact owned ID removal, refuse if unrelated tasks remain associated,
-and return unsupported if the installed API lacks removal. A missing required
-fixture capability is an actionable test precondition failure, never production
-fallback. Deterministic fixtures use durable external fake-provider facts, not
-another Fulcrum workflow journal.
-
-`fixture barrier prepare` records the expected participant list without releasing
-it. A different list for an existing barrier is a conflict. Worker arrive/wait commands report ready status through the fixture
-provider, while native active/tool state is independently observed through task CLI.
-Barriers are bounded external test resources, not production scheduling controls.
-
-`scenario emit/advance/fault` retain the §7 input schemas and cannot target native
-adapters. An advance cannot move time backward. Supported one-shot crash boundaries
-are `receipt_created`, `work_written`, `task_created`, `turn_started`,
-`handoff_owner_written`, `delivery_effect_observed`, `publication_pushed`,
-`reset_inventory_recorded`, `reset_old_ledger_removed`, `reset_remote_replaced`,
-and `reset_terminal_written`. Each pauses/crashes only after its named real step;
-no command can directly assign arbitrary bead state. A deterministic external
-provider fault uses applied/not-applied plus timeout/disconnect/reject/malformed;
-crashing the controller is a separate test control, not a provider success event.
-
-For operator-authorized queued work, `dispatch --bead ID --authorize` records a
-durable dispatch authorization without bypassing configured admission limits or
-starting a judgment turn. Human/Vizier may use it; `--human` instead retains the
-existing explicit immediate bypass. The flags are mutually exclusive. A later
-plain `dispatch`/reconcile executes that authorization through ordinary admission.
-This also lets the concurrency test exercise the 30-slot limit without 30 human
-bypasses or extra Marshal model turns. Its setup holds normal reconciliation until
-the intended participant set and barrier are recorded, then starts the fixture
-controller. This pause is fixture setup/foreground control, not a second scheduler.
-
-Project-scoped fleet replacement retains shared standing leaders; instance-wide
-replacement includes them. Memory writes require the owning curator (Vizier for
-global, Marshal for project/role) or an explicit human action; other roles file
-proposals. These rules do not create a second configuration authority.
+`runtime.kind` must be `codex`; `delivery.kind` must be `tollgate`. File-backed
+simulated providers and their crash/event/clock/barrier controls are removed.
+Test doubles are private to the test suite and cannot be selected by configuration.
 
 ### Timing, diagnostics, and repair payload details
 

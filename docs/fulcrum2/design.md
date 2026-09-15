@@ -696,17 +696,15 @@ Implementation order:
    writer lock, offline execution, authoritative YAML configuration with human/Vizier
    write checks, stock Beads records, project enrollment, and
    native intake, brain Git persistence, and five-minute publication maintenance.
-   Demonstrate terminal-only creation/adoption/status using an
-   isolated real Beads ledger.
+   Cover command dispatch and adapter results with in-process tests.
 2. **Runtime and context:** Shared Codex adapter, recorded task creation intent,
    context formulas, all microskill entry paths, role naming, explicit task IDs,
-   subscription cleanup, compaction hook, model overrides, and deterministic runtime
-   adapter. Implement plan publication/refinement and durable memory on the ledger
+   subscription cleanup, compaction hook, and model overrides. Implement plan publication/refinement and durable memory on the ledger
    primitives before dispatching authored plans.
 3. **Ownership and delivery:** Ownership-operation checks, stop-before-transfer, Executor to
    Warden, delivery interface and Tollgate mapping, complete CLI lifecycle, and
-   deterministic delivery adapter. Include configured source publication and the
-   missing-finish reminder. A scripted bead reaches observed promotion.
+   focused delivery tests. Include configured source publication and the
+   missing-finish reminder.
 4. **Leadership and recovery:** Marshal briefs/decisions, Vizier policy, deferred
    decision-focused grooming/dispatch/recovery briefs, author clarification, current
    Marshal context, backlog and duplicates, finite retry/reconciliation, offline repair, HUMAN
@@ -714,29 +712,19 @@ Implementation order:
 5. **Operations and replacement:** Logs/status/doctor, archive-once behavior,
    usage/cost attribution, isolated recovery launcher, fleet replacement, quiescent
    source refresh, hard-reset/cutover command, service repair/desktop launch,
-   focused CLI regression scenarios, and the small concurrency smoke command.
+   focused CLI and concurrency regression tests.
 
 Each step ships usable public CLI operations; do not defer the CLI to the end.
 Remove obsolete implementation and skills when replacing their responsibilities,
 rather than layering the new model onto the existing controller. Model names are
 configuration, not embedded branching logic. Initial worker and leadership
 defaults are `gpt-5.6-sol` with `high` effort; respect explicit per-request overrides.
-The explicit live replacement tests use `gpt-5.6-luna` with `low` effort for
-all participating roles and review tasks.
-
-Replacement acceptance requires installed-CLI regression scripts against real
-stock Beads and deterministic external adapters, plus real Luna workflows covering
-all eight roles and observed Tollgate/Git delivery. Allow 50 minutes for functional
-live testing and ten minutes for a 30-task concurrency smoke. A missing capability,
-timeout, or missing required evidence cannot be reported as a pass. Normal bounded
-workflow recovery remains active; external scripts own assertions and reports.
-Acceptance is not a Fulcrum work kind, scheduler, or additional workflow engine.
-The CLI exposes all actions and evidence needed to manage these tests. See
-[contracts §7](contracts.md#7-cli-driven-validation) and implementation tasks 22–24.
-Ordinary task promotions retain proportionate checks; they do not run this whole
-replacement suite. No prolonged soak or manual role-interview matrix is required.
-The smoke proves observed overlap, tool use, completion, and subscription release,
-not long-term process reclamation or arbitrary workload reliability.
+Repository acceptance is `scripts/check`: formatting, full strict types, and all
+focused tests within 55 seconds in a prepared environment. Critical behavior is
+exercised in-process against mocked providers and small record stores. Retired
+integration/live harnesses and public testing commands are deleted, not retained
+as optional gates. Historical live observations do not imply current provider
+compatibility. See [validation instructions](../validation.md).
 
 ## 9. Capabilities retained from current Fulcrum
 

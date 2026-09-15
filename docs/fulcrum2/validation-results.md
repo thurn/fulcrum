@@ -1,5 +1,9 @@
 # Fulcrum2 replacement validation results
 
+Historical observations from retired harnesses. These reports are not current
+acceptance gates and must not be rerun as repository checks. The current gate is
+[`scripts/check`](../validation.md), with a 55-second prepared-environment budget.
+
 Updated 2026-09-15. These are observed reports, not inferred status. Report paths
 are retained local artifacts from isolated fixtures; each JSON report has a matching
 Markdown rendering.
@@ -45,10 +49,9 @@ raises bounded IPC handler headroom for the three expected 30-wide request class
 plus control traffic and adds a focused regression. A full passing run after that
 fix is still required; neither prior partial run is labeled success.
 
-## Retest policy
+## Current acceptance policy
 
-The already-passing 31-minute eight-role workflow is not repeated for unrelated
-Task 24/25 fixes. Focused tests cover the changed path. Final replacement readiness
-still requires repository checks, a post-cleanup deterministic installed-CLI pass,
-and one complete post-`7809b13` 30-worker report within its ten-minute acceptance
-budget.
+The harnesses that produced these reports have been removed. Their former pending
+closeout requirements are retired. Use the complete repository check described in
+[validation](../validation.md); these historical reports make no claim about the
+current suite's coverage or live provider compatibility.

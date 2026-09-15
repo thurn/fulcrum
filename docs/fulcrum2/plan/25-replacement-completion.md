@@ -19,7 +19,7 @@ the replacement contracts without the old state model.
 
 1. Verify every command in the index's coverage map is installed, discoverable through
    help, callable through normal/offline paths where specified, and returns its exact
-   JSON/error contract. Include review/draft/approval/dependency/output/fixture tools
+   JSON/error contract. Include review/draft/approval/dependency/output tools
    rather than declaring CLI completeness from a happy delivery alone.
 2. Remove Fulcrum SQLite/journals, runs/lineages/occurrences, old role/retry engines,
    recurring model jobs, fixed bootstrap prompts and random claim tokens. Remove
@@ -34,14 +34,11 @@ the replacement contracts without the old state model.
    commands and role names. Every documented action has a tested CLI path. Document
    configuration authority, direct prompts, acquisition receipts, four default slots,
    explicit 30-task support, proportionate plan validation and remote reset boundaries.
-5. Run appropriate project checks (format/type/behavior) after final source changes,
-   the deterministic installed-CLI suite, then explicit real Luna functional and
-   concurrency validation. Record command invocations, installed source commit,
-   fixture/runtime/provider facts, result/evidence paths and known limitations.
-6. Audit actual delivered behavior against the requirement map. Missing required
-   behavior/evidence leaves replacement readiness incomplete. Partial telemetry is
-   allowed only with the promised explicit coverage, not fabricated zero cost.
-   A docs statement or a task marked complete cannot substitute for native evidence.
+5. Run `scripts/check` after final source changes: formatting, full strict types,
+   and all focused tests in a prepared environment within 55 seconds. No retired
+   deterministic, live, or concurrency harness is required.
+6. Audit delivered behavior against the current requirement map. Report the limits
+   of in-process coverage; passing mocks do not prove live provider compatibility.
 7. Prepare the cutover runbook using `recover inspect`, `reset --hard` and setup/
    service commands. Production destructive execution requires the user's explicit
    cutover instruction; the implementation plan alone does not trigger it. Keep
@@ -49,12 +46,9 @@ the replacement contracts without the old state model.
 
 ## Final acceptance
 
-A clean installed replacement can be bootstrapped and completely operated from its
-CLI; ordinary native Beads intake reaches observed delivery; ownership and external
-effects survive the required failure checks; all eight roles have real Luna evidence;
-30 simultaneous native tasks meet the bounded smoke; and no old workflow store is
-required. Reports distinguish tests actually passed, unsupported capabilities,
-partial observations and outstanding issues. No routine per-task full live suite,
-mandatory small-plan validation bead, native-subagent system or model-powered
-housekeeping is introduced. Commit/publish through the current authorized repository
-workflow, with Conventional Commits and required checks.
+The complete fast repository check passes; removed test commands and simulated
+provider kinds are rejected; no optional slow suite remains. Current tests cover
+critical ownership, request, admission, recovery, and delivery invariants without
+external infrastructure. Historical live observations impose no rerun requirement.
+Commit and publish through the authorized repository workflow using Conventional
+Commits. Production cutover remains separately authorized.

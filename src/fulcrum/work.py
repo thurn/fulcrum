@@ -192,9 +192,7 @@ class WorkService:
         _reconcile_dependencies(
             ledger, root_id, [str(item) for item in root_dependencies]
         )
-        from fulcrum.deterministic import trigger_crash_boundary
 
-        trigger_crash_boundary(request, operation.id, "work_written")
         operation = ledger.update_operation(
             operation,
             state="completed",

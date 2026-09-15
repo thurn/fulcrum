@@ -194,15 +194,15 @@ class ConfigurationManager:
 
         runtime = _mapping(effective["runtime"], "runtime")
         _known(runtime, {"kind", "endpoint", "executable"}, "runtime")
-        if runtime["kind"] not in {"codex", "deterministic"}:
-            raise _invalid("runtime.kind", "must be codex or deterministic")
+        if runtime["kind"] != "codex":
+            raise _invalid("runtime.kind", "must be codex")
         _nonempty(runtime["endpoint"], "runtime.endpoint")
         _optional_absolute(runtime["executable"], "runtime.executable")
 
         delivery = _mapping(effective["delivery"], "delivery")
-        _known(delivery, {"kind", "executable", "endpoint"}, "delivery")
-        if delivery["kind"] not in {"tollgate", "deterministic"}:
-            raise _invalid("delivery.kind", "must be tollgate or deterministic")
+        _known(delivery, {"kind", "executable"}, "delivery")
+        if delivery["kind"] != "tollgate":
+            raise _invalid("delivery.kind", "must be tollgate")
         _optional_absolute(delivery.get("executable"), "delivery.executable")
 
         beads = _mapping(effective["beads"], "beads")
@@ -587,16 +587,6 @@ class ProjectService:
                 },
                 result={"delivery_registration": registration},
                 next_action="Enroll the project in the shared Beads backend.",
-            )
-        elif not isinstance(project.get("delivery"), Mapping) or not project[
-            "delivery"
-        ].get("id"):
-            raise FulcrumError(
-                "CAPABILITY_UNAVAILABLE",
-                "deterministic delivery enrollment requires an explicit provider ID",
-                exit_code=4,
-                request_id=request.request_id,
-                operation_id=operation.id,
             )
         _enroll_project_beads(project_id, project, effective, ledger.executable)
         projects = document.get("projects")

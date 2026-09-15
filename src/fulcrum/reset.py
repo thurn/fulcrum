@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -91,23 +91,8 @@ def inspect_reset_inventory(request: ParsedRequest) -> dict[str, Any]:
 
 
 class ResetService:
-    def __init__(
-        self,
-        *,
-        boundary_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
-        runtime_factory: Callable[[str], Any] | None = None,
-    ) -> None:
-        self.boundary_observer = boundary_observer
-        self.runtime_factory = runtime_factory
-
     def _runtime(self, config: Mapping[str, Any]) -> Any:
         endpoint = str(config["runtime"]["endpoint"])
-        if self.runtime_factory is not None:
-            return self.runtime_factory(endpoint)
-        if config["runtime"].get("kind") == "deterministic":
-            from fulcrum.deterministic import DeterministicRuntime
-
-            return DeterministicRuntime(endpoint)
         from fulcrum.runtime import AppServerRuntime
 
         return AppServerRuntime(endpoint)
@@ -388,10 +373,7 @@ class ResetService:
             result=_progress(planned, service_facts),
             next_action="Remove temporary reset authority and start normal service.",
         )
-        self._notify("clean_receipt_written", operation.operation)
-        from fulcrum.deterministic import trigger_crash_boundary
 
-        trigger_crash_boundary(request, operation.id, "reset_terminal_written")
         _remove_reset_workspace(reset_root)
         start_facts = _start_normal_services(request, config)
         return CommandResult(
@@ -657,8 +639,6 @@ class ResetService:
         ledger: Ledger,
     ) -> dict[str, Any]:
         initial = _bootstrap_control_record(request, ledger)
-        if config["runtime"]["kind"] == "deterministic":
-            return {**initial, "provider": "deterministic", "turns_started": 0}
         from fulcrum.leadership import ensure_leadership
 
         runtime: Any = self._runtime(config)
@@ -711,21 +691,7 @@ class ResetService:
                 planned=planned,
                 result=_progress(planned, service_facts),
             )
-        self._notify(name, operation.operation)
-        public_name = {
-            "authority_recorded": "reset_inventory_recorded",
-            "old_state_removed": "reset_old_ledger_removed",
-            "remote_replaced": "reset_remote_replaced",
-        }.get(name)
-        if public_name is not None:
-            from fulcrum.deterministic import trigger_crash_boundary
-
-            trigger_crash_boundary(request, operation.id, public_name)
         return operation
-
-    def _notify(self, name: str, receipt: Mapping[str, Any]) -> None:
-        if self.boundary_observer is not None:
-            self.boundary_observer(name, receipt)
 
 
 def _load_config(request: ParsedRequest) -> tuple[dict[str, Any], bytes]:

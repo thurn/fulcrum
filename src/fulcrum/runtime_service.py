@@ -58,12 +58,6 @@ class RuntimeService:
         document, _ = manager.load()
         config = manager.effective(document)
         runtime = config["runtime"]
-        if runtime["kind"] != "codex":
-            raise FulcrumError(
-                "CAPABILITY_UNAVAILABLE",
-                "Desktop launch is unavailable for a deterministic runtime",
-                exit_code=4,
-            )
         ledger = _ledger(request)
         operation, reused = ledger.create_operation(
             request,
@@ -1251,16 +1245,8 @@ def _runtime_call(
     action: Callable[[Runtime], Coroutine[Any, Any, T]],
 ) -> T:
     async def invoke() -> T:
-        manager = ConfigurationManager(request.instance.config_path)
-        document, _ = manager.load()
-        runtime_config = manager.effective(document)["runtime"]
         endpoint = _runtime_endpoint(request)
-        if runtime_config.get("kind") == "deterministic":
-            from fulcrum.deterministic import DeterministicRuntime
-
-            runtime: Runtime = DeterministicRuntime(endpoint)
-        else:
-            runtime = AppServerRuntime(endpoint)
+        runtime = AppServerRuntime(endpoint)
         try:
             await runtime.connect()
             return await action(runtime)
