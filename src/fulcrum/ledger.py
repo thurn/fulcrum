@@ -21,6 +21,7 @@ from typing import Any, Mapping, Sequence
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 
 CAPTURE_BYTES = 256 * 1024
+JSON_BYTES = 64 * 1024 * 1024
 _PROCESS_SLOTS = threading.BoundedSemaphore(4)
 
 
@@ -224,6 +225,9 @@ class Ledger:
                 ) from error
             stdout, stdout_truncated = _read_capture(stdout_file)
             stderr, stderr_truncated = _read_capture(stderr_file)
+            stdout_json, stdout_json_truncated = _read_capture(
+                stdout_file, limit=JSON_BYTES
+            )
         duration = int((time.monotonic() - started) * 1000)
         truncated = stdout_truncated or stderr_truncated
         if completed.returncode != 0:
@@ -242,8 +246,19 @@ class Ledger:
         if not stdout.strip():
             value: Any = None
         else:
+            if stdout_json_truncated:
+                raise LedgerFailure(
+                    "Beads JSON exceeded the supported response size",
+                    category="unsupported",
+                    retryable=False,
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=completed.returncode,
+                    duration_ms=duration,
+                    truncated=True,
+                )
             try:
-                value = json.loads(stdout)
+                value = json.loads(stdout_json)
             except json.JSONDecodeError as error:
                 raise LedgerFailure(
                     "Beads returned malformed JSON",
@@ -575,6 +590,9 @@ class Ledger:
             owner=responsible,
             fc=fc,
         )
+        from fulcrum.deterministic import trigger_crash_boundary
+
+        trigger_crash_boundary(request, record_id, "receipt_created")
         return OperationRecord.from_record(created), False
 
     def update_operation(
@@ -820,12 +838,12 @@ def _operation_result(operation: OperationRecord) -> CommandResult:
     )
 
 
-def _read_capture(handle: Any) -> tuple[str, bool]:
+def _read_capture(handle: Any, *, limit: int = CAPTURE_BYTES) -> tuple[str, bool]:
     handle.flush()
     size = handle.tell()
     handle.seek(0)
-    data = handle.read(CAPTURE_BYTES)
-    return data.decode("utf-8", errors="replace"), size > CAPTURE_BYTES
+    data = handle.read(limit)
+    return data.decode("utf-8", errors="replace"), size > limit
 
 
 def _classify_failure(stdout: str, stderr: str) -> tuple[str, bool]:

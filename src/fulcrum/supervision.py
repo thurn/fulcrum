@@ -52,7 +52,13 @@ from fulcrum.leadership import (
 )
 from fulcrum.publication import LedgerPublicationService
 from fulcrum.recovery_service import active_recovery_fence
-from fulcrum.runtime import AppServerError, AppServerRuntime, TaskFacts, TurnInput
+from fulcrum.runtime import (
+    AppServerError,
+    AppServerRuntime,
+    Runtime,
+    TaskFacts,
+    TurnInput,
+)
 from fulcrum.source_refresh import (
     maintenance_path,
     maintenance_ready_path,
@@ -185,10 +191,9 @@ class ControllerSupervisor:
         application: Any,
         *,
         clock: Clock | None = None,
-        runtime: AppServerRuntime | None = None,
+        runtime: Runtime | None = None,
     ) -> None:
         self.application = application
-        self.clock: Clock = clock or SystemClock()
         manager = ConfigurationManager(request.instance.config_path)
         document, _ = manager.load()
         self.config: dict[str, Any] = manager.effective(document)
@@ -205,7 +210,24 @@ class ControllerSupervisor:
         )
         runtime_config = self.config["runtime"]
         endpoint = str(runtime_config["endpoint"])
-        self.runtime: AppServerRuntime = runtime or AppServerRuntime(endpoint)
+        self.clock: Clock
+        self.runtime: Runtime
+        if clock is not None:
+            self.clock = clock
+        elif runtime_config.get("kind") == "deterministic":
+            from fulcrum.deterministic import DeterministicClock
+
+            self.clock = DeterministicClock(endpoint)
+        else:
+            self.clock = SystemClock()
+        if runtime is not None:
+            self.runtime = runtime
+        elif runtime_config.get("kind") == "deterministic":
+            from fulcrum.deterministic import DeterministicRuntime
+
+            self.runtime = DeterministicRuntime(endpoint)
+        else:
+            self.runtime = AppServerRuntime(endpoint)
         self.health = HealthFile(
             request.instance.instance_root / "service-health.json", self.clock
         )
@@ -317,6 +339,11 @@ class ControllerSupervisor:
             for record in records
             if record.kind == "work" and (bead_id is None or record.id == bead_id)
         }
+        for work_id, work in list(work_by_id.items()):
+            refreshed, delivery_action = await self._reconcile_work_delivery(work)
+            work_by_id[work_id] = refreshed
+            if delivery_action is not None:
+                actions.append(delivery_action)
         task_rows: list[Mapping[str, Any]] = []
         work_rows: list[Mapping[str, Any]] = []
         facts: dict[str, TaskFacts] = {}
@@ -435,6 +462,97 @@ class ControllerSupervisor:
             pressure=pressure,
             gaps=tuple(gaps),
         )
+
+    async def _reconcile_work_delivery(
+        self, work: Any
+    ) -> tuple[Any, Mapping[str, Any] | None]:
+        retained = (work.fc or {}).get("delivery") if work.fc else None
+        if (
+            not isinstance(retained, Mapping)
+            or not retained.get("source_oid")
+            or not retained.get("provider_handle")
+        ):
+            return work, None
+        request = ParsedRequest(
+            command=("promotion", "show"),
+            arguments={"bead": work.id},
+            input={},
+            actor=ActorContext(kind="controller"),
+            instance=self.request.instance,
+            request_id=None,
+            timeout=self.request.timeout,
+            offline=True,
+            runtime_submit=self._runtime_submit,
+        )
+        try:
+            result = await asyncio.to_thread(self.application.dispatch, request)
+        except FulcrumError as error:
+            return work, {
+                "kind": "delivery_observation",
+                "bead_id": work.id,
+                "advanced": False,
+                "code": error.code,
+                "reason": error.message,
+            }
+        payload = result.result or {}
+        observed = payload.get("delivery") if isinstance(payload, Mapping) else None
+        if not isinstance(observed, Mapping):
+            return work, None
+        fc = dict(work.fc or {})
+        delivery = dict(retained)
+        validation = dict(delivery.get("validation") or {})
+        previous_facts = validation.get("facts")
+        stable_previous = (
+            {
+                key: value
+                for key, value in previous_facts.items()
+                if key != "observed_at"
+            }
+            if isinstance(previous_facts, Mapping)
+            else None
+        )
+        stable_observed = {
+            key: value for key, value in observed.items() if key != "observed_at"
+        }
+        promotion = dict(delivery.get("promotion") or {})
+        synchronization = dict(delivery.get("synchronization") or {})
+        cleanup = dict(delivery.get("cleanup") or {})
+        changed = (
+            validation.get("state") != observed.get("validation")
+            or promotion.get("state") != observed.get("promotion")
+            or synchronization.get("state") != observed.get("synchronization")
+            or cleanup.get("state") != observed.get("cleanup")
+            or stable_previous != stable_observed
+        )
+        if not changed:
+            return work, None
+        validation.update(
+            {"state": observed.get("validation"), "facts": dict(observed)}
+        )
+        promotion["state"] = observed.get("promotion")
+        synchronization["state"] = observed.get("synchronization")
+        cleanup["state"] = observed.get("cleanup")
+        delivery.update(
+            {
+                "validation": validation,
+                "promotion": promotion,
+                "synchronization": synchronization,
+                "cleanup": cleanup,
+                "observed_at": observed.get("observed_at"),
+                "evidence": observed.get("evidence"),
+            }
+        )
+        fc["delivery"] = delivery
+        updated = await asyncio.to_thread(self.ledger.update_fc, work.id, fc)
+        return updated, {
+            "kind": "delivery_observation",
+            "bead_id": work.id,
+            "advanced": True,
+            "validation": observed.get("validation"),
+            "promotion": observed.get("promotion"),
+            "source_oid": observed.get("source_oid"),
+            "provider_handle": observed.get("handle"),
+        }
 
     async def _complete_plan_roots(
         self, records: Sequence[Any]
@@ -704,7 +822,7 @@ class ControllerSupervisor:
 
     def _runtime_submit(
         self,
-        action: Callable[[AppServerRuntime], Awaitable[Any]],
+        action: Callable[[Runtime], Awaitable[Any]],
     ) -> Any:
         """Run command-layer runtime work on the controller's shared loop."""
 

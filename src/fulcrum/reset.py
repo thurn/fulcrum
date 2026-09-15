@@ -30,7 +30,6 @@ from fulcrum.ledger import (
 )
 from fulcrum.instance import WriterLock
 from fulcrum.publication import _git_transport
-from fulcrum.runtime import AppServerRuntime
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "uncertain"}
 RESET_BOUNDARIES = {
@@ -96,10 +95,22 @@ class ResetService:
         self,
         *,
         boundary_observer: Callable[[str, Mapping[str, Any]], None] | None = None,
-        runtime_factory: Callable[[str], Any] = AppServerRuntime,
+        runtime_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self.boundary_observer = boundary_observer
         self.runtime_factory = runtime_factory
+
+    def _runtime(self, config: Mapping[str, Any]) -> Any:
+        endpoint = str(config["runtime"]["endpoint"])
+        if self.runtime_factory is not None:
+            return self.runtime_factory(endpoint)
+        if config["runtime"].get("kind") == "deterministic":
+            from fulcrum.deterministic import DeterministicRuntime
+
+            return DeterministicRuntime(endpoint)
+        from fulcrum.runtime import AppServerRuntime
+
+        return AppServerRuntime(endpoint)
 
     def hard_reset(self, request: ParsedRequest) -> CommandResult:
         if request.actor.kind != "human":
@@ -249,7 +260,11 @@ class ResetService:
                 next_action="Interrupt and delete only enumerated managed resources.",
             )
             operation = self._boundary(
-                reset_ledger, operation, "authority_recorded", service_facts
+                request,
+                reset_ledger,
+                operation,
+                "authority_recorded",
+                service_facts,
             )
         elif reused and operation.operation.get("state") == "completed":
             clean = _configured_ledger(request, config)
@@ -277,7 +292,11 @@ class ResetService:
         )
         if _kinds_completed(operation, "native_task"):
             operation = self._boundary(
-                reset_ledger, operation, "native_cleanup_recorded", service_facts
+                request,
+                reset_ledger,
+                operation,
+                "native_cleanup_recorded",
+                service_facts,
             )
         operation = self._cleanup_workspaces(
             config, reset_ledger, operation, service_facts
@@ -287,21 +306,33 @@ class ResetService:
         )
         if _kinds_completed(operation, "operational_path", "ledger_root"):
             operation = self._boundary(
-                reset_ledger, operation, "old_state_removed", service_facts
+                request,
+                reset_ledger,
+                operation,
+                "old_state_removed",
+                service_facts,
             )
         operation = self._initialize_clean_ledger(
             request, config, reset_ledger, operation, reset_root, service_facts
         )
         if _kinds_completed(operation, "clean_ledger"):
             operation = self._boundary(
-                reset_ledger, operation, "clean_ledger_initialized", service_facts
+                request,
+                reset_ledger,
+                operation,
+                "clean_ledger_initialized",
+                service_facts,
             )
         operation = self._replace_remote(
             request, config, reset_ledger, operation, reset_root, service_facts
         )
         if _kinds_completed(operation, "remote_ledger"):
             operation = self._boundary(
-                reset_ledger, operation, "remote_replaced", service_facts
+                request,
+                reset_ledger,
+                operation,
+                "remote_replaced",
+                service_facts,
             )
         operation = self._bootstrap_clean(
             request, config, reset_ledger, operation, service_facts
@@ -358,6 +389,9 @@ class ResetService:
             next_action="Remove temporary reset authority and start normal service.",
         )
         self._notify("clean_receipt_written", operation.operation)
+        from fulcrum.deterministic import trigger_crash_boundary
+
+        trigger_crash_boundary(request, operation.id, "reset_terminal_written")
         _remove_reset_workspace(reset_root)
         start_facts = _start_normal_services(request, config)
         return CommandResult(
@@ -388,7 +422,7 @@ class ResetService:
         ]
         if not pending:
             return operation
-        runtime: Any = self.runtime_factory(str(config["runtime"]["endpoint"]))
+        runtime: Any = self._runtime(config)
 
         async def cleanup() -> None:
             try:
@@ -600,7 +634,7 @@ class ResetService:
             return {**initial, "provider": "deterministic", "turns_started": 0}
         from fulcrum.leadership import ensure_leadership
 
-        runtime: Any = self.runtime_factory(str(config["runtime"]["endpoint"]))
+        runtime: Any = self._runtime(config)
 
         async def provision() -> list[dict[str, Any]]:
             try:
@@ -630,6 +664,7 @@ class ResetService:
 
     def _boundary(
         self,
+        request: ParsedRequest,
         ledger: Ledger,
         operation: OperationRecord,
         name: str,
@@ -650,6 +685,15 @@ class ResetService:
                 result=_progress(planned, service_facts),
             )
         self._notify(name, operation.operation)
+        public_name = {
+            "authority_recorded": "reset_inventory_recorded",
+            "old_state_removed": "reset_old_ledger_removed",
+            "remote_replaced": "reset_remote_replaced",
+        }.get(name)
+        if public_name is not None:
+            from fulcrum.deterministic import trigger_crash_boundary
+
+            trigger_crash_boundary(request, operation.id, public_name)
         return operation
 
     def _notify(self, name: str, receipt: Mapping[str, Any]) -> None:

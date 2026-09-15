@@ -379,6 +379,9 @@ class RoleService:
                 result={"task": native.to_dict()},
                 next_action="Cook and retain the exact role input before starting its turn.",
             )
+            from fulcrum.deterministic import trigger_crash_boundary
+
+            trigger_crash_boundary(request, operation.id, "task_created")
         try:
             cooked = _cook_role(
                 ledger,
@@ -423,6 +426,10 @@ class RoleService:
             effort=effort,
             model_origin=model_origin,
         )
+        if role == "warden" and request.arguments.get("origin") == "dispatch":
+            from fulcrum.deterministic import trigger_crash_boundary
+
+            trigger_crash_boundary(request, operation.id, "handoff_owner_written")
         turn = None
         if request.thread_id is None or routed_leader:
             assert spec is not None
@@ -449,6 +456,9 @@ class RoleService:
                 task_fc["last_turn"] = turn.to_dict()
                 task_fc["last_transition"] = receipt_id
                 ledger.update_fc(task.id, task_fc)
+            from fulcrum.deterministic import trigger_crash_boundary
+
+            trigger_crash_boundary(request, operation.id, "turn_started")
         operation = ledger.update_operation(
             operation,
             state="completed",

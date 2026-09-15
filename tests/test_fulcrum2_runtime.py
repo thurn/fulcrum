@@ -608,13 +608,14 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
                         "tasks": [
                             {
                                 "key": "fixture",
+                                "title": "Deliver the reviewed fixture",
                                 "outcome": "Deliver the fixture.",
                                 "acceptance": ["The fixture is observed."],
                                 "depends_on": [],
                             }
                         ],
                         "summary": "One reviewed fixture task.",
-                        "publication": {"required": False},
+                        "publication": None,
                         "validation": {
                             "summary": "Observe the installed CLI.",
                             "checks": [],

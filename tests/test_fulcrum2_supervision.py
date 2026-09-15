@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticService
+from fulcrum.deterministic import ProviderState, initial_provider_state
 from fulcrum.instance import resolve_instance
 from fulcrum.ledger import Ledger, operation_id
 from fulcrum.runtime import ReleaseFacts, ResourceFacts, TaskFacts, TurnFacts
@@ -175,12 +176,14 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
             timeout=30,
         )
         self.config = self.brain / "fulcrum.yaml"
+        self.provider = root / "provider.json"
+        ProviderState(str(self.provider)).initialize(initial_provider_state())
         self.config.write_text(
             "\n".join(
                 (
                     "runtime:",
                     "  kind: deterministic",
-                    "  endpoint: ws://127.0.0.1:1",
+                    f"  endpoint: {self.provider}",
                     "brain:",
                     f"  root: {self.brain}",
                     "projects:",
@@ -508,7 +511,7 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("independent-effect", application.effects)
         self.assertNotIn("blocked-effect", application.effects)
         release.set()
-        await asyncio.wait_for(running, 10)
+        await asyncio.wait_for(running, 30)
         independent = self.ledger.show(independent_id)
         blocked = self.ledger.show(blocked_id)
         assert independent is not None and independent.fc

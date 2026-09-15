@@ -20,7 +20,13 @@ from pathlib import Path
 from typing import Any, NoReturn, Sequence
 
 from fulcrum.application import default_application
-from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
+from fulcrum.contracts import (
+    ActorContext,
+    CommandResult,
+    FulcrumError,
+    InstanceContext,
+    ParsedRequest,
+)
 from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.instance import WriterLock, resolve_instance
 from fulcrum.ipc import (
@@ -101,6 +107,8 @@ LOCAL_COMMANDS = {
     ("service", "status"),
     ("service", "update"),
     ("reset",),
+    ("fixture", "create"),
+    ("fixture", "cleanup"),
 }
 
 
@@ -553,6 +561,8 @@ def _add_command_options(
     elif path == ("scenario", "crash"):
         _option(parser, "--operation", required=True)
         _option(parser, "--boundary", required=True)
+    elif path == ("scenario", "advance"):
+        _option(parser, "--seconds", type=float, required=True)
     elif path == ("smoke", "concurrency"):
         _option(parser, "--workers", type=int, default=30)
 
@@ -773,9 +783,14 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "source_sync",
     },
     ("fixture", "barrier", "prepare"): {"participants"},
-    ("scenario", "emit"): {"provider", "event", "facts"},
-    ("scenario", "advance"): {"seconds"},
-    ("scenario", "fault"): {"provider", "method", "occurrence", "applied", "outcome"},
+    ("scenario", "emit"): {"provider", "event", "target", "data"},
+    ("scenario", "fault"): {
+        "provider",
+        "method",
+        "occurrence",
+        "effect",
+        "response",
+    },
 }
 
 
@@ -868,21 +883,51 @@ def _request_id(value: str | None, mutation: bool) -> str | None:
 def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     values = vars(namespace)
     command = tuple(values["_command_path"])
+    payload = _payload(namespace, command)
     mutation = command not in READ_ONLY_COMMANDS and command != ("serve",)
     timeout = float(values.get("timeout", 30.0))
     if timeout <= 0:
         raise FulcrumError.invalid("INVALID_TIMEOUT", "timeout must be positive")
-    allow_broken = command in BROKEN_CONFIG_COMMANDS
-    instance = resolve_instance(
-        instance=values.get("instance"),
-        config=values.get("config"),
-        allow_broken_config=allow_broken,
-    )
+    if command == ("fixture", "create"):
+        if values.get("instance") is not None or values.get("config") is not None:
+            raise FulcrumError.invalid(
+                "FIXTURE_SELECTION_CONFLICT",
+                "fixture create selects its instance only from input.root",
+            )
+        root_value = payload.get("root")
+        if (
+            not isinstance(root_value, str)
+            or not Path(root_value).expanduser().is_absolute()
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_PATH", "fixture input.root must be an absolute path"
+            )
+        root = Path(root_value).expanduser().resolve(strict=False)
+        brain = root / "brain"
+        instance_root = root / "instance"
+        instance = InstanceContext(
+            instance_root=instance_root,
+            config_path=brain / "fulcrum.yaml",
+            brain_root=brain,
+            socket_path=instance_root / "controller.sock",
+            lock_path=brain / ".fulcrum-controller.lock",
+            explicit_selection=True,
+        )
+    else:
+        allow_broken = command in BROKEN_CONFIG_COMMANDS
+        instance = resolve_instance(
+            instance=values.get("instance"),
+            config=values.get("config"),
+            allow_broken_config=allow_broken,
+        )
     environment_task = os.environ.get("CODEX_THREAD_ID")
-    thread_id = values.get("thread_id") or environment_task
+    explicit_actor = values.get("actor")
+    thread_id = values.get("thread_id") or (
+        None if explicit_actor == "human" else environment_task
+    )
     actor_text = values.get("actor") or (
         "human"
-        if command == ("setup",)
+        if command in {("setup",), ("fixture", "create"), ("fixture", "cleanup")}
         else f"task:{thread_id}" if thread_id else "human"
     )
     actor = ActorContext.parse(actor_text)
@@ -924,7 +969,7 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     return ParsedRequest(
         command=command,
         arguments=arguments,
-        input=_payload(namespace, command),
+        input=payload,
         actor=actor,
         instance=instance,
         request_id=_request_id(values.get("request_id"), mutation),

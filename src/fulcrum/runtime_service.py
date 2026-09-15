@@ -26,6 +26,7 @@ from fulcrum.runtime import (
     AppServerError,
     AppServerRuntime,
     RuntimeCapabilities,
+    Runtime,
     TaskFacts,
     TaskSpec,
     TurnFacts,
@@ -1199,10 +1200,19 @@ async def _send_turn(
 
 def _runtime_call(
     request: ParsedRequest,
-    action: Callable[[AppServerRuntime], Coroutine[Any, Any, T]],
+    action: Callable[[Runtime], Coroutine[Any, Any, T]],
 ) -> T:
     async def invoke() -> T:
-        runtime = AppServerRuntime(_runtime_endpoint(request))
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        runtime_config = manager.effective(document)["runtime"]
+        endpoint = _runtime_endpoint(request)
+        if runtime_config.get("kind") == "deterministic":
+            from fulcrum.deterministic import DeterministicRuntime
+
+            runtime: Runtime = DeterministicRuntime(endpoint)
+        else:
+            runtime = AppServerRuntime(endpoint)
         try:
             await runtime.connect()
             return await action(runtime)

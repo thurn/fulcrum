@@ -11,6 +11,7 @@ from pathlib import Path
 from fulcrum.contracts import ActorContext, FulcrumError, ParsedRequest
 from fulcrum.instance import resolve_instance
 from fulcrum.ledger import (
+    CAPTURE_BYTES,
     Ledger,
     LedgerFailure,
     OperationRecord,
@@ -171,6 +172,20 @@ class Fulcrum2LedgerTest(unittest.TestCase):
         self.assertTrue(all(item.kind == "work" for item in work))
         operations = self.ledger.list_records(kind="operation", limit=0)
         self.assertTrue(all(item.id != work_id for item in operations))
+
+    def test_valid_json_larger_than_diagnostic_capture_is_still_parsed(self) -> None:
+        executable = self.root / "large-json-beads"
+        executable.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            f"print(json.dumps([{{'id': 'fc-large', 'blob': 'x' * {CAPTURE_BYTES + 1}}}]))\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+        observation = Ledger(self.brain, executable=str(executable)).run(("list",))
+        self.assertEqual(observation.value[0]["id"], "fc-large")
+        self.assertEqual(len(observation.value[0]["blob"]), CAPTURE_BYTES + 1)
+        self.assertTrue(observation.truncated)
 
     def test_cancel_and_wait_report_actual_operation_state(self) -> None:
         target_request = self.request(

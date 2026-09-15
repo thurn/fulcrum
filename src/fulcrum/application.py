@@ -6,6 +6,7 @@ import json
 import os
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from fulcrum.analytics import AnalyticsService
@@ -15,11 +16,13 @@ from fulcrum.continuity import ContinuityService
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
+from fulcrum.fixture_service import BarrierService, FixtureService, ScenarioService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
     OperationRecord,
     OperationService,
+    operation_view,
 )
 from fulcrum.leadership import LeadershipService
 from fulcrum.knowledge import KnowledgeService, MemoryService
@@ -57,6 +60,20 @@ class Application:
         self.register(("service", "status"), services.status)
         self.register(("service", "update"), SourceRefreshService().update)
         self.register(("reset",), ResetService().hard_reset)
+        fixtures = FixtureService()
+        self.register(("fixture", "create"), fixtures.create)
+        self.register(("fixture", "show"), fixtures.show)
+        self.register(("fixture", "cleanup"), fixtures.cleanup)
+        barriers = BarrierService()
+        self.register(("fixture", "barrier", "prepare"), barriers.prepare)
+        self.register(("fixture", "barrier", "arrive"), barriers.arrive)
+        self.register(("fixture", "barrier", "show"), barriers.show)
+        self.register(("fixture", "barrier", "release"), barriers.release)
+        scenarios = ScenarioService()
+        self.register(("scenario", "emit"), scenarios.emit)
+        self.register(("scenario", "advance"), scenarios.advance)
+        self.register(("scenario", "fault"), scenarios.fault)
+        self.register(("scenario", "crash"), scenarios.crash)
         self.register(("skills", "reconcile"), SkillsService().reconcile)
         configuration = ConfigurationService()
         self.register(("config", "show"), configuration.show)
@@ -236,6 +253,16 @@ class Application:
         error: Exception | None = None,
         adapter_error: LedgerFailure | None = None,
     ) -> None:
+        if (
+            request.command == ("fixture", "cleanup")
+            and result is not None
+            and result.ok
+            and isinstance(result.result, dict)
+            and result.result.get("root_removed") is True
+        ):
+            # Successful fixture cleanup deliberately removes its own diagnostic
+            # root. Recreating it to log the cleanup would contradict the result.
+            return
         public_error = error if isinstance(error, FulcrumError) else None
         event = {
             "event": "command_completed",
@@ -308,7 +335,114 @@ class Application:
             return LedgerPublicationService().reconcile(
                 request, OperationRecord.from_record(target)
             )
+        if (
+            target is not None
+            and target.kind == "operation"
+            and (target.fc or {}).get("command")
+            in {"validation.start", "promotion.start"}
+        ):
+            return self._reconcile_delivery_operation(
+                request, service, OperationRecord.from_record(target)
+            )
         return self._ledger_call(request, "reconcile")
+
+    def _reconcile_delivery_operation(
+        self,
+        request: ParsedRequest,
+        service: OperationService,
+        target: OperationRecord,
+    ) -> CommandResult:
+        receipt, reused = service.ledger.create_operation(
+            request,
+            planned={"target_operation": target.id},
+            next_action="Inspect the exact retained delivery source and provider handle.",
+        )
+        if reused and receipt.operation.get("state") in {
+            "completed",
+            "failed",
+            "uncertain",
+            "cancelled",
+        }:
+            return _operation_result(receipt)
+        bead_id = target.operation.get("bead_id")
+        if not isinstance(bead_id, str):
+            raise FulcrumError.invalid(
+                "OPERATION_CORRUPT", "delivery receipt has no work bead"
+            )
+        command = str(target.operation.get("command"))
+        query = replace(
+            request,
+            command=(
+                ("validation", "show")
+                if command == "validation.start"
+                else ("promotion", "show")
+            ),
+            arguments={"bead": bead_id},
+            input={},
+            request_id=None,
+            offline=True,
+        )
+        try:
+            observed = self.dispatch(query).result or {}
+        except FulcrumError as error:
+            receipt = service.ledger.update_operation(
+                receipt,
+                state="uncertain",
+                step="delivery_postcondition_unproved",
+                error={
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                },
+                next_action="Repair provider inspection before deciding whether to replay.",
+            )
+            return _operation_result(receipt)
+        delivery = observed.get("delivery") if isinstance(observed, dict) else None
+        state = (
+            observed.get("state")
+            if command == "validation.start"
+            else delivery.get("promotion") if isinstance(delivery, dict) else None
+        )
+        applied = state in {
+            "pending",
+            "running",
+            "passed",
+            "failed",
+            "promoted",
+        }
+        if applied:
+            target = service.ledger.update_operation(
+                target,
+                state="completed",
+                step="delivery_effect_reconciled",
+                external={
+                    "provider": "observed",
+                    "handle": observed.get("handle")
+                    or (delivery.get("handle") if isinstance(delivery, dict) else None),
+                },
+                result={"observed": observed},
+                error={},
+                next_action="Observe the retained provider state through normal reconciliation.",
+            )
+            receipt_state = "completed"
+        else:
+            receipt_state = "uncertain"
+        receipt = service.ledger.update_operation(
+            receipt,
+            state=receipt_state,
+            step="delivery_postcondition_inspected",
+            result={
+                "target": operation_view(target),
+                "settled": applied,
+                "observed": observed,
+            },
+            next_action=(
+                "No further action is required."
+                if applied
+                else "Resolve the provider observation gap without replaying the effect."
+            ),
+        )
+        return _operation_result(receipt)
 
     def _ledger_call(self, request: ParsedRequest, method: str) -> CommandResult:
         try:
@@ -375,3 +509,24 @@ class Application:
 
 def default_application() -> Application:
     return Application()
+
+
+def _operation_result(operation: OperationRecord) -> CommandResult:
+    value = str(operation.operation.get("state") or "running")
+    state = (
+        CommandState(value)
+        if value in CommandState._value2member_map_
+        else CommandState.RUNNING
+    )
+    return CommandResult(
+        ok=state
+        not in {
+            CommandState.FAILED,
+            CommandState.UNCERTAIN,
+            CommandState.CANCELLED,
+        },
+        state=state,
+        operation_id=operation.id,
+        request_id=str(operation.operation.get("request_id")),
+        result=operation_view(operation),
+    )

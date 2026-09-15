@@ -1,0 +1,1117 @@
+#!/usr/bin/env python3
+"""Installed-CLI deterministic Fulcrum2 acceptance driver.
+
+This process treats Fulcrum as an external product.  It parses public JSON
+envelopes and uses Git only to prepare source and verify delivered ancestry.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+CASES = (
+    "delivery-happy",
+    "retry-same-request",
+    "handoff-crash",
+    "promotion-response-lost",
+    "controller-restart",
+    "archive-once",
+    "role-transition",
+    "human-resolution",
+)
+
+
+class Failure(RuntimeError):
+    pass
+
+
+@dataclass
+class Case:
+    name: str
+    passed: bool = False
+    assertions: list[dict[str, Any]] = field(default_factory=list)
+    references: list[dict[str, Any]] = field(default_factory=list)
+    ids: dict[str, Any] = field(default_factory=dict)
+    gaps: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+class Driver:
+    def __init__(self, executable: Path, timeout: float) -> None:
+        self.executable = executable
+        self.timeout = timeout
+        self.instance: str | None = None
+        self.fixture_id: str | None = None
+        self.fixture: dict[str, Any] = {}
+        self.start_bead: str | None = None
+        self.current: Case | None = None
+        self.server: subprocess.Popen[str] | None = None
+
+    def command(
+        self,
+        *arguments: str,
+        payload: dict[str, Any] | None = None,
+        expected: tuple[int, ...] = (0,),
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        argv = [str(self.executable), *arguments]
+        completed = subprocess.run(
+            argv,
+            input=(json.dumps(payload) + "\n" if payload is not None else None),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout or self.timeout,
+            env={**os.environ, "CODEX_THREAD_ID": ""},
+        )
+        envelope: dict[str, Any] | None = None
+        if completed.stdout.strip():
+            try:
+                value = json.loads(completed.stdout)
+                envelope = value if isinstance(value, dict) else None
+            except json.JSONDecodeError:
+                envelope = None
+        reference = {
+            "argv": argv,
+            "returncode": completed.returncode,
+            "state": envelope.get("state") if envelope else None,
+            "operation_id": envelope.get("operation_id") if envelope else None,
+            "request_id": envelope.get("request_id") if envelope else None,
+            "error_code": (
+                envelope.get("error", {}).get("code")
+                if envelope and isinstance(envelope.get("error"), dict)
+                else None
+            ),
+        }
+        if self.current is not None:
+            self.current.references.append(reference)
+        if completed.returncode not in expected:
+            raise Failure(
+                f"command returned {completed.returncode}, expected {expected}: "
+                f"{' '.join(argv)}\n{completed.stdout}\n{completed.stderr}"
+            )
+        if envelope is None:
+            raise Failure(f"command returned no JSON envelope: {' '.join(argv)}")
+        return envelope
+
+    def fc(
+        self,
+        *arguments: str,
+        payload: dict[str, Any] | None = None,
+        offline: bool = True,
+        expected: tuple[int, ...] = (0,),
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        if self.instance is None:
+            raise Failure("fixture instance is not established")
+        common = ["--instance", self.instance, *arguments]
+        if offline:
+            common.append("--offline")
+        if "--actor" not in arguments:
+            common.extend(["--actor", "human"])
+        if request_id:
+            common.extend(["--request-id", request_id])
+        if payload is not None:
+            common.extend(["--input", "-"])
+        common.append("--json")
+        return self.command(*common, payload=payload, expected=expected)
+
+    def assert_that(self, condition: bool, name: str, evidence: Any) -> None:
+        if self.current is None:
+            raise Failure("assertion has no active case")
+        self.current.assertions.append(
+            {"name": name, "passed": bool(condition), "evidence": evidence}
+        )
+        if not condition:
+            raise Failure(f"assertion failed: {name}: {evidence}")
+
+    def create_fixture(self, root: Path) -> None:
+        payload = {
+            "root": str(root),
+            "runtime": {"kind": "deterministic"},
+            "delivery": {"kind": "deterministic"},
+            "model": "gpt-5.6-luna",
+            "effort": "low",
+            "capacity": 4,
+            "source_sync": True,
+        }
+        request_id = str(uuid.uuid4())
+        arguments = (
+            "fixture",
+            "create",
+            "--actor",
+            "human",
+            "--request-id",
+            request_id,
+            "--input",
+            "-",
+            "--json",
+            "--timeout",
+            str(max(self.timeout, 120)),
+        )
+        envelope = self.command(
+            *arguments,
+            payload=payload,
+            timeout=max(self.timeout, 180),
+        )
+        result = envelope["result"]["result"]
+        repeated = self.command(
+            *arguments,
+            payload=payload,
+            timeout=max(self.timeout, 180),
+        )
+        if repeated["operation_id"] != envelope["operation_id"]:
+            raise Failure("exact fixture retry did not reuse its creation receipt")
+        self.fixture = dict(result)
+        self.instance = str(result["instance"])
+        self.fixture_id = str(result["fixture_id"])
+
+    def show_fixture(self) -> dict[str, Any]:
+        assert self.fixture_id is not None
+        return self.fc("fixture", "show", self.fixture_id, offline=True)["result"]
+
+    def create_work(
+        self, title: str, *, request_id: str | None = None
+    ) -> tuple[str, dict[str, Any]]:
+        result = self.fc(
+            "work",
+            "create",
+            "--project",
+            "fixture",
+            payload={
+                "title": title,
+                "outcome": f"Complete deterministic case: {title}.",
+                "acceptance": [f"{title} evidence is retained."],
+                "requested_role": "executor",
+                "project": "fixture",
+                "intake": {"benefit": "Replacement validation.", "uncertainties": []},
+            },
+            request_id=request_id,
+        )
+        receipt = result["result"]
+        bead = str(receipt["result"]["bead_id"])
+        return bead, result
+
+    def enter(
+        self, role: str, bead: str, *, thread: str | None = None
+    ) -> dict[str, Any]:
+        arguments = [
+            "enter",
+            role,
+            "--bead",
+            bead,
+            "--description",
+            f"Run deterministic {role} case for {bead}",
+        ]
+        if thread:
+            arguments.extend(["--thread-id", thread])
+        return self.fc(*arguments)["result"]
+
+    def work(self, bead: str) -> dict[str, Any]:
+        return self.fc("work", "show", bead)["result"]
+
+    def task(self, thread: str) -> dict[str, Any]:
+        return self.fc("task", "show", thread)["result"]
+
+    def emit_turn(self, thread: str, *, failed: bool = False) -> dict[str, Any]:
+        task = self.task(thread)
+        turn = task["native"]["active_turn"]
+        if not turn:
+            last = task["native"].get("last_turn") or {}
+            turn = last.get("id")
+        if not turn:
+            raise Failure(f"task {thread} has no turn to complete")
+        event = "runtime.turn_failed" if failed else "runtime.turn_completed"
+        return self.fc(
+            "scenario",
+            "emit",
+            payload={
+                "provider": "runtime",
+                "event": event,
+                "target": thread,
+                "data": {
+                    "turn_id": turn,
+                    "output": f"{thread} deterministic terminal output",
+                    "tools": [{"name": "shell", "status": "completed"}],
+                    "usage": {
+                        "model": "gpt-5.6-luna",
+                        "input_tokens": 100,
+                        "output_tokens": 25,
+                    },
+                    **({"error": {"code": "fixture_failed"}} if failed else {}),
+                },
+            },
+        )
+
+    def reconcile(self, bead: str, *, offline: bool = True) -> dict[str, Any]:
+        return self.fc("reconcile", "--bead", bead, offline=offline)["result"]
+
+    def release_task(self, thread: str) -> None:
+        self.fc("task", "release", thread)
+
+    def prepare_source(
+        self, bead: str, thread: str, ownership: str, marker: str
+    ) -> tuple[str, str]:
+        self.fc(
+            "worktree",
+            "prepare",
+            "--bead",
+            bead,
+            "--thread-id",
+            thread,
+            "--ownership-operation",
+            ownership,
+            "--actor",
+            f"task:{thread}",
+        )
+        workspace = self.fc("worktree", "inspect", "--bead", bead)["result"][
+            "workspace"
+        ]["path"]
+        path = Path(workspace)
+        source = path / "fixture.txt"
+        source.write_text(f"{marker}\n", encoding="utf-8")
+        self.git(path, "add", "fixture.txt")
+        self.git(path, "commit", "-m", f"fix: {marker}")
+        return str(path), self.git(path, "rev-parse", "HEAD")
+
+    def finish_executor(
+        self, bead: str, thread: str, ownership: str, source: str
+    ) -> dict[str, Any]:
+        return self.fc(
+            "finish",
+            "--bead",
+            bead,
+            "--outcome",
+            "ready_for_review",
+            "--thread-id",
+            thread,
+            "--ownership-operation",
+            ownership,
+            "--actor",
+            f"task:{thread}",
+            payload={
+                "summary": "Deterministic implementation complete.",
+                "source_oid": source,
+                "checks": [
+                    {"name": "fixture", "status": "passed", "evidence": "Git source"}
+                ],
+                "evidence": [f"git:{source}"],
+            },
+        )["result"]
+
+    def validate_source(
+        self, bead: str, thread: str, ownership: str, source: str
+    ) -> str:
+        submitted = self.fc(
+            "validation",
+            "start",
+            "--bead",
+            bead,
+            "--source",
+            source,
+            "--thread-id",
+            thread,
+            "--ownership-operation",
+            ownership,
+            "--actor",
+            f"task:{thread}",
+        )["result"]
+        handle = str(submitted["result"]["validation"]["handle"])
+        self.fc(
+            "scenario",
+            "emit",
+            payload={
+                "provider": "delivery",
+                "event": "delivery.validation_passed",
+                "target": handle,
+                "data": {
+                    "checks": [
+                        {"name": "fixture", "status": "passed", "evidence": source}
+                    ]
+                },
+            },
+        )
+        self.reconcile(bead)
+        return handle
+
+    def finish_warden(
+        self, bead: str, thread: str, ownership: str, source: str
+    ) -> dict[str, Any]:
+        return self.fc(
+            "finish",
+            "--bead",
+            bead,
+            "--outcome",
+            "approved",
+            "--thread-id",
+            thread,
+            "--ownership-operation",
+            ownership,
+            "--actor",
+            f"task:{thread}",
+            payload={
+                "summary": "Warden reviewed exact deterministic source.",
+                "source_oid": source,
+                "checks": [{"name": "fixture", "status": "passed", "evidence": source}],
+                "evidence": [f"git:{source}"],
+            },
+        )["result"]
+
+    def start_server(self, *, crash_expected: bool = False) -> None:
+        if self.instance is None:
+            raise Failure("fixture instance is missing")
+        if self.server is not None and self.server.poll() is None:
+            return
+        log = Path(self.fixture["root"]).parent / f"serve-{uuid.uuid4().hex}.log"
+        stream = log.open("w", encoding="utf-8")
+        self.server = subprocess.Popen(
+            [str(self.executable), "--instance", self.instance, "serve"],
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ, "CODEX_THREAD_ID": ""},
+        )
+        if crash_expected:
+            return
+        deadline = time.monotonic() + self.timeout
+        socket_path = Path(self.instance) / "controller.sock"
+        while time.monotonic() < deadline:
+            if self.server.poll() is not None:
+                stream.close()
+                raise Failure(f"foreground controller exited early; see {log}")
+            if not socket_path.exists():
+                time.sleep(0.1)
+                continue
+            try:
+                readiness = self.fc(
+                    "scenario", "advance", "--seconds", "0.001", offline=False
+                )
+                if (
+                    self.server.poll() is None
+                    and readiness.get("ok")
+                    and readiness.get("state") == "completed"
+                ):
+                    return
+            except Exception:
+                pass
+            time.sleep(0.1)
+        raise Failure(f"foreground controller did not become responsive; see {log}")
+
+    def stop_server(self, *, expected_code: int | None = None) -> None:
+        process = self.server
+        self.server = None
+        if process is None:
+            return
+        if expected_code is not None:
+            code = process.wait(timeout=self.timeout)
+            if code != expected_code:
+                raise Failure(f"controller exit {code}, expected {expected_code}")
+            return
+        if process.poll() is None:
+            process.send_signal(signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+
+    @staticmethod
+    def git(root: str | Path, *arguments: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise Failure(completed.stderr.strip() or completed.stdout.strip())
+        return completed.stdout.strip()
+
+    @staticmethod
+    def operation_id(request_id: str) -> str:
+        return "fc-" + uuid.UUID(request_id).hex
+
+
+def delivery_happy(driver: Driver) -> None:
+    if driver.start_bead is None:
+        bead, _ = driver.create_work("delivery happy")
+        entry = driver.enter("executor", bead)["result"]
+        executor = str(entry["thread_id"])
+        acquisition = str(entry["ownership_operation"])
+    else:
+        bead = driver.start_bead
+        current = driver.work(bead)
+        executor = str(current["fc"]["owner"])
+        acquisition = str(current["fc"]["ownership_operation"])
+        driver.assert_that(
+            current["fc"]["role"] == "executor",
+            "supplied work is owned by Executor",
+            current["fc"]["role"],
+        )
+    _, source = driver.prepare_source(bead, executor, acquisition, "delivery-happy")
+    driver.emit_turn(executor)
+    driver.finish_executor(bead, executor, acquisition, source)
+    driver.reconcile(bead)
+    work = driver.work(bead)
+    warden = str(work["fc"]["owner"])
+    warden_acquisition = str(work["fc"]["ownership_operation"])
+    handle = driver.validate_source(bead, warden, warden_acquisition, source)
+    finish = driver.finish_warden(bead, warden, warden_acquisition, source)
+    driver.emit_turn(warden)
+    driver.fc(
+        "scenario",
+        "emit",
+        payload={
+            "provider": "delivery",
+            "event": "delivery.promoted",
+            "target": handle,
+            "data": {},
+        },
+    )
+    driver.reconcile(bead)
+    closed = driver.work(bead)
+    remote_source = driver.git(
+        driver.fixture["source_remote"], "rev-parse", "refs/heads/main"
+    )
+    driver.assert_that(
+        closed["status"] == "closed", "delivery closes work", closed["status"]
+    )
+    driver.assert_that(
+        closed["phase"] == "done", "delivery reaches done", closed["phase"]
+    )
+    driver.assert_that(
+        remote_source == source, "remote contains exact source", remote_source
+    )
+    driver.current.ids.update(
+        {
+            "bead": bead,
+            "executor": executor,
+            "warden": warden,
+            "source_oid": source,
+            "provider_handle": handle,
+            "finish_operation": finish["id"],
+        }
+    )
+    driver.release_task(executor)
+    driver.release_task(warden)
+
+
+def retry_same_request(driver: Driver) -> None:
+    request_id = str(uuid.uuid4())
+    first_bead, first = driver.create_work("exact retry", request_id=request_id)
+    second_bead, second = driver.create_work("exact retry", request_id=request_id)
+    driver.assert_that(
+        first["operation_id"] == second["operation_id"],
+        "retry reuses receipt",
+        second["operation_id"],
+    )
+    driver.assert_that(first_bead == second_bead, "retry reuses work ID", second_bead)
+    conflict = driver.fc(
+        "work",
+        "create",
+        "--project",
+        "fixture",
+        payload={
+            "title": "changed retry",
+            "outcome": "Different input.",
+            "acceptance": ["Must conflict."],
+            "requested_role": "executor",
+            "project": "fixture",
+            "intake": {"benefit": "Conflict proof.", "uncertainties": []},
+        },
+        request_id=request_id,
+        expected=(5,),
+    )
+    driver.assert_that(
+        conflict["error"]["code"] == "REQUEST_CONFLICT",
+        "changed retry conflicts",
+        conflict["error"],
+    )
+
+    crash_request = str(uuid.uuid4())
+    target = driver.operation_id(crash_request)
+    driver.fc(
+        "scenario",
+        "crash",
+        "--operation",
+        target,
+        "--boundary",
+        "work_written",
+    )
+    crashed = subprocess.run(
+        [
+            str(driver.executable),
+            "--instance",
+            str(driver.instance),
+            "work",
+            "create",
+            "--project",
+            "fixture",
+            "--offline",
+            "--actor",
+            "human",
+            "--request-id",
+            crash_request,
+            "--input",
+            "-",
+            "--json",
+        ],
+        input=json.dumps(
+            {
+                "title": "partial graph",
+                "outcome": "Resume a written graph.",
+                "acceptance": ["One root exists."],
+                "requested_role": "executor",
+                "project": "fixture",
+                "intake": {"benefit": "Crash proof.", "uncertainties": []},
+            }
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=driver.timeout,
+        env={**os.environ, "CODEX_THREAD_ID": ""},
+    )
+    driver.assert_that(
+        crashed.returncode == 86, "named boundary crashes process", crashed.returncode
+    )
+    resumed = driver.fc(
+        "work",
+        "create",
+        "--project",
+        "fixture",
+        payload={
+            "title": "partial graph",
+            "outcome": "Resume a written graph.",
+            "acceptance": ["One root exists."],
+            "requested_role": "executor",
+            "project": "fixture",
+            "intake": {"benefit": "Crash proof.", "uncertainties": []},
+        },
+        request_id=crash_request,
+    )
+    resumed_receipt = resumed["result"]
+    resumed_bead = str(resumed_receipt["result"]["bead_id"])
+    driver.assert_that(
+        resumed_receipt["state"] == "completed",
+        "partial graph resumes",
+        resumed_receipt["state"],
+    )
+    driver.current.ids.update(
+        {
+            "retry_bead": first_bead,
+            "crash_bead": resumed_bead,
+            "crash_operation": target,
+        }
+    )
+
+
+def handoff_crash(driver: Driver) -> None:
+    bead, _ = driver.create_work("handoff crash")
+    entry = driver.enter("executor", bead)["result"]
+    executor = str(entry["thread_id"])
+    acquisition = str(entry["ownership_operation"])
+    _, source = driver.prepare_source(bead, executor, acquisition, "handoff-crash")
+    driver.emit_turn(executor)
+    finish = driver.finish_executor(bead, executor, acquisition, source)
+    start_request = str(finish["result"]["handoff"]["start_request_id"])
+    warden_operation = driver.operation_id(start_request)
+    driver.fc(
+        "scenario",
+        "crash",
+        "--operation",
+        warden_operation,
+        "--boundary",
+        "handoff_owner_written",
+    )
+    driver.start_server(crash_expected=True)
+    driver.stop_server(expected_code=86)
+    driver.start_server()
+    driver.reconcile(bead, offline=False)
+    work = driver.work(bead)
+    tasks = driver.fc("task", "list")["result"]["items"]
+    wardens = [
+        item
+        for item in tasks
+        if item.get("role") == "warden" and item.get("work_bead") == bead
+    ]
+    driver.assert_that(
+        work["fc"]["role"] == "warden", "handoff resumes to Warden", work["fc"]["role"]
+    )
+    driver.assert_that(
+        len(wardens) == 1,
+        "handoff creates exactly one Warden",
+        [item["thread_id"] for item in wardens],
+    )
+    driver.current.ids.update(
+        {
+            "bead": bead,
+            "executor": executor,
+            "warden": work["fc"]["owner"],
+            "handoff_operation": warden_operation,
+        }
+    )
+    driver.stop_server()
+    driver.emit_turn(str(work["fc"]["owner"]))
+    driver.release_task(executor)
+    driver.release_task(str(work["fc"]["owner"]))
+
+
+def promotion_response_lost(driver: Driver) -> None:
+    bead, _ = driver.create_work("promotion response lost")
+    entry = driver.enter("warden", bead)["result"]
+    warden = str(entry["thread_id"])
+    acquisition = str(entry["ownership_operation"])
+    _, source = driver.prepare_source(bead, warden, acquisition, "promotion-lost")
+    driver.validate_source(bead, warden, acquisition, source)
+    observation = driver.show_fixture()["provider"]
+    occurrence = int(observation.get("calls", {}).get("delivery.promote", 0)) + 1
+    driver.fc(
+        "scenario",
+        "fault",
+        payload={
+            "provider": "delivery",
+            "method": "promote",
+            "occurrence": occurrence,
+            "effect": "applied",
+            "response": "timeout",
+        },
+    )
+    finish = driver.finish_warden(bead, warden, acquisition, source)
+    promotion = finish["result"]["children"]["promotion"]
+    promotion_operation = str(promotion["operation_id"])
+    driver.assert_that(
+        promotion["state"] == "uncertain", "lost response is uncertain", promotion
+    )
+    reconciled = driver.fc("operation", "reconcile", promotion_operation)["result"]
+    driver.assert_that(
+        reconciled["state"] == "completed",
+        "provider observation settles reconciliation",
+        reconciled["state"],
+    )
+    driver.emit_turn(warden)
+    driver.reconcile(bead)
+    closed = driver.work(bead)
+    remote_source = driver.git(
+        driver.fixture["source_remote"], "rev-parse", "refs/heads/main"
+    )
+    driver.assert_that(
+        closed["status"] == "closed",
+        "observed lost promotion closes work",
+        closed["status"],
+    )
+    driver.assert_that(
+        remote_source == source,
+        "lost response retained exact Git effect",
+        remote_source,
+    )
+    driver.current.ids.update(
+        {
+            "bead": bead,
+            "warden": warden,
+            "source_oid": source,
+            "promotion_operation": promotion_operation,
+        }
+    )
+    driver.release_task(warden)
+
+
+def controller_restart(driver: Driver) -> None:
+    bead, _ = driver.create_work("controller restart")
+    entry = driver.enter("executor", bead)["result"]
+    thread = str(entry["thread_id"])
+    before = driver.task(thread)["native"]
+    driver.start_server()
+    served = driver.fc("task", "show", thread, offline=False)["result"]["native"]
+    driver.assert_that(
+        served["active_turn"] == before["active_turn"],
+        "served controller observes retained turn",
+        served["active_turn"],
+    )
+    driver.stop_server()
+    driver.start_server()
+    restarted = driver.fc("task", "show", thread, offline=False)["result"]["native"]
+    driver.assert_that(
+        restarted["active_turn"] == before["active_turn"],
+        "restart preserves provider turn",
+        restarted["active_turn"],
+    )
+    driver.stop_server()
+    driver.emit_turn(thread)
+    driver.release_task(thread)
+    driver.current.ids.update(
+        {"bead": bead, "task": thread, "turn": before["active_turn"]}
+    )
+
+
+def archive_once(driver: Driver) -> None:
+    bead, _ = driver.create_work("archive once")
+    entry = driver.enter("weaver", bead)["result"]
+    thread = str(entry["thread_id"])
+    acquisition = str(entry["ownership_operation"])
+    driver.emit_turn(thread)
+    driver.fc(
+        "finish",
+        "--bead",
+        bead,
+        "--outcome",
+        "answered",
+        "--thread-id",
+        thread,
+        "--ownership-operation",
+        acquisition,
+        "--actor",
+        f"task:{thread}",
+        payload={"summary": "Fixture answer retained.", "evidence": ["fixture:answer"]},
+    )
+    driver.reconcile(bead)
+    driver.fc("scenario", "advance", "--seconds", "601")
+    driver.reconcile(bead)
+    first = driver.show_fixture()["provider"]["runtime"]["tasks"][thread]
+    driver.fc("scenario", "advance", "--seconds", "601")
+    driver.reconcile(bead)
+    second = driver.show_fixture()["provider"]["runtime"]["tasks"][thread]
+    driver.assert_that(
+        first["archive_count"] == 1, "task archived after due time", first
+    )
+    driver.assert_that(
+        second["archive_count"] == 1, "archive occurs exactly once", second
+    )
+    driver.fc("task", "unarchive", thread)
+    visible = driver.task(thread)["native"]
+    driver.assert_that(
+        visible["archived"] is False,
+        "manual unarchive remains visible",
+        visible["archived"],
+    )
+    driver.current.ids.update({"bead": bead, "task": thread})
+    driver.release_task(thread)
+
+
+def role_transition(driver: Driver) -> None:
+    bead, _ = driver.create_work("role transition")
+    entry = driver.enter("executor", bead)["result"]
+    thread = str(entry["thread_id"])
+    old_acquisition = str(entry["ownership_operation"])
+    transitioned = driver.enter("sage", bead, thread=thread)
+    transition_result = transitioned.get("result", transitioned)
+    current = driver.work(bead)
+    driver.assert_that(
+        transition_result["thread_id"] == thread,
+        "same task changes role",
+        transition_result,
+    )
+    driver.assert_that(
+        current["fc"]["role"] == "sage", "work records Sage role", current["fc"]["role"]
+    )
+    stale = driver.fc(
+        "progress",
+        "--bead",
+        bead,
+        "--kind",
+        "investigation",
+        "--summary",
+        "stale executor progress",
+        "--thread-id",
+        thread,
+        "--ownership-operation",
+        old_acquisition,
+        "--actor",
+        f"task:{thread}",
+        expected=(5,),
+    )
+    driver.assert_that(
+        stale["error"]["code"] == "OWNERSHIP_CONFLICT",
+        "old acquisition is stale",
+        stale["error"],
+    )
+    driver.current.ids.update(
+        {
+            "bead": bead,
+            "task": thread,
+            "old_ownership": old_acquisition,
+            "new_ownership": current["fc"]["ownership_operation"],
+        }
+    )
+    driver.emit_turn(thread)
+    driver.release_task(thread)
+
+
+def human_resolution(driver: Driver) -> None:
+    bead, _ = driver.create_work("human resolution")
+    entry = driver.enter("executor", bead)["result"]
+    thread = str(entry["thread_id"])
+    acquisition = str(entry["ownership_operation"])
+    driver.fc(
+        "finish",
+        "--bead",
+        bead,
+        "--outcome",
+        "blocked",
+        "--thread-id",
+        thread,
+        "--ownership-operation",
+        acquisition,
+        "--actor",
+        f"task:{thread}",
+        payload={
+            "summary": "A human fixture choice is required.",
+            "blocker": "The deterministic environment name is unspecified.",
+            "attempts": ["Inspected fixture configuration."],
+            "required_action": "Select the fixture environment.",
+        },
+    )
+    blocked = driver.work(bead)
+    decision_request = driver.fc(
+        "marshal", "request", "--kind", "dispatch", "--bead", bead
+    )
+    decision_operation = str(decision_request["operation_id"])
+    decision_receipt = decision_request["result"]
+    decision_result = decision_receipt.get("result", decision_receipt)
+    marshal_thread = str(decision_result["turn"]["thread_id"])
+    driver.fc(
+        "marshal",
+        "decide",
+        payload={
+            "decision_operation": decision_operation,
+            "decisions": [
+                {
+                    "bead_id": bead,
+                    "expected_ownership_operation": blocked["fc"][
+                        "ownership_operation"
+                    ],
+                    "expected_phase": blocked["fc"]["phase"],
+                    "action": "human",
+                    "reason": "The retained blocker requires an operator choice.",
+                    "question": "Which isolated environment should this work use?",
+                    "required_action": "Select the fixture environment.",
+                }
+            ],
+        },
+    )
+    listed = driver.fc("human", "list")["result"]["items"]
+    driver.assert_that(
+        any(item["bead_id"] == bead for item in listed),
+        "HUMAN queue exposes blocked work",
+        listed,
+    )
+    current = driver.work(bead)
+    human_row = next(item for item in listed if item["bead_id"] == bead)
+    reason_id = str(human_row["reasons"][0]["id"])
+    resolved = driver.fc(
+        "human",
+        "resolve",
+        bead,
+        payload={
+            "reason_id": reason_id,
+            "answer": "Use the isolated deterministic fixture.",
+            "resume_role": "warden",
+        },
+    )["result"]
+    after = driver.work(bead)
+    driver.assert_that(
+        resolved["state"] == "completed",
+        "human resolution is durable",
+        resolved["state"],
+    )
+    driver.assert_that(
+        after["fc"]["requested_role"] == "warden",
+        "resolution retains resume role",
+        after["fc"]["requested_role"],
+    )
+    driver.current.ids.update(
+        {
+            "bead": bead,
+            "task": thread,
+            "reason_id": reason_id,
+            "resolution_operation": resolved["id"],
+            "decision_operation": decision_operation,
+        }
+    )
+    driver.emit_turn(marshal_thread)
+    driver.emit_turn(thread)
+    driver.release_task(thread)
+
+
+FUNCTIONS = {
+    "delivery-happy": delivery_happy,
+    "retry-same-request": retry_same_request,
+    "handoff-crash": handoff_crash,
+    "promotion-response-lost": promotion_response_lost,
+    "controller-restart": controller_restart,
+    "archive-once": archive_once,
+    "role-transition": role_transition,
+    "human-resolution": human_resolution,
+}
+
+
+def markdown(report: dict[str, Any]) -> str:
+    lines = ["# Fulcrum2 deterministic CLI validation", ""]
+    lines.append(f"Overall: **{report['state']}**")
+    lines.append("")
+    lines.append(f"Source: `{report['source_commit']}`")
+    lines.append(f"Fixture: `{report.get('fixture_id')}`")
+    lines.append("")
+    for case in report["cases"]:
+        lines.append(f"## {case['name']}: {'PASS' if case['passed'] else 'FAIL'}")
+        lines.append("")
+        if case.get("error"):
+            lines.append(case["error"])
+            lines.append("")
+        for assertion in case["assertions"]:
+            mark = "x" if assertion["passed"] else " "
+            lines.append(f"- [{mark}] {assertion['name']}")
+        lines.append("")
+    cleanup = report.get("cleanup") or {}
+    lines.append(f"Cleanup: `{json.dumps(cleanup, sort_keys=True)}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fulcrum")
+    parser.add_argument("--instance")
+    parser.add_argument("--fixture-id")
+    parser.add_argument("--bead")
+    parser.add_argument("--case", action="append", choices=CASES)
+    parser.add_argument("--timeout", type=float, default=90)
+    parser.add_argument("--report-dir", default="/tmp/fulcrum2-reports")
+    parser.add_argument("--keep", action="store_true")
+    args = parser.parse_args()
+    repo = Path(__file__).resolve().parents[1]
+    executable = Path(
+        args.fulcrum or shutil.which("fulcrum") or (repo / ".venv" / "bin" / "fulcrum")
+    ).resolve(strict=True)
+    driver = Driver(executable, args.timeout)
+    driver.start_bead = args.bead
+    report_dir = Path(args.report_dir).expanduser().resolve(strict=False)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    run_id = (
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        + "-"
+        + uuid.uuid4().hex[:8]
+    )
+    report: dict[str, Any] = {
+        "run_id": run_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "executable": str(executable),
+        "source_commit": Driver.git(repo, "rev-parse", "HEAD"),
+        "cases": [],
+        "gaps": [],
+        "cleanup": None,
+    }
+    selected = args.case or list(CASES)
+    if args.instance:
+        if not args.fixture_id and not (args.bead and selected == ["delivery-happy"]):
+            parser.error(
+                "--fixture-id is required with --instance except for "
+                "--case delivery-happy --bead ID"
+            )
+        driver.instance = str(Path(args.instance).expanduser().resolve(strict=True))
+        driver.fixture_id = args.fixture_id
+        if args.fixture_id:
+            shown = driver.show_fixture()
+            driver.fixture = dict(shown["fixture"])
+        else:
+            work = driver.work(str(args.bead))
+            project_id = str(work["fc"]["project"])
+            project = driver.fc("project", "show", project_id)["result"]
+            project_root = str(project["root"])
+            remote_name = str(project.get("source_remote") or "origin")
+            source_remote = Driver.git(project_root, "remote", "get-url", remote_name)
+            driver.fixture = {
+                "root": str(Path(driver.instance).parent),
+                "instance": driver.instance,
+                "project_id": project_id,
+                "project_root": project_root,
+                "source_remote": source_remote,
+            }
+    else:
+        parent = Path(tempfile.mkdtemp(prefix="fulcrum2-cli-", dir="/tmp"))
+        driver.create_fixture(parent / "fixture")
+    report["fixture_id"] = driver.fixture_id
+    report["fixture"] = driver.fixture
+    failed = False
+    try:
+        for name in selected:
+            case = Case(name=name)
+            driver.current = case
+            try:
+                FUNCTIONS[name](driver)
+                case.passed = True
+            except Exception as error:
+                case.error = str(error)
+                failed = True
+            report["cases"].append(case.__dict__)
+            if failed:
+                break
+    finally:
+        driver.current = None
+        try:
+            driver.stop_server()
+        except Exception as error:
+            report["gaps"].append(f"foreground cleanup: {error}")
+            failed = True
+        report["provider"] = (
+            driver.show_fixture().get("provider") if driver.fixture_id else None
+        )
+        report["state"] = "failed" if failed else "passed"
+        report["completed_at"] = datetime.now(timezone.utc).isoformat()
+        json_path = report_dir / f"fulcrum2-cli-{run_id}.json"
+        markdown_path = report_dir / f"fulcrum2-cli-{run_id}.md"
+        json_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        markdown_path.write_text(markdown(report), encoding="utf-8")
+        if not failed and not args.keep and not args.instance:
+            try:
+                cleanup = driver.fc(
+                    "fixture", "cleanup", str(driver.fixture_id), "--yes"
+                )
+                report["cleanup"] = cleanup["result"]
+                fixture_root = Path(str(driver.fixture["root"]))
+                if fixture_root.exists():
+                    report["gaps"].append(
+                        f"fixture cleanup left its root behind: {fixture_root}"
+                    )
+                    report["state"] = "failed"
+                    failed = True
+            except Exception as error:
+                report["cleanup"] = {"error": str(error)}
+                report["state"] = "failed"
+                failed = True
+            json_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+            markdown_path.write_text(markdown(report), encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "state": report["state"],
+                "json_report": str(json_path),
+                "markdown_report": str(markdown_path),
+                "fixture_id": driver.fixture_id,
+            },
+            sort_keys=True,
+        )
+    )
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
