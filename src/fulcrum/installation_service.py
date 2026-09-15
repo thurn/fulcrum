@@ -241,7 +241,7 @@ class ServiceService:
                 request,
                 request.instance.socket_path,
                 controller,
-                timeout=min(max(request.timeout, 1.0), 30.0),
+                timeout=max(request.timeout, 1.0),
             )
         except FulcrumError as error:
             if controller_start.get("state") == "started":
