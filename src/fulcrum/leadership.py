@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
@@ -1105,36 +1106,44 @@ async def _create_or_recover_leader(
     *,
     excluded_threads: set[str],
 ) -> tuple[Any, bool]:
-    matches = [
-        task
-        for task in await runtime.find_tasks(spec.creation_cwd)
-        if task.id not in excluded_threads
-    ]
-    if len(matches) == 1:
-        return matches[0], False
-    if len(matches) > 1:
-        raise AppServerError(
-            "multiple native tasks match the retained leadership creation path",
-            category="uncertain",
-            uncertain=True,
-        )
-    try:
-        return await runtime.create_task(spec), True
-    except AppServerError as error:
-        if not error.uncertain:
-            raise
-        observed = [
+    ignored = set(excluded_threads)
+    for attempt in range(3):
+        matches = [
             task
             for task in await runtime.find_tasks(spec.creation_cwd)
-            if task.id not in excluded_threads
+            if task.id not in ignored
         ]
-        if len(observed) == 1:
-            return observed[0], True
-        raise AppServerError(
-            "leadership creation response was lost and the retained path is inconclusive",
-            category="uncertain",
-            uncertain=True,
-        ) from error
+        if len(matches) == 1:
+            return matches[0], False
+        if len(matches) > 1:
+            raise AppServerError(
+                "multiple native tasks match the retained leadership creation path",
+                category="uncertain",
+                uncertain=True,
+            )
+        try:
+            return await runtime.create_task(spec), True
+        except AppServerError as error:
+            absent = re.search(r"thread not found: ([0-9a-f-]+)", str(error), re.I)
+            if absent is not None:
+                ignored.add(absent.group(1))
+                if attempt < 2:
+                    continue
+            if not error.uncertain:
+                raise
+            observed = [
+                task
+                for task in await runtime.find_tasks(spec.creation_cwd)
+                if task.id not in ignored
+            ]
+            if len(observed) == 1:
+                return observed[0], True
+            raise AppServerError(
+                "leadership creation response was lost and the retained path is inconclusive",
+                category="uncertain",
+                uncertain=True,
+            ) from error
+    raise AssertionError("bounded leadership creation loop did not return")
 
 
 def normalize_native_intake(

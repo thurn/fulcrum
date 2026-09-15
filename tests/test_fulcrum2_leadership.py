@@ -24,12 +24,19 @@ from fulcrum.leadership import (
     LeadershipService,
     capacity_snapshot,
     ensure_leadership,
+    _create_or_recover_leader,
     marshal_context,
     normalize_native_intake,
 )
 from fulcrum.ledger import Ledger, LedgerRecord
 from fulcrum.roles import LEADERSHIP_TITLES
-from fulcrum.runtime import ResourceFacts, TaskFacts, TurnFacts
+from fulcrum.runtime import (
+    AppServerError,
+    ResourceFacts,
+    TaskFacts,
+    TaskSpec,
+    TurnFacts,
+)
 from fulcrum.supervision import ControllerSupervisor
 
 
@@ -52,6 +59,7 @@ class FakeLeadershipRuntime:
         self.tasks: dict[str, TaskFacts] = {}
         self.created: list[str] = []
         self.turns: list[str] = []
+        self.rejected_creates = 0
 
     async def connect(self) -> None:
         pass
@@ -63,6 +71,12 @@ class FakeLeadershipRuntime:
         return [task for task in self.tasks.values() if task.cwd == creation_cwd]
 
     async def create_task(self, spec: Any) -> TaskFacts:
+        if self.rejected_creates:
+            self.rejected_creates -= 1
+            raise AppServerError(
+                "thread not found: 01a0a4b6-6fb7-7302-a990-0f248370e080",
+                category="rejected",
+            )
         thread_id = f"native-leader-{len(self.tasks) + 1}"
         task = TaskFacts(
             id=thread_id,
@@ -135,6 +149,27 @@ class FakeLeadershipRuntime:
 
 
 class Fulcrum2LeadershipTest(unittest.TestCase):
+    def test_absent_fresh_leader_is_retried_from_same_intent(self) -> None:
+        runtime = FakeLeadershipRuntime()
+        runtime.rejected_creates = 1
+        spec = TaskSpec(
+            creation_cwd=str(self.instance / "leaders" / "vizier-retry"),
+            cwd=str(self.brain),
+            project_id=None,
+            workspace_roots=(str(self.brain),),
+            title="Vizier retry",
+            model="luna",
+            effort="low",
+        )
+
+        task, created = asyncio.run(
+            _create_or_recover_leader(runtime, spec, excluded_threads=set())
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(task.title, "Vizier retry")
+        self.assertEqual(runtime.rejected_creates, 0)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name).resolve()
