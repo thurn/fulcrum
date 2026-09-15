@@ -27,6 +27,7 @@ from fulcrum.runtime_service import (
     _runtime_call,
     _select_model,
     _start_or_recover,
+    routing_developer_instructions,
 )
 
 
@@ -72,7 +73,7 @@ class ReviewService:
                     "task_record_id": existing_review.get("task_record_id"),
                 },
             )
-        prompt = _review_prompt(root, perspective, retained_draft)
+        prompt = _review_prompt(root, perspective, retained_draft, expected_operation)
         config, project = _project_config(request, str(root.fc.get("project")))
         model, effort, model_origin = _select_model(
             request, config, project, root.fc, "weaver"
@@ -186,6 +187,7 @@ class ReviewService:
             title=f"Plan review ({perspective}): {root.title}",
             model=model,
             effort=effort,
+            developer_instructions=routing_developer_instructions(request),
         )
         native = _runtime_call(
             request,
@@ -479,7 +481,12 @@ class ReviewService:
         return _operation_result(receipt)
 
 
-def _review_prompt(root: Any, perspective: str, draft: Mapping[str, Any]) -> str:
+def _review_prompt(
+    root: Any,
+    perspective: str,
+    draft: Mapping[str, Any],
+    review_operation: str,
+) -> str:
     instructions = {
         "role": "weaver",
         "purpose": "plan_review",
@@ -491,7 +498,15 @@ def _review_prompt(root: Any, perspective: str, draft: Mapping[str, Any]) -> str
         ),
         "candidate_draft": dict(draft),
         "finish": {
-            "command": "fulcrum plan review finish",
+            "command": (
+                "fulcrum plan review finish --task $CODEX_THREAD_ID --input - --json"
+            ),
+            "review_operation": review_operation,
+            "payload": {
+                "review_operation": review_operation,
+                "findings": [],
+                "summary": "replace with the independent review summary",
+            },
             "findings_shape": {
                 "problem": "text",
                 "required_change": "text",

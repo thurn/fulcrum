@@ -193,6 +193,9 @@ class Tollgate:
     def add_repository(self, path: Path) -> dict[str, Any]:
         return self.run(["repo", "add", str(path)], cwd=path, mutating=True)
 
+    def remove_repository(self, repository_id: str) -> dict[str, Any]:
+        return self.run(["repo", "remove", repository_id], mutating=True)
+
     def queue(self, repository_id: str) -> Any:
         return self._run_json(["queue"], repository_id=repository_id)
 

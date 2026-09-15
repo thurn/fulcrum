@@ -205,6 +205,7 @@ class Runtime(Protocol):
     async def ensure_project(
         self, *, name: str, root: str, operation_id: str
     ) -> dict[str, Any]: ...
+    async def delete_project(self, project_id: str) -> dict[str, Any]: ...
     async def create_task(self, spec: TaskSpec) -> TaskFacts: ...
     async def find_tasks(self, creation_cwd: str) -> list[TaskFacts]: ...
     async def inspect_task(self, thread_id: str) -> TaskFacts: ...
@@ -688,6 +689,9 @@ class CodexRuntime:
             },
         )
 
+    async def delete_project(self, project_id: str) -> dict[str, Any]:
+        return await self.request("project/delete", {"projectId": project_id})
+
     async def _paged(
         self, method: str, params: Mapping[str, Any]
     ) -> list[dict[str, Any]]:
@@ -1161,6 +1165,28 @@ class AppServerRuntime:
                 uncertain=True,
             )
         return project
+
+    async def delete_project(self, project_id: str) -> dict[str, Any]:
+        matches = [
+            project
+            for project in await self.transport.list_projects()
+            if str(project.get("id") or project.get("projectId") or "") == project_id
+        ]
+        if not matches:
+            return {"id": project_id, "exists": False, "deleted": False}
+        await self.transport.delete_project(project_id)
+        retained = [
+            project
+            for project in await self.transport.list_projects()
+            if str(project.get("id") or project.get("projectId") or "") == project_id
+        ]
+        if retained:
+            raise AppServerError(
+                f"project {project_id} still exists after project/delete",
+                category="uncertain",
+                uncertain=True,
+            )
+        return {"id": project_id, "exists": False, "deleted": True}
 
     async def create_task(self, spec: TaskSpec) -> TaskFacts:
         result = await self.transport.create_thread(

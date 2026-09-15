@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import socket
@@ -30,7 +31,9 @@ from fulcrum.installation_service import (
     load_installed_services,
 )
 from fulcrum.ledger import Ledger, OperationRecord, operation_id, operation_view
+from fulcrum.runtime import AppServerRuntime
 from fulcrum.setup import run_setup
+from fulcrum.tollgate import Tollgate, TollgateError
 
 TERMINAL_STATES = {"completed", "failed", "cancelled", "uncertain"}
 
@@ -50,8 +53,17 @@ class FixtureService:
             raise FulcrumError.invalid(
                 "INVALID_INPUT", "source_sync must be explicitly true or false"
             )
-        _provider_kind(supplied.get("runtime"), "runtime")
-        _provider_kind(supplied.get("delivery"), "delivery")
+        runtime_input = _provider_config(supplied.get("runtime"), "runtime")
+        delivery_input = _provider_config(supplied.get("delivery"), "delivery")
+        if (runtime_input["kind"], delivery_input["kind"]) not in {
+            ("deterministic", "deterministic"),
+            ("codex", "tollgate"),
+        }:
+            raise FulcrumError.invalid(
+                "INVALID_INPUT",
+                "fixture providers must be deterministic/deterministic or codex/tollgate",
+            )
+        native = runtime_input["kind"] == "codex"
         existing = _existing_fixture_receipt(request, root)
         if existing is not None and existing.operation.get("state") in TERMINAL_STATES:
             return _operation_result(existing)
@@ -81,14 +93,16 @@ class FixtureService:
                             "remote": "origin",
                         },
                         "runtime": {
-                            "kind": "deterministic",
-                            "endpoint": str(state_path),
-                            "executable": None,
+                            **runtime_input,
+                            "endpoint": (
+                                runtime_input.get("endpoint")
+                                if native
+                                else str(state_path)
+                            ),
                         },
                         "delivery": {
-                            "kind": "deterministic",
-                            "endpoint": str(state_path),
-                            "executable": None,
+                            **delivery_input,
+                            **({} if native else {"endpoint": str(state_path)}),
                         },
                         "beads": {"host": "127.0.0.1", "port": port},
                         "models": models,
@@ -111,6 +125,10 @@ class FixtureService:
                     offline=True,
                 )
                 setup = run_setup(setup_request)
+                if not setup.ok:
+                    raise RuntimeError(
+                        f"fixture setup did not satisfy required capabilities: {setup.result}"
+                    )
                 ServiceService().stop(
                     replace(
                         request,
@@ -130,6 +148,10 @@ class FixtureService:
                         "fixture_root": str(root),
                         "owned_paths": [str(path) for path in paths.values()],
                         "provider_state": str(state_path),
+                        "provider_kinds": {
+                            "runtime": runtime_input["kind"],
+                            "delivery": delivery_input["kind"],
+                        },
                         "beads_port": port,
                         "setup_operation": setup.operation_id,
                     },
@@ -148,42 +170,51 @@ class FixtureService:
                 ProviderState(str(state_path)).read()
                 ledger = Ledger(paths["brain"], timeout=request.timeout)
                 operation = existing
+            project_payload: dict[str, Any] = {
+                "id": "fixture",
+                "root": str(paths["project"]),
+                "codex_project_id": None if native else "fixture-project-1",
+                "integration_branch": "main",
+                "prepare_argv": [],
+                "validate_argv": [],
+                "enabled": True,
+                "source_remote": "origin",
+                "require_source_sync": source_sync,
+                "models": {},
+            }
+            if not native:
+                project_payload["delivery"] = {
+                    "id": "fixture-repository-1",
+                    "registration": "created",
+                }
             project_request = replace(
                 request,
                 command=("project", "add"),
                 request_id=_derived_request_id(request, "fixture-project-add"),
                 project="fixture",
-                input={
-                    "id": "fixture",
-                    "root": str(paths["project"]),
-                    "codex_project_id": "fixture-project-1",
-                    "delivery": {
-                        "id": "fixture-repository-1",
-                        "registration": "created",
-                    },
-                    "integration_branch": "main",
-                    "prepare_argv": [],
-                    "validate_argv": [],
-                    "enabled": True,
-                    "source_remote": "origin",
-                    "require_source_sync": source_sync,
-                    "models": {},
-                },
+                input=project_payload,
                 offline=True,
             )
             project_result = ProjectService().add(project_request)
-            ProviderState(str(state_path)).mutate(
-                lambda state: state.setdefault("projects", {}).update(
-                    {
-                        "fixture-project-1": {
-                            "id": "fixture-project-1",
-                            "name": "fixture",
-                            "root": str(paths["project"]),
-                            "operation_id": project_result.operation_id,
+            project = _project_from_result(project_result)
+            runtime_project_id = str(project["codex_project_id"])
+            delivery = project.get("delivery")
+            if not isinstance(delivery, Mapping) or not delivery.get("id"):
+                raise RuntimeError("fixture project returned no delivery repository")
+            delivery_repository_id = str(delivery["id"])
+            if not native:
+                ProviderState(str(state_path)).mutate(
+                    lambda state: state.setdefault("projects", {}).update(
+                        {
+                            runtime_project_id: {
+                                "id": runtime_project_id,
+                                "name": "fixture",
+                                "root": str(paths["project"]),
+                                "operation_id": project_result.operation_id,
+                            }
                         }
-                    }
+                    )
                 )
-            )
             inventory = {
                 "fixture_id": operation.id,
                 "root": str(root),
@@ -194,10 +225,21 @@ class FixtureService:
                 "project_root": str(paths["project"]),
                 "remote": str(paths["brain_remote"]),
                 "source_remote": str(paths["source_remote"]),
-                "provider_state": str(state_path),
+                "fixture_state": str(state_path),
+                "provider_state": None if native else str(state_path),
+                "provider_kinds": {
+                    "runtime": runtime_input["kind"],
+                    "delivery": delivery_input["kind"],
+                },
                 "provider_ids": {
-                    "runtime_project": "fixture-project-1",
-                    "delivery_repository": "fixture-repository-1",
+                    "runtime_project": runtime_project_id,
+                    "delivery_repository": delivery_repository_id,
+                },
+                "provider_ownership": {
+                    "runtime_project": "created",
+                    "delivery_repository": str(
+                        delivery.get("registration") or "unknown"
+                    ),
                 },
                 "beads_port": port,
                 "model": model,
@@ -240,12 +282,20 @@ class FixtureService:
     def show(self, request: ParsedRequest) -> CommandResult:
         operation = _fixture_operation(request, str(request.arguments["id"]))
         result = dict(operation.operation.get("result") or {})
-        endpoint = result.get("provider_state")
         gaps: list[dict[str, Any]] = []
         provider: Mapping[str, Any] | None = None
+        endpoint = result.get("provider_state")
         if isinstance(endpoint, str):
             try:
                 provider = provider_observation(endpoint)
+            except Exception as error:
+                gaps.append({"component": "provider", "reason": str(error)})
+        elif result.get("provider_kinds") == {
+            "runtime": "codex",
+            "delivery": "tollgate",
+        }:
+            try:
+                provider = _native_provider_observation(request, result)
             except Exception as error:
                 gaps.append({"component": "provider", "reason": str(error)})
         ledger = _ledger(request)
@@ -294,31 +344,96 @@ class FixtureService:
                 "cleanup target is not the exact selected disposable fixture",
                 exit_code=5,
             )
-        endpoint = str(inventory["provider_state"])
-        provider = provider_observation(endpoint)
-        runtime_tasks: list[str] = list(provider["runtime"].get("tasks", {}).keys())
-        from fulcrum.deterministic import DeterministicRuntime
-
-        runtime: DeterministicRuntime = DeterministicRuntime(endpoint)
-
-        async def remove_tasks() -> list[str]:
-            removed: list[str] = []
-            for thread_id in runtime_tasks:
-                facts = await runtime.inspect_task(thread_id)
-                if facts.active_turn:
-                    await runtime.interrupt(thread_id, facts.active_turn)
-                if facts.exists:
-                    await runtime.delete(thread_id)
-                removed.append(thread_id)
-            return removed
-
-        import asyncio
-
-        removed_tasks = asyncio.run(remove_tasks())
         stopped: list[dict[str, Any]] = []
         services = load_installed_services(request.instance.instance_root)
         failures: list[str] = []
-        for name in ("updater", "controller", "runtime", "dolt"):
+        for name in ("updater", "controller"):
+            service = services.get(name)
+            if service is None:
+                continue
+            try:
+                stopped.append(_stop_one(service))
+            except Exception as error:
+                failures.append(f"{name}: {error}")
+        config = ConfigurationManager(request.instance.config_path).effective(
+            ConfigurationManager(request.instance.config_path).load()[0]
+        )
+        runtime_kind = str(config["runtime"]["kind"])
+        runtime_tasks: list[str] = _fixture_task_ids(_ledger(request))
+        if runtime_kind == "deterministic":
+            endpoint = str(inventory["provider_state"])
+            provider = provider_observation(endpoint)
+            runtime_tasks = sorted(
+                set(runtime_tasks).union(provider["runtime"].get("tasks", {}).keys())
+            )
+            from fulcrum.deterministic import DeterministicRuntime
+
+            runtime: Any = DeterministicRuntime(endpoint)
+        else:
+            runtime = AppServerRuntime(str(config["runtime"]["endpoint"]))
+
+        async def remove_tasks() -> tuple[list[str], list[str]]:
+            removed: list[str] = []
+            errors: list[str] = []
+            try:
+                await runtime.connect()
+                for thread_id in runtime_tasks:
+                    try:
+                        facts = await runtime.inspect_task(thread_id)
+                        if facts.active_turn:
+                            await runtime.interrupt(thread_id, facts.active_turn)
+                        if facts.exists:
+                            await runtime.delete(thread_id)
+                        removed.append(thread_id)
+                    except Exception as error:
+                        errors.append(f"task {thread_id}: {error}")
+            finally:
+                await runtime.close()
+            return removed, errors
+
+        removed_tasks, task_failures = asyncio.run(remove_tasks())
+        failures.extend(task_failures)
+        provider_removals: list[dict[str, Any]] = []
+        if runtime_kind == "codex" and not task_failures:
+            provider_ids = inventory.get("provider_ids")
+            ownership = inventory.get("provider_ownership")
+            if isinstance(provider_ids, Mapping) and isinstance(ownership, Mapping):
+                runtime_project: str = str(provider_ids.get("runtime_project") or "")
+                if runtime_project and ownership.get("runtime_project") == "created":
+                    native_runtime: AppServerRuntime = AppServerRuntime(
+                        str(config["runtime"]["endpoint"])
+                    )
+
+                    async def remove_project() -> dict[str, Any]:
+                        await native_runtime.connect()
+                        try:
+                            return await native_runtime.delete_project(runtime_project)
+                        finally:
+                            await native_runtime.close()
+
+                    try:
+                        provider_removals.append(
+                            {"runtime_project": asyncio.run(remove_project())}
+                        )
+                    except Exception as error:
+                        failures.append(f"runtime project {runtime_project}: {error}")
+                delivery_repository = str(provider_ids.get("delivery_repository") or "")
+                if (
+                    delivery_repository
+                    and ownership.get("delivery_repository") == "created"
+                ):
+                    try:
+                        removed = Tollgate(
+                            config["delivery"].get("executable")
+                        ).remove_repository(delivery_repository)
+                        provider_removals.append(
+                            {"delivery_repository": removed or delivery_repository}
+                        )
+                    except TollgateError as error:
+                        failures.append(
+                            f"delivery repository {delivery_repository}: {error}"
+                        )
+        for name in ("runtime", "dolt"):
             service = services.get(name)
             if service is None:
                 continue
@@ -335,6 +450,7 @@ class FixtureService:
                     "fixture_id": creation.id,
                     "root": str(root),
                     "removed_tasks": removed_tasks,
+                    "provider_removals": provider_removals,
                     "services": stopped,
                     "cleanup_failures": failures,
                     "root_removed": False,
@@ -350,6 +466,7 @@ class FixtureService:
                 "fixture_id": creation.id,
                 "root": str(root),
                 "removed_tasks": removed_tasks,
+                "provider_removals": provider_removals,
                 "services": stopped,
                 "cleanup_failures": [],
                 "root_removed": not root.exists(),
@@ -486,7 +603,7 @@ class BarrierService:
         )
         if not request.wait:
             return result
-        endpoint = _provider_endpoint(request)
+        endpoint = _fixture_state_endpoint(request, str(request.arguments["id"]))
         key = str(request.arguments["name"])
         deadline = time.monotonic() + request.timeout
         while time.monotonic() < deadline:
@@ -519,7 +636,7 @@ class BarrierService:
 
     def show(self, request: ParsedRequest) -> CommandResult:
         _fixture_operation(request, str(request.arguments["id"]))
-        endpoint = _provider_endpoint(request)
+        endpoint = _fixture_state_endpoint(request, str(request.arguments["id"]))
         key = str(request.arguments["name"])
         barrier = provider_observation(endpoint)["barriers"].get(key)
         if not isinstance(barrier, Mapping):
@@ -530,7 +647,7 @@ class BarrierService:
 
     def _mutate(self, request: ParsedRequest, action: Any, step: str) -> CommandResult:
         _fixture_operation(request, str(request.arguments["id"]))
-        endpoint = _provider_endpoint(request)
+        endpoint = _fixture_state_endpoint(request, str(request.arguments["id"]))
         ledger = _ledger(request)
         operation, reused = ledger.create_operation(
             request,
@@ -611,15 +728,50 @@ def _scaffold_fixture(root: Path) -> dict[str, Path]:
     (brain / "README.md").write_text("# Disposable Fulcrum fixture\n", encoding="utf-8")
     _run("git", "-C", str(brain), "add", "README.md")
     _run("git", "-C", str(brain), "commit", "-m", "chore: initialize fixture brain")
-    (project / "fixture.txt").write_text("initial fixture source\n", encoding="utf-8")
-    _run("git", "-C", str(project), "add", "fixture.txt")
+    (project / "ordering.py").write_text(
+        '"""Small ordering library used only by Fulcrum acceptance fixtures."""\n\n'
+        "from collections.abc import Iterable\n\n\n"
+        "def ascending(values: Iterable[int]) -> list[int]:\n"
+        "    return sorted(values)\n",
+        encoding="utf-8",
+    )
+    (project / "legacy_ordering.py").write_text(
+        '"""Deliberately duplicated fixture component for Mason inspection."""\n\n'
+        "from collections.abc import Iterable\n\n\n"
+        "def legacy_ascending(values: Iterable[int]) -> list[int]:\n"
+        "    return sorted(values)\n",
+        encoding="utf-8",
+    )
+    tests = project / "tests"
+    tests.mkdir()
+    (tests / "test_ordering.py").write_text(
+        "import unittest\n\n"
+        "from ordering import ascending\n\n\n"
+        "class OrderingTest(unittest.TestCase):\n"
+        "    def test_ascending(self) -> None:\n"
+        "        self.assertEqual(ascending([3, 1, 2]), [1, 2, 3])\n\n\n"
+        "if __name__ == '__main__':\n"
+        "    unittest.main()\n",
+        encoding="utf-8",
+    )
+    tollgate = project / ".tollgate"
+    tollgate.mkdir()
+    (tollgate / "config.toml").write_text(
+        'version = 1\n\n[remote]\nenabled = true\nname = "origin"\n'
+        'branch = "main"\n\n[[step]]\nname = "tests"\n'
+        'run = "python3 -m unittest discover -s tests -q"\n',
+        encoding="utf-8",
+    )
+    _run("git", "-C", str(project), "add", ".")
     _run("git", "-C", str(project), "commit", "-m", "chore: initialize fixture source")
+    _run("git", "-C", str(project), "branch", "master")
     _run("git", "init", "--bare", "--initial-branch=main", str(brain_remote))
     _run("git", "init", "--bare", "--initial-branch=main", str(source_remote))
     _run("git", "-C", str(brain), "remote", "add", "origin", str(brain_remote))
     _run("git", "-C", str(project), "remote", "add", "origin", str(source_remote))
     _run("git", "-C", str(brain), "push", "-u", "origin", "main")
     _run("git", "-C", str(project), "push", "-u", "origin", "main")
+    _run("git", "-C", str(project), "push", "origin", "master")
     return {
         "brain": brain,
         "project": project,
@@ -691,6 +843,84 @@ def _fixture_operation(request: ParsedRequest, fixture_id: str) -> OperationReco
     return operation
 
 
+def _fixture_state_endpoint(request: ParsedRequest, fixture_id: str) -> str:
+    operation = _fixture_operation(request, fixture_id)
+    inventory = operation.operation.get("result")
+    endpoint = (
+        inventory.get("fixture_state") if isinstance(inventory, Mapping) else None
+    )
+    if not isinstance(endpoint, str) or not endpoint:
+        raise FulcrumError.invalid(
+            "FIXTURE_INVALID", "fixture has no external control state"
+        )
+    return endpoint
+
+
+def _fixture_task_ids(ledger: Ledger) -> list[str]:
+    return sorted(
+        {
+            str(record.fc["thread_id"])
+            for record in ledger.list_records(kind="task", limit=0)
+            if record.fc
+            and isinstance(record.fc.get("thread_id"), str)
+            and record.fc.get("thread_id")
+        }
+    )
+
+
+def _native_provider_observation(
+    request: ParsedRequest, inventory: Mapping[str, Any]
+) -> dict[str, Any]:
+    manager = ConfigurationManager(request.instance.config_path)
+    document, _ = manager.load()
+    config = manager.effective(document)
+    runtime: AppServerRuntime = AppServerRuntime(str(config["runtime"]["endpoint"]))
+
+    async def inspect_runtime() -> dict[str, Any]:
+        await runtime.connect()
+        try:
+            capabilities = await runtime.capabilities()
+            project_id = str(
+                (inventory.get("provider_ids") or {}).get("runtime_project") or ""
+            )
+            projects = await runtime.find_projects(str(inventory["project_root"]))
+            return {
+                "capabilities": capabilities.to_dict(),
+                "project_id": project_id,
+                "project_present": any(
+                    str(row.get("id") or row.get("projectId") or "") == project_id
+                    for row in projects
+                ),
+                "managed_task_ids": _fixture_task_ids(_ledger(request)),
+            }
+        finally:
+            await runtime.close()
+
+    runtime_result = asyncio.run(inspect_runtime())
+    repository_id = str(
+        (inventory.get("provider_ids") or {}).get("delivery_repository") or ""
+    )
+    repositories = Tollgate(config["delivery"].get("executable")).repositories()
+    matching = [row for row in repositories if _tollgate_id(row) == repository_id]
+    state = provider_observation(str(inventory["fixture_state"]))
+    return {
+        "runtime": runtime_result,
+        "delivery": {
+            "repository_id": repository_id,
+            "repository_present": len(matching) == 1,
+            "repository": matching[0] if len(matching) == 1 else None,
+        },
+        "barriers": state.get("barriers", {}),
+    }
+
+
+def _tollgate_id(value: Mapping[str, Any]) -> str | None:
+    state = value.get("state")
+    row = state if isinstance(state, Mapping) else value
+    identifier = row.get("id") or row.get("repository_id")
+    return str(identifier) if identifier else None
+
+
 def _deterministic_config(request: ParsedRequest) -> dict[str, Any]:
     manager = ConfigurationManager(request.instance.config_path)
     document, _ = manager.load()
@@ -711,11 +941,51 @@ def _provider_endpoint(request: ParsedRequest) -> str:
     return str(_deterministic_config(request)["runtime"]["endpoint"])
 
 
-def _provider_kind(value: Any, field: str) -> None:
-    if not isinstance(value, Mapping) or value.get("kind") != "deterministic":
+def _provider_config(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise FulcrumError.invalid("INVALID_INPUT", f"{field} must be a mapping")
+    allowed = (
+        {"kind", "endpoint", "executable"}
+        if field == "runtime"
+        else {"kind", "endpoint", "executable"}
+    )
+    unknown = sorted(set(value).difference(allowed))
+    if unknown:
         raise FulcrumError.invalid(
-            "INVALID_INPUT", f"{field}.kind must explicitly be deterministic"
+            "INVALID_INPUT", f"{field} contains unknown fields: {', '.join(unknown)}"
         )
+    kind = value.get("kind")
+    supported = (
+        {"deterministic", "codex"}
+        if field == "runtime"
+        else {
+            "deterministic",
+            "tollgate",
+        }
+    )
+    if kind not in supported:
+        raise FulcrumError.invalid(
+            "INVALID_INPUT",
+            f"{field}.kind must explicitly be one of {sorted(supported)}",
+        )
+    result = dict(value)
+    if kind in {"codex", "tollgate"}:
+        required = "endpoint" if field == "runtime" else "executable"
+        if not isinstance(result.get(required), str) or not result[required]:
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", f"{field}.{required} is required for {kind}"
+            )
+    result.setdefault("executable", None)
+    return result
+
+
+def _project_from_result(result: CommandResult) -> dict[str, Any]:
+    outer = result.result
+    retained = outer.get("result") if isinstance(outer, Mapping) else None
+    project = retained.get("project") if isinstance(retained, Mapping) else None
+    if not result.ok or not isinstance(project, Mapping):
+        raise RuntimeError(f"fixture project enrollment failed: {outer}")
+    return dict(project)
 
 
 def _ledger(request: ParsedRequest) -> Ledger:

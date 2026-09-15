@@ -698,10 +698,40 @@ class ProjectService:
                 exit_code=5,
                 details={"work": open_work},
             )
+        project = projects[project_id]
+        if not isinstance(project, Mapping):
+            raise _invalid(f"projects.{project_id}", "must be a mapping")
+        remove_registrations = bool(
+            request.arguments.get("remove_owned_registrations", False)
+        )
+        add_operation = _project_add_operation(ledger, project_id)
+        delivery = project.get("delivery")
+        planned_registrations = {
+            "runtime_project": {
+                "id": project.get("codex_project_id"),
+                "ownership_operation": add_operation,
+            },
+            "delivery_repository": {
+                "id": delivery.get("id") if isinstance(delivery, Mapping) else None,
+                "ownership": (
+                    delivery.get("registration")
+                    if isinstance(delivery, Mapping)
+                    else None
+                ),
+            },
+        }
         operation, reused = ledger.create_operation(
             request,
-            planned={"project_id": project_id},
-            next_action="Remove the settled project from authoritative YAML.",
+            planned={
+                "project_id": project_id,
+                "remove_owned_registrations": remove_registrations,
+                "registrations": planned_registrations,
+            },
+            next_action=(
+                "Remove exact owned provider registrations, then authoritative YAML."
+                if remove_registrations
+                else "Remove the settled project from authoritative YAML."
+            ),
         )
         if reused and operation.operation.get("state") in {
             "completed",
@@ -710,6 +740,67 @@ class ProjectService:
             "cancelled",
         }:
             return _operation_command_result(operation)
+        provider_removals: list[dict[str, Any]] = []
+        if remove_registrations:
+            try:
+                runtime_id = project.get("codex_project_id")
+                if isinstance(runtime_id, str) and runtime_id and add_operation:
+                    from fulcrum.runtime_service import _runtime_call
+
+                    runtime_result = _runtime_call(
+                        request,
+                        lambda runtime: _remove_created_runtime_project(
+                            runtime,
+                            str(project["root"]),
+                            runtime_id,
+                            add_operation,
+                        ),
+                    )
+                    provider_removals.append({"runtime_project": runtime_result})
+                    operation = ledger.update_operation(
+                        operation,
+                        step="runtime_project_removal_observed",
+                        result={"provider_removals": provider_removals},
+                        next_action="Remove any exact owned delivery registration.",
+                    )
+                if (
+                    isinstance(delivery, Mapping)
+                    and delivery.get("registration") == "created"
+                    and isinstance(delivery.get("id"), str)
+                ):
+                    tollgate = Tollgate(effective["delivery"].get("executable"))
+                    removed = tollgate.remove_repository(str(delivery["id"]))
+                    provider_removals.append(
+                        {"delivery_repository": removed or str(delivery["id"])}
+                    )
+                    operation = ledger.update_operation(
+                        operation,
+                        step="delivery_repository_removal_observed",
+                        result={"provider_removals": provider_removals},
+                        next_action="Remove the authoritative YAML enrollment.",
+                    )
+            except (FulcrumError, TollgateError) as error:
+                operation = ledger.update_operation(
+                    operation,
+                    state=(
+                        "uncertain"
+                        if isinstance(error, TollgateUncertainError)
+                        or (
+                            isinstance(error, FulcrumError)
+                            and error.state == CommandState.UNCERTAIN
+                        )
+                        else "failed"
+                    ),
+                    step="provider_registration_removal_failed",
+                    error={
+                        "code": getattr(error, "code", "PROVIDER_REMOVAL_FAILED"),
+                        "message": str(error),
+                        "retryable": getattr(error, "retryable", False),
+                    },
+                    result={"provider_removals": provider_removals},
+                    next_action="Inspect the exact provider IDs before retrying removal.",
+                )
+                return _operation_command_result(operation)
         del projects[project_id]
         manager.validate_document(document)
         manager.replace(document, original)
@@ -719,7 +810,8 @@ class ProjectService:
             step="project_removed",
             result={
                 "project_id": project_id,
-                "owned_provider_registrations_removed": False,
+                "owned_provider_registrations_removed": remove_registrations,
+                "provider_removals": provider_removals,
             },
             next_action="No further action is required.",
         )
@@ -952,6 +1044,68 @@ def _ensure_tollgate_repository(
         "ownership": "created",
         "repository": created,
     }
+
+
+def _project_add_operation(ledger: Ledger, project_id: str) -> str | None:
+    matches: list[OperationRecord] = []
+    for record in ledger.list_records(kind="operation", limit=0):
+        operation = OperationRecord.from_record(record)
+        if operation.operation.get("command") != "project.add":
+            continue
+        planned = operation.operation.get("planned")
+        if isinstance(planned, Mapping) and planned.get("project_id") == project_id:
+            matches.append(operation)
+    if not matches:
+        return None
+    matches.sort(
+        key=lambda item: (
+            str(item.native.get("updated_at") or item.native.get("updatedAt") or ""),
+            item.id,
+        )
+    )
+    return matches[-1].id
+
+
+async def _remove_created_runtime_project(
+    runtime: Any,
+    root: str,
+    project_id: str,
+    creation_operation: str,
+) -> dict[str, Any]:
+    matches = await runtime.find_projects(root)
+    exact = [
+        project
+        for project in matches
+        if str(project.get("id") or project.get("projectId") or "") == project_id
+    ]
+    if not exact:
+        return {
+            "id": project_id,
+            "exists": False,
+            "deleted": False,
+            "ownership": "previously_removed",
+        }
+    if len(exact) != 1:
+        raise FulcrumError(
+            "PROJECT_PROVIDER_UNCERTAIN",
+            "multiple native projects match the exact configured provider ID",
+            exit_code=4,
+            state=CommandState.UNCERTAIN,
+            details={"project_id": project_id, "matches": len(exact)},
+        )
+    metadata = exact[0].get("metadata")
+    if (
+        not isinstance(metadata, Mapping)
+        or metadata.get("fulcrum_operation") != creation_operation
+    ):
+        return {
+            "id": project_id,
+            "exists": True,
+            "deleted": False,
+            "ownership": "discovered",
+        }
+    removed = await runtime.delete_project(project_id)
+    return {**dict(removed), "ownership": "created"}
 
 
 def _tollgate_repository_state(value: Mapping[str, Any]) -> Mapping[str, Any]:

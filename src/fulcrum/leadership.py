@@ -160,7 +160,10 @@ class LeadershipService:
             )
             return _operation_result(operation)
         from fulcrum.runtime import TurnInput
-        from fulcrum.runtime_service import _runtime_call
+        from fulcrum.runtime_service import (
+            _runtime_call,
+            routing_developer_instructions,
+        )
 
         fc = marshal.fc
         turn = _runtime_call(
@@ -168,7 +171,10 @@ class LeadershipService:
             lambda runtime: runtime.start_turn(
                 str(fc["thread_id"]),
                 TurnInput(
-                    text=str(operation.operation["planned"]["serialized_brief"]),
+                    text=_marshal_decision_prompt(
+                        operation.id,
+                        str(operation.operation["planned"]["serialized_brief"]),
+                    ),
                     cwd=str(fc.get("creation_cwd") or request.instance.instance_root),
                     workspace_roots=tuple(
                         str(item)
@@ -183,6 +189,7 @@ class LeadershipService:
                     effort=str(fc.get("effort")),
                     operation_id=operation.id,
                     ownership_operation=None,
+                    developer_instructions=routing_developer_instructions(request),
                 ),
             ),
         )
@@ -2042,6 +2049,22 @@ def _why_now(
 
 def _serialize(value: Mapping[str, Any]) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, sort_keys=True)
+
+
+def _marshal_decision_prompt(operation_id: str, serialized_brief: str) -> str:
+    return (
+        "You are the standing Fulcrum Marshal for one retained decision batch. "
+        "Evaluate every selected row from evidence, keep material unknowns explicit, "
+        "and keep independent actionable work moving. Use the selected Fulcrum "
+        "instance CLI to call `marshal decide --input - --json` exactly once with "
+        f"`decision_operation` set to `{operation_id}` and one decision per row. "
+        "Each decision must repeat `bead_id`, `expected_ownership_operation`, and "
+        "`expected_phase` from the row, then choose an allowed action and give an "
+        "evidence-based reason plus its action-specific fields. Do not edit source "
+        "or fulcrum.yaml. End the turn after the command result is observed.\n\n"
+        "## Retained decision brief\n"
+        f"{serialized_brief}"
+    )
 
 
 def _optional_string(value: Any) -> str | None:

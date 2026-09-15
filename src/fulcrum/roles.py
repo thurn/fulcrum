@@ -31,6 +31,7 @@ from fulcrum.runtime_service import (
     _runtime_call,
     _select_model,
     _start_or_recover,
+    routing_developer_instructions,
 )
 from fulcrum.work import WorkService
 
@@ -313,6 +314,7 @@ class RoleService:
             effort = str(retained["effort"])
             model_origin = str(retained["model_origin"])
         root = str(Path(str(project["root"])).resolve(strict=True))
+        routing_instructions = routing_developer_instructions(request)
         if request.thread_id:
             thread_id = request.thread_id
             expected_title = role_title(role, bead_id, work.title)
@@ -342,6 +344,7 @@ class RoleService:
                     title=expected_title,
                     model=model,
                     effort=effort,
+                    developer_instructions=routing_instructions,
                 )
         else:
             Path(creation_cwd).mkdir(parents=True, exist_ok=True)
@@ -357,6 +360,7 @@ class RoleService:
                 title=role_title(role, bead_id, work.title),
                 model=model,
                 effort=effort,
+                developer_instructions=routing_instructions,
             )
             try:
                 native = _runtime_call(
@@ -718,19 +722,29 @@ def _bind_work(
 ) -> LedgerRecord:
     fc = dict(work.fc or {})
     prior_phase = fc.get("phase")
-    if work.status == "closed":
-        if role not in {"sage", "mason"}:
-            raise FulcrumError(
-                "OWNERSHIP_CONFLICT",
-                "only scoped Sage or Mason investigation may enter closed work directly",
-                exit_code=5,
-            )
-        fc["interrupted_work"] = {
-            "status": work.status,
-            "phase": fc.get("phase"),
-            "disposition": fc.get("disposition"),
-            "owner": fc.get("owner"),
-        }
+    if work.status == "closed" and role not in {"sage", "mason"}:
+        raise FulcrumError(
+            "OWNERSHIP_CONFLICT",
+            "only scoped Sage or Mason investigation may enter closed work directly",
+            exit_code=5,
+        )
+    if role in {"sage", "mason"} and fc.get("role") not in {"sage", "mason"}:
+        standalone = (
+            work.status != "closed"
+            and fc.get("phase") == "backlog"
+            and fc.get("requested_role") == role
+        )
+        if not standalone:
+            fc["interrupted_work"] = {
+                "status": work.status,
+                "phase": fc.get("phase"),
+                "disposition": fc.get("disposition"),
+                "owner": fc.get("owner"),
+                "role": fc.get("role"),
+                "ownership_operation": fc.get("ownership_operation"),
+                "next_action": fc.get("next_action"),
+                "delivery": fc.get("delivery"),
+            }
     fc.update(
         {
             "owner": thread_id,

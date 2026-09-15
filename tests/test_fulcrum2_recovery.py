@@ -663,6 +663,108 @@ class Fulcrum2RecoveryTest(unittest.TestCase):
         self.assertEqual(closed.fc["disposition"]["outcome"], "repaired")
         self.assertIsNotNone(closed.fc["completion_cost"]["summary_bead"])
 
+    def test_standalone_investigation_files_reports_and_closes(self) -> None:
+        root = self.work("Standalone Mason investigation")
+        thread_id = "mason-standalone-thread"
+        work = self.ledger.show(root)
+        assert work is not None and work.fc
+        work_fc = dict(work.fc)
+        work_fc.update(
+            {
+                "owner": thread_id,
+                "role": "mason",
+                "requested_role": "mason",
+                "ownership_operation": "fixture-ownership",
+                "phase": "working",
+            }
+        )
+        self.ledger.update_fc(root, work_fc, assignee=thread_id)
+        self.task(
+            thread_id,
+            role="mason",
+            purpose="work",
+            work_bead=root,
+            runtime_status="idle",
+        )
+
+        finished = self.application.dispatch(
+            self.request(
+                ("finish",),
+                arguments={"bead": root, "outcome": "findings"},
+                payload={
+                    "summary": "One duplicated responsibility was observed.",
+                    "findings": [
+                        {
+                            "title": "Consolidate duplicate ordering helpers",
+                            "problem": "Two modules sort the same integer input.",
+                            "observed_evidence": "ordering.py and legacy_ordering.py",
+                            "required_change": "Retain one ordering responsibility.",
+                            "acceptance_checks": [
+                                "Only one production ordering helper remains."
+                            ],
+                        }
+                    ],
+                },
+                actor=ActorContext(kind="task", task_id=thread_id),
+                thread_id=thread_id,
+                ownership_operation="fixture-ownership",
+            )
+        )
+
+        self.assertEqual(finished.state, CommandState.COMPLETED)
+        closed = self.ledger.show(root)
+        assert closed is not None and closed.fc
+        self.assertEqual(closed.status, "closed")
+        self.assertEqual(closed.fc["disposition"]["outcome"], "findings")
+        reports = closed.fc["investigations"][-1]["reports"]
+        self.assertEqual(len(reports), 1)
+        report = self.ledger.show(reports[0])
+        assert report is not None and report.fc
+        self.assertEqual(report.fc["caused_by"], root)
+
+    def test_leadership_completion_closes_request_not_standing_task(self) -> None:
+        root = self.work("Explicit Vizier request")
+        thread_id = "vizier-standing-thread"
+        work = self.ledger.show(root)
+        assert work is not None and work.fc
+        work_fc = dict(work.fc)
+        work_fc.update(
+            {
+                "owner": thread_id,
+                "role": "vizier",
+                "requested_role": "vizier",
+                "ownership_operation": "fixture-ownership",
+                "phase": "working",
+            }
+        )
+        self.ledger.update_fc(root, work_fc, assignee=thread_id)
+        task_id = self.task(
+            thread_id,
+            role="vizier",
+            purpose="leadership",
+            work_bead=root,
+            runtime_status="idle",
+        )
+
+        finished = self.application.dispatch(
+            self.request(
+                ("finish",),
+                arguments={"bead": root, "outcome": "completed"},
+                payload={"summary": "The requested fixture policy is retained."},
+                actor=ActorContext(kind="task", task_id=thread_id),
+                thread_id=thread_id,
+                ownership_operation="fixture-ownership",
+            )
+        )
+
+        self.assertEqual(finished.state, CommandState.COMPLETED)
+        closed = self.ledger.show(root)
+        task = self.ledger.show(task_id)
+        assert closed is not None and closed.fc and task is not None and task.fc
+        self.assertEqual(closed.fc["disposition"]["outcome"], "answered")
+        self.assertEqual(task.fc["finish_operation"], finished.operation_id)
+        self.assertNotEqual(task.status, "closed")
+
 
 if __name__ == "__main__":
     unittest.main()

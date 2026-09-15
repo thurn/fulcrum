@@ -341,6 +341,8 @@ def _add_command_options(
         parser.add_argument("id")
     if path == ("project", "disable"):
         _option(parser, "--reason", required=True)
+    elif path == ("project", "remove"):
+        _option(parser, "--remove-owned-registrations", action="store_true")
     if path == ("serve",):
         _option(parser, "--once", action="store_true")
     elif path == ("reconcile",):

@@ -22,10 +22,11 @@ from fulcrum.ledger import (
     operation_view,
     utc_now,
 )
-from fulcrum.work import _marshal_or_human
+from fulcrum.work import WorkService, _marshal_or_human
 
 HANDOFF_NAMESPACE = uuid.UUID("5f41c1ab-35bf-4df6-a85b-a75cb82ab40e")
 FINISH_CHILD_NAMESPACE = uuid.UUID("c5846683-3cc4-40a8-92af-cb14a44ca88b")
+FINDING_CHILD_NAMESPACE = uuid.UUID("492f4f42-4d3d-4ec0-a243-2d19ae305fca")
 TERMINAL_STATES = {"completed", "failed", "uncertain", "cancelled"}
 CHECK_STATES = {"passed", "failed", "not_run"}
 
@@ -58,12 +59,187 @@ class CompletionService:
             return self._executor_finish(request, ledger, work)
         if role == "warden" and outcome == "approved":
             return self._warden_finish(request, ledger, work)
+        if role in {"sage", "mason"} and outcome == "findings":
+            return self._investigation_findings(request, ledger, work)
+        if role in {"vizier", "marshal"} and outcome == "completed":
+            return self._leadership_completed(request, ledger, work)
         raise FulcrumError(
             "OUTCOME_NOT_IMPLEMENTED",
             f"{role or 'unassigned'} cannot finish with outcome {outcome!r} yet",
             exit_code=4,
             details={"role": role, "outcome": outcome},
         )
+
+    def _leadership_completed(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary = request.input.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise FulcrumError.invalid("INVALID_INPUT", "completed summary is required")
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={"summary": summary, "role": (work.fc or {}).get("role")},
+            next_action="Close only the explicit leadership request; retain the standing task.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        fc = dict(work.fc or {})
+        fc["phase"] = "done"
+        fc["disposition"] = {
+            "outcome": "answered",
+            "role_outcome": "completed",
+            "summary": summary.strip(),
+            "waived_requirements": [],
+            "known_defects": [],
+            "canonical_bead": None,
+            "completed_at": utc_now(),
+            "ownership_operation": request.ownership_operation,
+        }
+        fc["last_transition"] = operation.id
+        fc["next_action"] = (
+            "The standing leadership task remains available for an explicit request."
+        )
+        closed = ledger.update_fc(work.id, fc, status="closed")
+        completion_cost = (
+            AnalyticsService().finalize_root(ledger, closed, operation.id)
+            if fc.get("workflow_root") == work.id
+            else None
+        )
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="leadership_request_completed",
+            result={
+                "bead_id": work.id,
+                "accepted": True,
+                "role": (work.fc or {}).get("role"),
+                "standing_task_retained": True,
+                "completion_cost": completion_cost,
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
+
+    def _investigation_findings(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary = request.input.get("summary")
+        findings = request.input.get("findings")
+        if not isinstance(summary, str) or not summary.strip():
+            raise FulcrumError.invalid("INVALID_INPUT", "findings summary is required")
+        if not isinstance(findings, list) or not findings:
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "findings must be a nonempty array of report objects"
+            )
+        normalized = [
+            _normalize_finding(item, work.id, index)
+            for index, item in enumerate(findings)
+        ]
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={"summary": summary, "findings": normalized},
+            next_action="File each independently attributable finding before settling the investigation.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        reports: list[dict[str, Any]] = []
+        for index, finding in enumerate(normalized):
+            report = WorkService().report(
+                replace(
+                    request,
+                    command=("report",),
+                    arguments={},
+                    input=finding,
+                    project=str((work.fc or {}).get("project") or request.project),
+                    request_id=str(
+                        uuid.uuid5(
+                            FINDING_CHILD_NAMESPACE,
+                            f"{operation.id}:{index}",
+                        )
+                    ),
+                )
+            )
+            reports.append(_child_result(report))
+        _record_task_finish(ledger, work, operation.id)
+        fc = dict(work.fc or {})
+        interrupted = fc.get("interrupted_work")
+        investigation = {
+            "role": fc.get("role"),
+            "summary": summary.strip(),
+            "findings": normalized,
+            "reports": [
+                (row.get("result") or {}).get("result", {}).get("bead_id")
+                for row in reports
+            ],
+            "operation_id": operation.id,
+            "completed_at": utc_now(),
+        }
+        history = list(fc.get("investigations") or [])
+        history.append(investigation)
+        fc["investigations"] = history
+        if isinstance(interrupted, Mapping) and interrupted.get("status") == "closed":
+            fc["phase"] = interrupted.get("phase") or "done"
+            fc["disposition"] = interrupted.get("disposition")
+            fc["next_action"] = (
+                "The prior terminal disposition is restored; reports are held for Marshal grooming."
+            )
+            status = "closed"
+        elif isinstance(interrupted, Mapping):
+            owner = _marshal_or_human(ledger)
+            fc["owner"] = owner
+            fc["role"] = "marshal" if owner != "HUMAN" else None
+            fc["ownership_operation"] = operation.id
+            fc["phase"] = "backlog"
+            fc["next_action"] = (
+                "Marshal must decide any follow-up without losing the investigation evidence."
+            )
+            status = "open"
+            fc["disposition"] = {
+                "outcome": "findings",
+                "summary": summary.strip(),
+                "completed_at": utc_now(),
+                "ownership_operation": request.ownership_operation,
+            }
+        else:
+            fc["phase"] = "done"
+            fc["next_action"] = (
+                "The standalone investigation is complete; reports remain queued for Marshal grooming."
+            )
+            fc["disposition"] = {
+                "outcome": "findings",
+                "summary": summary.strip(),
+                "completed_at": utc_now(),
+                "ownership_operation": request.ownership_operation,
+            }
+            status = "closed"
+        fc["last_transition"] = operation.id
+        settled = ledger.update_fc(work.id, fc, status=status)
+        completion_cost = (
+            AnalyticsService().finalize_root(ledger, settled, operation.id)
+            if status == "closed" and fc.get("workflow_root") == work.id
+            else None
+        )
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="investigation_findings_retained",
+            result={
+                "bead_id": work.id,
+                "accepted": True,
+                "stable_identity": work.id,
+                "reports": reports,
+                "restored_interrupted_disposition": (
+                    isinstance(interrupted, Mapping)
+                    and interrupted.get("status") == "closed"
+                ),
+                "completion_cost": completion_cost,
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
 
     def _blocked(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
@@ -933,6 +1109,43 @@ def _child_result(result: CommandResult) -> dict[str, Any]:
         "state": result.state.value,
         "ok": result.ok,
         "result": result.result,
+    }
+
+
+def _normalize_finding(value: Any, discovered_from: str, index: int) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise FulcrumError.invalid(
+            "INVALID_INPUT", f"findings[{index}] must be a report object"
+        )
+    title = value.get("title")
+    problem = value.get("problem")
+    evidence = value.get("observed_evidence") or value.get("evidence")
+    required = value.get("required_change")
+    acceptance = value.get("acceptance_checks")
+    for field, item in (
+        ("title", title),
+        ("problem", problem),
+        ("observed_evidence", evidence),
+        ("required_change", required),
+    ):
+        if not isinstance(item, str) or not item.strip():
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", f"findings[{index}].{field} is required"
+            )
+    if not isinstance(acceptance, list) or not all(
+        isinstance(item, str) and item.strip() for item in acceptance
+    ):
+        raise FulcrumError.invalid(
+            "INVALID_INPUT",
+            f"findings[{index}].acceptance_checks must be an array of strings",
+        )
+    return {
+        "title": title.strip(),
+        "problem": problem.strip(),
+        "observed_evidence": evidence.strip(),
+        "required_change": required.strip(),
+        "acceptance_checks": list(acceptance),
+        "discovered_from": discovered_from,
     }
 
 

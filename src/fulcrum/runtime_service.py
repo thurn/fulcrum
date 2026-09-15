@@ -36,6 +36,22 @@ from fulcrum.runtime import (
 T = TypeVar("T")
 
 
+def routing_developer_instructions(
+    request: ParsedRequest, extra: str | None = None
+) -> str:
+    executable = (
+        request.instance.instance_root / "runtime" / "current" / "bin" / "fulcrum"
+    ).resolve(strict=False)
+    instance = request.instance.instance_root.resolve(strict=False)
+    routing = (
+        "Fulcrum command routing: this task belongs only to the selected instance "
+        f"at {instance}. Run workflow commands through {executable} with "
+        f"`--instance {instance}`. Preserve the native CODEX_THREAD_ID actor "
+        "identity; do not use a production/default Fulcrum instance."
+    )
+    return routing if not extra else f"{routing}\n\n{extra}"
+
+
 class RuntimeService:
     def launch_desktop(self, request: ParsedRequest) -> CommandResult:
         manager = ConfigurationManager(request.instance.config_path)
@@ -321,9 +337,14 @@ class TaskService:
             effort=effort,
             permissions=None,
             developer_instructions=(
-                str(request.input["developer_instructions"])
-                if request.input.get("developer_instructions") is not None
-                else None
+                routing_developer_instructions(
+                    request,
+                    (
+                        str(request.input["developer_instructions"])
+                        if request.input.get("developer_instructions") is not None
+                        else None
+                    ),
+                )
             ),
         )
         native = _runtime_call(

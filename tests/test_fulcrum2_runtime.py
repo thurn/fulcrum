@@ -871,6 +871,21 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
             metadata={"fulcrum_operation": "fc-op-project"},
         )
 
+    async def test_project_deletion_is_verified_by_exact_id(self) -> None:
+        transport = AsyncMock()
+        transport.list_projects.side_effect = [
+            [{"id": "project-1", "name": "toy"}],
+            [{"id": "unrelated", "name": "other"}],
+        ]
+        runtime = AppServerRuntime(
+            "ws://unused", transport=cast(CodexRuntime, transport)
+        )
+
+        result = await runtime.delete_project("project-1")
+
+        self.assertEqual(result, {"id": "project-1", "exists": False, "deleted": True})
+        transport.delete_project.assert_awaited_once_with("project-1")
+
 
 if __name__ == "__main__":
     unittest.main()

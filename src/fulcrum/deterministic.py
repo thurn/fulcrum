@@ -272,6 +272,14 @@ class DeterministicRuntime:
 
         return self.state.mutate(ensure)
 
+    async def delete_project(self, project_id: str) -> dict[str, Any]:
+        def remove(state: dict[str, Any]) -> dict[str, Any]:
+            existed = project_id in state.setdefault("projects", {})
+            state["projects"].pop(project_id, None)
+            return {"id": project_id, "exists": False, "deleted": existed}
+
+        return self.state.mutate(remove)
+
     async def create_task(self, spec: TaskSpec) -> TaskFacts:
         fault = self.state.consume_fault("runtime", "create_task")
         if fault and fault.get("effect") == "not_applied":
