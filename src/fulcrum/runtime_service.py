@@ -577,7 +577,9 @@ class TaskService:
             return _operation_result(operation)
         observed = _runtime_call(
             request,
-            lambda runtime: runtime.interrupt(_thread_id(record), str(turn_id)),
+            lambda runtime: _interrupt_or_observe(
+                runtime, _thread_id(record), str(turn_id)
+            ),
         )
         state = "completed" if observed.completed else "uncertain"
         operation = ledger.update_operation(
@@ -1183,6 +1185,20 @@ async def _start_or_recover(
             raise
         turn = found
     return turn
+
+
+async def _interrupt_or_observe(
+    runtime: AppServerRuntime, thread_id: str, turn_id: str
+) -> TurnFacts:
+    try:
+        return await runtime.interrupt(thread_id, turn_id)
+    except AppServerError as error:
+        if error.category != "rejected" or "no active turn" not in str(error).lower():
+            raise
+        observed = await runtime.inspect_turn(thread_id, turn_id)
+        if observed is None or not observed.completed:
+            raise
+        return observed
 
 
 async def _send_turn(

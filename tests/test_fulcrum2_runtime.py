@@ -25,6 +25,7 @@ from fulcrum.runtime import (
     TurnFacts,
 )
 from fulcrum.runtime_service import (
+    _interrupt_or_observe,
     _create_and_configure,
     _runtime_call,
     _start_or_recover,
@@ -819,6 +820,29 @@ class RuntimeRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn_input.operation_id, "fc-op-1")
         self.assertEqual(turn_input.ownership_operation, "fc-owner-1")
         self.assertEqual(runtime.find_turn.await_count, 2)
+
+    async def test_interrupt_race_accepts_observed_terminal_turn(self) -> None:
+        completed = TurnFacts(
+            id="turn-ended",
+            thread_id="thread-1",
+            state="completed",
+            operation_id=None,
+            completed=True,
+            error=None,
+            tools=(),
+            usage=None,
+            observed_at="2026-09-15T17:00:00Z",
+        )
+        runtime = AsyncMock()
+        runtime.interrupt.side_effect = AppServerError(
+            "no active turn to interrupt", category="rejected"
+        )
+        runtime.inspect_turn.return_value = completed
+
+        result = await _interrupt_or_observe(runtime, "thread-1", "turn-ended")
+
+        self.assertEqual(result, completed)
+        runtime.inspect_turn.assert_awaited_once_with("thread-1", "turn-ended")
 
     async def test_find_turn_requires_exact_persisted_marker(self) -> None:
         transport = AsyncMock()
