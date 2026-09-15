@@ -49,6 +49,15 @@ def _task_native(row: Mapping[str, Any]) -> dict[str, Any]:
     return dict(native) if isinstance(native, Mapping) else {}
 
 
+def _capacity_policy(workers: int) -> dict[str, Any]:
+    return {
+        "automatic_capacity": workers,
+        "default_project_capacity": workers,
+        "project_capacity": {"fixture": workers},
+        "rationale": "Explicit disposable native concurrency smoke.",
+    }
+
+
 class ConcurrencySmoke:
     def __init__(self, namespace: argparse.Namespace, executable: Path) -> None:
         values = vars(namespace)
@@ -378,14 +387,7 @@ class ConcurrencySmoke:
         policy = self.fc(
             "policy",
             "set",
-            payload={
-                "automatic_capacity": self.workers,
-                "default_project_capacity": self.workers,
-                "project_capacity": {"fixture": self.workers},
-                "paused_projects": [],
-                "suspended_rules": [],
-                "rationale": "Explicit disposable native concurrency smoke.",
-            },
+            payload=_capacity_policy(self.workers),
         )
         self.check(policy.get("ok") is True, "fixture capacity is authorized", policy)
         status = self.fc("status")
@@ -521,7 +523,7 @@ class ConcurrencySmoke:
         return {
             participant: by_work[self.work[participant]]
             for participant in self.participants
-            if self.work[participant] in by_work
+            if self.work.get(participant) in by_work
         }
 
     def observe_overlap(self) -> None:
