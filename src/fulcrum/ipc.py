@@ -12,7 +12,11 @@ from typing import Any
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
-IPC_HANDLER_LIMIT = 64
+# Thirty live workers can simultaneously hold a barrier request, a task wait, and
+# an admission/reconciliation request while operators still need responsive
+# status and release controls.  Keep that fanout explicitly bounded, with room
+# for the three 30-wide request classes plus ordinary control traffic.
+IPC_HANDLER_LIMIT = 128
 _IPC_HANDLERS = ThreadPoolExecutor(
     max_workers=IPC_HANDLER_LIMIT, thread_name_prefix="fulcrum-ipc"
 )

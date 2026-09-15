@@ -18,7 +18,9 @@ from fulcrum.ipc import IPC_HANDLER_LIMIT, ControllerTimedOut, IpcServer, reques
 
 
 class IpcTest(unittest.IsolatedAsyncioTestCase):
-    async def test_waiting_handlers_do_not_exhaust_thirty_task_capacity(self) -> None:
+    async def test_waiting_handlers_leave_control_headroom_at_thirty_tasks(
+        self,
+    ) -> None:
         parsed = ParsedRequest(
             command=("fixture", "barrier", "arrive"),
             arguments={},
@@ -49,7 +51,11 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
         server = IpcServer(Path("/tmp/not-created.sock"), wait_at_barrier)
         handlers = []
         writers = []
-        for _ in range(IPC_HANDLER_LIMIT):
+        # Exercise the worst expected live-smoke fanout: one barrier, task-wait,
+        # and admission request per worker, plus a status/release control lane.
+        expected_concurrent_requests = 30 * 3 + 2
+        self.assertGreaterEqual(IPC_HANDLER_LIMIT, expected_concurrent_requests)
+        for _ in range(expected_concurrent_requests):
             reader = AsyncMock()
             reader.readline.return_value = (
                 json.dumps(parsed.to_wire(), separators=(",", ":")).encode() + b"\n"
@@ -61,10 +67,11 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
             handlers.append(asyncio.create_task(server._handle(reader, writer)))
         deadline = asyncio.get_running_loop().time() + 5
         while (
-            entered < IPC_HANDLER_LIMIT and asyncio.get_running_loop().time() < deadline
+            entered < expected_concurrent_requests
+            and asyncio.get_running_loop().time() < deadline
         ):
             await asyncio.sleep(0.01)
-        self.assertEqual(entered, IPC_HANDLER_LIMIT)
+        self.assertEqual(entered, expected_concurrent_requests)
         release.set()
         await asyncio.wait_for(asyncio.gather(*handlers), 10)
         self.assertTrue(all(writer.write.called for writer in writers))
