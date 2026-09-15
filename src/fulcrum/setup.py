@@ -711,7 +711,9 @@ def _delivery_capability(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _provider_id(value: Mapping[str, Any]) -> str | None:
-    nested = value.get("repository")
+    nested = value.get("state")
+    if not isinstance(nested, Mapping):
+        nested = value.get("repository")
     row = nested if isinstance(nested, Mapping) else value
     identifier = row.get("id") or row.get("repository_id")
     return str(identifier) if identifier else None

@@ -56,5 +56,15 @@ fulcrum skills reconcile --instance INSTANCE --json
 fulcrum doctor --instance INSTANCE --json
 ```
 
+Launch Codex Desktop against the configured shared runtime with:
+
+```sh
+fulcrum runtime launch-desktop
+```
+
+The command reads the selected runtime endpoint and starts Desktop with the
+required `CODEX_APP_SERVER_WS_URL` environment variable. The retained-checkout
+shortcut `scripts/launch_codex.sh` invokes the same command.
+
 After changing `pyproject.toml` or `requirements-dev.lock`, reinstall both locked
 requirements and the editable package in `.venv`; `scripts/setup` does this.

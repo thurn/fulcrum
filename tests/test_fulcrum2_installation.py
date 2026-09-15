@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import socket
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -35,6 +36,7 @@ from fulcrum.setup import (
     _missing_required,
     _model_capability,
     _prepare_configuration,
+    _provider_id,
 )
 
 
@@ -192,6 +194,31 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         )
         self.assertFalse(models["available"])
         self.assertEqual(len(models["invalid"]), 8)
+
+    def test_setup_reads_current_tollgate_repository_identity(self) -> None:
+        self.assertEqual(
+            _provider_id({"state": {"id": "repo-current"}}), "repo-current"
+        )
+
+    def test_desktop_launcher_uses_fulcrum_runtime_command(self) -> None:
+        checkout = self.root / "checkout"
+        script = checkout / "scripts" / "launch_codex.sh"
+        executable = checkout / ".venv" / "bin" / "fulcrum"
+        script.parent.mkdir(parents=True)
+        executable.parent.mkdir(parents=True)
+        script.write_bytes(
+            (Path(__file__).parents[1] / "scripts" / "launch_codex.sh").read_bytes()
+        )
+        script.chmod(0o700)
+        executable.write_text('#!/bin/sh\nprintf "<%s>\\n" "$@"\n', encoding="utf-8")
+        executable.chmod(0o700)
+
+        launched = subprocess.run(
+            [str(script), "--json"], capture_output=True, text=True, check=False
+        )
+
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        self.assertEqual(launched.stdout, "<runtime>\n<launch-desktop>\n<--json>\n")
 
     def test_occupied_port_is_reported_without_killing_or_starting(self) -> None:
         service = InstalledService("dolt", "dev.fulcrum.test.dolt", self.root / "x")
