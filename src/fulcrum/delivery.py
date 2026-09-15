@@ -759,8 +759,13 @@ def _candidate_rows(value: Any) -> list[Mapping[str, Any]]:
         item = value.get("item")
         if isinstance(item, Mapping) and isinstance(item.get("id"), str):
             rows.append(value)
-        elif isinstance(value.get("id"), str) and value.get("source_oid") is not None:
-            rows.append({"item": value})
+        else:
+            normalized = _item(value)
+            if (
+                isinstance(normalized.get("id"), str)
+                and normalized.get("source_oid") is not None
+            ):
+                rows.append({"item": normalized})
         for key in ("queue", "checks", "items", "data"):
             child = value.get(key)
             if isinstance(child, (Mapping, list)):
@@ -771,9 +776,14 @@ def _candidate_rows(value: Any) -> list[Mapping[str, Any]]:
     return rows
 
 
-def _item(response: Mapping[str, Any]) -> Mapping[str, Any]:
+def _item(response: Mapping[str, Any]) -> dict[str, Any]:
     item = response.get("item")
-    return item if isinstance(item, Mapping) else response
+    normalized = dict(item) if isinstance(item, Mapping) else dict(response)
+    if not isinstance(normalized.get("id"), str) and isinstance(
+        normalized.get("item_id"), str
+    ):
+        normalized["id"] = normalized["item_id"]
+    return normalized
 
 
 def _oid(value: Any) -> str | None:

@@ -19,6 +19,7 @@ from fulcrum.delivery import (
     TollgateDelivery,
     WorkRef,
     _delivery_facts,
+    _validation_facts,
 )
 from fulcrum.instance import resolve_instance
 from fulcrum.ledger import Ledger
@@ -435,6 +436,29 @@ class Fulcrum2DeliveryAdapterTest(unittest.IsolatedAsyncioTestCase):
             "3cd6135fec4e851489b2832c0acc144ceb4179aa",
         )
         self.assertNotEqual(normalized.source_oid, normalized.integration_oid)
+
+    async def test_candidate_submission_accepts_flat_tollgate_item_id(self) -> None:
+        response = {
+            "item_id": "01a0a4fc-3a5a-7273-9574-0fb11279c0b2",
+            "queue_revision": 1,
+            "source_oid": {
+                "format": "sha1",
+                "bytes": "dbfe9ed9c054274c369714ab32d7da6accd50052",
+            },
+            "state": "queued",
+            "tested_oid": {
+                "format": "sha1",
+                "bytes": "dbfe9ed9c054274c369714ab32d7da6accd50052",
+            },
+        }
+
+        normalized = _validation_facts(response)
+
+        self.assertEqual(normalized.handle, "01a0a4fc-3a5a-7273-9574-0fb11279c0b2")
+        self.assertEqual(
+            normalized.source_oid, "dbfe9ed9c054274c369714ab32d7da6accd50052"
+        )
+        self.assertEqual(normalized.state, "pending")
 
 
 class Fulcrum2DeliveryInstalledCliTest(unittest.TestCase):
