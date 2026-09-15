@@ -536,6 +536,71 @@ class Fulcrum2LeadershipTest(unittest.TestCase):
         self.assertEqual([row["bead_id"] for row in recover["rows"]], [recovery.id])
         self.assertIn("scoped recovery", recover["rows"][0]["decision_needed"])
 
+    def test_automatic_dispatch_omits_plan_roots_and_dependency_blocked_work(
+        self,
+    ) -> None:
+        root = self.create_work(
+            "fc-plan-root",
+            intake={"benefit": "Known", "uncertainties": []},
+            priority=0,
+        )
+        root_fc = dict(root.fc or {})
+        root_fc["plan"] = {
+            "published_scope": {"summary": "Coordinate the published plan."},
+            "children_by_key": {"child": "fc-plan-child"},
+        }
+        self.ledger.update_fc(root.id, root_fc)
+
+        prerequisite = self.create_work(
+            "fc-plan-prerequisite",
+            intake={"benefit": "Known", "uncertainties": []},
+        )
+        prerequisite_fc = dict(prerequisite.fc or {})
+        prerequisite_fc["phase"] = "working"
+        self.ledger.update_fc(prerequisite.id, prerequisite_fc)
+        child = self.create_work(
+            "fc-plan-child",
+            intake={"benefit": "Known", "uncertainties": []},
+            priority=1,
+        )
+        self.ledger.run(("dep", "add", child.id, prerequisite.id), mutating=True)
+
+        automatic = self.invoke(
+            "marshal",
+            "brief",
+            "--kind",
+            "auto",
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--json",
+        )
+        self.assertEqual(automatic.returncode, 0, automatic.stderr + automatic.stdout)
+        automatic_result = json.loads(automatic.stdout)["result"]
+        self.assertFalse(automatic_result["decision_required"])
+        self.assertEqual(automatic_result["rows"], [])
+
+        targeted = self.invoke(
+            "marshal",
+            "brief",
+            "--kind",
+            "dispatch",
+            "--bead",
+            child.id,
+            "--instance",
+            str(self.instance),
+            "--offline",
+            "--json",
+        )
+        self.assertEqual(targeted.returncode, 0, targeted.stderr + targeted.stdout)
+        targeted_result = json.loads(targeted.stdout)["result"]
+        self.assertEqual(
+            [row["bead_id"] for row in targeted_result["rows"]], [child.id]
+        )
+        self.assertFalse(
+            targeted_result["rows"][0]["decision_context"]["dependencies_ready"]
+        )
+
     def test_bootstrap_records_intents_and_creates_idle_leaders_without_turns(
         self,
     ) -> None:

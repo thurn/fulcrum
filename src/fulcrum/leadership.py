@@ -1226,6 +1226,12 @@ def build_brief(
         kind, row = _decision_row(ledger, record)
         if kind is None or row is None:
             continue
+        if (
+            requested_kind == "auto"
+            and kind == "dispatch"
+            and not row["decision_context"]["dependencies_ready"]
+        ):
+            continue
         candidates[kind].append((record, row, comparison_facts(ledger, record, config)))
     for values in candidates.values():
         values.sort(
@@ -1570,6 +1576,9 @@ def _decision_row(
     ledger: Ledger, record: LedgerRecord
 ) -> tuple[str | None, dict[str, Any] | None]:
     fc = record.fc or {}
+    plan = fc.get("plan")
+    if isinstance(plan, Mapping) and plan.get("published_scope") is not None:
+        return None, None
     phase = str(fc.get("phase", "intake"))
     if phase in {"working", "handoff", "reviewing", "delivering", "done"}:
         return None, None
