@@ -87,7 +87,11 @@ READ_ONLY_COMMANDS = {
     ("fixture", "show"),
     ("fixture", "barrier", "show"),
 }
-BROKEN_CONFIG_COMMANDS = {("service", "status"), ("recover", "inspect")}
+BROKEN_CONFIG_COMMANDS = {
+    ("service", "status"),
+    ("recover", "inspect"),
+    ("recover", "repair"),
+}
 
 
 @dataclass(frozen=True)
@@ -278,6 +282,7 @@ POSITIONAL_ID: set[tuple[str, ...]] = {
         ("plan", "complete"),
         ("memory", "show"),
         ("rates", "show"),
+        ("human", "resolve"),
         ("fixture", "show"),
         ("fixture", "cleanup"),
     }
@@ -454,6 +459,10 @@ def _add_command_options(
         _option(parser, "--until", required=True)
     elif path[:1] == ("recover",):
         _option(parser, "--scope", required=True)
+        if path == ("recover", "takeover"):
+            _option(parser, "--reason", required=True)
+        elif path == ("recover", "release"):
+            _option(parser, "--summary", required=True)
     elif path == ("plan", "draft") or path in {
         ("plan", "approve"),
         ("plan", "publish"),
@@ -675,6 +684,10 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "waived_requirements",
         "answer",
         "plan_id",
+        "changes",
+        "blocker",
+        "attempts",
+        "required_action",
     },
     ("progress",): {"kind", "summary", "evidence", "bead"},
     ("report",): {
@@ -689,7 +702,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "intake",
     },
     ("marshal", "decide"): {"decision_operation", "decisions"},
-    ("human", "resolve"): {"reason_id", "answer", "scope_change"},
+    ("human", "resolve"): {"reason_id", "answer", "scope_change", "resume_role"},
     ("task", "start"): {
         "instructions",
         "title",

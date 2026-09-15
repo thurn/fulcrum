@@ -24,6 +24,7 @@ from fulcrum.leadership import LeadershipService
 from fulcrum.knowledge import KnowledgeService, MemoryService
 from fulcrum.plans import PlanService
 from fulcrum.publication import LedgerPublicationService
+from fulcrum.recovery_service import HumanService, RecoveryService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.reviews import ReviewService
 from fulcrum.roles import RoleService
@@ -125,6 +126,14 @@ class Application:
         self.register(("rates", "show"), analytics.rates_show)
         self.register(("rates", "add"), analytics.rates_add)
         self.register(("usage", "reconcile"), analytics.reconcile)
+        recovery = RecoveryService(self)
+        self.register(("recover", "inspect"), recovery.inspect)
+        self.register(("recover", "takeover"), recovery.takeover)
+        self.register(("recover", "repair"), recovery.repair)
+        self.register(("recover", "release"), recovery.release)
+        human = HumanService()
+        self.register(("human", "list"), human.list)
+        self.register(("human", "resolve"), human.resolve)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)

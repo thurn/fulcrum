@@ -811,6 +811,22 @@ async def ensure_leadership(
             bound_fc,
             assignee=str(bound_fc.get("owner") or "HUMAN"),
         )
+    takeover = (control.fc or {}).get("active_takeover")
+    if isinstance(takeover, Mapping) and takeover.get("state") in {
+        "acquiring",
+        "stopping",
+        "active",
+        "repairing",
+        "failed",
+    }:
+        return [
+            {
+                "role": "justiciar",
+                "thread_id": takeover.get("owner_thread"),
+                "created": False,
+                "recovery_fence": dict(takeover),
+            }
+        ]
     actions: list[dict[str, Any]] = []
     connection_error: AppServerError | None = None
     known_tasks = {

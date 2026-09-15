@@ -516,6 +516,40 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(independent.fc["state"], "completed")
         self.assertEqual(blocked.fc["state"], "completed")
 
+    async def test_active_recovery_fence_pauses_ordinary_dispatch(self) -> None:
+        control = self.ledger.show("fc-system")
+        assert control is not None and control.fc
+        control_fc = dict(control.fc)
+        control_fc["active_takeover"] = {
+            "operation_id": "fc-recovery-fixture",
+            "scope": "instance",
+            "state": "active",
+            "bead_ids": [],
+            "project_ids": ["toy"],
+            "owner_thread": "native-justiciar",
+        }
+        self.ledger.update_fc(control.id, control_fc)
+        supervisor = ControllerSupervisor(
+            self.request,
+            RetryApplication(self.ledger),
+            clock=self.clock,
+            runtime=self.runtime,  # type: ignore[arg-type]
+        )
+
+        summary = await supervisor.run_once()
+
+        self.assertTrue(summary.pressure["paused"])
+        self.assertEqual(summary.pressure["reason"], "active recovery fence")
+        self.assertEqual(self.runtime.sent, [])
+        self.assertIn(
+            "ordinary_dispatch_paused",
+            [
+                action.get("effect")
+                for action in summary.next_actions
+                if action.get("kind") == "recovery_fence"
+            ],
+        )
+
     async def test_pressure_releases_only_idle_completed_subscription(self) -> None:
         thread_id = "native-completed"
         work = self.ledger.create_record(

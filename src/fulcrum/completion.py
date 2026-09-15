@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -43,6 +44,10 @@ class CompletionService:
         ledger, work = _owned_work(request)
         outcome = request.input.get("outcome") or request.arguments.get("outcome")
         role = str((work.fc or {}).get("role") or "")
+        if outcome == "blocked":
+            return self._blocked(request, ledger, work)
+        if role == "justiciar" and outcome == "repaired":
+            return self._justiciar_repaired(request, ledger, work)
         if role == "weaver" and outcome == "answered":
             return self._weaver_answered(request, ledger, work)
         if role == "weaver" and outcome == "ready":
@@ -59,6 +64,185 @@ class CompletionService:
             exit_code=4,
             details={"role": role, "outcome": outcome},
         )
+
+    def _blocked(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary = request.input.get("summary")
+        blocker = request.input.get("blocker")
+        attempts = request.input.get("attempts")
+        required = request.input.get("required_action")
+        if not all(
+            isinstance(item, str) and item.strip()
+            for item in (summary, blocker, required)
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT",
+                "blocked requires nonempty summary, blocker, and required_action",
+            )
+        if not isinstance(attempts, list) or not all(
+            isinstance(item, str) and item.strip() for item in attempts
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "blocked attempts must be an array of strings"
+            )
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "summary": summary,
+                "blocker": blocker,
+                "attempts": list(attempts),
+                "required_action": required,
+            },
+            next_action="Transfer accountability to Marshal with exact attempted evidence.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        marshal = _marshal_or_human(ledger)
+        fc = dict(work.fc or {})
+        reasons = _waiting_reasons(fc.get("waiting"))
+        reason_id = f"blocked:{operation.id}"
+        if not any(item.get("id") == reason_id for item in reasons):
+            reasons.append(
+                {
+                    "id": reason_id,
+                    "kind": "blocked",
+                    "reason": blocker,
+                    "attempts": list(attempts),
+                    "required_action": required,
+                    "decision_operation": operation.id,
+                    "recorded_at": utc_now(),
+                }
+            )
+        fc["waiting"] = {"reasons": reasons}
+        fc["owner"] = marshal
+        fc["role"] = "marshal" if marshal != "HUMAN" else None
+        fc["ownership_operation"] = operation.id
+        fc["phase"] = "backlog" if marshal != "HUMAN" else "human"
+        fc["last_transition"] = operation.id
+        fc["next_action"] = str(required)
+        ledger.update_fc(work.id, fc, assignee=marshal, status="blocked")
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="blocker_transferred",
+            result={
+                "bead_id": work.id,
+                "owner": marshal,
+                "reason_id": reason_id,
+                "blocked": True,
+                "report_reminder": _report_reminder(work.id),
+            },
+            next_action=str(required),
+        )
+        return _operation_result(operation)
+
+    def _justiciar_repaired(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary = request.input.get("summary")
+        changes = request.input.get("changes")
+        waived = request.input.get("waived_requirements")
+        defects = request.input.get("known_defects")
+        evidence = request.input.get("evidence")
+        source_oid = request.input.get("source_oid")
+        if not isinstance(summary, str) or not summary.strip():
+            raise FulcrumError.invalid("INVALID_INPUT", "repaired summary is required")
+        if not isinstance(changes, list) or not all(
+            isinstance(item, (str, Mapping)) for item in changes
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "repaired changes must be an array"
+            )
+        for name, value in (
+            ("waived_requirements", waived),
+            ("known_defects", defects),
+            ("evidence", evidence),
+        ):
+            if not isinstance(value, list) or not all(
+                isinstance(item, str) and item.strip() for item in value
+            ):
+                raise FulcrumError.invalid(
+                    "INVALID_INPUT", f"repaired {name} must be strings"
+                )
+        fence = (work.fc or {}).get("recovery_fence")
+        if not isinstance(fence, Mapping) or fence.get("state") not in {
+            "active",
+            "repairing",
+            "failed",
+        }:
+            raise FulcrumError(
+                "RECOVERY_AUTHORITY_REQUIRED",
+                "Justiciar repaired requires an active scoped takeover",
+                exit_code=5,
+            )
+        source_evidence = None
+        if source_oid is not None:
+            if not isinstance(source_oid, str) or not source_oid:
+                raise FulcrumError.invalid("INVALID_INPUT", "source_oid is invalid")
+            source_evidence = _verify_repair_source(work, source_oid)
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "summary": summary,
+                "changes": list(changes),
+                "waived_requirements": list(waived),
+                "known_defects": list(defects),
+                "source_oid": source_oid,
+                "evidence": list(evidence),
+                "takeover_operation": fence.get("operation_id"),
+            },
+            next_action="Reconcile the reduced scope and actual evidence before closing work.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        fc = dict(work.fc or {})
+        fc["phase"] = "done"
+        fc["disposition"] = {
+            "outcome": "repaired",
+            "summary": summary,
+            "changes": list(changes),
+            "waived_requirements": list(waived),
+            "known_defects": list(defects),
+            "source_oid": source_oid,
+            "source_evidence": source_evidence,
+            "evidence": list(evidence),
+            "completed_at": utc_now(),
+            "ownership_operation": request.ownership_operation,
+            "repair_operation": operation.id,
+        }
+        recovery = dict(fc.get("recovery") or {})
+        recovery["result"] = fc["disposition"]
+        fc["recovery"] = recovery
+        fc["last_transition"] = operation.id
+        fc["next_action"] = (
+            "Release the retained takeover after scoped facts are reconciled."
+        )
+        closed = ledger.update_fc(work.id, fc, status="closed")
+        completion_cost = (
+            AnalyticsService().finalize_root(ledger, closed, operation.id)
+            if fc.get("workflow_root") == work.id
+            else None
+        )
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="justiciar_repair_retained",
+            result={
+                "bead_id": work.id,
+                "accepted": True,
+                "disposition": fc["disposition"],
+                "completion_cost": completion_cost,
+                "takeover_still_active": True,
+                "report_reminder": _report_reminder(work.id),
+            },
+            next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
 
     def _weaver_answered(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
@@ -541,6 +725,43 @@ def _finish_replay(request: ParsedRequest) -> CommandResult | None:
     return None
 
 
+def _waiting_reasons(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return []
+    reasons = value.get("reasons")
+    return (
+        [dict(item) for item in reasons if isinstance(item, Mapping)]
+        if isinstance(reasons, list)
+        else []
+    )
+
+
+def _verify_repair_source(work: LedgerRecord, source_oid: str) -> dict[str, Any]:
+    workspace = (work.fc or {}).get("worktree")
+    path = workspace.get("path") if isinstance(workspace, Mapping) else None
+    if not isinstance(path, str):
+        raise FulcrumError(
+            "SOURCE_NOT_OBSERVED",
+            "repaired source_oid requires a retained managed worktree",
+            exit_code=5,
+        )
+    result = subprocess.run(
+        ["git", "-C", path, "cat-file", "-e", f"{source_oid}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        raise FulcrumError(
+            "SOURCE_NOT_OBSERVED",
+            "source_oid is not an observed commit in the retained worktree",
+            exit_code=5,
+            details={"source_oid": source_oid, "path": path},
+        )
+    return {"source_oid": source_oid, "path": path, "observed": True}
+
+
 def _weaver_payload(
     request: ParsedRequest, *, evidence_required: bool
 ) -> tuple[str, list[str]]:
@@ -723,7 +944,10 @@ def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -
         for item in ledger.list_records(kind="task", limit=0)
         if item.fc
         and item.fc.get("thread_id") == owner
-        and item.fc.get("work_bead") == work.id
+        and (
+            item.fc.get("work_bead") == work.id
+            or work.id in item.fc.get("associated_beads", [])
+        )
         and item.fc.get("ownership_operation") == acquisition
     ]
     if len(matches) != 1:

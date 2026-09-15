@@ -41,6 +41,7 @@ from fulcrum.leadership import (
     normalize_native_intake,
 )
 from fulcrum.publication import LedgerPublicationService
+from fulcrum.recovery_service import active_recovery_fence
 from fulcrum.runtime import AppServerError, AppServerRuntime, TaskFacts, TurnInput
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
@@ -303,6 +304,20 @@ class ControllerSupervisor:
                     }
                 )
                 self.health.failure("event", error)
+        recovery_fence = await asyncio.to_thread(active_recovery_fence, self.ledger)
+        if recovery_fence is not None:
+            pressure = {
+                "paused": True,
+                "reason": "active recovery fence",
+                "recovery_fence": recovery_fence,
+            }
+            actions.append(
+                {
+                    "kind": "recovery_fence",
+                    "effect": "ordinary_dispatch_paused",
+                    "fence": recovery_fence,
+                }
+            )
         try:
             reconciled_tasks = await asyncio.gather(
                 *(
