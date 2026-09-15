@@ -502,6 +502,10 @@ def draft_payload(*, future: bool = False) -> dict[str, Any]:
                 "outcome": "Confirm the existing ascending behavior remains covered.",
                 "acceptance": ["The existing ordering unit test passes."],
                 "requested_role": "weaver",
+                "intake": {
+                    "benefit": "Prove explicit activation without redundant validation work.",
+                    "uncertainties": [],
+                },
                 "depends_on": [],
             }
         ]
@@ -522,6 +526,10 @@ def draft_payload(*, future: bool = False) -> dict[str, Any]:
                     "All unit tests pass.",
                 ],
                 "requested_role": "executor",
+                "intake": {
+                    "benefit": "Provide the reusable ordered aggregation behavior requested by the fixture.",
+                    "uncertainties": [],
+                },
                 "depends_on": [],
                 "size": "small",
                 "overlap_tags": ["ordering"],
@@ -539,6 +547,10 @@ def draft_payload(*, future: bool = False) -> dict[str, Any]:
                     "All unit tests pass.",
                 ],
                 "requested_role": "executor",
+                "intake": {
+                    "benefit": "Cover material edge behavior for the approved aggregation API.",
+                    "uncertainties": [],
+                },
                 "depends_on": ["library"],
                 "size": "small",
                 "overlap_tags": ["ordering"],
