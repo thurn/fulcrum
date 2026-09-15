@@ -132,6 +132,7 @@ class RoleService:
         if work is None or work.kind != "work" or not work.fc:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
         routed_leader = False
+        leadership_config: Mapping[str, Any] | None = None
         if role in LEADERSHIP_TITLES and request.thread_id is None:
             from fulcrum.leadership import ensure_leadership
 
@@ -336,11 +337,57 @@ class RoleService:
                     ),
                 )
             except FulcrumError as error:
-                if error.code not in DEGRADABLE_CODES:
-                    raise
-                return _entry_degraded(
-                    ledger, operation, request, role, bead_id, thread_id, error
-                )
+                if (
+                    routed_leader
+                    and error.code == "RUNTIME_REJECTED"
+                    and "thread not found" in error.message.lower()
+                    and leadership_config is not None
+                ):
+                    thread_id, native = _runtime_call(
+                        request,
+                        lambda runtime: _repair_and_name_leader(
+                            runtime,
+                            request,
+                            ledger,
+                            leadership_config,
+                            role,
+                            expected_title,
+                        ),
+                    )
+                    replacement_tasks = [
+                        item
+                        for item in ledger.list_records(kind="task", limit=0)
+                        if item.fc and item.fc.get("thread_id") == thread_id
+                    ]
+                    if len(replacement_tasks) != 1:
+                        raise FulcrumError(
+                            "TASK_CORRUPT",
+                            "replacement leader has no unique managed task record",
+                            exit_code=4,
+                        )
+                    replacement_task = replacement_tasks[0]
+                    task_record_id = replacement_task.id
+                    creation_cwd = str(
+                        (replacement_task.fc or {}).get("creation_cwd") or creation_cwd
+                    )
+                    retained = {
+                        **dict(retained),
+                        "task_record_id": task_record_id,
+                        "creation_cwd": creation_cwd,
+                    }
+                    operation = ledger.update_operation(
+                        operation,
+                        step="missing_leader_repaired",
+                        planned=retained,
+                        next_action="Cook and retain the exact role input for the replacement leader.",
+                    )
+                    request = replace(request, thread_id=thread_id)
+                else:
+                    if error.code not in DEGRADABLE_CODES:
+                        raise
+                    return _entry_degraded(
+                        ledger, operation, request, role, bead_id, thread_id, error
+                    )
             if routed_leader:
                 spec = TaskSpec(
                     creation_cwd=creation_cwd,
@@ -719,6 +766,28 @@ async def _name_current_task(runtime: Any, thread_id: str, title: str) -> TaskFa
             state=CommandState.UNCERTAIN,
         )
     return facts
+
+
+async def _repair_and_name_leader(
+    runtime: Any,
+    request: ParsedRequest,
+    ledger: Ledger,
+    config: Mapping[str, Any],
+    role: str,
+    title: str,
+) -> tuple[str, TaskFacts]:
+    from fulcrum.leadership import ensure_leadership
+
+    await ensure_leadership(request, ledger, runtime, config)
+    thread_id = _leader_thread(ledger, role)
+    if thread_id is None:
+        raise FulcrumError(
+            "RUNTIME_UNAVAILABLE",
+            f"standing {role} leadership could not be repaired",
+            exit_code=4,
+            retryable=True,
+        )
+    return thread_id, await _name_current_task(runtime, thread_id, title)
 
 
 def _bind_work(

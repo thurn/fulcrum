@@ -21,6 +21,7 @@ from fulcrum.deterministic import ProviderState, initial_provider_state
 from fulcrum.instance import resolve_instance
 from fulcrum.leadership import ensure_leadership
 from fulcrum.ledger import Ledger, operation_id
+from fulcrum.roles import _repair_and_name_leader
 from fulcrum.runtime import ReleaseFacts, ResourceFacts, TaskFacts, TurnFacts
 from fulcrum.supervision import ControllerSupervisor
 
@@ -43,6 +44,7 @@ class FakeClock:
 
 class FakeRuntime:
     def __init__(self) -> None:
+        self.transport = self
         self.facts: dict[str, TaskFacts] = {}
         self.sent: list[tuple[str, str, str]] = []
         self.released: list[str] = []
@@ -57,6 +59,10 @@ class FakeRuntime:
 
     async def close(self) -> None:
         pass
+
+    async def set_name(self, thread_id: str, name: str) -> None:
+        facts = self.facts[thread_id]
+        self.facts[thread_id] = TaskFacts(**{**facts.__dict__, "title": name})
 
     async def inspect_task(self, thread_id: str) -> TaskFacts:
         if thread_id in self.facts:
@@ -407,6 +413,28 @@ class Fulcrum2SupervisionTest(unittest.IsolatedAsyncioTestCase):
                 for row in actions
             )
         )
+
+    async def test_entry_repairs_and_names_leader_after_not_found_race(self) -> None:
+        stale = self.runtime.facts["native-vizier-leader"]
+        self.runtime.facts["native-vizier-leader"] = TaskFacts(
+            **{**stale.__dict__, "exists": False}
+        )
+        config = ConfigurationManager(self.config).effective(
+            ConfigurationManager(self.config).load()[0]
+        )
+
+        thread_id, facts = await _repair_and_name_leader(
+            self.runtime,
+            self.request,
+            self.ledger,
+            config,
+            "vizier",
+            "Repaired Vizier",
+        )
+
+        self.assertNotEqual(thread_id, "native-vizier-leader")
+        self.assertEqual(facts.title, "Repaired Vizier")
+        self.assertEqual(self.runtime.facts[thread_id].title, "Repaired Vizier")
 
     async def test_command_runtime_submission_reconnects_before_action(self) -> None:
         supervisor = ControllerSupervisor(
