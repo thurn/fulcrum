@@ -29,6 +29,7 @@ from fulcrum.recovery_service import HumanService, RecoveryService
 from fulcrum.installation_service import ServiceService, SkillsService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.setup import run_setup
+from fulcrum.source_refresh import SourceRefreshService
 from fulcrum.reviews import ReviewService
 from fulcrum.roles import RoleService
 from fulcrum.supervision import ReconciliationService
@@ -53,6 +54,7 @@ class Application:
         self.register(("service", "stop"), services.stop)
         self.register(("service", "restart"), services.restart)
         self.register(("service", "status"), services.status)
+        self.register(("service", "update"), SourceRefreshService().update)
         self.register(("skills", "reconcile"), SkillsService().reconcile)
         configuration = ConfigurationService()
         self.register(("config", "show"), configuration.show)

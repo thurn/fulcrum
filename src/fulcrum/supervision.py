@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
+import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -13,6 +16,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
+
+from watchfiles import awatch
 
 from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager
@@ -28,6 +33,7 @@ from fulcrum.continuity import (
     reconcile_archive_once,
 )
 from fulcrum.ipc import IpcServer
+from fulcrum.install import inspect_service
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -47,6 +53,12 @@ from fulcrum.leadership import (
 from fulcrum.publication import LedgerPublicationService
 from fulcrum.recovery_service import active_recovery_fence
 from fulcrum.runtime import AppServerError, AppServerRuntime, TaskFacts, TurnInput
+from fulcrum.source_refresh import (
+    maintenance_path,
+    maintenance_ready_path,
+    read_maintenance,
+    write_maintenance,
+)
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
 RETRY_DELAYS = (2.0, 10.0)
@@ -201,6 +213,9 @@ class ControllerSupervisor:
         self.analytics = AnalyticsService()
         self.external_slots = asyncio.Semaphore(4)
         self.bead_locks: dict[str, asyncio.Lock] = {}
+        self.reconcile_lock = asyncio.Lock()
+        self._ipc_lock = threading.Lock()
+        self._active_ipc_mutations = 0
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self.request: ParsedRequest = replace(
@@ -208,6 +223,20 @@ class ControllerSupervisor:
         )
 
     async def run_once(
+        self,
+        *,
+        bead_id: str | None = None,
+        operation_id: str | None = None,
+        keep_runtime: bool = False,
+    ) -> PassSummary:
+        async with self.reconcile_lock:
+            return await self._run_once(
+                bead_id=bead_id,
+                operation_id=operation_id,
+                keep_runtime=keep_runtime,
+            )
+
+    async def _run_once(
         self,
         *,
         bead_id: str | None = None,
@@ -222,6 +251,7 @@ class ControllerSupervisor:
             # at that boundary.  Durable ordering still comes from ledger receipts.
             self.external_slots = asyncio.Semaphore(4)
             self.bead_locks = {}
+            self.reconcile_lock = asyncio.Lock()
         self._loop = current_loop
         records = await asyncio.to_thread(self.ledger.list_records, limit=0)
         intake = tuple(
@@ -711,7 +741,18 @@ class ControllerSupervisor:
                 self._supervise("publication", self._publication_loop),
                 name="fulcrum-publication",
             ),
+            asyncio.create_task(
+                self._supervise("maintenance", self._maintenance_loop),
+                name="fulcrum-maintenance",
+            ),
         ]
+        if self.config.get("source_watch_root") is not None:
+            tasks.append(
+                asyncio.create_task(
+                    self._supervise("source-watch", self._source_watch_loop),
+                    name="fulcrum-source-watch",
+                )
+            )
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
             for task in done:
@@ -757,9 +798,104 @@ class ControllerSupervisor:
         return CommandResult.query(summary.to_dict())
 
     def _dispatch_from_ipc(self, request: ParsedRequest) -> CommandResult:
-        return self.application.dispatch(
-            replace(request, runtime_submit=self._runtime_submit)
-        )
+        mutating = request.request_id is not None
+        if (
+            mutating
+            and read_maintenance(maintenance_path(self.request.instance.instance_root))
+            is not None
+        ):
+            raise FulcrumError(
+                "MAINTENANCE_IN_PROGRESS",
+                "installed source activation is waiting at a quiescent boundary",
+                exit_code=4,
+                retryable=True,
+            )
+        if mutating:
+            with self._ipc_lock:
+                self._active_ipc_mutations += 1
+        try:
+            return self.application.dispatch(
+                replace(request, runtime_submit=self._runtime_submit)
+            )
+        finally:
+            if mutating:
+                with self._ipc_lock:
+                    self._active_ipc_mutations -= 1
+
+    async def _maintenance_loop(self) -> None:
+        request_path = maintenance_path(self.request.instance.instance_root)
+        ready_path = maintenance_ready_path(self.request.instance.instance_root)
+        while not self._stop.is_set():
+            requested = read_maintenance(request_path)
+            if requested is None:
+                ready_path.unlink(missing_ok=True)
+                await self._wait(0.1)
+                continue
+            operation_id = requested.get("operation_id")
+            if not isinstance(operation_id, str):
+                await self._wait(0.1)
+                continue
+            async with self.reconcile_lock:
+                while not self._stop.is_set():
+                    with self._ipc_lock:
+                        active = self._active_ipc_mutations
+                    current = read_maintenance(request_path)
+                    if current is None or current.get("operation_id") != operation_id:
+                        break
+                    if active == 0:
+                        write_maintenance(
+                            ready_path,
+                            {
+                                "operation_id": operation_id,
+                                "acknowledged_at": _format_time(self.clock.now()),
+                                "active_ipc_mutations": 0,
+                            },
+                        )
+                        self.health.success(
+                            "maintenance", {"operation_id": operation_id, "ready": True}
+                        )
+                        while not self._stop.is_set():
+                            current = read_maintenance(request_path)
+                            if (
+                                current is None
+                                or current.get("operation_id") != operation_id
+                            ):
+                                break
+                            await self._wait(0.1)
+                        break
+                    await self._wait(0.05)
+
+    async def _source_watch_loop(self) -> None:
+        configured = self.config.get("source_watch_root")
+        if not isinstance(configured, str):
+            return
+        source = Path(configured).resolve(strict=True)
+        instance = self.request.instance.instance_root.resolve(strict=False)
+        async for changes in awatch(source, debounce=500, step=100):
+            relevant = []
+            for _kind, raw_path in changes:
+                path = Path(raw_path).resolve(strict=False)
+                relative = path.relative_to(source)
+                if path.is_relative_to(instance) or any(
+                    part in {".git", ".venv", "__pycache__"} for part in relative.parts
+                ):
+                    continue
+                if path.suffix in {".py", ".toml", ".lock", ".json", ".yaml", ".md"}:
+                    relevant.append(str(path))
+            if not relevant:
+                continue
+            try:
+                detail = await asyncio.to_thread(
+                    _launch_source_updater,
+                    instance / "services" / "updater.plist",
+                )
+                self.health.success(
+                    "source-watch", {**detail, "change_count": len(relevant)}
+                )
+                if detail.get("state") == "started":
+                    return
+            except Exception as error:
+                self.health.failure("source-watch", error)
 
     async def _startup_reconcile(self) -> None:
         try:
@@ -936,6 +1072,7 @@ class ControllerSupervisor:
             "service.start",
             "service.stop",
             "service.restart",
+            "service.update",
             "operation.reconcile",
             "operation.cancel",
         }:
@@ -1968,6 +2105,58 @@ class ControllerSupervisor:
             "observed_at": event.observed_at,
         }
         await asyncio.to_thread(self.ledger.update_fc, matches[0].id, fc)
+
+
+def _launch_source_updater(definition_path: Path) -> dict[str, Any]:
+    """Kick a separate launchd job so controller shutdown cannot kill the updater."""
+
+    try:
+        with definition_path.open("rb") as stream:
+            definition = plistlib.load(stream)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise RuntimeError(
+            f"source updater definition is unavailable: {error}"
+        ) from error
+    label = definition.get("Label") if isinstance(definition, Mapping) else None
+    arguments = (
+        definition.get("ProgramArguments") if isinstance(definition, Mapping) else None
+    )
+    if not isinstance(label, str) or not isinstance(arguments, list):
+        raise RuntimeError("source updater definition is invalid")
+    expected = tuple(str(item) for item in arguments)
+    observed = inspect_service(label)
+    domain = f"gui/{os.getuid()}"
+    if observed.running:
+        return {"label": label, "state": "coalesced", "pid": observed.pid}
+    if observed.loaded and observed.program_arguments != expected:
+        stopped = subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if stopped.returncode != 0:
+            raise RuntimeError(stopped.stderr.strip() or stopped.stdout.strip())
+        observed = inspect_service(label)
+    if not observed.loaded:
+        loaded = subprocess.run(
+            ["launchctl", "bootstrap", domain, str(definition_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if loaded.returncode != 0:
+            raise RuntimeError(loaded.stderr.strip() or loaded.stdout.strip())
+    started = subprocess.run(
+        ["launchctl", "kickstart", "-k", f"{domain}/{label}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if started.returncode != 0:
+        raise RuntimeError(started.stderr.strip() or started.stdout.strip())
+    current = inspect_service(label)
+    return {"label": label, "state": "started", "pid": current.pid}
 
 
 class ReconciliationService:

@@ -41,6 +41,7 @@ from fulcrum.instance import DEFAULT_BRAIN, WriterLock
 from fulcrum.leadership import ensure_leadership
 from fulcrum.ledger import Ledger, LedgerFailure, operation_view
 from fulcrum.runtime import AppServerRuntime
+from fulcrum.source_refresh import ensure_recovery_environment
 from fulcrum.tollgate import Tollgate, TollgateError
 from fulcrum.publication import (
     DoltPublicationAdapter,
@@ -168,6 +169,13 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "uncertain",
         }:
             return _setup_operation_result(operation)
+        recovery = ensure_recovery_environment(
+            instance.instance_root,
+            installation_source_root(),
+            operation.id,
+            config_path=target,
+            production=not instance.explicit_selection,
+        )
         skills = reconcile_fulcrum2_skills(
             instance.instance_root,
             production=not instance.explicit_selection,
@@ -201,6 +209,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "assets": {
                 "controller": str(controller),
                 "controller_changed": controller_changed,
+                "recovery": recovery,
                 "skills": skills,
             },
             "services": {
@@ -338,6 +347,10 @@ def _prepare_configuration(
         )
     config = default_config(brain_root)
     _merge(config, supplied)
+    if "source_watch_root" not in supplied:
+        config["source_watch_root"] = str(
+            installation_source_root().resolve(strict=True)
+        )
     _resolve_missing_executables(config)
     missing = _missing_required(config)
     if missing and not non_interactive:

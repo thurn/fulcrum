@@ -70,6 +70,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
     def test_service_identity_is_stable_unique_and_definitions_are_rerunnable(
         self,
     ) -> None:
+        self.config["source_watch_root"] = str(Path(__file__).parents[1])
         first = fulcrum2_service_definitions(
             instance_root=self.instance,
             config_path=self.config_path,
@@ -88,11 +89,12 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         )
         self.assertEqual(first, second)
         self.assertEqual(first["runtime"]["SoftResourceLimits"]["NumberOfFiles"], 4096)
+        self.assertFalse(first["updater"]["RunAtLoad"])
         installed, changed = install_fulcrum2_service_definitions(first, self.instance)
         repeated, repeated_changed = install_fulcrum2_service_definitions(
             second, self.instance
         )
-        self.assertEqual(set(installed), {"runtime", "dolt", "controller"})
+        self.assertEqual(set(installed), {"runtime", "dolt", "controller", "updater"})
         self.assertEqual(set(repeated), set(installed))
         self.assertEqual(set(changed), set(installed))
         self.assertEqual(repeated_changed, [])
@@ -130,6 +132,27 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(self.config_path.read_bytes(), before)
         self.assertEqual(effective["brain"]["root"], str(self.brain))
+
+    def test_new_setup_defaults_source_watch_to_installation_source(self) -> None:
+        effective, changed = _prepare_configuration(
+            self.config_path,
+            self.brain,
+            {
+                "beads": {"executable": "/usr/bin/true"},
+                "runtime": {
+                    "kind": "deterministic",
+                    "endpoint": "ws://127.0.0.1:1",
+                    "executable": None,
+                },
+                "delivery": {"kind": "deterministic", "executable": None},
+            },
+            non_interactive=True,
+        )
+        self.assertTrue(changed)
+        self.assertEqual(
+            Path(str(effective["source_watch_root"])).resolve(),
+            Path(__file__).parents[1].resolve(),
+        )
 
     def test_missing_prerequisites_and_wrong_model_are_exact(self) -> None:
         missing = default_config(self.brain)

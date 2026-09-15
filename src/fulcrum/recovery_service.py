@@ -105,6 +105,7 @@ class RecoveryService:
             inventory.update(_inventory(ledger, selected))
         except Exception as error:
             gaps.append({"component": "ledger", "reason": str(error)})
+            ledger = None
             selected = {
                 "scope": scope_text,
                 "kind": parsed["kind"],
@@ -305,6 +306,7 @@ class RecoveryService:
         actions = _validate_actions(request.input)
         try:
             ledger = _ledger(request)
+            ledger.run(("status",))
             config = _config(request)
         except (FulcrumError, LedgerFailure) as error:
             return self._degraded_repair(request, actions, error)
@@ -474,7 +476,12 @@ class RecoveryService:
             elif kind == "repair_service":
                 effect = _repair_service(request, target, arguments)
             else:
-                effect = _repair_reinstall(request, target, arguments)
+                effect = _repair_reinstall(
+                    request,
+                    target,
+                    arguments,
+                    operation_key=request.request_id or str(uuid.uuid4()),
+                )
             effects.append(
                 {
                     "action": kind,
@@ -798,7 +805,12 @@ class RecoveryService:
         if kind == "repair_service":
             return _repair_service(request, target, arguments)
         if kind == "reinstall":
-            return _repair_reinstall(request, target, arguments)
+            return _repair_reinstall(
+                request,
+                target,
+                arguments,
+                operation_key=f"{operation_id}-{index}",
+            )
         if kind == "quarantine":
             return _repair_quarantine(request, target, operation_id, index)
         if kind == "beads_update":
@@ -1505,45 +1517,95 @@ def _repair_service(
 
 
 def _repair_reinstall(
-    request: ParsedRequest, target: str, arguments: Mapping[str, Any]
+    request: ParsedRequest,
+    target: str,
+    arguments: Mapping[str, Any],
+    *,
+    operation_key: str,
 ) -> Mapping[str, Any]:
+    from fulcrum.install import (
+        fulcrum2_service_definitions,
+        install_fulcrum2_service_definitions,
+    )
+    from fulcrum.source_refresh import (
+        build_installed_environment,
+        install_recovery_link,
+        switch_installed_pointer,
+    )
+
     source = Path(str(arguments["source_root"])).resolve(strict=True)
     if not source.is_dir():
         raise FulcrumError.invalid(
             "NOT_FOUND", "reinstall source_root is not a directory"
         )
-    command = source / ".venv" / "bin" / "fulcrum"
-    if not command.is_file():
-        raise FulcrumError(
-            "CAPABILITY_UNAVAILABLE",
-            "source_root has no installed Fulcrum CLI",
-            exit_code=4,
+    installation = str(arguments["installation"])
+    token = operation_key.removeprefix("fc-").replace("/", "-")
+    if installation == "recovery":
+        deployment = request.instance.instance_root / "recovery" / f"deployment-{token}"
+        recovery_config: Path | None = request.instance.config_path
+        try:
+            ConfigurationManager(request.instance.config_path).load()
+        except FulcrumError:
+            recovery_config = None
+        probe = build_installed_environment(
+            source,
+            deployment,
+            config_path=recovery_config,
+            recovery=True,
         )
-    completed = subprocess.run(
-        [
-            str(command),
-            "setup",
-            "--instance",
-            str(request.instance.instance_root),
-            "--non-interactive",
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=max(request.timeout, 30),
+        active = switch_installed_pointer(
+            request.instance.instance_root / "recovery", deployment
+        )
+        launcher = install_recovery_link(
+            request.instance.instance_root,
+            production=not request.instance.explicit_selection,
+        )
+        return {
+            "target": target,
+            "installation": installation,
+            "source_root": str(source),
+            "active": str(active),
+            "launcher": str(launcher),
+            "probe": probe,
+            "development_environment_used": False,
+        }
+    manager = ConfigurationManager(request.instance.config_path)
+    document, _ = manager.load()
+    config = manager.effective(document)
+    if request.instance.brain_root is None:
+        raise FulcrumError(
+            "CONFIG_INVALID", "main reinstall requires a valid brain root", exit_code=4
+        )
+    deployment = request.instance.instance_root / "runtime" / f"deployment-{token}"
+    probe = build_installed_environment(
+        source,
+        deployment,
+        config_path=request.instance.config_path,
+        recovery=False,
     )
-    if completed.returncode != 0:
-        raise FulcrumError(
-            "REINSTALL_FAILED",
-            completed.stderr.strip() or completed.stdout.strip(),
-            exit_code=4,
-        )
+    active = switch_installed_pointer(
+        request.instance.instance_root / "runtime", deployment
+    )
+    definitions = fulcrum2_service_definitions(
+        instance_root=request.instance.instance_root,
+        config_path=request.instance.config_path,
+        brain_root=request.instance.brain_root,
+        config=config,
+        controller_executable=active / "bin" / "fulcrum",
+        production=not request.instance.explicit_selection,
+    )
+    _installed, changed = install_fulcrum2_service_definitions(
+        definitions, request.instance.instance_root
+    )
     return {
         "target": target,
-        "installation": arguments["installation"],
+        "installation": installation,
         "source_root": str(source),
-        "stdout": completed.stdout[-4096:],
+        "active": str(active),
+        "probe": probe,
+        "changed_service_definitions": changed,
+        "controller_started": False,
+        "development_environment_used": False,
     }
 
 

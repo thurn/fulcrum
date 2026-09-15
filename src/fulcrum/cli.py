@@ -99,6 +99,7 @@ LOCAL_COMMANDS = {
     ("service", "stop"),
     ("service", "restart"),
     ("service", "status"),
+    ("service", "update"),
 }
 
 
@@ -341,6 +342,8 @@ def _add_command_options(
         _option(parser, "--non-interactive", action="store_true")
     elif path in {("service", "stop"), ("service", "restart")}:
         _option(parser, "--interrupt", action="store_true")
+    elif path == ("service", "update"):
+        _option(parser, "--source")
     elif path == ("enter",):
         parser.add_argument("role", choices=ROLES)
         _option(parser, "--description", required=True)
@@ -965,6 +968,8 @@ def _execute(request: ParsedRequest) -> dict[str, Any]:
             except ControllerUnavailable:
                 return application.dispatch(replace(request, offline=True)).to_dict()
         if request.instance.lock_path is None:
+            if request.command == ("recover", "repair"):
+                return application.dispatch(request).to_dict()
             raise FulcrumError(
                 "CONFIG_INVALID",
                 "offline mutation requires a valid brain root",
