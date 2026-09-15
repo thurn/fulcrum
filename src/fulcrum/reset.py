@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Any
 
 from fulcrum.configuration import ConfigurationManager
-from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
+from fulcrum.contracts import (
+    CommandResult,
+    CommandState,
+    ErrorInfo,
+    FulcrumError,
+    ParsedRequest,
+)
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -1413,6 +1419,9 @@ def _initialize_clean_normal_ledger(
         return existing
     except LedgerFailure:
         pass
+    beads_dir = brain / ".beads"
+    # The installed server reads this directory at startup, before bd init runs.
+    (beads_dir / "dolt").mkdir(parents=True, exist_ok=True, mode=0o700)
     dolt = load_installed_services(request.instance.instance_root).get("dolt")
     server_args: list[str] = []
     if dolt is not None:
@@ -1433,8 +1442,6 @@ def _initialize_clean_normal_ledger(
     if not staging.exists():
         _run(("git", "init", "--bare", "--initial-branch=main", str(staging)))
     _ensure_staging_anchor(reset_root, staging, request.timeout)
-    beads_dir = brain / ".beads"
-    (beads_dir / "dolt").mkdir(parents=True, exist_ok=True, mode=0o700)
     (beads_dir / "config.yaml").write_text(
         f'sync.remote: "{_git_transport(str(staging))}"\n', encoding="utf-8"
     )
@@ -1915,10 +1922,42 @@ def _operation_result(operation: OperationRecord) -> CommandResult:
         if value in CommandState._value2member_map_
         else CommandState.RUNNING
     )
+    failure = operation.operation.get("error")
+    error = None
+    if state in {CommandState.FAILED, CommandState.UNCERTAIN} and isinstance(
+        failure, Mapping
+    ):
+        message = str(failure.get("message") or "hard reset failed")
+        for target in failure.get("targets") or []:
+            target_error = target.get("error") or {}
+            if target_error.get("message"):
+                message += (
+                    f"; {target['kind']} {target['id']}: {target_error['message']}"
+                )
+        retryable = bool(failure.get("retryable"))
+        error = ErrorInfo(
+            code=str(failure.get("code") or "RESET_FAILED"),
+            message=message,
+            retryable=retryable,
+            next_command=(
+                (
+                    "fulcrum",
+                    "reset",
+                    "--hard",
+                    "--yes",
+                    "--request-id",
+                    str(operation.operation["request_id"]),
+                )
+                if retryable
+                else None
+            ),
+            details=dict(failure),
+        )
     return CommandResult(
         ok=state not in {CommandState.FAILED, CommandState.UNCERTAIN},
         state=state,
         operation_id=operation.id,
         request_id=str(operation.operation.get("request_id")),
         result=operation_view(operation),
+        error=error,
     )
