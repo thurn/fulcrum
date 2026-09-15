@@ -100,6 +100,7 @@ LOCAL_COMMANDS = {
     ("service", "restart"),
     ("service", "status"),
     ("service", "update"),
+    ("reset",),
 }
 
 
@@ -595,6 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
+    ("reset",): {"expected_remote_ref", "legacy_state_root", "legacy_database"},
     ("hook", "context"): {
         "hook_event_name",
         "source",
@@ -936,6 +938,9 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
 
 
 def _serve(request: ParsedRequest) -> CommandResult:
+    from fulcrum.reset import refuse_unfinished_reset
+
+    refuse_unfinished_reset(request.instance.instance_root)
     if request.instance.lock_path is None:
         raise FulcrumError(
             "CONFIG_INVALID", "a brain root is required to serve", exit_code=4

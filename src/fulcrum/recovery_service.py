@@ -116,6 +116,13 @@ class RecoveryService:
             }
         if config is not None:
             inventory["repositories"] = _repository_inventory(config, selected)
+            if parsed["kind"] == "instance":
+                try:
+                    from fulcrum.reset import inspect_reset_inventory
+
+                    inventory["reset_preview"] = inspect_reset_inventory(request)
+                except Exception as error:
+                    gaps.append({"component": "reset_inventory", "reason": str(error)})
         result = {
             **inventory,
             "observed_at": utc_now(),

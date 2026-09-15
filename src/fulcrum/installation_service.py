@@ -156,6 +156,9 @@ class ServiceService:
         return CommandResult.query(service_status_result(request))
 
     def start(self, request: ParsedRequest) -> CommandResult:
+        from fulcrum.reset import refuse_unfinished_reset
+
+        refuse_unfinished_reset(request.instance.instance_root)
         services = load_installed_services(request.instance.instance_root)
         if "controller" not in services or "dolt" not in services:
             raise FulcrumError(

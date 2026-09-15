@@ -67,6 +67,10 @@ def run_setup(request: ParsedRequest) -> CommandResult:
 
 def _run_setup(request: ParsedRequest) -> CommandResult:
 
+    from fulcrum.reset import refuse_unfinished_reset
+
+    refuse_unfinished_reset(request.instance.instance_root)
+
     if request.actor.kind != "human":
         raise FulcrumError(
             "CONFIG_AUTHORITY_DENIED",

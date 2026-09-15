@@ -26,6 +26,7 @@ from fulcrum.knowledge import KnowledgeService, MemoryService
 from fulcrum.plans import PlanService
 from fulcrum.publication import LedgerPublicationService
 from fulcrum.recovery_service import HumanService, RecoveryService
+from fulcrum.reset import ResetService
 from fulcrum.installation_service import ServiceService, SkillsService
 from fulcrum.runtime_service import RuntimeService, TaskService
 from fulcrum.setup import run_setup
@@ -55,6 +56,7 @@ class Application:
         self.register(("service", "restart"), services.restart)
         self.register(("service", "status"), services.status)
         self.register(("service", "update"), SourceRefreshService().update)
+        self.register(("reset",), ResetService().hard_reset)
         self.register(("skills", "reconcile"), SkillsService().reconcile)
         configuration = ConfigurationService()
         self.register(("config", "show"), configuration.show)

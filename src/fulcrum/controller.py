@@ -84,7 +84,6 @@ from fulcrum.prompts import (
     weaver_instructions,
 )
 from fulcrum.readiness import progress_readiness, state_readiness
-from fulcrum.reset import reset_brain
 from fulcrum.resources import (
     AppServerResourceProbe,
     MAX_ACTIVE_CONVERSATIONS,
@@ -1571,7 +1570,6 @@ class Controller:
             if isinstance(record, dict) and record.get("mode") in {
                 "soft",
                 "hard",
-                "reset",
             }:
                 await self._begin_reboot(str(record["mode"]), existing=record)
         violations = invariant_violations(self.store)
@@ -11730,8 +11728,11 @@ class Controller:
     async def _begin_reboot(
         self, mode: str, *, existing: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        if mode not in {"soft", "hard", "reset"}:
-            raise StoreError("reboot mode must be soft, hard, or reset")
+        if mode not in {"soft", "hard"}:
+            raise StoreError(
+                "reboot mode must be soft or hard; use `fulcrum reset --hard --yes` "
+                "for destructive replacement"
+            )
         record = existing or {
             "mode": mode,
             "state": "stopping",
@@ -11966,10 +11967,8 @@ class Controller:
             raise StoreError(
                 "reset retained cleanup failures: " + "; ".join(cleanup_errors)
             )
-        await asyncio.to_thread(
-            reset_brain,
-            self.paths.brain_root,
-            source_root=Path(self.config.source_root),
+        raise StoreError(
+            "legacy controller reset was removed; use `fulcrum reset --hard --yes`"
         )
         self.store.close()
         for suffix in ("", "-wal", "-shm"):
