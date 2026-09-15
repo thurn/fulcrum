@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 import subprocess
 from contextlib import redirect_stderr
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fulcrum.cli import _emit
 from fulcrum.ledger import LedgerFailure, LedgerRecord, OperationRecord
@@ -70,6 +70,47 @@ class ResetTests(unittest.TestCase):
                 self.request(), self.config, self.root / "reset"
             )
         started.assert_called_once()
+
+    def test_reset_initializes_leadership_like_setup_and_reports_started_turns(self):
+        from fulcrum.reset import ResetService
+
+        request = self.request()
+        ledger = MagicMock()
+        runtime = MagicMock()
+        runtime.close = AsyncMock()
+        for started in (True, False):
+            with self.subTest(initial_requests_started=started):
+                actions = [
+                    {
+                        "role": role,
+                        "thread_id": f"{role}-thread",
+                        "turn_started": started,
+                        "initial_request": "sent" if started else "already_sent",
+                    }
+                    for role in ("vizier", "marshal")
+                ]
+                with (
+                    patch(
+                        "fulcrum.reset._bootstrap_control_record",
+                        return_value={"created": started},
+                    ),
+                    patch.object(ResetService, "_runtime", return_value=runtime),
+                    patch(
+                        "fulcrum.leadership.ensure_leadership",
+                        new_callable=AsyncMock,
+                        return_value=actions,
+                    ) as ensure,
+                ):
+                    result = ResetService()._bootstrap_control(
+                        request, self.config, ledger
+                    )
+                ensure.assert_awaited_once_with(
+                    request, ledger, runtime, self.config, send_initial_requests=True
+                )
+                self.assertEqual(result["turns_started"], 2 if started else 0)
+                self.assertEqual(result["actions"], actions)
+                runtime.close.assert_awaited_once()
+                runtime.close.reset_mock()
 
     def test_failed_reset_exposes_cause_and_exact_retry_command(self):
         operation = OperationRecord.from_record(

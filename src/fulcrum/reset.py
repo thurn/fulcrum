@@ -653,7 +653,13 @@ class ResetService:
 
         async def provision() -> list[dict[str, Any]]:
             try:
-                actions = await ensure_leadership(request, ledger, runtime, config)
+                actions = await ensure_leadership(
+                    request,
+                    ledger,
+                    runtime,
+                    config,
+                    send_initial_requests=True,
+                )
                 return [dict(item) for item in actions]
             finally:
                 await runtime.close()
@@ -674,7 +680,7 @@ class ResetService:
             "vizier_thread": by_role["vizier"]["thread_id"],
             "marshal_thread": by_role["marshal"]["thread_id"],
             "actions": actions,
-            "turns_started": 0,
+            "turns_started": sum(bool(item.get("turn_started")) for item in actions),
         }
 
     def _boundary(
