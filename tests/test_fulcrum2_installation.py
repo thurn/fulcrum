@@ -273,6 +273,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertEqual(result["socket"], str(path))
         self.assertEqual(result["probe_state"], "completed")
         probe.assert_called_once()
+        self.assertEqual(probe.call_args.args[1]["command"], ["service", "status"])
 
     def test_restart_child_failure_is_not_treated_as_success(self) -> None:
         completed = CommandResult(ok=True, state=CommandState.COMPLETED)

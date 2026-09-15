@@ -519,11 +519,11 @@ def _wait_for_controller(
         remaining = deadline - time.monotonic()
         probe = replace(
             request,
-            command=("status",),
+            command=("service", "status"),
             arguments={},
             input={},
             request_id=None,
-            timeout=min(2.0, max(0.1, remaining)),
+            timeout=min(5.0, max(0.1, remaining)),
             offline=False,
         )
         try:

@@ -5,8 +5,15 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import AsyncMock, Mock
 
-from fulcrum.ipc import ControllerTimedOut, request
+from fulcrum.contracts import (
+    ActorContext,
+    CommandResult,
+    InstanceContext,
+    ParsedRequest,
+)
+from fulcrum.ipc import ControllerTimedOut, IpcServer, request
 
 
 class IpcTest(unittest.IsolatedAsyncioTestCase):
@@ -48,6 +55,39 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
                 response = await request(socket_path, {"command": "status"})
 
             self.assertEqual(len(response["data"]["detail"]), 200_000)
+
+    async def test_server_tolerates_client_disconnect_before_response(self) -> None:
+        parsed = ParsedRequest(
+            command=("status",),
+            arguments={},
+            input={},
+            actor=ActorContext(kind="human"),
+            instance=InstanceContext(
+                instance_root=Path("/tmp/instance"),
+                config_path=Path("/tmp/config"),
+                brain_root=Path("/tmp/brain"),
+                socket_path=Path("/tmp/controller.sock"),
+                lock_path=Path("/tmp/controller.lock"),
+                explicit_selection=True,
+            ),
+            request_id=None,
+        )
+        reader = AsyncMock()
+        reader.readline.return_value = (
+            json.dumps(parsed.to_wire(), separators=(",", ":")).encode() + b"\n"
+        )
+        writer = Mock()
+        writer.drain = AsyncMock(side_effect=ConnectionResetError("client left"))
+        writer.wait_closed = AsyncMock()
+        server = IpcServer(
+            Path("/tmp/not-created.sock"),
+            lambda _request: CommandResult.query({"ready": True}),
+        )
+
+        await server._handle(reader, writer)
+
+        writer.close.assert_called_once()
+        writer.wait_closed.assert_awaited_once()
 
 
 if __name__ == "__main__":

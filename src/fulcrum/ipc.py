@@ -148,9 +148,16 @@ class IpcServer:
                 .to_result()
                 .to_dict()
             )
-        writer.write(json.dumps(response, separators=(",", ":")).encode() + b"\n")
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
-        if self.once:
-            self._handled.set()
+        try:
+            writer.write(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+            await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            if self.once:
+                self._handled.set()
