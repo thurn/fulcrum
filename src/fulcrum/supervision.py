@@ -1353,14 +1353,16 @@ class ControllerSupervisor:
             if isinstance(previous_observed, Mapping)
             else None
         )
+        retained_facts = facts.to_dict()
+        retained_turn = retained_facts.get("last_turn")
         now = self.clock.now()
         if (
             facts.active_turn is not None
             and facts.last_turn is not None
-            and facts.last_turn != previous_turn
+            and retained_turn != previous_turn
         ):
             fc["last_tool_evidence_at"] = _format_time(now)
-        fc["last_observed"] = facts.to_dict()
+        fc["last_observed"] = retained_facts
         if fc.get("purpose") == "leadership":
             if fc != original_fc:
                 await asyncio.to_thread(self.ledger.update_fc, task.id, fc)

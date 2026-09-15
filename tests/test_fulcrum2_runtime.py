@@ -60,6 +60,34 @@ def task_spec() -> TaskSpec:
 
 
 class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
+    def test_task_facts_exclude_unbounded_turn_items(self) -> None:
+        facts = TaskFacts(
+            id="thread-1",
+            title="Managed task",
+            cwd="/work",
+            project_id="project-1",
+            workspace_roots=("/work",),
+            archived=False,
+            exists=True,
+            loaded=True,
+            runtime_status="inProgress",
+            active_turn="turn-1",
+            last_turn={
+                "id": "turn-1",
+                "status": "inProgress",
+                "items": [{"type": "agentMessage", "text": "x" * 1_000_000}],
+            },
+            pending_requests=(),
+            observed_at="2026-09-14T00:00:00Z",
+        )
+
+        retained = facts.to_dict()
+
+        self.assertNotIn("items", retained["last_turn"])
+        self.assertEqual(retained["last_turn"]["item_count"], 1)
+        self.assertLess(len(json.dumps(retained)), 1_000)
+        self.assertIn("items", facts.last_turn)
+
     async def test_tool_rich_native_history_frame_is_observable(self) -> None:
         padding = "x" * (17 * 1024 * 1024)
 

@@ -83,6 +83,11 @@ class TaskFacts:
     gaps: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
+        last_turn = dict(self.last_turn) if self.last_turn else None
+        if last_turn is not None:
+            items = last_turn.pop("items", None)
+            if isinstance(items, list):
+                last_turn["item_count"] = len(items)
         return {
             "id": self.id,
             "title": self.title,
@@ -94,7 +99,9 @@ class TaskFacts:
             "loaded": self.loaded,
             "runtime_status": self.runtime_status,
             "active_turn": self.active_turn,
-            "last_turn": dict(self.last_turn) if self.last_turn else None,
+            # Full turn items are native output, not task-state facts. They can
+            # grow without bound and are available through ``task output``.
+            "last_turn": last_turn,
             "pending_requests": [dict(item) for item in self.pending_requests],
             "observed_at": self.observed_at,
             "gaps": list(self.gaps),
