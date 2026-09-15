@@ -233,7 +233,33 @@ class ServiceService:
         # Reconciliation ran with the retained pause. Clear it immediately
         # before launch so the new controller observes admission enabled.
         _set_service_pause(request, config, None)
-        results.append(_start_one(controller, endpoint=None))
+        controller_start = _start_one(controller, endpoint=None)
+        results.append(controller_start)
+        try:
+            readiness = _wait_for_controller(
+                request.instance.socket_path,
+                controller,
+                timeout=min(max(request.timeout, 1.0), 30.0),
+            )
+        except FulcrumError as error:
+            if controller_start.get("state") == "started":
+                try:
+                    _stop_one(controller)
+                except Exception:
+                    pass
+            operation = ledger.update_operation(
+                operation,
+                state="failed",
+                step="controller_readiness_failed",
+                error={
+                    "code": error.code,
+                    "message": str(error),
+                    "retryable": error.retryable,
+                },
+                result={"services": results},
+                next_action="Inspect service status and controller logs before retrying start.",
+            )
+            return _operation_result(operation)
         operation = ledger.update_operation(
             operation,
             state="completed",
@@ -243,6 +269,7 @@ class ServiceService:
                 "reconciled_before_admission": not controller_was_running,
                 "already_running": controller_was_running,
                 "identities_retained": True,
+                "controller_readiness": readiness,
             },
             next_action="No further action is required.",
         )
@@ -447,6 +474,42 @@ def _occupied(endpoint: str) -> bool:
             return True
     except OSError:
         return False
+
+
+def _wait_for_controller(
+    socket_path: Path, service: InstalledService, *, timeout: float
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    last_observation = inspect_service(service.label)
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        last_observation = inspect_service(service.label)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.25)
+        try:
+            client.connect(str(socket_path))
+            return {
+                "socket": str(socket_path),
+                "responsive": True,
+                "pid": last_observation.pid,
+            }
+        except OSError as error:
+            last_error = str(error)
+        finally:
+            client.close()
+        time.sleep(0.1)
+    raise FulcrumError(
+        "CONTROLLER_UNAVAILABLE",
+        f"controller did not accept connections at {socket_path}: {last_error}",
+        exit_code=4,
+        retryable=True,
+        details={
+            "service": service.label,
+            "state": last_observation.state,
+            "pid": last_observation.pid,
+            "socket": str(socket_path),
+        },
+    )
 
 
 def _start_one(service: InstalledService, *, endpoint: str | None) -> dict[str, Any]:

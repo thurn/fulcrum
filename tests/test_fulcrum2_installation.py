@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import tempfile
 import unittest
 import uuid
@@ -18,7 +19,11 @@ from fulcrum.install import (
     install_fulcrum2_service_definitions,
     reconcile_fulcrum2_skills,
 )
-from fulcrum.installation_service import _start_one, service_status_result
+from fulcrum.installation_service import (
+    _start_one,
+    _wait_for_controller,
+    service_status_result,
+)
 from fulcrum.setup import (
     _missing_required,
     _model_capability,
@@ -224,6 +229,35 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertFalse(result["socket"]["exists"])
         self.assertEqual(set(result["services"]), {"dolt", "controller"})
         self.assertTrue(all(row["running"] for row in result["services"].values()))
+
+    def test_controller_readiness_requires_a_connectable_unix_socket(self) -> None:
+        path = self.root / "ready.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(1)
+        service = InstalledService(
+            "controller", "dev.fulcrum.test.controller", self.root / "x"
+        )
+        observation = ServiceObservation(
+            label=service.label,
+            loaded=True,
+            state="running",
+            pid=os.getpid(),
+            executable_path=None,
+            program_arguments=(),
+            working_directory=None,
+            detail="observed",
+        )
+        try:
+            with patch(
+                "fulcrum.installation_service.inspect_service",
+                return_value=observation,
+            ):
+                result = _wait_for_controller(path, service, timeout=0.5)
+        finally:
+            server.close()
+        self.assertTrue(result["responsive"])
+        self.assertEqual(result["socket"], str(path))
 
 
 if __name__ == "__main__":
