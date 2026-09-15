@@ -420,8 +420,27 @@ class ResetService:
             for target in _target_rows(planned, "native_task")
             if target.get("state") != "completed"
         ]
+        for target in pending:
+            error = target.get("error")
+            message = error.get("message") if isinstance(error, Mapping) else None
+            if isinstance(message, str) and "thread not found:" in message.lower():
+                _complete_target(
+                    target,
+                    {
+                        "thread_id": str(target["id"]),
+                        "exists": False,
+                        "already_absent": True,
+                    },
+                )
+        pending = [target for target in pending if target.get("state") != "completed"]
         if not pending:
-            return operation
+            return _persist_targets(
+                ledger,
+                operation.id,
+                planned,
+                service_facts,
+                "native_cleanup_recorded",
+            )
         runtime: Any = self._runtime(config)
 
         async def cleanup() -> None:
