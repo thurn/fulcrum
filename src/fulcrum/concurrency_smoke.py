@@ -31,6 +31,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _json_default(value: Any) -> str:
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def _nested(envelope: Mapping[str, Any]) -> dict[str, Any]:
     result = envelope.get("result")
     if isinstance(result, Mapping) and isinstance(result.get("result"), Mapping):
@@ -151,7 +157,8 @@ class ConcurrencySmoke:
             self.report_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.report_path.with_suffix(self.report_path.suffix + ".tmp")
             temporary.write_text(
-                json.dumps(self.report, indent=2, sort_keys=True) + "\n",
+                json.dumps(self.report, indent=2, sort_keys=True, default=_json_default)
+                + "\n",
                 encoding="utf-8",
             )
             os.replace(temporary, self.report_path)
@@ -180,13 +187,20 @@ class ConcurrencySmoke:
                 "## Measured concurrency",
                 "",
                 "```json",
-                json.dumps(self.observations, indent=2, sort_keys=True),
+                json.dumps(
+                    self.observations,
+                    indent=2,
+                    sort_keys=True,
+                    default=_json_default,
+                ),
                 "```",
                 "",
                 "## Cleanup",
                 "",
                 "```json",
-                json.dumps(self.cleanup, indent=2, sort_keys=True),
+                json.dumps(
+                    self.cleanup, indent=2, sort_keys=True, default=_json_default
+                ),
                 "```",
             ]
         )
@@ -354,7 +368,7 @@ class ConcurrencySmoke:
         self.fixture_id = str(self.fixture["fixture_id"])
         installed = Path(str(self.instance)) / "runtime" / "current" / "bin" / "fulcrum"
         self.check(
-            installed.is_file(), "fixture installed executable exists", installed
+            installed.is_file(), "fixture installed executable exists", str(installed)
         )
         self.executable = installed.resolve(strict=True)
 
