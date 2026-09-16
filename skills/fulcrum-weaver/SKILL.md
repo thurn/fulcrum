@@ -1,5 +1,5 @@
 ---
-name: fulcrum-weaver
+name: weaver
 description: Investigate questions, prepare implementation scope, or author plans; implementation follows Marshal review.
 ---
 

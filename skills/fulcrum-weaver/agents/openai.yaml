@@ -1,5 +1,5 @@
 interface:
-  display_name: "Fulcrum Weaver"
+  display_name: "Weaver"
   short_description: "Answer questions or prepare scope for Marshal"
 policy:
   allow_implicit_invocation: false

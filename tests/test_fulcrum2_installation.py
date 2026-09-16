@@ -176,24 +176,27 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertEqual(effective["brain"]["root"], str(self.brain))
 
     def test_new_setup_defaults_source_watch_to_installation_source(self) -> None:
-        effective, changed = _prepare_configuration(
-            self.config_path,
-            self.brain,
-            {
-                "beads": {"executable": "/usr/bin/true"},
-                "runtime": {
-                    "kind": "codex",
-                    "endpoint": "ws://127.0.0.1:1",
-                    "executable": "/usr/bin/true",
+        master = self.root / "canonical-master"
+        master.mkdir()
+        with patch("fulcrum.setup.master_source_root", return_value=master):
+            effective, changed = _prepare_configuration(
+                self.config_path,
+                self.brain,
+                {
+                    "beads": {"executable": "/usr/bin/true"},
+                    "runtime": {
+                        "kind": "codex",
+                        "endpoint": "ws://127.0.0.1:1",
+                        "executable": "/usr/bin/true",
+                    },
+                    "delivery": {"kind": "tollgate", "executable": "/usr/bin/true"},
                 },
-                "delivery": {"kind": "tollgate", "executable": "/usr/bin/true"},
-            },
-            non_interactive=True,
-        )
+                non_interactive=True,
+            )
         self.assertTrue(changed)
         self.assertEqual(
             Path(str(effective["source"]["repository"])).resolve(),
-            Path(__file__).parents[1].resolve(),
+            master.resolve(),
         )
 
     def test_missing_prerequisites_and_wrong_model_are_exact(self) -> None:
