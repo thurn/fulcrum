@@ -58,7 +58,8 @@ Setup provisions locked dependencies and an editable `.venv`, writes the
 authoritative YAML configuration beside the brain, initializes the Beads/Dolt
 ledger, writes uniquely owned service definitions, reconciles the nine
 human-invoked skill links and read-only compaction hook, validates provider
-identities, and creates the standing Vizier and Marshal without model turns.
+identities, and initializes the standing Vizier and Marshal with one bounded
+readiness turn so both tasks are durable and visible in Codex Desktop.
 Production setup links the source-following `fulcrum` and `fulcrum-recover`
 launchers into `~/.local/bin` without replacing unrelated user files. This
 provisions infrastructure: launchers automatically resolve local master,

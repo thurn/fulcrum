@@ -105,7 +105,8 @@ Setup is a one-time/rerunnable bootstrap and performs these bounded operations:
 6. Reconciles the nine human-invoked skills and the read-only compaction hook without
    replacing real user directories or unrelated hooks.
 7. Validates runtime models/efforts and exact project/delivery registrations.
-8. Creates or reuses standing Vizier and Marshal identities without model turns.
+8. Creates or reuses standing Vizier and Marshal identities and sends one bounded
+   readiness turn to each new task so it is durable and visible in Codex Desktop.
 
 Automatic capacity defaults to four globally and four per project. The owned shared
 runtime service uses an FD soft limit of 4096. Setup reports actual capability facts;

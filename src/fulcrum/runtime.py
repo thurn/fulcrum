@@ -1352,9 +1352,11 @@ def _same_path(value: Any, expected: str) -> bool:
 
 
 def _empty_history_error(error: AppServerError) -> bool:
-    message = str(error)
-    return ("rollout at" in message and "is empty" in message) or (
-        "list_turns is not supported yet" in message
+    message = str(error).lower()
+    return (
+        ("rollout at" in message and "is empty" in message)
+        or ("list_turns is not supported yet" in message)
+        or "missing source rollout" in message
     )
 
 

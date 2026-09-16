@@ -357,7 +357,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertTrue(Gate.released)
         self.assertEqual(sleep.call_count, 2)
 
-    def test_setup_creates_idle_leadership_without_model_turns(self) -> None:
+    def test_setup_initializes_leadership_threads_for_desktop_visibility(self) -> None:
         request = self.request()
         ledger = MagicMock()
         capability = MagicMock()
@@ -380,7 +380,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             ledger,
             runtime,
             self.config,
-            send_initial_requests=False,
+            send_initial_requests=True,
         )
 
     def test_failed_setup_stops_only_services_started_by_that_attempt(self) -> None:

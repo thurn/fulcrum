@@ -280,7 +280,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             next_action="Start the installed controller service.",
         )
     # The controller must acquire the same writer lock, so launch it only after
-    # the bootstrap critical section. No Vizier turn is started by setup.
+    # the bootstrap critical section.
     assert setup_request.request_id is not None
     service_request = replace(
         setup_request,
@@ -794,7 +794,7 @@ def _runtime_and_leadership(
                 ledger,
                 runtime,
                 config,
-                send_initial_requests=False,
+                send_initial_requests=True,
             )
             return (
                 {"required": True, **capabilities.to_dict(), "projects": projects},

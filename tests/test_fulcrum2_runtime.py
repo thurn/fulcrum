@@ -238,6 +238,36 @@ class RuntimeFailureFixtureTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(AppServerError, "thread not loaded"):
                     await runtime.inspect_task("thread-1")
 
+    async def test_missing_source_rollout_is_an_uninitialized_task(self) -> None:
+        transport = AsyncMock()
+        transport.read_thread.side_effect = [
+            AppServerError(
+                "invalid paginated history lineage for thread-1: missing source rollout",
+                category="rejected",
+            ),
+            {
+                "id": "thread-1",
+                "name": "Standing leader",
+                "cwd": "/work",
+                "archived": False,
+                "turns": [],
+            },
+        ]
+        transport.loaded_threads.return_value = []
+        transport.pending_server_requests = {}
+        runtime = AppServerRuntime(
+            "ws://unused", transport=cast(CodexRuntime, transport)
+        )
+
+        facts = await runtime.inspect_task("thread-1")
+
+        self.assertTrue(facts.exists)
+        self.assertIn("no first rollout", facts.gaps[0])
+        self.assertEqual(
+            transport.read_thread.await_args_list[-1].kwargs,
+            {"include_turns": False},
+        )
+
     async def test_inspection_rejection_is_not_proof_task_is_absent(self) -> None:
         transport = AsyncMock()
         transport.read_thread.side_effect = AppServerError(
