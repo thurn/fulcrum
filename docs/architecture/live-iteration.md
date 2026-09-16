@@ -97,3 +97,17 @@ The normal repository check remains independent of external providers. Measure
 activation separately from remote discovery; the local target is p95 below one
 second for unchanged dependencies and state contracts, not a guarantee about
 network latency or migrations.
+
+## Measured initial acceptance
+
+On 2026-09-15, 20 isolated activations of committed source measured p95 **0.475 s**
+and maximum **0.488 s**, including Git archive materialization, actual import and
+configuration preflight, atomic selection, and a fresh CLI configuration query.
+The same local simulated native WebSocket and pending approval survived all 20
+activations. This measures the local activation path; it excludes remote fetch
+latency and does not establish a hard real-time guarantee. The source commit
+measured was `1501a12`.
+
+The initial production handoff retained the two leadership task identities and
+reused the existing Codex runtime and Dolt processes. Ordinary source selection
+is separately checked without restarting the resident.

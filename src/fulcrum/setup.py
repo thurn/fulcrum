@@ -84,7 +84,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         instance_root=request.instance.instance_root.resolve(strict=False),
         config_path=target.resolve(strict=False),
         brain_root=brain_root,
-        socket_path=request.instance.instance_root / "controller.sock",
+        socket_path=request.instance.instance_root / "resident.sock",
         lock_path=brain_root / ".fulcrum-locks" / "maintenance",
         explicit_selection=request.instance.explicit_selection,
     )

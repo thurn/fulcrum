@@ -147,10 +147,14 @@ def activate(
     status_path = instance / "activation.json"
     with ProcessLock(instance / "update.lock", blocking=False):
         previous = selection(instance)
+        prior_status = (
+            json.loads(status_path.read_text()) if status_path.exists() else {}
+        )
         status: dict[str, Any] = {
             "selected": previous,
             "state": "checking",
             "timings": {},
+            "last_activation": prior_status.get("last_activation"),
         }
         try:
             repo = Path(source_config["repository"])
@@ -227,6 +231,10 @@ def activate(
                 select_candidate(instance, candidate)
                 status.update(state="activated", selected=candidate)
                 status["timings"]["local_activation"] = time.monotonic() - local_started
+                status["last_activation"] = {
+                    "commit": commit,
+                    "timings": dict(status["timings"]),
+                }
                 try:
                     from fulcrum.resident_client import exchange
 

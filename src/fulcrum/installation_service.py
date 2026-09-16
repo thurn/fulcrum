@@ -295,7 +295,7 @@ class ServiceService:
             step="controller_started",
             result={
                 "services": results,
-                "reconciled_before_admission": not controller_was_running,
+                "reconciliation": "scheduled in a fresh process",
                 "already_running": controller_was_running,
                 "identities_retained": True,
                 "controller_readiness": readiness,
