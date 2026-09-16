@@ -70,6 +70,11 @@ requires `service update --maintenance`; failed migration leaves admission fence
 See the [live-iteration architecture](architecture/live-iteration.md) for source
 selection, concurrency, maintenance, and recovery rules.
 
+When tearing down a disposable test instance, archive or delete its exact managed
+tasks before `service stop`; task commands require the resident connection. The
+stop command intentionally retains Dolt, and hard reset is replacement rather than
+instance disposal.
+
 ## Publication, delivery, and analytics
 
 Ledger publication is native Beads/Dolt Git transport and runs only when real native

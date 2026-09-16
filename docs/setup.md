@@ -123,6 +123,13 @@ fulcrum skills reconcile --instance INSTANCE --json
 fulcrum doctor --instance INSTANCE --json
 ```
 
+For a disposable test instance, archive or delete its exact managed tasks before
+running `service stop`; task commands use the resident connection and are
+unavailable after it stops. `service stop` deliberately leaves the dedicated Dolt
+service running. Fulcrum has no one-command instance disposal operation, and hard
+reset is not a disposal substitute because it bootstraps clean leadership and
+services again.
+
 Launch Codex Desktop against the configured shared runtime with:
 
 ```sh
