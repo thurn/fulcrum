@@ -1051,6 +1051,48 @@ explicit operator recovery blocker, never permission for automatic replacement.
 If a user archived it early, require an observed unarchive before continuation;
 do not treat archival as task deletion.
 
+Allow at most three unsuccessful automatic repair cycles per bead before
+requiring a human decision. The original implementation/review and the failure
+that first requests repair do not consume this allowance. Start a cycle when
+Fulcrum grants a substantive repair assignment against retained failure
+evidence; associate any Executor-to-Warden return with that same cycle so role
+handoffs cannot multiply or reset the allowance. Record its identity,
+assignments, source before/after, attempted correction, and observed result on
+the work bead.
+
+A cycle fails when its attempted correction is complete and authoritative
+validation/delivery evidence establishes that further repair is required, or
+the worker explicitly reports that the attempted correction did not resolve the
+problem. Count that cycle once in the same transition that accepts its failure.
+Waiting for CI, repeated status observations, capacity waits, native message
+retries, and transport errors do not count. An uncertain outcome remains
+unresolved; do not count it as failure or grant another repair to bypass it.
+Edits and local test iterations within one repair assignment are not separate
+cycles. Passing one check, changing source, switching roles, restarting Desktop,
+or resuming the same task does not reset the bead's failed-cycle total.
+
+On the third failed cycle, atomically retain the failure history and a
+`repair_limit_reached` human blocker instead of another continuation action.
+Hold only that bead; keep its tasks visible, preserve its worktree, and let
+unrelated work continue. Once its current worker is confirmed complete, release
+the agent slot under the normal completion rules. Surface one actionable summary
+with the three attempted corrections, current failure, source, and task links;
+unchanged hourly recovery does not repeatedly announce it. The hold prohibits
+further repair dispatch and promotion but permits evidence collection and
+report acceptance.
+
+Only an explicit human decision resolves this limit: supply revised direction,
+authorize a specific additional number of cycles, or choose a terminal
+disposition. Use the existing human-resolution path with the exact blocker and
+stable request ID; retain the decision and prior failure history. Marshal or
+Vizier cannot autonomously renew the allowance. A global resume, source commit,
+or duplicate resolution request does not clear this bead's blocker. Additional
+repair still uses the existing tasks and fresh capacity/assignment checks.
+Extend the resolution payload with a positive `additional_repair_cycles` field
+when continuing repair; revised direction alone does not replenish the budget.
+Vizier may record the human's explicit grant, with its evidence, but may not
+invent one from its general policy authority.
+
 Automatic archival becomes eligible only after the bead reaches a terminal
 disposition and its delivery/repair/cleanup obligations are settled. For work
 without a delivery phase, require its terminal disposition and settled
@@ -1630,3 +1672,13 @@ operation boundaries without modifying production state.
     an archive reply, then manually unarchive an observed archived task: no
     duplicate archive or automatic rearchive occurs. Leaders remain visible;
     retained links still identify archived workers.
+26. **Repair-cycle limit.** Fail the original delivery, then complete three
+    unsuccessful repair cycles in the retained tasks. Only the three repairs
+    count; repeated failure events, CI waiting, transport errors, local test
+    iterations, and Executor/Warden handoffs cannot increment the total again.
+    The third failure commits the scoped human hold without a fourth repair
+    action; unrelated work proceeds and idle workers release capacity. Restart
+    and run hourly recovery: the count/hold survive without repeated alerts.
+    Generic resume cannot clear it. Resolve the exact blocker with a human
+    allowance for one more cycle, retry that resolution, and verify precisely
+    one additional cycle is authorized with the full prior history retained.
