@@ -99,6 +99,7 @@ BROKEN_CONFIG_COMMANDS = {
     ("recover", "repair"),
 }
 LOCAL_COMMANDS = {
+    ("runtime", "launch-desktop"),
     ("setup",),
     ("service", "start"),
     ("service", "stop"),

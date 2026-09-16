@@ -1158,7 +1158,7 @@ fulcrum --instance "$FC_INSTANCE" fleet replace --mode drain \
 | `skills reconcile` | Repair Fulcrum-owned links and disable implicit invocation; leave unrelated assets and real user directories intact |
 | `runtime capabilities` | Supported models/efforts and lifecycle capabilities |
 | `runtime status` | Shared endpoint health, resource facts, and Desktop attachment evidence or unknown |
-| `runtime launch-desktop` | Start configured Desktop with `CODEX_APP_SERVER_WS_URL`; never terminate another runtime |
+| `runtime launch-desktop` | Start configured Desktop locally with `CODEX_APP_SERVER_WS_URL`, including during controller maintenance; no ledger operation or controller connection; never terminate another runtime |
 | `service update [--source ABSOLUTE_PATH]` | Build, probe, and activate a quiescent installed snapshot; resumable operation |
 | `fleet replace --mode drain\|interrupt [--project ID] --reason TEXT` | Replace the selected managed tasks, preserving ledger/worktrees/policy/memory |
 | `hook context --input -` | Read-only compaction hook; native hook JSON response, not the general result envelope |

@@ -58,19 +58,6 @@ class RuntimeService:
         document, _ = manager.load()
         config = manager.effective(document)
         runtime = config["runtime"]
-        ledger = _ledger(request)
-        operation, reused = ledger.create_operation(
-            request,
-            planned={"endpoint": str(runtime["endpoint"])},
-            next_action="Launch Desktop once without terminating another runtime.",
-        )
-        if reused and operation.operation.get("state") in {
-            "completed",
-            "failed",
-            "cancelled",
-            "uncertain",
-        }:
-            return _operation_result(operation)
         endpoint = str(runtime["endpoint"])
         candidates = (
             Path("/Applications/Codex.app/Contents/MacOS/Codex"),
@@ -106,11 +93,12 @@ class RuntimeService:
             raise FulcrumError(
                 "DESKTOP_LAUNCH_FAILED", str(error), exit_code=4, retryable=True
             ) from error
-        operation = ledger.update_operation(
-            operation,
-            state="completed",
-            step="desktop_process_launched",
-            external={"pid": process.pid, "endpoint": endpoint},
+        # Desktop is a local debugging entry point, independent of controller
+        # maintenance and workflow storage availability.
+        return CommandResult(
+            ok=True,
+            state=CommandState.COMPLETED,
+            request_id=request.request_id,
             result={
                 "launched": True,
                 "pid": process.pid,
@@ -124,9 +112,7 @@ class RuntimeService:
                 },
                 "separate_runtime_terminated": False,
             },
-            next_action="Inspect runtime status for attachment evidence when available.",
         )
-        return _operation_result(operation)
 
     def capabilities(self, request: ParsedRequest) -> CommandResult:
         try:

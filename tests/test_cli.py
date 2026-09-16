@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import replace
 from io import BytesIO, StringIO, TextIOWrapper
 import json
 from pathlib import Path
@@ -141,6 +142,63 @@ class CliTests(unittest.TestCase):
             offline = _execute(value)
         self.assertEqual(served, offline)
         self.assertEqual(seen, [("status",), ("status",)])
+
+    def test_desktop_launch_remains_available_during_maintenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "fulcrum.yaml"
+            document = default_config(root)
+            document["runtime"]["endpoint"] = "ws://127.0.0.1:9876"
+            with config.open("w") as stream:
+                ConfigurationManager.yaml().dump(document, stream)
+            value = request(("runtime", "launch-desktop"))
+            value = replace(
+                value,
+                instance=replace(
+                    value.instance,
+                    instance_root=root,
+                    config_path=config,
+                    brain_root=root,
+                    lock_path=root / "controller.lock",
+                    socket_path=root / "controller.sock",
+                ),
+            )
+            (root / "source-refresh-request.json").write_text(
+                '{"operation_id": "pending-refresh"}'
+            )
+            with (
+                WriterLock(value.instance.lock_path),
+                patch("fulcrum.cli.request_sync") as ipc,
+                patch("fulcrum.runtime_service._ledger") as ledger,
+                patch("fulcrum.runtime_service.Path.is_file", return_value=True),
+                patch(
+                    "fulcrum.runtime_service.Path.resolve",
+                    autospec=True,
+                    side_effect=lambda path, **kwargs: path,
+                ),
+                patch(
+                    "fulcrum.runtime_service.subprocess.Popen",
+                    return_value=Mock(pid=123),
+                ) as launch,
+            ):
+                result = _execute(value)
+            self.assertTrue(result["ok"])
+            self.assertIsNone(result["operation_id"])
+            self.assertTrue(result["result"]["launched"])
+            self.assertEqual(result["result"]["pid"], 123)
+            self.assertEqual(result["result"]["attachment"]["state"], "unknown")
+            self.assertFalse(result["result"]["separate_runtime_terminated"])
+            ipc.assert_not_called()
+            ledger.assert_not_called()
+            launch.assert_called_once()
+            self.assertEqual(
+                launch.call_args.args[0],
+                ["/Applications/Codex.app/Contents/MacOS/Codex"],
+            )
+            self.assertEqual(
+                launch.call_args.kwargs["env"]["CODEX_APP_SERVER_WS_URL"],
+                "ws://127.0.0.1:9876",
+            )
 
     def test_writer_lock_is_shared_by_instance_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
