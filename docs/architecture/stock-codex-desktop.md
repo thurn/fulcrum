@@ -126,7 +126,7 @@ automation to compensate for a missing task tool.
 | Observe worker progress | Workers report outcomes and meaningful progress through MCP; hooks capture lifecycle and native-result evidence; provider watchers publish existing-work events. No routine native task inventory polling. |
 | Inspect one unresolved task | `wait_threads` with one target and `timeoutMs=0`; use `read_thread` for scoped evidence when needed. Schedule later checks through broker timers. |
 | Recover a lost creation reply | Worker self-registration and correlated native history. Inventory search is a bounded exceptional recovery operation, never a normal polling loop. |
-| Archive/unarchive | `set_thread_archived`; archive eligible workers after their own completed handoff, once per native task. Manual unarchive suppresses automatic rearchive. Archival is not termination or delivery. |
+| Archive/unarchive | `set_thread_archived`; defer worker archival until the bead's delivery and remaining obligations settle, once per native task. Resume the same tasks for repairs. Manual unarchive suppresses automatic rearchive. |
 | Interrupt a worker or answer a native approval | No observed task-tool equivalent. Expose the specific Desktop task for user action and retain the blocker. Do not invent a response or start a conflicting writer. |
 | Observe a user interruption | The required `Interrupt` hook records the exact managed turn when delivered. It does not interrupt another task, pause Fulcrum, or prove all processes have stopped. |
 | Delete tasks/projects | No observed native deletion tool. Mark automatic deletion unavailable; retain/archive owned task evidence. Hard reset cannot claim native deletion occurred. |
@@ -323,7 +323,8 @@ Context is compiled from current authoritative state, not replayed wholesale
 from the original work description. Keep approved scope as data and include its
 locator; do not promote raw intake, arbitrary prompt text, or tool output into
 developer instructions. After finish, context describes the retained reporting
-permission and forbids further edits. A new source commit may refresh policy
+permission and forbids further edits until an explicit renewed assignment is
+registered in that same task. A new source commit may refresh policy
 instructions but must not rewrite already-issued native arguments.
 
 `PermissionRequest`, `SessionEnd`, and subagent hooks are not required or
@@ -336,7 +337,8 @@ Fulcrum entry calls, not arbitrary shell parsing or filesystem isolation.
 
 Native messages and creation prompts start with one machine-readable JSON line
 under the literal prefix `Fulcrum-Action: `. Its object contains `instance`,
-`record_id`, and `action_id`; creation also carries `assignment_token`.
+`record_id`, and `action_id`; creation and renewed assignments also carry
+`assignment_token`.
 Invocation records supply the attempt ID without changing the action's
 fixed prompt on retry. Validate marker values against retained arguments and
 intended recipient before acknowledging delivery. A marker from another instance
@@ -556,9 +558,11 @@ CI, promotion, synchronization, cleanup, or archival may remain pending after
 release without occupying an agent slot. Keep their obligations and workspace
 ownership intact; release is neither a successful-delivery claim nor permission
 to delete the worktree. Provider operations use bounded broker scheduling and
-their existing resource locks. Any later repair or renewed worker turn must
-acquire a fresh agent reservation under current capacity and pause rules before
-dispatch. A late report cannot revive an old reservation or editing authority.
+their existing resource locks. Any later repair resumes the existing role task;
+it must acquire a fresh agent reservation under current capacity and pause rules
+before its continuation is sent. A late report cannot revive an old reservation
+or editing authority. Keeping that task unarchived while delivery is pending
+does not occupy an agent slot.
 
 ### Events and cursors
 
@@ -626,7 +630,7 @@ and action envelope; managed workers use MCP for reports.
 | --- | --- |
 | `bootstrap` | Run/recover deterministic setup and return the next native action or explicit user prerequisite. |
 | `pause` / `resume` | Human/Vizier-authorized CLI/MCP transitions with stable request IDs and a reason. Pause returns the retained boundary hold plus active assignments/in-flight effects; resume revalidates held work without clearing independent fences. |
-| `register_worker` | Bind the native task/host ID to the exact creation action and assignment before substantive work. |
+| `register_worker` | Bind the native task/host ID to the exact creation or authorized continuation action and assignment before substantive work. A repair reuses the retained role task and receives a fresh assignment token. |
 | `report_progress` | Persist meaningful progress and renew the assignment's reporting deadline. |
 | `finish` | Accept a role outcome, commit the transition, and return exact authorized follow-ups. |
 | `wait_for_instruction` | Acquire/renew Marshal coordination and return a decision request, native action, renewal, pause, or idle result. |
@@ -701,6 +705,8 @@ a narrow, retained permission to execute and report its returned follow-up
 actions. That permission does not allow another finish, a scope amendment, or
 editing after transfer. Once the last follow-up is reported, the worker ends its
 turn. A missing follow-up report remains a recoverable obligation.
+Only a new, explicitly granted assignment can authorize further editing or a
+new finish in that same native task; it never changes the accepted old finish.
 
 ### Registration and uncertain native creation
 
@@ -994,7 +1000,9 @@ Executor finish seals its source-writing outcome and returns any follow-up
 reporting actions. Warden starts only after the old assignment has relinquished
 source access and its native turn is observed complete. Warden can fix findings
 directly. One accepted Warden finish seals the review judgment for the exact
-source; delivery does not ask Warden to finish again.
+source and assignment; delivery does not ask Warden to repeat that finish. A
+later repair uses a new assignment in the same Warden task and seals its own
+outcome for the repaired source.
 
 Fresh CLI operations continue to own provider submission, exact-source
 validation, promotion, remote synchronization when required, and cleanup.
@@ -1012,17 +1020,47 @@ commands before finish and reporting any retained process locators. A completed
 turn is not proof that all terminals or subprocesses ended; unknown resource
 ownership blocks automatic deletion. Never terminate unrelated processes.
 
-### Archival after each worker's handoff
+### Same-task repair and deferred archival
 
-Archive a non-leader worker as soon as its own handoff is settled: its required
-outcome is accepted, current native completion is positively observed, ownership
-has transferred or its work is closed, and all follow-up actions assigned to
-that task are settled. Keep tasks with missing reports, human blockers, uncertain
-effects assigned to them, or unresolved owned processes visible. Recheck these
-conditions when claiming the archive action; a new native turn or assignment
-invalidates an unissued archive. A completed Executor may archive while Warden
-reviews; a completed Warden may archive while provider CI or promotion runs.
-Neither waits for the entire bead to be delivered or its worktree deleted.
+Keep the bead's existing worker tasks unarchived through review, provider CI,
+promotion, required synchronization, and cleanup. A worker's accepted finish
+and native completion can release its agent slot without archiving its task.
+Executor stays available while Warden reviews; Warden stays available while
+delivery runs. Routine failure, delay, or retry never creates a replacement
+native task.
+
+When CI or delivery requires Warden repair, retain the exact failure evidence
+and current source, then reserve capacity for the existing Warden native ID.
+After verifying its prior turn is complete and no conflicting writer or native
+continuation remains, commit a fresh assignment token and an exact
+`send_message_to_thread` action targeting that same task/host. The prompt carries
+the continuation marker, original approved scope, retained worktree, observed
+failure, and expected source. `register_worker` accepts this retained
+continuation action, verifies current workspace/ownership evidence, and grants
+the new assignment before edits. Current model/effort and pause rules still
+apply. If the continuation result is uncertain, reconcile it; do not resend or
+create a fresh task.
+
+Preserve the prior sealed finish and review as historical evidence. Repair
+changes invalidate approval for the changed source and require new validation
+and a new finish under the fresh assignment, not a replay or amendment of the
+old finish. If Executor work is needed instead, resume that bead's existing
+Executor under the same protocol after the current writer relinquishes authority;
+then return to the existing Warden. A missing or unusable retained task is an
+explicit operator recovery blocker, never permission for automatic replacement.
+If a user archived it early, require an observed unarchive before continuation;
+do not treat archival as task deletion.
+
+Automatic archival becomes eligible only after the bead reaches a terminal
+disposition and its delivery/repair/cleanup obligations are settled. For work
+without a delivery phase, require its terminal disposition and settled
+follow-ups. A task associated with several beads waits for all of them to
+qualify. Each task also needs an accepted role outcome (or explicit terminal
+resolution), positively observed native completion, released ownership, and no
+missing reports, human blockers, uncertain assigned effects, or unresolved owned
+processes. A failed delivery or cleanup remains visible even when earlier source
+promotion succeeded. Recheck eligibility when claiming the archive action; a
+new turn, assignment, or repair obligation invalidates an unissued archive.
 
 Persist the archive obligation and exact native task/host locator on the owning
 work bead, even after it closes. Discovery includes these unfinished obligations
@@ -1575,11 +1613,19 @@ operation boundaries without modifying production state.
     Trigger a later repair with all slots occupied: it waits for a fresh
     reservation and cannot reuse the completed Warden's authority. Restart
     between release and delivery; no capacity is lost or counted twice.
-25. **Independent archival.** Complete Executor handoff while Warden is active,
-    then complete Warden handoff while CI is pending. Each old worker archives
-    without waiting for bead delivery or deleting its worktree. Missing reports,
-    unsettled follow-ups, blockers, new turns, and owned-process uncertainty
-    prevent archival. Pause before archive issuance and resume afterward.
+25. **Deferred archival and same-task repair.** Complete Executor handoff while
+    Warden is active, then Warden handoff while CI is pending. Both tasks remain
+    visible without retaining completed worker capacity. Fail CI and resume the
+    exact same Warden task after acquiring a fresh reservation and assignment;
+    no `create_thread` action is issued. Its old finish stays sealed, its old
+    token cannot edit or finish again, and the repair validates and finishes new
+    source under the new assignment. Lose the continuation response: retain
+    uncertainty without duplicate messaging or a replacement task. Exercise
+    a return to the same Executor followed by the same Warden. A missing native
+    task produces an operator blocker. Only settled terminal work permits
+    archival; failed cleanup, reports, follow-ups, blockers, new turns, and
+    owned-process uncertainty prevent it. Pause before archive issuance and
+    resume afterward.
     Restart with a closed bead's archive still pending and rediscover it. Lose
     an archive reply, then manually unarchive an observed archived task: no
     duplicate archive or automatic rearchive occurs. Leaders remain visible;
