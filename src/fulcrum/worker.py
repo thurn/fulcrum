@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 import asyncio
 import json
 import os
@@ -16,6 +18,7 @@ from fulcrum.coordination import ProcessLock
 from fulcrum.instance import resolve_instance
 
 
+@timed("worker.main")
 def main() -> int:
     source = os.environ.get("FULCRUM_SOURCE")
     descriptor = pin(Path(source)) if source else None

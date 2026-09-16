@@ -628,10 +628,18 @@ class ControllerSupervisor:
     ) -> Mapping[str, Any] | None:
         control = await asyncio.to_thread(self.ledger.show, "fc-system")
         if control is None or not control.fc:
-            return None
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "reason": "leadership control unavailable; HUMAN review required",
+            }
         marshal_thread = _optional_string(control.fc.get("marshal_thread"))
         if marshal_thread is None:
-            return None
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "reason": "no standing Marshal; HUMAN review required",
+            }
         observed = facts.get(marshal_thread)
         if observed is not None and observed.active_turn is not None:
             return {
@@ -665,7 +673,7 @@ class ControllerSupervisor:
                 for record in operations
                 if record.fc
                 and record.fc.get("command") == "marshal.request"
-                and record.fc.get("state") in {"accepted", "running"}
+                and record.fc.get("state") in {"accepted", "running", "uncertain"}
             ),
             None,
         )
@@ -674,7 +682,7 @@ class ControllerSupervisor:
                 "kind": "marshal_decision",
                 "started": False,
                 "operation_id": outstanding.id,
-                "reason": "one Marshal decision is already outstanding",
+                "reason": "one Marshal decision is outstanding or requires inspection",
             }
         now = self.clock.now()
         if not isinstance(pending, Mapping) or pending.get("kind") != brief["kind"]:
@@ -698,6 +706,14 @@ class ControllerSupervisor:
                     )
                 ),
             }
+        retry_at = pending.get("retry_at")
+        if isinstance(retry_at, str) and now < _parse_time(retry_at):
+            return {
+                "kind": "marshal_decision",
+                "started": False,
+                "reason": "waiting to retry unavailable leadership",
+                "eligible_at": retry_at,
+            }
         first_seen = _parse_time(str(pending["first_seen_at"]))
         coalesce = float(_mapping(config["timing"])["marshal_coalesce_seconds"])
         if (now - first_seen).total_seconds() < coalesce:
@@ -716,7 +732,7 @@ class ControllerSupervisor:
             request_id=str(
                 uuid.uuid5(
                     LEADERSHIP_NAMESPACE,
-                    f"automatic:{brief['kind']}:{pending['first_seen_at']}",
+                    f"automatic:{brief['kind']}:{pending['first_seen_at']}:{pending.get('attempt', 0)}",
                 )
             ),
             thread_id=marshal_thread,
@@ -726,13 +742,36 @@ class ControllerSupervisor:
         async with self.external_slots:
             result = await asyncio.to_thread(self.application.dispatch, request)
         latest = await asyncio.to_thread(self.ledger.show, "fc-system")
-        if latest is not None and latest.fc:
+        if (
+            result.ok
+            and result.state in {CommandState.RUNNING, CommandState.COMPLETED}
+            and latest is not None
+            and latest.fc
+        ):
             latest_fc = dict(latest.fc)
             latest_fc["pending_decision"] = None
             await asyncio.to_thread(self.ledger.update_fc, latest.id, latest_fc)
+        elif latest is not None and latest.fc and result.state is CommandState.FAILED:
+            latest_fc = dict(latest.fc)
+            latest_fc["pending_decision"] = {
+                **dict(pending),
+                "attempt": int(pending.get("attempt", 0)) + 1,
+                "retry_at": _format_time(
+                    now
+                    + timedelta(
+                        seconds=min(
+                            60.0,
+                            float(_mapping(config["timing"])["reconcile_seconds"])
+                            * (int(pending.get("attempt", 0)) + 1),
+                        )
+                    )
+                ),
+            }
+            await asyncio.to_thread(self.ledger.update_fc, latest.id, latest_fc)
         return {
             "kind": "marshal_decision",
-            "started": result.state in {CommandState.RUNNING, CommandState.COMPLETED},
+            "started": result.ok
+            and result.state in {CommandState.RUNNING, CommandState.COMPLETED},
             "operation_id": result.operation_id,
             "state": result.state.value,
         }

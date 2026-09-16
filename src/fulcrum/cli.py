@@ -6,6 +6,8 @@ place. Workflow behavior lives behind :mod:`fulcrum.application`, never here.
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 import argparse
 import asyncio
 import json
@@ -340,7 +342,7 @@ def _add_command_options(
         _option(parser, "--retry", action="store_true")
     elif path == ("enter",):
         parser.add_argument("role", choices=ROLES)
-        _option(parser, "--description", required=True)
+        _option(parser, "--description")
         _option(parser, "--bead")
         _option(parser, "--origin", choices=("human", "dispatch"), default="human")
     elif path == ("context",):
@@ -662,6 +664,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     },
     ("finish",): {
         "summary",
+        "acceptance",
         "source_oid",
         "checks",
         "evidence",
@@ -823,6 +826,7 @@ def _request_id(value: str | None, mutation: bool) -> str | None:
     return str(parsed)
 
 
+@timed("cli._build_request")
 def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     values = vars(namespace)
     command = tuple(values["_command_path"])
@@ -925,6 +929,7 @@ def _serve(request: ParsedRequest) -> CommandResult:
     raise AssertionError("exec returned")
 
 
+@timed("cli._execute")
 def _execute(request: ParsedRequest) -> dict[str, Any]:
     if request.command == ("serve",):
         return _serve(request).to_dict()
@@ -1094,6 +1099,7 @@ def _emit_log_stream(request: ParsedRequest, result: dict[str, Any]) -> None:
     )
 
 
+@timed("cli.main")
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     namespace: argparse.Namespace | None = None

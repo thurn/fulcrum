@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 from fulcrum.coordination import coordinated
 
 import json
@@ -20,7 +22,7 @@ from fulcrum.ledger import (
     LedgerRecord,
     OperationRecord,
     operation_id,
-    operation_view,
+    operation_reply,
     random_record_id,
     utc_now,
 )
@@ -126,6 +128,7 @@ class RoleService:
                 operation=error.operation_id,
             )
 
+    @timed("roles._enter")
     def _enter(
         self, request: ParsedRequest, role: str, description: str
     ) -> CommandResult:
@@ -840,7 +843,15 @@ class RoleService:
                         fc.get("owner") if fc.get("owner") != "HUMAN" else None
                     ),
                     "ownership_operation": fc.get("ownership_operation"),
-                    "instructions": record.native.get("description"),
+                    "instructions": (
+                        record.native.get("description")
+                        if isinstance(fc.get("compiled_role"), Mapping)
+                        and fc["compiled_role"].get("thread_id") == fc.get("owner")
+                        and fc["compiled_role"].get("ownership_operation")
+                        == fc.get("ownership_operation")
+                        else None
+                    ),
+                    "next_action": fc.get("next_action"),
                     "work": _context_work(record),
                     "registered": True,
                 }
@@ -901,6 +912,7 @@ class RoleService:
         return CommandResult.query(response)
 
 
+@timed("roles._cook_role")
 def _cook_role(
     ledger: Ledger,
     request: ParsedRequest,
@@ -956,7 +968,10 @@ def _cook_role(
         "project": str(fc.get("project")),
         "workspace": workspace,
         "acceptance": acceptance_text,
-        "current_evidence": _render_facts(evidence, "No prior evidence."),
+        "current_evidence": _render_facts(
+            {key: value for key, value in evidence.items() if value is not None},
+            "No prior evidence.",
+        ),
         "blockers": _render_facts(fc.get("waiting"), "No current blocker."),
         "context": memory_context,
         "next_action": _role_next_action(role),
@@ -1573,5 +1588,5 @@ def _operation_result(operation: OperationRecord) -> CommandResult:
         state=state,
         operation_id=operation.id,
         request_id=str(operation.operation.get("request_id")),
-        result=operation_view(operation),
+        result=operation_reply(operation),
     )

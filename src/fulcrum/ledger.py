@@ -6,6 +6,8 @@ typed views over native issues; they are not a second persistence layer.
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 import json
 import copy
 import shutil
@@ -169,6 +171,7 @@ class Ledger:
     def _lock_for(self, bead_id: str | None) -> ProcessLock:
         return ProcessLock(self.workspace / ".fulcrum-locks" / "state")
 
+    @timed("ledger.run")
     def run(
         self,
         arguments: Sequence[str],
@@ -512,6 +515,7 @@ class Ledger:
             else []
         )
 
+    @timed("ledger.cook")
     def cook(self, formula: str, variables: Mapping[str, str]) -> dict[str, str]:
         arguments: list[str] = ["cook", formula, "--mode", "runtime"]
         for key in sorted(variables):
@@ -551,6 +555,7 @@ class Ledger:
             )
         return {"title": title, "description": description}
 
+    @timed("ledger.create_operation")
     def create_operation(
         self,
         request: ParsedRequest,
@@ -612,6 +617,7 @@ class Ledger:
 
         return OperationRecord.from_record(created), False
 
+    @timed("ledger.update_operation")
     def update_operation(
         self,
         operation: OperationRecord | str,
@@ -628,38 +634,51 @@ class Ledger:
         record_id = (
             operation.id if isinstance(operation, OperationRecord) else operation
         )
-        current = self.show(record_id)
-        if current is None:
-            raise FulcrumError.invalid("NOT_FOUND", f"unknown operation {record_id}")
-        record = OperationRecord.from_record(current)
-        fc = dict(record.operation)
-        for key, value in (
-            ("state", state),
-            ("step", step),
-            ("attempts", attempts),
-            ("external", external),
-            ("result", result),
-            ("error", error),
-            ("next_action", next_action),
-            ("planned", planned),
-        ):
-            if value is not None:
-                fc[key] = value
-        if state in {"completed", "failed", "cancelled"}:
-            fc["completed_at"] = utc_now()
-        updated = self.update_fc(record_id, fc)
-        if state in {"completed", "failed", "cancelled"} and updated.status != "closed":
-            try:
-                self.run(
-                    ("close", record_id, "--reason", f"operation {state}"),
-                    mutating=True,
-                )
-            except LedgerFailure:
-                observed = self.show(record_id)
-                if observed is None or observed.status != "closed":
-                    raise
-            updated = self.show(record_id) or updated
-        return OperationRecord.from_record(updated)
+        with self._lock_for(record_id):
+            if isinstance(operation, OperationRecord):
+                # Reuse the caller's snapshot as the merge baseline. update_fc still
+                # reads fresh state under this same lock, rejects ownership changes,
+                # merges unrelated updates, and verifies the resulting write.
+                record = operation
+                self._observed[record_id] = copy.deepcopy(dict(record.operation))
+            else:
+                current = self.show(record_id)
+                if current is None:
+                    raise FulcrumError.invalid(
+                        "NOT_FOUND", f"unknown operation {record_id}"
+                    )
+                record = OperationRecord.from_record(current)
+            fc = dict(record.operation)
+            for key, value in (
+                ("state", state),
+                ("step", step),
+                ("attempts", attempts),
+                ("external", external),
+                ("result", result),
+                ("error", error),
+                ("next_action", next_action),
+                ("planned", planned),
+            ):
+                if value is not None:
+                    fc[key] = value
+            if state in {"completed", "failed", "cancelled"}:
+                fc["completed_at"] = utc_now()
+            updated = self.update_fc(record_id, fc)
+            if (
+                state in {"completed", "failed", "cancelled"}
+                and updated.status != "closed"
+            ):
+                try:
+                    self.run(
+                        ("close", record_id, "--reason", f"operation {state}"),
+                        mutating=True,
+                    )
+                except LedgerFailure:
+                    observed = self.show(record_id)
+                    if observed is None or observed.status != "closed":
+                        raise
+                updated = self.show(record_id) or updated
+            return OperationRecord.from_record(updated)
 
 
 def accepted_input(request: ParsedRequest) -> dict[str, Any]:
@@ -810,6 +829,21 @@ class OperationService:
             ),
         )
         return _operation_result(receipt)
+
+
+def operation_reply(operation: OperationRecord) -> dict[str, Any]:
+    """Agent-facing result; the full durable recovery receipt remains inspectable."""
+    fc = operation.operation
+    result = fc.get("result")
+    return {
+        "bead_id": fc.get("bead_id"),
+        "ownership_operation": fc.get("ownership_operation"),
+        **(dict(result) if isinstance(result, Mapping) else {}),
+        "step": fc.get("step"),
+        "next_action": fc.get("next_action"),
+        "error": fc.get("error"),
+        "next_commands": [["fulcrum", "operation", "show", operation.id, "--json"]],
+    }
 
 
 def operation_view(operation: OperationRecord) -> dict[str, Any]:

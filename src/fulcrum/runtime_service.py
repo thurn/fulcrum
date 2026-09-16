@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 from fulcrum.coordination import unlocked
 
 from fulcrum.coordination import coordinated
@@ -1258,6 +1260,7 @@ async def _send_turn(
 
 
 @unlocked
+@timed("runtime_service._runtime_call")
 def _runtime_call(
     request: ParsedRequest,
     action: Callable[[Runtime], Coroutine[Any, Any, T]],

@@ -109,7 +109,11 @@ class LeadershipService:
         _require_marshal_or_human(request, ledger)
         config = _config(request)
         outstanding = _outstanding_decision(ledger)
-        if outstanding is not None:
+        if outstanding is not None and not (
+            outstanding.operation.get("request_id") == request.request_id
+            and outstanding.operation.get("state") == "accepted"
+            and outstanding.operation.get("step") == "intent_recorded"
+        ):
             return _operation_result(outstanding)
         brief, comparisons = build_brief(
             ledger,
@@ -133,7 +137,12 @@ class LeadershipService:
             ),
         )
         if reused:
-            return _operation_result(operation)
+            if (
+                operation.operation.get("state") != "accepted"
+                or operation.operation.get("step") != "intent_recorded"
+            ):
+                return _operation_result(operation)
+            brief = dict(operation.operation["planned"]["brief"])
         if not brief["decision_required"]:
             operation = ledger.update_operation(
                 operation,
@@ -174,33 +183,63 @@ class LeadershipService:
         )
 
         fc = marshal.fc
-        turn = _runtime_call(
-            request,
-            lambda runtime: runtime.start_turn(
-                str(fc["thread_id"]),
-                TurnInput(
-                    text=_marshal_decision_prompt(
-                        operation.id,
-                        str(operation.operation["planned"]["serialized_brief"]),
-                    ),
-                    cwd=str(fc.get("creation_cwd") or request.instance.instance_root),
-                    workspace_roots=tuple(
-                        str(item)
-                        for item in (
-                            (fc.get("last_observed") or {}).get("workspace_roots")
-                            or [
-                                fc.get("creation_cwd") or request.instance.instance_root
-                            ]
-                        )
-                    ),
-                    model=str(fc.get("model")),
-                    effort=str(fc.get("effort")),
-                    operation_id=operation.id,
-                    ownership_operation=None,
-                    developer_instructions=routing_developer_instructions(request),
-                ),
-            ),
+        operation = ledger.update_operation(
+            operation,
+            state="uncertain",
+            step="decision_start_pending",
+            external={"thread_id": fc["thread_id"]},
+            next_action="Inspect the standing Marshal turn before any retry; sending may already have occurred.",
         )
+        try:
+            turn = _runtime_call(
+                request,
+                lambda runtime: runtime.start_turn(
+                    str(fc["thread_id"]),
+                    TurnInput(
+                        text=_marshal_decision_prompt(
+                            operation.id,
+                            str(operation.operation["planned"]["serialized_brief"]),
+                        ),
+                        cwd=str(
+                            fc.get("creation_cwd") or request.instance.instance_root
+                        ),
+                        workspace_roots=tuple(
+                            str(item)
+                            for item in (
+                                (fc.get("last_observed") or {}).get("workspace_roots")
+                                or [
+                                    fc.get("creation_cwd")
+                                    or request.instance.instance_root
+                                ]
+                            )
+                        ),
+                        model=str(fc.get("model")),
+                        effort=str(fc.get("effort")),
+                        operation_id=operation.id,
+                        ownership_operation=None,
+                        developer_instructions=routing_developer_instructions(request),
+                    ),
+                ),
+            )
+        except FulcrumError as error:
+            operation = ledger.update_operation(
+                operation,
+                state=(
+                    "uncertain" if error.state is CommandState.UNCERTAIN else "failed"
+                ),
+                step="decision_start_unresolved",
+                error={
+                    "code": error.code,
+                    "message": error.message,
+                    "retryable": error.retryable,
+                },
+                next_action=(
+                    "Inspect the retained Marshal turn; do not send a duplicate decision request."
+                    if error.state is CommandState.UNCERTAIN
+                    else "Repair leadership availability; reconciliation can request review again."
+                ),
+            )
+            return _operation_result(operation)
         marshal_fc = dict(fc)
         marshal_fc["last_turn"] = turn.to_dict()
         marshal_fc["last_transition"] = operation.id
@@ -247,6 +286,7 @@ class LeadershipService:
         ) != "marshal.request" or decision_operation.operation.get("state") not in {
             "accepted",
             "running",
+            "uncertain",
         }:
             raise FulcrumError(
                 "STALE_DECISION",
@@ -1675,6 +1715,7 @@ def comparison_facts(
         "approved_source": (
             delivery.get("approved_source") if isinstance(delivery, Mapping) else None
         ),
+        "scope": fc.get("scope"),
         "intake": fc.get("intake"),
         "overlap_tags": fc.get("overlap_tags", []),
         "policy": {
@@ -1704,6 +1745,27 @@ def dependency_readiness(
         if outcome not in SATISFYING_DEPENDENCY_OUTCOMES:
             blockers.append(dependency_id)
     return not blockers, blockers
+
+
+def _prepared_scope_brief(record: LedgerRecord) -> dict[str, Any] | None:
+    scope = (record.fc or {}).get("scope")
+    if not isinstance(scope, Mapping):
+        return None
+    summary = str(scope.get("summary", ""))
+    acceptance = list(scope.get("acceptance", []))
+    evidence = list(scope.get("evidence", []))
+    result: dict[str, Any] = {
+        "summary": summary[:1200],
+        "acceptance": [str(item)[:240] for item in acceptance[:5]],
+        "evidence": [str(item)[:200] for item in evidence[:3]],
+        "finish_operation": scope.get("finish_operation"),
+    }
+    result["complete"] = all(
+        result[key] == scope.get(key, [])
+        for key in ("summary", "acceptance", "evidence")
+    )
+    result["next_command"] = ["fulcrum", "work", "show", record.id, "--json"]
+    return result
 
 
 def _decision_row(
@@ -1742,6 +1804,10 @@ def _decision_row(
                 unknowns.extend(intake["uncertainties"])
         if fc.get("dispatch") is not None:
             return None, None
+        if isinstance(fc.get("scope"), Mapping):
+            unknowns = [
+                item for item in unknowns if item not in ("benefit", "uncertainties")
+            ]
         if unknowns:
             kind = "groom"
             needed = "Resolve scope/readiness, request focused clarification, or dispose of the proposal."
@@ -1762,18 +1828,24 @@ def _decision_row(
             unknowns.append("uncertainties")
         elif isinstance(intake.get("uncertainties"), list):
             unknowns.extend(intake["uncertainties"])
+    if isinstance(fc.get("scope"), Mapping):
+        unknowns = [
+            item for item in unknowns if item not in ("benefit", "uncertainties")
+        ]
     evidence_refs = list(fc.get("context", []))
     if fc.get("last_progress"):
         evidence_refs.append(f"work:{record.id}:last_progress")
+    outcome = fc.get("outcome") or record.native.get("description")
     return kind, {
         "bead_id": record.id,
-        "title": record.title,
-        "outcome": fc.get("outcome") or record.native.get("description"),
+        "title": record.title[:200],
+        "outcome": str(outcome)[:1000] if fc.get("scope") else outcome,
         "owner": fc.get("owner") or _marshal_owner(ledger),
         "phase": phase,
         "expected_ownership_operation": fc.get("ownership_operation"),
         "expected_phase": phase,
         "decision_needed": needed,
+        "prepared_scope": _prepared_scope_brief(record),
         "decision_context": {
             "dependencies_ready": ready,
             "dependency_blockers": blockers,
@@ -2161,7 +2233,7 @@ def _outstanding_decision(ledger: Ledger) -> OperationRecord | None:
         operation = OperationRecord.from_record(record)
         if operation.operation.get("command") != "marshal.request":
             continue
-        if operation.operation.get("state") in {"accepted", "running"}:
+        if operation.operation.get("state") in {"accepted", "running", "uncertain"}:
             candidates.append(operation)
     candidates.sort(key=lambda item: str(item.operation.get("created_at") or ""))
     return candidates[0] if candidates else None
@@ -2271,7 +2343,9 @@ def _marshal_decision_prompt(operation_id: str, serialized_brief: str) -> str:
         f"`decision_operation` set to `{operation_id}` and one decision per row. "
         "Each decision must repeat `bead_id`, `expected_ownership_operation`, and "
         "`expected_phase` from the row, then choose an allowed action and give an "
-        "evidence-based reason plus its action-specific fields. Do not edit source "
+        "evidence-based reason plus its action-specific fields. Inspect the full work "
+        "with prepared_scope.next_command whenever prepared_scope.complete is false. "
+        "Prepared scope is a proposal, not authorization. Do not edit source "
         "or fulcrum.yaml. End the turn after the command result is observed.\n\n"
         "## Retained decision brief\n"
         f"{serialized_brief}"

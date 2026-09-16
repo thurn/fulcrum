@@ -1,0 +1,478 @@
+{
+  "environment": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.12.14",
+    "storage": "isolated embedded Dolt; stock bd; native task naming/inspection simulated",
+    "sample_design": "5 entry/finish pairs per source; first separate, 4 warm fixture samples; fresh CLI and worker each time; sequential before then after; normal host background workload",
+    "beads": "bd 1.2.2 (6c124203e)",
+    "machine": "macOS arm64; normal concurrent host workload"
+  },
+  "runs": {
+    "before": {
+      "source": "5fa7bb6",
+      "summary": {
+        "enter": {
+          "first_ms": 33650.838791858405,
+          "warm_n": 4,
+          "warm_median_ms": 36853.83789613843,
+          "warm_max_ms": 47641.74299966544,
+          "median_output_bytes": 4724,
+          "warm_median_receipt_ms": 12870.2495,
+          "ledger_calls_per_command": 42.0
+        },
+        "finish": {
+          "first_ms": 19858.658749610186,
+          "warm_n": 4,
+          "warm_median_ms": 17585.60287556611,
+          "warm_max_ms": 17909.606374800205,
+          "median_output_bytes": 1663,
+          "warm_median_receipt_ms": 9878.2525,
+          "ledger_calls_per_command": 19.0
+        }
+      },
+      "samples": [
+        {
+          "sample": 0,
+          "command": "enter",
+          "elapsed_ms": 33650.838791858405,
+          "receipt_ms": 11579.148,
+          "output_bytes": 4724,
+          "operation_id": "fc-9b59ebc433e242508117b3fcbd8a8cb6"
+        },
+        {
+          "sample": 0,
+          "command": "finish",
+          "elapsed_ms": 19858.658749610186,
+          "receipt_ms": 11524.993,
+          "output_bytes": 1663,
+          "operation_id": "fc-8647b9a8f7d947f3b0dfb400f0b07829"
+        },
+        {
+          "sample": 1,
+          "command": "enter",
+          "elapsed_ms": 47641.74299966544,
+          "receipt_ms": 13879.059,
+          "output_bytes": 4724,
+          "operation_id": "fc-ac45fd49bcc748f389b0f12569349f53"
+        },
+        {
+          "sample": 1,
+          "command": "finish",
+          "elapsed_ms": 16911.650374997407,
+          "receipt_ms": 9644.987000000001,
+          "output_bytes": 1663,
+          "operation_id": "fc-a8f0127325e0496fb3e951f0c8482807"
+        },
+        {
+          "sample": 2,
+          "command": "enter",
+          "elapsed_ms": 35480.03274993971,
+          "receipt_ms": 12623.191,
+          "output_bytes": 4724,
+          "operation_id": "fc-36a380554cab4c8cac9eb0df7746a217"
+        },
+        {
+          "sample": 2,
+          "command": "finish",
+          "elapsed_ms": 17877.39633396268,
+          "receipt_ms": 10106.394999999999,
+          "output_bytes": 1663,
+          "operation_id": "fc-e788a8691a044f53b3b8bebcaa8c8d1d"
+        },
+        {
+          "sample": 3,
+          "command": "enter",
+          "elapsed_ms": 35641.35116711259,
+          "receipt_ms": 12751.614,
+          "output_bytes": 4724,
+          "operation_id": "fc-a55b25af4496470aae93eff6bed6aafa"
+        },
+        {
+          "sample": 3,
+          "command": "finish",
+          "elapsed_ms": 17909.606374800205,
+          "receipt_ms": 9944.473,
+          "output_bytes": 1663,
+          "operation_id": "fc-0356ad457c214875a535bed2ac5685bf"
+        },
+        {
+          "sample": 4,
+          "command": "enter",
+          "elapsed_ms": 38066.32462516427,
+          "receipt_ms": 12988.885,
+          "output_bytes": 4724,
+          "operation_id": "fc-2ccc6b1b988448d9a8bf6ab2752f83d3"
+        },
+        {
+          "sample": 4,
+          "command": "finish",
+          "elapsed_ms": 17293.80941716954,
+          "receipt_ms": 9812.032000000001,
+          "output_bytes": 1663,
+          "operation_id": "fc-e91b60b073bd4df38832115116d46e13"
+        }
+      ],
+      "worker_stages": {
+        "enter": {
+          "probe.lock_wait": {
+            "calls": 65,
+            "total_ms": 3.343,
+            "mean_ms": 0.051
+          },
+          "probe.config": {
+            "calls": 35,
+            "total_ms": 42.351,
+            "mean_ms": 1.21
+          },
+          "probe.ledger.show": {
+            "calls": 130,
+            "total_ms": 112579.191,
+            "mean_ms": 865.994
+          },
+          "probe.ledger.create": {
+            "calls": 20,
+            "total_ms": 20870.893,
+            "mean_ms": 1043.545
+          },
+          "probe.ledger.dep": {
+            "calls": 10,
+            "total_ms": 7066.109,
+            "mean_ms": 706.611
+          },
+          "probe.ledger.update": {
+            "calls": 20,
+            "total_ms": 17744.023,
+            "mean_ms": 887.201
+          },
+          "probe.ledger.close": {
+            "calls": 10,
+            "total_ms": 9737.948,
+            "mean_ms": 973.795
+          },
+          "probe.ledger.list": {
+            "calls": 15,
+            "total_ms": 11729.938,
+            "mean_ms": 781.996
+          },
+          "probe.runtime": {
+            "calls": 5,
+            "total_ms": 6.351,
+            "mean_ms": 1.27
+          },
+          "probe.ledger.cook": {
+            "calls": 5,
+            "total_ms": 3306.255,
+            "mean_ms": 661.251
+          },
+          "probe.cook": {
+            "calls": 5,
+            "total_ms": 7090.953,
+            "mean_ms": 1418.191
+          },
+          "probe.entry": {
+            "calls": 5,
+            "total_ms": 183131.875,
+            "mean_ms": 36626.375
+          }
+        },
+        "finish": {
+          "probe.lock_wait": {
+            "calls": 35,
+            "total_ms": 2.234,
+            "mean_ms": 0.064
+          },
+          "probe.config": {
+            "calls": 15,
+            "total_ms": 164.436,
+            "mean_ms": 10.962
+          },
+          "probe.ledger.show": {
+            "calls": 65,
+            "total_ms": 58255.052,
+            "mean_ms": 896.232
+          },
+          "probe.ledger.create": {
+            "calls": 5,
+            "total_ms": 5362.183,
+            "mean_ms": 1072.437
+          },
+          "probe.ledger.list": {
+            "calls": 5,
+            "total_ms": 4142.131,
+            "mean_ms": 828.426
+          },
+          "probe.ledger.update": {
+            "calls": 15,
+            "total_ms": 14255.436,
+            "mean_ms": 950.362
+          },
+          "probe.ledger.close": {
+            "calls": 5,
+            "total_ms": 5080.524,
+            "mean_ms": 1016.105
+          },
+          "probe.finish": {
+            "calls": 5,
+            "total_ms": 87142.017,
+            "mean_ms": 17428.403
+          }
+        }
+      },
+      "client_stages": {
+        "probe.request": {
+          "calls": 10,
+          "total_ms": 29.549,
+          "mean_ms": 2.955
+        },
+        "probe.execute": {
+          "calls": 10,
+          "total_ms": 273992.094,
+          "mean_ms": 27399.209
+        },
+        "probe.cli": {
+          "calls": 10,
+          "total_ms": 274168.804,
+          "mean_ms": 27416.88
+        },
+        "launcher.selection": {
+          "calls": 10,
+          "total_ms": 44.597,
+          "mean_ms": 4.46
+        }
+      }
+    },
+    "after": {
+      "source": "candidate entry/finish code delivered with this report",
+      "summary": {
+        "enter": {
+          "first_ms": 37245.13916717842,
+          "warm_n": 4,
+          "warm_median_ms": 37033.872104482725,
+          "warm_max_ms": 46816.14074995741,
+          "median_output_bytes": 3158,
+          "warm_median_receipt_ms": 12524.429,
+          "ledger_calls_per_command": 39.0
+        },
+        "finish": {
+          "first_ms": 17798.534292262048,
+          "warm_n": 4,
+          "warm_median_ms": 23669.723500031978,
+          "warm_max_ms": 31775.1067080535,
+          "median_output_bytes": 684,
+          "warm_median_receipt_ms": 8546.514,
+          "ledger_calls_per_command": 18.0
+        }
+      },
+      "samples": [
+        {
+          "sample": 0,
+          "command": "enter",
+          "elapsed_ms": 37245.13916717842,
+          "receipt_ms": 10908.59,
+          "output_bytes": 3158,
+          "operation_id": "fc-f9f6f42d32464b9ba505b3efef2790c9"
+        },
+        {
+          "sample": 0,
+          "command": "finish",
+          "elapsed_ms": 17798.534292262048,
+          "receipt_ms": 9332.262,
+          "output_bytes": 684,
+          "operation_id": "fc-db88f3d0d27841daadfbd3ecc6294599"
+        },
+        {
+          "sample": 1,
+          "command": "enter",
+          "elapsed_ms": 35385.41429210454,
+          "receipt_ms": 11433.808,
+          "output_bytes": 3158,
+          "operation_id": "fc-9c8d98375ea641fea8b5a19b0e709dff"
+        },
+        {
+          "sample": 1,
+          "command": "finish",
+          "elapsed_ms": 16177.032832987607,
+          "receipt_ms": 8034.253,
+          "output_bytes": 684,
+          "operation_id": "fc-e9338071b3bc4ab5af691ea0106943d6"
+        },
+        {
+          "sample": 2,
+          "command": "enter",
+          "elapsed_ms": 35104.464082978666,
+          "receipt_ms": 12133.063,
+          "output_bytes": 3158,
+          "operation_id": "fc-e2f0a86bf65c458ea69c462696200d51"
+        },
+        {
+          "sample": 2,
+          "command": "finish",
+          "elapsed_ms": 17111.779375001788,
+          "receipt_ms": 8528.507,
+          "output_bytes": 684,
+          "operation_id": "fc-a77e06c5e66c4bca87f5de6424451848"
+        },
+        {
+          "sample": 3,
+          "command": "enter",
+          "elapsed_ms": 46816.14074995741,
+          "receipt_ms": 18370.065,
+          "output_bytes": 3158,
+          "operation_id": "fc-a7b01486575e4227a13a7059d6ce4dbf"
+        },
+        {
+          "sample": 3,
+          "command": "finish",
+          "elapsed_ms": 31775.1067080535,
+          "receipt_ms": 17114.849,
+          "output_bytes": 684,
+          "operation_id": "fc-dc562b6e552147af8e87e94e68fdf24f"
+        },
+        {
+          "sample": 4,
+          "command": "enter",
+          "elapsed_ms": 38682.32991686091,
+          "receipt_ms": 12915.795,
+          "output_bytes": 3158,
+          "operation_id": "fc-713e57b720b24a4e8be315cfc6a2e7c8"
+        },
+        {
+          "sample": 4,
+          "command": "finish",
+          "elapsed_ms": 30227.667625062168,
+          "receipt_ms": 8564.520999999999,
+          "output_bytes": 684,
+          "operation_id": "fc-675dda9986c04a0493f7af5a05e882ca"
+        }
+      ],
+      "worker_stages": {
+        "enter": {
+          "probe.lock_wait": {
+            "calls": 80,
+            "total_ms": 4.411,
+            "mean_ms": 0.055
+          },
+          "probe.config": {
+            "calls": 35,
+            "total_ms": 47.077,
+            "mean_ms": 1.345
+          },
+          "probe.ledger.show": {
+            "calls": 115,
+            "total_ms": 108018.169,
+            "mean_ms": 939.288
+          },
+          "probe.ledger.create": {
+            "calls": 20,
+            "total_ms": 23885.138,
+            "mean_ms": 1194.257
+          },
+          "probe.ledger.dep": {
+            "calls": 10,
+            "total_ms": 7147.742,
+            "mean_ms": 714.774
+          },
+          "probe.ledger.update": {
+            "calls": 20,
+            "total_ms": 20583.286,
+            "mean_ms": 1029.164
+          },
+          "probe.ledger.close": {
+            "calls": 10,
+            "total_ms": 10675.535,
+            "mean_ms": 1067.553
+          },
+          "probe.ledger.list": {
+            "calls": 15,
+            "total_ms": 12162.56,
+            "mean_ms": 810.837
+          },
+          "probe.runtime": {
+            "calls": 5,
+            "total_ms": 4.336,
+            "mean_ms": 0.867
+          },
+          "probe.ledger.cook": {
+            "calls": 5,
+            "total_ms": 3463.364,
+            "mean_ms": 692.673
+          },
+          "probe.cook": {
+            "calls": 5,
+            "total_ms": 7388.63,
+            "mean_ms": 1477.726
+          },
+          "probe.entry": {
+            "calls": 5,
+            "total_ms": 186011.817,
+            "mean_ms": 37202.363
+          }
+        },
+        "finish": {
+          "probe.lock_wait": {
+            "calls": 40,
+            "total_ms": 9.639,
+            "mean_ms": 0.241
+          },
+          "probe.config": {
+            "calls": 10,
+            "total_ms": 56.335,
+            "mean_ms": 5.634
+          },
+          "probe.ledger.show": {
+            "calls": 60,
+            "total_ms": 69526.536,
+            "mean_ms": 1158.776
+          },
+          "probe.ledger.create": {
+            "calls": 5,
+            "total_ms": 7552.773,
+            "mean_ms": 1510.555
+          },
+          "probe.ledger.list": {
+            "calls": 5,
+            "total_ms": 5572.575,
+            "mean_ms": 1114.515
+          },
+          "probe.ledger.update": {
+            "calls": 15,
+            "total_ms": 18181.641,
+            "mean_ms": 1212.109
+          },
+          "probe.ledger.close": {
+            "calls": 5,
+            "total_ms": 5092.365,
+            "mean_ms": 1018.473
+          },
+          "probe.finish": {
+            "calls": 5,
+            "total_ms": 106009.108,
+            "mean_ms": 21201.822
+          }
+        }
+      },
+      "client_stages": {
+        "probe.request": {
+          "calls": 10,
+          "total_ms": 29.388,
+          "mean_ms": 2.939
+        },
+        "probe.execute": {
+          "calls": 10,
+          "total_ms": 294961.111,
+          "mean_ms": 29496.111
+        },
+        "probe.cli": {
+          "calls": 10,
+          "total_ms": 295137.833,
+          "mean_ms": 29513.783
+        },
+        "launcher.selection": {
+          "calls": 10,
+          "total_ms": 221.727,
+          "mean_ms": 22.173
+        }
+      }
+    }
+  }
+}

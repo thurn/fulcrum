@@ -12,6 +12,9 @@ import contextvars
 import fcntl
 import os
 import threading
+import time
+
+from fulcrum.timing import record_timing
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -45,6 +48,7 @@ class ProcessLock:
             )
 
     def __enter__(self) -> ProcessLock:
+        started = time.monotonic()
         if not self.mutex.acquire(blocking=self.blocking):
             raise FulcrumError(
                 "OPERATION_BUSY",
@@ -78,6 +82,7 @@ class ProcessLock:
                 ) from error
             raise
         held[self.key] = [fd, 1]
+        record_timing("lock.wait", started)
         return self
 
     def __exit__(self, *args: Any) -> None:

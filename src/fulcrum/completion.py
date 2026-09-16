@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 from fulcrum.coordination import coordinated
 
 import asyncio
@@ -21,7 +23,7 @@ from fulcrum.ledger import (
     OperationRecord,
     accepted_input,
     operation_id,
-    operation_view,
+    operation_reply,
     utc_now,
 )
 from fulcrum.work import WorkService, _marshal_or_human
@@ -35,6 +37,7 @@ CHECK_STATES = {"passed", "failed", "not_run"}
 
 class CompletionService:
     @coordinated
+    @timed("completion.finish")
     def finish(self, request: ParsedRequest) -> CommandResult:
         bead_id = request.input.get("bead") or request.arguments.get("bead")
         if not isinstance(bead_id, str) or not bead_id:
@@ -42,10 +45,11 @@ class CompletionService:
         request = replace(
             request, arguments={**dict(request.arguments), "bead": bead_id}
         )
-        replayed = _finish_replay(request)
+        ledger = _ledger(request)
+        replayed = _finish_replay(request, ledger)
         if replayed is not None:
             return replayed
-        ledger, work = _owned_work(request)
+        ledger, work = _owned_work(request, ledger)
         outcome = request.input.get("outcome") or request.arguments.get("outcome")
         role = str((work.fc or {}).get("role") or "")
         if outcome == "blocked":
@@ -470,40 +474,46 @@ class CompletionService:
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
     ) -> CommandResult:
         summary, _ = _weaver_payload(request, evidence_required=False)
+        acceptance = request.input.get("acceptance")
+        if (
+            not isinstance(acceptance, list)
+            or not acceptance
+            or not all(isinstance(item, str) and item.strip() for item in acceptance)
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT",
+                "ready requires a nonempty acceptance array of observable checks",
+            )
+        owner = _marshal_or_human(ledger)
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
-            planned={"summary": summary},
-            next_action="Return the completed scope to Marshal backlog without dispatching it.",
+            planned={"summary": summary, "acceptance": acceptance, "owner": owner},
+            next_action="Return implementation-ready scope for Marshal review; do not dispatch.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
+        owner = str(operation.operation["planned"]["owner"])
         _record_task_finish(ledger, work, operation.id)
-        owner = _marshal_or_human(ledger)
         fc = dict(work.fc or {})
         fc["summary"] = summary
+        fc["acceptance"] = list(acceptance)
+        fc["requested_role"] = "executor"
+        fc["scope"] = {
+            "summary": summary,
+            "acceptance": list(acceptance),
+            "evidence": list(request.input.get("evidence", [])),
+            "finish_operation": operation.id,
+        }
         fc["owner"] = owner
         fc["role"] = "marshal" if owner != "HUMAN" else None
         fc["phase"] = "backlog"
         fc["dispatch"] = None
         fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")
         fc["last_transition"] = operation.id
-        fc["next_action"] = "Marshal must review and authorize the completed scope."
-        ledger.update_fc(work.id, fc, assignee=owner, status="open")
-        operation = ledger.update_operation(
-            operation.id,
-            state="completed",
-            step="weaver_scope_returned",
-            result={
-                "bead_id": work.id,
-                "accepted": True,
-                "owner": owner,
-                "phase": "backlog",
-                "report_reminder": _report_reminder(work.id),
-            },
-            next_action=fc["next_action"],
-        )
-        return _operation_result(operation)
+        fc["next_action"] = _scope_next_action(owner)
+        transferred = ledger.update_fc(work.id, fc, assignee=owner, status="open")
+        return _complete_scope_return(ledger, operation, transferred)
 
     def _weaver_planned(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
@@ -839,8 +849,7 @@ def _finish_child_unresolved(
     return _operation_result(operation)
 
 
-def _owned_work(request: ParsedRequest) -> tuple[Ledger, LedgerRecord]:
-    ledger = _ledger(request)
+def _owned_work(request: ParsedRequest, ledger: Ledger) -> tuple[Ledger, LedgerRecord]:
     work = ledger.show(str(request.arguments["bead"]))
     if work is None or work.kind != "work" or not work.fc:
         raise FulcrumError.invalid(
@@ -881,10 +890,9 @@ def _ledger(request: ParsedRequest) -> Ledger:
     )
 
 
-def _finish_replay(request: ParsedRequest) -> CommandResult | None:
+def _finish_replay(request: ParsedRequest, ledger: Ledger) -> CommandResult | None:
     if request.request_id is None:
         return None
-    ledger = _ledger(request)
     record = ledger.show(operation_id(request.request_id))
     if record is None:
         return None
@@ -901,7 +909,53 @@ def _finish_replay(request: ParsedRequest) -> CommandResult | None:
         )
     if operation.operation.get("state") in TERMINAL_STATES:
         return _operation_result(operation)
+    # Ownership may already have transferred before receipt finalization. The
+    # retained scope proves this exact finish even if Marshal has since acted.
+    work = ledger.show(str(operation.operation.get("bead_id")))
+    scope = (work.fc or {}).get("scope") if work else None
+    if (
+        (request.input.get("outcome") or request.arguments.get("outcome")) == "ready"
+        and isinstance(scope, Mapping)
+        and scope.get("finish_operation") == operation.id
+        and scope.get("summary") == request.input.get("summary", "").strip()
+        and scope.get("acceptance") == request.input.get("acceptance")
+    ):
+        assert work is not None
+        return _complete_scope_return(ledger, operation, work)
     return None
+
+
+def _scope_next_action(owner: str) -> str:
+    if owner == "HUMAN":
+        return "HUMAN must arrange Marshal review; no standing Marshal is registered. Implementation is not authorized."
+    return "Marshal must review the prepared scope and authorize implementation. Reconciliation discovers this backlog; notification is not yet confirmed."
+
+
+def _complete_scope_return(
+    ledger: Ledger, operation: OperationRecord, work: LedgerRecord
+) -> CommandResult:
+    owner = str(operation.operation["planned"]["owner"])
+    operation = ledger.update_operation(
+        operation,
+        state="completed",
+        step="weaver_scope_returned",
+        result={
+            "bead_id": work.id,
+            "accepted": True,
+            "owner": owner,
+            "phase": "backlog",
+            "scope_state": (
+                "awaiting_marshal_review" if owner != "HUMAN" else "awaiting_human"
+            ),
+            "attention": (
+                "reconciliation_discovery" if owner != "HUMAN" else "human_required"
+            ),
+            "implementation_authorized": False,
+            "next_actor": "marshal" if owner != "HUMAN" else "HUMAN",
+        },
+        next_action=_scope_next_action(owner),
+    )
+    return _operation_result(operation)
 
 
 def _waiting_reasons(value: Any) -> list[dict[str, Any]]:
@@ -1219,5 +1273,5 @@ def _operation_result(operation: OperationRecord) -> CommandResult:
         state=state,
         operation_id=operation.id,
         request_id=str(operation.operation.get("request_id")),
-        result=operation_view(operation),
+        result=operation_reply(operation),
     )

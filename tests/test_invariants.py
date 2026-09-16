@@ -104,6 +104,45 @@ class ReceiptTests(unittest.TestCase):
                     ledger.run(("update",), mutating=mutating)
                 self.assertEqual(error.exception.uncertain, mutating)
 
+    def test_receipt_snapshot_merge_keeps_fresh_changes_with_two_verified_reads(self):
+        import json
+        from fulcrum.ledger import CommandObservation, OperationRecord
+
+        ledger = Ledger(request().instance.brain_root, executable=sys.executable)
+        original = record(
+            "fc-op", kind="operation", state="running", attempts=0, step="before"
+        )
+        snapshot = OperationRecord.from_record(original)
+        for changed, conflict in [({"attempts": 2}, False), ({"owner": "other"}, True)]:
+            current = {**original.fc, **changed}
+            commands = []
+
+            def run(arguments, **kwargs):
+                nonlocal current
+                commands.append(arguments[0])
+                if arguments[0] == "update":
+                    current = json.loads(arguments[arguments.index("--metadata") + 1])[
+                        "fc"
+                    ]
+                    return CommandObservation(None, 0, "", "", False)
+                self.assertEqual(arguments[0], "show")
+                native = {**original.native, "metadata": {"fc": current}}
+                return CommandObservation([native], 0, "", "", False)
+
+            with (
+                self.subTest(changed=changed),
+                patch.object(ledger, "run", side_effect=run),
+            ):
+                if conflict:
+                    with self.assertRaises(FulcrumError):
+                        ledger.update_operation(snapshot, step="after")
+                    self.assertEqual(commands, ["show"])
+                else:
+                    result = ledger.update_operation(snapshot, step="after")
+                    self.assertEqual(result.operation["attempts"], 2)
+                    self.assertEqual(result.operation["step"], "after")
+                    self.assertEqual(commands, ["show", "update", "show"])
+
 
 class OwnershipTests(unittest.TestCase):
     def test_wrong_actor_and_stale_acquisition_fail_before_writes(self):

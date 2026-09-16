@@ -131,6 +131,25 @@ and semantically equal parsed input returns the existing receipt. Compare stored
 values directly; do not hash input. Changed input under the same ID returns
 `REQUEST_CONFLICT`. Retry an intentional new action with a new UUID.
 
+Role `enter` and `finish` return compact `result` objects: relevant IDs, the
+achieved step, role-specific facts, instructions once (entry), `next_action`, error,
+and `next_commands` for explicit `operation show ID --json`. The outer envelope
+retains operation/request IDs, state, warnings, and error. Full receipts retain
+accepted input, planned work, recovery checkpoints, and timestamps; they are not
+repeated in normal command output. Receipt results describe the achieved state at
+that operation, not a live status query; use `context`/`work show` for current state.
+
+Weaver `ready` retains scope and observable acceptance for Marshal's decision
+brief and stale-decision comparison. It proposes Executor review/dispatch but
+never authorizes it. Reconciliation discovers unapproved backlog, coalesces
+attention, and starts a Marshal review turn when leadership is available and idle.
+Successful finish reports discovery eligibility, not notification. Failed review
+requests remain eligible for bounded retries; uncertain requests require inspection.
+Missing leadership explicitly leaves HUMAN responsible. Only a subsequent Marshal
+decision records dispatch authorization; capacity/dependencies still gate launch.
+Long prepared scope is excerpted with an explicit `complete: false` and `work show`
+continuation; Marshal must inspect that full scope before deciding.
+
 When the caller omits a request ID, generate it before contacting the controller
 and print it to stderr so a lost response is still retryable. Structured callers
 should supply it themselves. Normal stdout stays one parseable JSON document.
@@ -329,7 +348,7 @@ in-memory native request, inspect/recover the task and report that gap.
 | --- | --- |
 | Weaver `answered` | `summary`, `evidence`; closes question bead |
 | Weaver `planned` | `summary`, `plan_id`; retain published future plan and its explicit deferral without dispatch |
-| Weaver `ready` | `summary`, completed scope/acceptance on bead; Marshal backlog |
+| Weaver `ready` | `summary`, nonempty `acceptance` array, optional `evidence`; implementation-ready scope awaiting Marshal review, without authorization or dispatch |
 | Executor `ready_for_review` | `summary`, `source_oid`, `checks`, `evidence`; recorded handoff to Warden |
 | Warden `approved` | `summary`, `source_oid`, `checks`, `evidence`; approve and promote current source |
 | Sage/Mason `findings` | `summary`, `findings` (report objects); file findings and resume interrupted work via Marshal, or close standalone investigation |

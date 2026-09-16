@@ -55,6 +55,7 @@ class MemoryLedger(Ledger):
         self.rows = {row.id: deepcopy(row) for row in records}
         self.edges = {}
         self.writes = []
+        self._observed = {}
 
     def show(self, record_id):
         return deepcopy(self.rows.get(record_id))
@@ -66,7 +67,9 @@ class MemoryLedger(Ledger):
             if kind is None or row.kind == kind
         ]
 
-    def create_record(self, *, record_id, kind, title, description, owner, fc):
+    def create_record(
+        self, *, record_id, kind, title, description, owner, fc, **native
+    ):
         if record_id in self.rows:
             raise AssertionError(f"unexpected duplicate storage write: {record_id}")
         value = LedgerRecord.from_native(
@@ -77,16 +80,19 @@ class MemoryLedger(Ledger):
                 "status": "open",
                 "assignee": owner,
                 "metadata": {"fc": deepcopy(fc)},
+                **native,
             }
         )
         self.rows[record_id] = value
         self.writes.append(record_id)
         return deepcopy(value)
 
-    def update_fc(self, record_id, fc, *, status=None):
+    def update_fc(self, record_id, fc, *, status=None, assignee=None, **native):
         current = self.rows[record_id]
         value = replace(
             current,
+            native={**current.native, **native},
+            assignee=assignee if assignee is not None else current.assignee,
             metadata={**current.metadata, "fc": deepcopy(fc)},
             status=status or current.status,
         )

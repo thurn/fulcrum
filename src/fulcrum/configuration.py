@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.timing import timed
+
 from fulcrum.coordination import coordinated
 
 import copy
@@ -138,6 +140,7 @@ class ConfigurationManager:
         parser.default_flow_style = False
         return parser
 
+    @timed("configuration.load")
     def load(self) -> tuple[MutableMapping[str, Any], bytes]:
         loaded, raw = self._read_document()
         self.validate_document(loaded)
