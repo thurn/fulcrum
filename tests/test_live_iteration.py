@@ -343,3 +343,28 @@ class MaintenanceBoundaryTests(unittest.TestCase):
                 self.assertTrue(pool.submit(shared).result(timeout=1))
                 with self.assertRaises(FulcrumError):
                     pool.submit(exclusive).result(timeout=1)
+
+
+class AssetSelectionTests(unittest.TestCase):
+    def test_user_skills_follow_selection_without_pinning_old_source(self):
+        from fulcrum.install import HUMAN_SKILLS
+        from fulcrum.activation import select_candidate
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("old", "new"):
+                source = root / "sources" / name
+                for skill in HUMAN_SKILLS:
+                    asset = source / "skills" / skill
+                    (asset / "agents").mkdir(parents=True)
+                    (asset / "SKILL.md").write_text(name)
+                    (asset / "agents/openai.yaml").write_text("interface: {}")
+                select_candidate(
+                    root,
+                    {"source": str(source), "python": sys.executable, "commit": name},
+                )
+            cleanup_sources(root, {"source": str(root / "sources/new")})
+            for skill in HUMAN_SKILLS:
+                link = root / "codex/skills" / skill
+                self.assertEqual((link / "SKILL.md").read_text(), "new")
+                self.assertEqual(link.readlink(), root / "skills-current" / skill)

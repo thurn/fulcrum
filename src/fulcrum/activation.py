@@ -341,6 +341,18 @@ def select_candidate(instance: Path, candidate: dict[str, Any]) -> None:
     # The build lock and selection lock MUST stay distinct. Dependency setup
     # may take minutes; fresh commands can pin the old selection throughout it.
     with ProcessLock(instance / "activation.lock"):
+        source = Path(candidate["source"]) / "skills"
+        if source.is_dir():
+            from fulcrum.install import _replace_owned_link, reconcile_fulcrum2_skills
+
+            # User-invoked skills follow the selection, while operation assets
+            # remain pinned to concrete source. Stable links survive source GC.
+            _replace_owned_link(source, instance / "skills-current")
+            production = (
+                instance.resolve()
+                == (Path.home() / "Library/Application Support/Fulcrum").resolve()
+            )
+            reconcile_fulcrum2_skills(instance, production=production)
         write_json(instance / "selected.json", candidate)
 
 

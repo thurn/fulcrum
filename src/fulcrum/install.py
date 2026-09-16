@@ -106,7 +106,7 @@ def owned_skills_source() -> Path:
 def _replace_owned_link(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if target.is_symlink():
-        if target.resolve(strict=False) == source.resolve(strict=False):
+        if target.readlink() == source.absolute():
             return
         target.unlink()
     elif target.exists():
@@ -188,7 +188,9 @@ def reconcile_fulcrum2_skills(
 ) -> dict[str, Any]:
     """Repair owned role links and the read-only compaction hook."""
 
-    source = owned_skills_source().resolve(strict=True)
+    source = instance_root / "skills-current"
+    if not source.is_dir():
+        source = owned_skills_source().resolve(strict=True)
     root = (
         skills_root
         or (
@@ -211,9 +213,7 @@ def reconcile_fulcrum2_skills(
             raise InstallationError(
                 f"refusing to replace real user skill directory {target}"
             )
-        if target.is_symlink() and target.resolve(strict=False) == skill.resolve(
-            strict=False
-        ):
+        if target.is_symlink() and target.readlink() == skill.absolute():
             unchanged.append(str(target))
             continue
         _replace_owned_link(skill, target)
