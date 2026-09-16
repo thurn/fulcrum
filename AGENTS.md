@@ -14,3 +14,7 @@ and the editable package in .venv.
 Before changing execution, installation, or runtime ownership, read
 [the live-iteration architecture](docs/architecture/live-iteration.md).
 Preserve its no-restart, source-pinning, and connection-continuity invariants.
+
+Any design which requires an 'installation' step after changing fulcrum
+behavior is inherently wrong. All fulcrum functionality is sourced from master
+in ~/fulcrum, changing that directory immediately changes the live system.
