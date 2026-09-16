@@ -356,7 +356,6 @@ class Application:
             arguments={"bead": bead_id},
             input={},
             request_id=None,
-            offline=True,
         )
         try:
             observed = self.dispatch(query).result or {}
@@ -458,8 +457,6 @@ class Application:
                     controller_pid = pids[0]
         except (OSError, json.JSONDecodeError):
             pass
-        if not request.offline:
-            controller_pid = os.getpid()
         return CommandResult.query(
             {
                 "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -473,12 +470,8 @@ class Application:
                     "pid": os.getpid(),
                     "controller_pid": controller_pid,
                 },
-                "responsive": not request.offline,
-                "gaps": (
-                    []
-                    if not request.offline
-                    else ["controller did not answer this inspection"]
-                ),
+                "responsive": True,
+                "gaps": (["inspection executed in a fresh process"]),
             }
         )
 

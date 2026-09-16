@@ -53,14 +53,20 @@ fulcrum service status --json
 fulcrum service stop --json
 fulcrum service start --json
 fulcrum service restart --json
-fulcrum service update --source /absolute/clean/checkout --json
+fulcrum service update --json
 ```
 
-Stop drains by default; `--interrupt` is the explicit destructive alternative.
-Client timeout does not trigger interruption. Source update builds and probes a new
-installed environment, reaches a safe boundary, swaps atomically, restarts, and
-reconciles. A failed probe leaves the prior installation active. Direct edits to an
-installed deployment are unsupported.
+Ordinary published-source updates activate new code without restarting the resident
+or interrupting agent work. Client timeout leaves detached operation execution
+running. A failed preflight preserves the selected source. Use `service update
+--retry` after repairing a rejected candidate. `service status` includes activation
+state, source identities, timings, and resident health.
+
+Service stop/restart is exceptional maintenance: without explicit `--interrupt`,
+active native turns or pending requests prevent replacement. A state migration
+requires `service update --maintenance`; failed migration leaves admission fenced.
+See the [live-iteration architecture](architecture/live-iteration.md) for source
+selection, concurrency, maintenance, and recovery rules.
 
 ## Publication, delivery, and analytics
 

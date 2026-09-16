@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import maintenance_operation, coordinated
+
 import os
 import shutil
 import subprocess
@@ -139,6 +141,7 @@ class RecoveryService:
             )
         return CommandResult.query(result)
 
+    @maintenance_operation
     def takeover(self, request: ParsedRequest) -> CommandResult:
         _authorize_recovery_actor(request)
         ledger = _ledger(request)
@@ -310,6 +313,7 @@ class RecoveryService:
         )
         return _operation_result(operation)
 
+    @maintenance_operation
     def repair(self, request: ParsedRequest) -> CommandResult:
         actions = _validate_actions(request.input)
         try:
@@ -510,6 +514,7 @@ class RecoveryService:
             },
         )
 
+    @maintenance_operation
     def release(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         config = _config(request)
@@ -862,6 +867,7 @@ class HumanService:
             {"items": sorted(rows, key=lambda item: item["bead_id"])}
         )
 
+    @coordinated
     def resolve(self, request: ParsedRequest) -> CommandResult:
         if request.actor.kind != "human" and not _actor_has_role(request, "vizier"):
             raise FulcrumError(
@@ -1851,7 +1857,6 @@ def _child_request(
                 RECOVERY_NAMESPACE, f"{operation_id}:{index}:{'.'.join(command)}"
             )
         ),
-        offline=True,
     )
 
 

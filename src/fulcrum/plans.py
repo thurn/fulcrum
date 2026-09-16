@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import json
 import uuid
 from collections.abc import Mapping, Sequence
@@ -40,6 +42,7 @@ REQUIRED_REVIEW_PERSPECTIVES = ("cold_reader", "requirements")
 class PlanService:
     """Keep canonical plan scope in Beads and reconcile ordinary child work."""
 
+    @coordinated
     def draft(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         root = _root(ledger, str(request.arguments["bead"]))
@@ -106,11 +109,13 @@ class PlanService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def show(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         root = _root(ledger, str(request.arguments["id"]))
         return CommandResult.query(_plan_view(ledger, root))
 
+    @coordinated
     def approve(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         root = _root(ledger, str(request.arguments["bead"]))
@@ -183,9 +188,11 @@ class PlanService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def publish(self, request: ParsedRequest) -> CommandResult:
         return self._publish_or_refine(request, refining=False)
 
+    @coordinated
     def refine(self, request: ParsedRequest) -> CommandResult:
         return self._publish_or_refine(request, refining=True)
 
@@ -577,6 +584,7 @@ class PlanService:
             # remove the parent link from a newly materialized plan child.
             ledger.set_parent(children_by_key[key], root.id)
 
+    @coordinated
     def activate(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         root = _root(ledger, str(request.arguments["id"]))
@@ -687,6 +695,7 @@ class PlanService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def complete(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         root = _root(ledger, str(request.arguments["id"]))

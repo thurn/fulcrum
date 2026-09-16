@@ -74,7 +74,6 @@ class ParsedRequest:
     ownership_operation: str | None = None
     wait: bool = False
     timeout: float = 30.0
-    offline: bool = False
     # Controller-internal execution hook. It is intentionally absent from the
     # wire representation so callers cannot inject runtime authority over IPC.
     runtime_submit: Any | None = field(default=None, compare=False, repr=False)
@@ -96,7 +95,6 @@ class ParsedRequest:
             "ownership_operation": self.ownership_operation,
             "wait": self.wait,
             "timeout": self.timeout,
-            "offline": self.offline,
         }
 
     @classmethod
@@ -138,7 +136,6 @@ class ParsedRequest:
                 ownership_operation=value.get("ownership_operation"),
                 wait=bool(value.get("wait", False)),
                 timeout=float(value.get("timeout", 30.0)),
-                offline=bool(value.get("offline", False)),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise FulcrumError.invalid(

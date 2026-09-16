@@ -7,6 +7,7 @@ typed views over native issues; they are not a second persistence layer.
 from __future__ import annotations
 
 import json
+import copy
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from fulcrum.coordination import ProcessLock, merge_change
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 
 CAPTURE_BYTES = 256 * 1024
@@ -162,11 +164,10 @@ class Ledger:
         self.actor = actor
         self.timeout = timeout
         self.dolt_auto_commit = dolt_auto_commit
+        self._observed: dict[str, dict[str, Any]] = {}
 
-    def _lock_for(self, bead_id: str | None) -> threading.RLock:
-        key = (str(self.workspace), bead_id or "__global__")
-        with _LEDGER_LOCK_GUARD:
-            return _LEDGER_RECORD_LOCKS.setdefault(key, threading.RLock())
+    def _lock_for(self, bead_id: str | None) -> ProcessLock:
+        return ProcessLock(self.workspace / ".fulcrum-locks" / "state")
 
     def run(
         self,
@@ -286,9 +287,13 @@ class Ledger:
                 return None
             raise
         if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
-            return LedgerRecord.from_native(value[0])
+            record = LedgerRecord.from_native(value[0])
+            self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
+            return record
         if isinstance(value, dict):
-            return LedgerRecord.from_native(value)
+            record = LedgerRecord.from_native(value)
+            self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
+            return record
         return None
 
     def list_records(
@@ -305,6 +310,8 @@ class Ledger:
         )
         if kind is not None:
             records = [record for record in records if record.kind == kind]
+        for record in records:
+            self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
         return records
 
     def create_record(
@@ -424,11 +431,21 @@ class Ledger:
         acceptance: str | None = None,
     ) -> LedgerRecord:
         with self._lock_for(record_id):
+            base = self._observed.get(record_id)
             existing = self.show(record_id)
             if existing is None:
                 raise FulcrumError.invalid(
                     "NOT_FOUND", f"unknown Beads record {record_id}"
                 )
+            if base is not None:
+                for field in ("owner", "ownership_operation", "recovery_fence"):
+                    if base.get(field) != (existing.fc or {}).get(field):
+                        raise FulcrumError(
+                            "OWNERSHIP_CONFLICT",
+                            "ownership changed while an external effect was running",
+                            exit_code=5,
+                        )
+                fc = merge_change(base, dict(fc), dict(existing.fc or {}))
             arguments = [
                 "update",
                 record_id,

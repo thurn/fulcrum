@@ -413,7 +413,7 @@ class DiagnosticService:
                 evidence={
                     "path": str(request.instance.socket_path),
                     "exists": socket_exists,
-                    "request_routed_offline": request.offline,
+                    "execution": "local_process",
                 },
                 affected_commands=(
                     ["automatic reconciliation"] if not socket_exists else []

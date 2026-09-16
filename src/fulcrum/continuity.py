@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -41,10 +43,12 @@ REPLACEMENT_STAGES = {
 
 
 class ContinuityService:
+    @coordinated
     def leader_replace(self, request: ParsedRequest) -> CommandResult:
         role = str(request.arguments["role"])
         return self._replace(request, leader_role=role)
 
+    @coordinated
     def fleet_replace(self, request: ParsedRequest) -> CommandResult:
         return self._replace(request, leader_role=None)
 
@@ -571,7 +575,6 @@ async def reconcile_archive_once(
             instance=request.instance,
             request_id=request_id,
             timeout=request.timeout,
-            offline=True,
         )
         operation, reused = ledger.create_operation(
             archive_request,

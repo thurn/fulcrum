@@ -32,6 +32,13 @@ Automatic work defaults to four active tasks globally and four per project. All
 four slots are available to ordinary work. The runtime and IPC layers are bounded
 but explicitly support a separately validated 30-task concurrency workload.
 
+## Live iteration
+
+Fulcrum runs published application changes in fresh processes while a small
+resident host preserves native connections and pending requests. Read the
+[live-iteration architecture](docs/architecture/live-iteration.md) before changing
+these boundaries.
+
 ## Install
 
 Requirements are macOS, Python 3.12, Codex Desktop/CLI, Git, `bd`, `dolt`, and the
@@ -58,8 +65,8 @@ requires a configured remote.
 
 Use `fulcrum --help` and `fulcrum COMMAND --help` for the complete installed command
 surface. All commands accept `--json`; mutating retries use the same `--request-id`
-and exact input. `--offline` runs the same application operation while holding the
-canonical brain writer lock. It is not a compatibility or fallback state store.
+and exact input. Commands run selected source directly. Ledger-only operations do not require
+the resident host; native runtime operations share its persistent connection.
 
 ## Everyday operation
 

@@ -99,8 +99,14 @@ class CliTests(unittest.TestCase):
         pending = request(("plan", "review", "start"))
         with (
             patch(
+                "fulcrum.cli.subprocess.Popen",
+            ) as spawn,
+            patch(
+                "fulcrum.cli.subprocess.Popen.return_value.communicate",
+                side_effect=__import__("subprocess").TimeoutExpired("worker", 1),
+            ),
+            patch(
                 "fulcrum.cli.request_sync",
-                side_effect=ControllerTimedOut("still running"),
             ),
             self.assertRaises(FulcrumError) as error,
         ):

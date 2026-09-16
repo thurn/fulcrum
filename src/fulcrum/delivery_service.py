@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import unlocked
+
+from fulcrum.coordination import coordinated
+
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,6 +36,7 @@ TERMINAL_STATES = {"completed", "failed", "uncertain", "cancelled"}
 
 
 class DeliveryService:
+    @coordinated
     def worktree_prepare(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
@@ -70,6 +75,7 @@ class DeliveryService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def worktree_inspect(self, request: ParsedRequest) -> CommandResult:
         _, work, project, provider = _context(request)
         reference = _work_ref(request, work, project, _workspace_operation(work))
@@ -86,6 +92,7 @@ class DeliveryService:
             }
         )
 
+    @coordinated
     def worktree_cleanup(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
@@ -132,6 +139,7 @@ class DeliveryService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def validation_start(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
@@ -193,6 +201,7 @@ class DeliveryService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def validation_show(self, request: ParsedRequest) -> CommandResult:
         _, work, project, provider = _context(request)
         source, handle = _retained_delivery_source(request, work, project)
@@ -211,6 +220,7 @@ class DeliveryService:
             }
         )
 
+    @coordinated
     def review_approve(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize_warden(ledger, request, work)
@@ -314,6 +324,7 @@ class DeliveryService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def promotion_start(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize_warden(ledger, request, work)
@@ -382,6 +393,7 @@ class DeliveryService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def promotion_show(self, request: ParsedRequest) -> CommandResult:
         _, work, project, provider = _context(request)
         source, handle = _retained_delivery_source(request, work, project)
@@ -391,6 +403,7 @@ class DeliveryService:
             raise _public_error(error, request) from error
         return CommandResult.query({"bead_id": work.id, "delivery": facts.to_dict()})
 
+    @coordinated
     def source_sync(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
@@ -407,6 +420,20 @@ class DeliveryService:
             facts = _call(provider.synchronize(source, handle))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "source_sync")
+        if facts.synchronization == "complete":
+            from fulcrum.resident_client import exchange
+            from fulcrum.coordination import external_effect
+
+            try:
+                with external_effect():
+                    asyncio.run(
+                        exchange(
+                            request.instance.instance_root / "resident.sock",
+                            {"action": "wake", "update": True},
+                        )
+                    )
+            except Exception:
+                pass  # Remote polling also observes publication; delivery remains valid.
         _retain_delivery(ledger, work, _delivery_update(facts), operation.id)
         operation = ledger.update_operation(
             operation.id,
@@ -788,6 +815,7 @@ def _require_approved_source(work: LedgerRecord, source_oid: str) -> None:
         )
 
 
+@unlocked
 def _call(action: Coroutine[Any, Any, T]) -> T:
     try:
         return asyncio.run(action)

@@ -79,7 +79,6 @@ class Fulcrum2InstallationTest(unittest.TestCase):
                 explicit_selection=True,
             ),
             request_id=str(uuid.uuid4()),
-            offline=True,
         )
 
     @patch("fulcrum.install.shutil.which", new=lambda _name: "/usr/bin/true")
@@ -105,12 +104,12 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         )
         self.assertEqual(first, second)
         self.assertEqual(first["runtime"]["SoftResourceLimits"]["NumberOfFiles"], 4096)
-        self.assertFalse(first["updater"]["RunAtLoad"])
+        self.assertNotIn("updater", first)
         installed, changed = install_fulcrum2_service_definitions(first, self.instance)
         repeated, repeated_changed = install_fulcrum2_service_definitions(
             second, self.instance
         )
-        self.assertEqual(set(installed), {"runtime", "dolt", "controller", "updater"})
+        self.assertEqual(set(installed), {"runtime", "dolt", "controller"})
         self.assertEqual(set(repeated), set(installed))
         self.assertEqual(set(changed), set(installed))
         self.assertEqual(repeated_changed, [])
@@ -174,7 +173,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         )
         self.assertTrue(changed)
         self.assertEqual(
-            Path(str(effective["source_watch_root"])).resolve(),
+            Path(str(effective["source"]["repository"])).resolve(),
             Path(__file__).parents[1].resolve(),
         )
 
@@ -297,7 +296,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
                 return_value=observation,
             ),
             patch(
-                "fulcrum.installation_service.request_sync",
+                "fulcrum.resident_client.exchange",
                 return_value={"ok": True, "state": "completed", "result": {}},
             ) as probe,
         ):
@@ -311,8 +310,8 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertTrue(result["responsive"])
         self.assertEqual(result["socket"], str(path))
         self.assertEqual(result["probe_state"], "completed")
-        probe.assert_called_once()
-        self.assertEqual(probe.call_args.args[1]["command"], ["service", "status"])
+        probe.assert_awaited_once()
+        self.assertEqual(probe.call_args.args[1]["action"], "health")
 
     def test_restart_child_failure_is_not_treated_as_success(self) -> None:
         completed = CommandResult(ok=True, state=CommandState.COMPLETED)

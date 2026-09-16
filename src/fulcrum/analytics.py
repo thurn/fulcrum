@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -132,6 +134,7 @@ class AnalyticsService:
             )
         return CommandResult.query(_rate_view(record))
 
+    @coordinated
     def rates_add(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         card = _validate_rate_card(request.input)
@@ -197,6 +200,7 @@ class AnalyticsService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def reconcile(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         operation, reused = ledger.create_operation(

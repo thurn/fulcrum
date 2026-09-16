@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import asyncio
 import subprocess
 import uuid
@@ -32,6 +34,7 @@ CHECK_STATES = {"passed", "failed", "not_run"}
 
 
 class CompletionService:
+    @coordinated
     def finish(self, request: ParsedRequest) -> CommandResult:
         bead_id = request.input.get("bead") or request.arguments.get("bead")
         if not isinstance(bead_id, str) or not bead_id:

@@ -68,3 +68,11 @@ shortcut `scripts/launch_codex.sh` invokes the same command.
 
 After changing `pyproject.toml` or `requirements-dev.lock`, reinstall both locked
 requirements and the editable package in `.venv`; `scripts/setup` does this.
+
+## Published source
+
+Configure `source.repository`, `source.remote`, and `source.branch`; production
+uses only committed published source. The default remote and branch are `origin`
+and `master`. Setup provisions the independent runtime once. Ordinary activation
+reuses it. See [live iteration](architecture/live-iteration.md) for the required
+execution and update boundaries.

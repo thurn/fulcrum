@@ -353,30 +353,6 @@ def fulcrum2_service_definitions(
             "EnvironmentVariables": environment,
         },
     }
-    source_watch_root = config.get("source_watch_root")
-    if isinstance(source_watch_root, str):
-        definitions["updater"] = {
-            "Label": f"{prefix}.updater",
-            "ProgramArguments": [
-                str(controller_executable.resolve(strict=True)),
-                "service",
-                "update",
-                "--source",
-                str(Path(source_watch_root).resolve(strict=True)),
-                "--instance",
-                str(instance_root.resolve(strict=False)),
-                "--timeout",
-                "300",
-                "--json",
-            ],
-            "WorkingDirectory": str(instance_root),
-            "RunAtLoad": False,
-            "KeepAlive": False,
-            "ProcessType": "Background",
-            "StandardOutPath": str(logs / "updater.log"),
-            "StandardErrorPath": str(logs / "updater-error.log"),
-            "EnvironmentVariables": environment,
-        }
     runtime = dict(config["runtime"])
     if production and runtime["kind"] == "codex":
         executable = runtime.get("executable")

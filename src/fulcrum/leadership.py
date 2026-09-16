@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import json
 import re
 import threading
@@ -57,6 +59,7 @@ class LeadershipService:
     def __init__(self) -> None:
         self._admission = AdmissionService()
 
+    @coordinated
     def leader_show(self, request: ParsedRequest) -> CommandResult:
         role = str(request.arguments["role"])
         if role not in LEADERSHIP_TITLES:
@@ -88,6 +91,7 @@ class LeadershipService:
             }
         )
 
+    @coordinated
     def marshal_brief(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         config = _config(request)
@@ -99,6 +103,7 @@ class LeadershipService:
         )
         return CommandResult.query(brief)
 
+    @coordinated
     def marshal_request(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         _require_marshal_or_human(request, ledger)
@@ -217,6 +222,7 @@ class LeadershipService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def marshal_decide(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         _require_marshal_or_human(request, ledger)
@@ -388,6 +394,7 @@ class LeadershipService:
         )
         return _operation_result(receipt)
 
+    @coordinated
     def backlog_list(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         include_deferred = bool(request.arguments.get("include_deferred", False))
@@ -429,6 +436,7 @@ class LeadershipService:
             }
         )
 
+    @coordinated
     def dispatch(self, request: ParsedRequest) -> CommandResult:
         return self._admission.dispatch(request)
 
@@ -445,6 +453,7 @@ class AdmissionService:
         with self._bead_locks_guard:
             return self._bead_locks.setdefault(bead_id, threading.RLock())
 
+    @coordinated
     def dispatch(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["bead"])
@@ -702,7 +711,6 @@ class AdmissionService:
             ),
             project=_optional_string(fc.get("project")),
             timeout=request.timeout,
-            offline=True,
             runtime_submit=request.runtime_submit,
         )
         result = RoleService().enter(entry_request)
@@ -922,7 +930,6 @@ async def ensure_leadership(
             instance=request.instance,
             request_id=request_id,
             timeout=request.timeout,
-            offline=True,
         )
         operation, _ = ledger.create_operation(
             leader_request,
@@ -1293,7 +1300,6 @@ def normalize_native_intake(
                 uuid.uuid5(ADMISSION_NAMESPACE, f"native-intake:{record.id}")
             ),
             timeout=request.timeout,
-            offline=True,
         )
         try:
             result = WorkService().adopt(adopt_request)

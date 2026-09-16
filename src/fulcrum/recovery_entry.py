@@ -26,38 +26,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         None,
     )
-    if action in {"takeover", "repair", "release"} and "--offline" not in supplied:
-        instance = _option(supplied, "--instance")
-        config = _option(supplied, "--config")
-        context = resolve_instance(
-            instance=instance,
-            config=config,
-            allow_broken_config=action == "repair",
-        )
-        available = False
-        if context.brain_root is not None:
-            probe = ParsedRequest(
-                command=("status",),
-                arguments={"limit": 1},
-                input={},
-                actor=ActorContext(kind="human"),
-                instance=context,
-                request_id=None,
-                timeout=2,
-                offline=False,
-            )
-            try:
-                response = request_sync(context.socket_path, probe.to_wire(), timeout=2)
-                available = isinstance(response, dict)
-            except ControllerUnavailable:
-                pass
-        if not available:
-            controller = load_installed_services(context.instance_root).get(
-                "controller"
-            )
-            if controller is not None and inspect_service(controller.label).running:
-                _stop_one(controller)
-            supplied.append("--offline")
     return fulcrum_main(["recover", *supplied])
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import unlocked
+
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -157,6 +159,7 @@ class BrainRepository:
             )
         return result.returncode == 0
 
+    @unlocked
     def _run(self, arguments: list[str]) -> str:
         command = ["git", "-C", str(self.root), *arguments]
         try:
@@ -763,6 +766,7 @@ class IsolatedGitPublisher:
             )
         return result.returncode == 0
 
+    @unlocked
     def _run(self, root: Path, arguments: Sequence[str]) -> str:
         result = self._run_result(root, arguments)
         if result.returncode != 0:
@@ -777,6 +781,7 @@ class IsolatedGitPublisher:
         result = self._run_result(root, arguments)
         return result.stdout.strip() if result.returncode == 0 else None
 
+    @unlocked
     def _run_result(
         self, root: Path, arguments: Sequence[str]
     ) -> subprocess.CompletedProcess[str]:
@@ -793,6 +798,7 @@ class IsolatedGitPublisher:
                 f"could not run Git {arguments[0]}: {error}"
             ) from error
 
+    @unlocked
     def _run_with_input(
         self,
         root: Path,

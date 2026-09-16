@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import json
 import uuid
 from collections.abc import Mapping
@@ -87,6 +89,7 @@ def fallback_instructions(role: str) -> str:
 
 
 class RoleService:
+    @coordinated
     def enter(self, request: ParsedRequest) -> CommandResult:
         role = str(request.arguments["role"])
         origin = str(request.arguments.get("origin", "human"))
@@ -815,6 +818,7 @@ class RoleService:
             )
         return str(nested["bead_id"])
 
+    @coordinated
     def context(self, request: ParsedRequest) -> CommandResult:
         if request.arguments.get("role") == "marshal":
             from fulcrum.leadership import marshal_context
@@ -855,6 +859,7 @@ class RoleService:
             )
         raise FulcrumError.invalid("INVALID_INPUT", "context requires --bead or --role")
 
+    @coordinated
     def hook_context(self, request: ParsedRequest) -> CommandResult:
         event = request.input
         response: dict[str, Any] = {"continue": True}

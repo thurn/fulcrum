@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import sys
+import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Mapping
@@ -303,7 +305,6 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--request-id", default=argparse.SUPPRESS)
     parser.add_argument("--wait", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=argparse.SUPPRESS)
-    parser.add_argument("--offline", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument("--model", default=argparse.SUPPRESS)
     parser.add_argument("--effort", default=argparse.SUPPRESS)
     parser.add_argument("--ownership-operation", default=argparse.SUPPRESS)
@@ -334,7 +335,8 @@ def _add_command_options(
     elif path in {("service", "stop"), ("service", "restart")}:
         _option(parser, "--interrupt", action="store_true")
     elif path == ("service", "update"):
-        _option(parser, "--source")
+        _option(parser, "--maintenance", action="store_true")
+        _option(parser, "--retry", action="store_true")
     elif path == ("enter",):
         parser.add_argument("role", choices=ROLES)
         _option(parser, "--description", required=True)
@@ -582,7 +584,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "models",
         "projects",
         "knowledge",
-        "source_watch_root",
+        "source",
         "timing",
         "diagnostics",
         "resources",
@@ -596,7 +598,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "models",
         "projects",
         "knowledge",
-        "source_watch_root",
+        "source",
         "timing",
         "diagnostics",
         "resources",
@@ -857,7 +859,6 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
         "request_id",
         "wait",
         "timeout",
-        "offline",
         "model",
         "effort",
         "ownership_operation",
@@ -892,98 +893,93 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
         ownership_operation=values.get("ownership_operation"),
         wait=bool(values.get("wait", False)),
         timeout=timeout,
-        offline=bool(values.get("offline", False)),
     )
 
 
 def _serve(request: ParsedRequest) -> CommandResult:
-    from fulcrum.reset import refuse_unfinished_reset
+    if request.arguments.get("once"):
+        return default_application().dispatch(replace(request, command=("reconcile",)))
+    from fulcrum.configuration import ConfigurationManager
+    from fulcrum.activation import write_json
 
-    refuse_unfinished_reset(request.instance.instance_root)
-    if request.instance.lock_path is None:
-        raise FulcrumError(
-            "CONFIG_INVALID", "a brain root is required to serve", exit_code=4
-        )
-    application = default_application()
-    with WriterLock(request.instance.lock_path):
-        supervisor = ControllerSupervisor(request, application)
-        if request.arguments.get("once"):
-            summary = asyncio.run(supervisor.run_once())
-            return CommandResult.query(summary.to_dict())
-        asyncio.run(supervisor.serve())
-    return CommandResult.query({"stopped": True})
+    manager = ConfigurationManager(request.instance.config_path)
+    document, _ = manager.load()
+    config = manager.effective(document)
+    write_json(
+        request.instance.instance_root / "resident.json",
+        {
+            "endpoint": config["runtime"]["endpoint"],
+            "config": str(request.instance.config_path),
+        },
+    )
+    # Exec discards all imported business logic from the resident's interpreter.
+    from fulcrum.bootstrap import launch_arguments
+
+    arguments = launch_arguments(
+        {"python": sys.executable, "source": str(Path(__file__).resolve().parents[2])},
+        "fulcrum.resident",
+        [str(request.instance.instance_root)],
+    )
+    os.execv(sys.executable, arguments)
+    raise AssertionError("exec returned")
 
 
 def _execute(request: ParsedRequest) -> dict[str, Any]:
     if request.command == ("serve",):
         return _serve(request).to_dict()
-    application = default_application()
-    if request.command in LOCAL_COMMANDS:
-        return application.dispatch(replace(request, offline=True)).to_dict()
-    is_read = request.command in READ_ONLY_COMMANDS
-    if request.offline or is_read:
-        if is_read:
-            try:
-                return request_sync(
-                    request.instance.socket_path,
-                    request.to_wire(),
-                    timeout=request.timeout,
-                )
-            except ControllerUnavailable:
-                return application.dispatch(replace(request, offline=True)).to_dict()
-        if request.instance.lock_path is None:
-            if request.command == ("recover", "repair"):
-                return application.dispatch(request).to_dict()
-            raise FulcrumError(
-                "CONFIG_INVALID",
-                "offline mutation requires a valid brain root",
-                exit_code=4,
-            )
-        with WriterLock(request.instance.lock_path):
-            return application.dispatch(request).to_dict()
+    if request.command in READ_ONLY_COMMANDS or request.command in LOCAL_COMMANDS:
+        return default_application().dispatch(request).to_dict()
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    output_file = tempfile.TemporaryFile(mode="w+t")
+    error_file = tempfile.TemporaryFile(mode="w+t")
+    child = subprocess.Popen(
+        [sys.executable, "-B", "-m", "fulcrum.worker"],
+        stdin=subprocess.PIPE,
+        stdout=output_file,
+        stderr=error_file,
+        text=True,
+        env=environment,
+        start_new_session=True,
+    )
     try:
-        return request_sync(
-            request.instance.socket_path, request.to_wire(), timeout=request.timeout
-        )
-    except ControllerTimedOut as error:
-        pending_operation = (
-            operation_id(request.request_id) if request.request_id is not None else None
-        )
-        next_command: tuple[str, ...]
-        if pending_operation is not None:
-            next_command = (
-                "fulcrum",
-                "operation",
-                "show",
-                pending_operation,
-                "--json",
-            )
-        else:
-            next_command = ("fulcrum",) + request.command + ("--json",)
+        child.communicate(json.dumps(request.to_wire()), timeout=request.timeout)
+    except subprocess.TimeoutExpired:
+        # Do not terminate a process that may already have committed an effect.
         raise FulcrumError(
             "WAIT_TIMEOUT",
-            "the controller continues this bounded request after the client deadline",
+            "operation continues independently of this client",
             exit_code=3,
             retryable=True,
             request_id=request.request_id,
-            operation_id=pending_operation,
-            next_command=next_command,
-        ) from error
-    except ControllerUnavailable as error:
-        raise FulcrumError(
-            "CONTROLLER_UNAVAILABLE",
-            str(error),
-            exit_code=4,
-            retryable=True,
-            request_id=request.request_id,
-            next_command=(
-                "fulcrum",
-                *request.command,
-                "--offline",
-                "--request-id",
-                str(request.request_id),
+            operation_id=(
+                operation_id(request.request_id) if request.request_id else None
             ),
-        ) from error
+            next_command=(
+                (
+                    "fulcrum",
+                    "operation",
+                    "show",
+                    operation_id(request.request_id),
+                    "--json",
+                )
+                if request.request_id
+                else None
+            ),
+        )
+    finally:
+        output_file.seek(0)
+        error_file.seek(0)
+        output, error = output_file.read(), error_file.read()
+        output_file.close()
+        error_file.close()
+    if not output:
+        raise FulcrumError(
+            "WORKER_FAILED",
+            error.strip() or "operation process exited without a result",
+            exit_code=4,
+        )
+    return json.loads(output)
 
 
 def _exit_code(result: dict[str, Any]) -> int:

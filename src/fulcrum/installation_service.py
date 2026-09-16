@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import json
 import plistlib
 import socket
 import subprocess
@@ -15,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fulcrum.configuration import ConfigurationManager
+from fulcrum.coordination import maintenance_operation
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.install import (
     InstalledService,
@@ -26,6 +29,7 @@ from fulcrum.install import (
 from fulcrum.ipc import ControllerTimedOut, ControllerUnavailable, request_sync
 from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_view
 from fulcrum.runtime_service import _runtime_call
+from fulcrum.transport import AppServerError
 
 
 def load_installed_services(instance_root: Path) -> dict[str, InstalledService]:
@@ -86,7 +90,37 @@ def service_status_result(request: ParsedRequest) -> dict[str, Any]:
             health = loaded
     except (OSError, ValueError):
         pass
+    from fulcrum.bootstrap import selection
+    from fulcrum.resident_client import exchange
+
+    try:
+        resident = asyncio.run(
+            exchange(
+                request.instance.instance_root / "resident.sock",
+                {"action": "health", "timeout": 1},
+            )
+        )
+    except Exception as error:
+        resident = {"available": False, "reason": str(error)}
+    try:
+        activation = json.loads(
+            (request.instance.instance_root / "activation.json").read_text()
+        )
+    except (OSError, ValueError):
+        activation = None
+    active = []
+    for path in (request.instance.instance_root / "active-operations").glob("*.json"):
+        try:
+            row = json.loads(path.read_text())
+            os.kill(row["pid"], 0)
+            active.append(row)
+        except (OSError, ValueError):
+            pass
     return {
+        "selected": selection(request.instance.instance_root),
+        "activation": activation,
+        "resident": resident,
+        "active_operations": active,
         "observed_at": _now(),
         "instance": str(request.instance.instance_root),
         "config": {
@@ -214,22 +248,15 @@ class ServiceService:
             )
             _stop_one(controller)
             controller_was_running = False
-        if arguments and not controller_was_running:
-            once = [*arguments, "--once"]
-            completed = subprocess.run(
-                once,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=max(30.0, request.timeout),
-            )
-            if completed.returncode != 0:
-                raise FulcrumError(
-                    "RECONCILIATION_FAILED",
-                    "pre-start reconciliation failed: "
-                    + (completed.stderr.strip() or completed.stdout.strip()),
-                    exit_code=4,
-                    retryable=True,
+        if not controller_was_running:
+            from fulcrum.activation import activate
+            from fulcrum.bootstrap import selection
+
+            if selection(request.instance.instance_root) is None:
+                activate(
+                    request.instance.instance_root,
+                    request.instance.config_path,
+                    dict(config["source"]),
                 )
         # Reconciliation ran with the retained pause. Clear it immediately
         # before launch so the new controller observes admission enabled.
@@ -239,7 +266,7 @@ class ServiceService:
         try:
             readiness = _wait_for_controller(
                 request,
-                request.instance.socket_path,
+                request.instance.instance_root / "resident.sock",
                 controller,
                 timeout=max(request.timeout, 1.0),
             )
@@ -277,6 +304,7 @@ class ServiceService:
         )
         return _operation_result(operation)
 
+    @maintenance_operation
     def stop(self, request: ParsedRequest) -> CommandResult:
         services = load_installed_services(request.instance.instance_root)
         controller = services.get("controller")
@@ -335,6 +363,39 @@ class ServiceService:
                         )
                 except FulcrumError:
                     raise
+        if (
+            not interrupt
+            and (request.instance.instance_root / "resident.sock").exists()
+        ):
+            from fulcrum.resident_client import exchange
+
+            facts = asyncio.run(
+                exchange(
+                    request.instance.instance_root / "resident.sock",
+                    {"action": "health"},
+                )
+            )
+            if facts["pending"]:
+                raise FulcrumError(
+                    "SERVICE_BUSY",
+                    "native requests must settle before resident handoff",
+                    exit_code=3,
+                    retryable=True,
+                )
+            for task in ledger.list_records(kind="task", limit=0):
+                thread_id = (task.fc or {}).get("thread_id")
+                if isinstance(thread_id, str):
+                    observed = _runtime_call(
+                        request,
+                        lambda runtime, value=thread_id: runtime.inspect_task(value),
+                    )
+                    if observed.active_turn or observed.pending_requests:
+                        raise FulcrumError(
+                            "SERVICE_BUSY",
+                            "active turns must settle before resident handoff",
+                            exit_code=3,
+                            retryable=True,
+                        )
         stopped = _stop_one(controller)
         operation = ledger.update_operation(
             operation,
@@ -524,18 +585,13 @@ def _wait_for_controller(
             input={},
             request_id=None,
             timeout=min(5.0, max(0.1, remaining)),
-            offline=False,
         )
         try:
-            response = request_sync(
-                socket_path,
-                probe.to_wire(),
-                timeout=probe.timeout,
+            from fulcrum.resident_client import exchange
+
+            response = asyncio.run(
+                exchange(socket_path, {"action": "health", "timeout": probe.timeout})
             )
-            if response.get("ok") is not True:
-                last_error = str(response.get("error") or "readiness probe failed")
-                time.sleep(0.1)
-                continue
             observed_pid = last_observation.pid
             stable_until = time.monotonic() + stability_seconds
             stable = True
@@ -560,7 +616,7 @@ def _wait_for_controller(
                 "probe_state": response.get("state"),
                 "stable_seconds": stability_seconds,
             }
-        except (ControllerUnavailable, ControllerTimedOut) as error:
+        except (ControllerUnavailable, ControllerTimedOut, AppServerError) as error:
             last_error = str(error)
         time.sleep(0.1)
     raise FulcrumError(

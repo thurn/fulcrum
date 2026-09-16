@@ -4,6 +4,11 @@ from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 import uuid
+import tempfile
+
+_TEMP = tempfile.TemporaryDirectory(prefix="fulcrum-tests-")
+BRAIN = Path(_TEMP.name) / "brain"
+BRAIN.mkdir()
 
 from fulcrum.contracts import ActorContext, InstanceContext, ParsedRequest
 from fulcrum.ledger import CommandObservation, Ledger, LedgerRecord
@@ -18,7 +23,7 @@ def request(command=("work", "update"), **changes):
         instance=InstanceContext(
             instance_root=Path("/unused/instance"),
             config_path=Path("/unused/brain/fulcrum.yaml"),
-            brain_root=Path("/unused/brain"),
+            brain_root=BRAIN,
             socket_path=Path("/unused/instance/controller.sock"),
             lock_path=Path("/unused/brain/.lock"),
             explicit_selection=True,
@@ -46,7 +51,7 @@ class MemoryLedger(Ledger):
     """Only record storage and explicit dependency rows; no command emulator."""
 
     def __init__(self, *records):
-        self.workspace = Path("/unused/brain")
+        self.workspace = BRAIN
         self.rows = {row.id: deepcopy(row) for row in records}
         self.edges = {}
         self.writes = []

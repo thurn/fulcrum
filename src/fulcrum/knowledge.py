@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -31,6 +33,7 @@ CONFIG_LEDGER_SYNC_NAMESPACE = uuid.UUID("17bc2d92-d45a-4f92-a8db-3469d4de82a7")
 
 
 class MemoryService:
+    @coordinated
     def list(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         scope = request.arguments.get("scope")
@@ -56,12 +59,14 @@ class MemoryService:
             }
         )
 
+    @coordinated
     def show(self, request: ParsedRequest) -> CommandResult:
         record = _memory(_ledger(request), str(request.arguments["id"]))
         view = _memory_view(record, include_text=True)
         assert view is not None
         return CommandResult.query(view)
 
+    @coordinated
     def set(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         config = _config(request)
@@ -146,6 +151,7 @@ class KnowledgeService:
     def __init__(self, publisher: IsolatedGitPublisher | None = None) -> None:
         self.publisher: IsolatedGitPublisher = publisher or IsolatedGitPublisher()
 
+    @coordinated
     def publish(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         identifier = str(request.arguments["bead"])
@@ -292,6 +298,7 @@ class KnowledgeService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def config_sync(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         _authorize_config_publication(request, ledger)

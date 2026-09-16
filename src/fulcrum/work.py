@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -43,6 +45,7 @@ PROGRESS_KINDS: set[str] = {"investigation", "source", "validation", "blocker"}
 
 
 class WorkService:
+    @coordinated
     def create(self, request: ParsedRequest) -> CommandResult:
         payload = dict(request.input)
         _known(
@@ -255,6 +258,7 @@ class WorkService:
             parent=parent,
         )
 
+    @coordinated
     def show(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = ledger.show(str(request.arguments["id"]))
@@ -264,6 +268,7 @@ class WorkService:
             )
         return CommandResult.query(work_view(ledger, record))
 
+    @coordinated
     def list(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         limit = int(request.arguments.get("limit", 20))
@@ -299,6 +304,7 @@ class WorkService:
                 break
         return CommandResult.query({"items": rows, "next_cursor": None})
 
+    @coordinated
     def children(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["id"])
@@ -313,6 +319,7 @@ class WorkService:
             }
         )
 
+    @coordinated
     def adopt(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["id"])
@@ -379,6 +386,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def update(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _owned_work(ledger, request, str(request.arguments["id"]))
@@ -441,6 +449,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def dependencies(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _owned_work(ledger, request, str(request.arguments["id"]))
@@ -497,6 +506,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def transfer(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["id"])
@@ -662,6 +672,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def close(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _owned_work(ledger, request, str(request.arguments["id"]))
@@ -739,6 +750,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def reopen(self, request: ParsedRequest) -> CommandResult:
         if request.actor.kind != "human":
             raise FulcrumError(
@@ -820,6 +832,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def progress(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.input.get("bead") or request.arguments.get("bead") or "")
@@ -867,6 +880,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def report(self, request: ParsedRequest) -> CommandResult:
         payload = dict(request.input)
         _known(
@@ -956,6 +970,7 @@ class WorkService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def context(self, request: ParsedRequest) -> CommandResult:
         bead_id = request.arguments.get("bead") or request.input.get("bead")
         if not bead_id:

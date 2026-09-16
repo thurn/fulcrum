@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import copy
 import io
 import json
@@ -39,7 +41,7 @@ TOP_LEVEL: set[str] = {
     "models",
     "policy",
     "knowledge",
-    "source_watch_root",
+    "source",
     "timing",
     "diagnostics",
     "resources",
@@ -93,7 +95,7 @@ def default_config(brain_root: Path) -> dict[str, Any]:
             "branch": None,
             "require_remote_sync": True,
         },
-        "source_watch_root": None,
+        "source": {"repository": None, "remote": "origin", "branch": "master"},
         "timing": {
             "intake_busy_seconds": 2,
             "intake_idle_seconds": 10,
@@ -268,9 +270,12 @@ class ConfigurationManager:
         _absolute(knowledge["root"], "knowledge.root")
         if not isinstance(knowledge["require_remote_sync"], bool):
             raise _invalid("knowledge.require_remote_sync", "must be boolean")
-        source_watch = effective["source_watch_root"]
-        if source_watch is not None:
-            _absolute(source_watch, "source_watch_root")
+        source = _mapping(effective["source"], "source")
+        _known(source, {"repository", "remote", "branch"}, "source")
+        if source["repository"] is not None:
+            _absolute(source["repository"], "source.repository")
+        _nonempty(source["remote"], "source.remote")
+        _nonempty(source["branch"], "source.branch")
 
         timing = _mapping(effective["timing"], "timing")
         _known(timing, set(default_config(brain_root)["timing"]), "timing")
@@ -361,6 +366,7 @@ class ConfigurationManager:
 
 
 class ConfigurationService:
+    @coordinated
     def show(self, request: ParsedRequest) -> CommandResult:
         manager = ConfigurationManager(request.instance.config_path)
         document, _ = manager.load()
@@ -372,6 +378,7 @@ class ConfigurationService:
             }
         )
 
+    @coordinated
     def validate(self, request: ParsedRequest) -> CommandResult:
         manager = ConfigurationManager(request.instance.config_path)
         document, _ = manager.load()
@@ -388,9 +395,11 @@ class ConfigurationService:
             }
         )
 
+    @coordinated
     def set(self, request: ParsedRequest) -> CommandResult:
         return self._mutate(request, request.input)
 
+    @coordinated
     def policy_show(self, request: ParsedRequest) -> CommandResult:
         manager = ConfigurationManager(request.instance.config_path)
         document, _ = manager.load()
@@ -401,6 +410,7 @@ class ConfigurationService:
             }
         )
 
+    @coordinated
     def policy_set(self, request: ParsedRequest) -> CommandResult:
         return self._mutate(request, request.input, prefix="policy")
 
@@ -435,7 +445,7 @@ class ConfigurationService:
             }:
                 return _operation_command_result(operation)
         except LedgerFailure as error:
-            if not (request.offline and request.actor.kind == "human"):
+            if request.actor.kind != "human":
                 raise _ledger_public_error(error, request)
             manager.replace(document, original)
             return CommandResult(
@@ -450,7 +460,7 @@ class ConfigurationService:
                     "degraded_reason": str(error),
                 },
                 warnings=(
-                    "Beads was unavailable; the explicit offline human repair has no operation receipt.",
+                    "Beads was unavailable; the human configuration repair has no operation receipt.",
                 ),
             )
         manager.replace(document, original)
@@ -471,6 +481,7 @@ class ConfigurationService:
 
 
 class ProjectService:
+    @coordinated
     def list(self, request: ParsedRequest) -> CommandResult:
         effective = _effective(request)
         projects = effective["projects"]
@@ -484,6 +495,7 @@ class ProjectService:
             }
         )
 
+    @coordinated
     def show(self, request: ParsedRequest) -> CommandResult:
         effective = _effective(request)
         project_id = str(request.arguments["id"])
@@ -494,6 +506,7 @@ class ProjectService:
             {"id": project_id, **project, "provider_observation": "unverified"}
         )
 
+    @coordinated
     def add(self, request: ParsedRequest) -> CommandResult:
         project = dict(request.input)
         project_id = project.pop("id", None)
@@ -611,9 +624,11 @@ class ProjectService:
         )
         return _operation_command_result(operation)
 
+    @coordinated
     def enable(self, request: ParsedRequest) -> CommandResult:
         return self._set_enabled(request, True)
 
+    @coordinated
     def disable(self, request: ParsedRequest) -> CommandResult:
         return self._set_enabled(request, False)
 
@@ -656,6 +671,7 @@ class ProjectService:
         )
         return _operation_command_result(operation)
 
+    @coordinated
     def remove(self, request: ParsedRequest) -> CommandResult:
         project_id = str(request.arguments["id"])
         manager = ConfigurationManager(request.instance.config_path)

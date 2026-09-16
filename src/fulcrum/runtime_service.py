@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import unlocked
+
+from fulcrum.coordination import coordinated
+
 import asyncio
 import concurrent.futures
 import os
@@ -128,6 +132,7 @@ class RuntimeService:
             },
         )
 
+    @coordinated
     def capabilities(self, request: ParsedRequest) -> CommandResult:
         try:
             capabilities = _runtime_call(
@@ -145,6 +150,7 @@ class RuntimeService:
             )
         return CommandResult.query(capabilities.to_dict())
 
+    @coordinated
     def status(self, request: ParsedRequest) -> CommandResult:
         observed_at = utc_now()
         try:
@@ -178,6 +184,7 @@ class RuntimeService:
 
 
 class TaskService:
+    @coordinated
     def list(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         records = ledger.list_records(kind="task", limit=0)
@@ -213,6 +220,7 @@ class TaskService:
             }
         )
 
+    @coordinated
     def show(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -228,6 +236,7 @@ class TaskService:
         view["gaps"] = gaps + list(view.get("gaps", []))
         return CommandResult.query(view)
 
+    @coordinated
     def start(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["bead"])
@@ -460,6 +469,7 @@ class TaskService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def send(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -508,6 +518,7 @@ class TaskService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def output(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -545,6 +556,7 @@ class TaskService:
         )
         return CommandResult.query(result)
 
+    @coordinated
     def interrupt(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -591,6 +603,7 @@ class TaskService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def requests(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -614,6 +627,7 @@ class TaskService:
             }
         )
 
+    @coordinated
     def respond(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -637,6 +651,7 @@ class TaskService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def terminals(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -651,6 +666,7 @@ class TaskService:
         )
         return CommandResult.query(dict(result))
 
+    @coordinated
     def terminal_stop(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -732,15 +748,19 @@ class TaskService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def release(self, request: ParsedRequest) -> CommandResult:
         return self._lifecycle(request, "release")
 
+    @coordinated
     def archive(self, request: ParsedRequest) -> CommandResult:
         return self._lifecycle(request, "archive")
 
+    @coordinated
     def unarchive(self, request: ParsedRequest) -> CommandResult:
         return self._lifecycle(request, "unarchive")
 
+    @coordinated
     def delete(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         record = _find_task(ledger, str(request.arguments["id"]))
@@ -1240,13 +1260,21 @@ async def _send_turn(
         return found
 
 
+@unlocked
 def _runtime_call(
     request: ParsedRequest,
     action: Callable[[Runtime], Coroutine[Any, Any, T]],
 ) -> T:
     async def invoke() -> T:
         endpoint = _runtime_endpoint(request)
-        runtime = AppServerRuntime(endpoint)
+        from fulcrum.resident_client import ResidentTransport
+
+        runtime = AppServerRuntime(
+            endpoint,
+            transport=ResidentTransport(
+                request.instance.instance_root / "resident.sock"
+            ),
+        )
         try:
             await runtime.connect()
             return await action(runtime)

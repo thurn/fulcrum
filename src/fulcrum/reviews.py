@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import coordinated
+
 import json
 import threading
 from collections.abc import Mapping
@@ -36,6 +38,7 @@ class ReviewService:
 
     _reservation_lock = threading.RLock()
 
+    @coordinated
     def start(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["bead"])
@@ -332,6 +335,7 @@ class ReviewService:
         )
         return _operation_result(operation)
 
+    @coordinated
     def finish(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         task = _task(ledger, str(request.arguments["task"]))

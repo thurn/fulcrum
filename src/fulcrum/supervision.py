@@ -17,10 +17,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from watchfiles import awatch
 
 from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager
+from fulcrum.coordination import operation_lock, transition
 from fulcrum.contracts import (
     ActorContext,
     CommandResult,
@@ -59,12 +59,6 @@ from fulcrum.runtime import (
     Runtime,
     TaskFacts,
     TurnInput,
-)
-from fulcrum.source_refresh import (
-    maintenance_path,
-    maintenance_ready_path,
-    read_maintenance,
-    write_maintenance,
 )
 
 TERMINAL_OPERATION_STATES = {"completed", "failed", "cancelled"}
@@ -221,7 +215,14 @@ class ControllerSupervisor:
         if runtime is not None:
             self.runtime = runtime
         else:
-            self.runtime = AppServerRuntime(endpoint)
+            from fulcrum.resident_client import ResidentTransport
+
+            self.runtime = AppServerRuntime(
+                endpoint,
+                transport=ResidentTransport(
+                    request.instance.instance_root / "resident.sock"
+                ),
+            )
         self.health = HealthFile(
             request.instance.instance_root / "service-health.json", self.clock
         )
@@ -476,7 +477,6 @@ class ControllerSupervisor:
             instance=self.request.instance,
             request_id=None,
             timeout=self.request.timeout,
-            offline=True,
             runtime_submit=self._runtime_submit,
         )
         try:
@@ -581,7 +581,6 @@ class ControllerSupervisor:
                     uuid.uuid5(PLAN_COMPLETION_NAMESPACE, f"{root.id}:{boundary}")
                 ),
                 timeout=self.request.timeout,
-                offline=True,
                 runtime_submit=self._runtime_submit,
             )
             try:
@@ -722,7 +721,6 @@ class ControllerSupervisor:
             ),
             thread_id=marshal_thread,
             timeout=self.request.timeout,
-            offline=True,
             runtime_submit=self._runtime_submit,
         )
         async with self.external_slots:
@@ -818,7 +816,6 @@ class ControllerSupervisor:
                     )
                 ),
                 timeout=self.request.timeout,
-                offline=True,
                 runtime_submit=self._runtime_submit,
             )
             requests.append((record.id, request))
@@ -857,340 +854,6 @@ class ControllerSupervisor:
         future = asyncio.run_coroutine_threadsafe(invoke(), loop)
         return future.result(timeout=timeout)
 
-    async def serve(self) -> None:
-        self._loop = asyncio.get_running_loop()
-        self.application.replace_handler(("reconcile",), self.reconcile_from_ipc)
-        await self._startup_reconcile()
-        server = IpcServer(self.request.instance.socket_path, self._dispatch_from_ipc)
-        tasks = [
-            asyncio.create_task(server.run(), name="fulcrum-ipc"),
-            asyncio.create_task(
-                self._supervise("intake", self._intake_loop),
-                name="fulcrum-intake",
-            ),
-            asyncio.create_task(
-                self._supervise("reconciliation", self._reconciliation_loop),
-                name="fulcrum-reconciliation",
-            ),
-            asyncio.create_task(
-                self._supervise("runner", self._runner_loop),
-                name="fulcrum-runner",
-            ),
-            asyncio.create_task(
-                self._supervise("event", self._event_loop),
-                name="fulcrum-events",
-            ),
-            asyncio.create_task(
-                self._supervise("publication", self._publication_loop),
-                name="fulcrum-publication",
-            ),
-            asyncio.create_task(
-                self._supervise("maintenance", self._maintenance_loop),
-                name="fulcrum-maintenance",
-            ),
-        ]
-        if self.config.get("source_watch_root") is not None:
-            tasks.append(
-                asyncio.create_task(
-                    self._supervise("source-watch", self._source_watch_loop),
-                    name="fulcrum-source-watch",
-                )
-            )
-        try:
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-            for task in done:
-                exception = task.exception()
-                if exception is not None:
-                    raise exception
-        finally:
-            self._stop.set()
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            try:
-                await asyncio.wait_for(self._shutdown_cleanup(), 35)
-            except (TimeoutError, AppServerError, LedgerFailure):
-                pass
-            await self.runtime.close()
-
-    def reconcile_from_ipc(self, request: ParsedRequest) -> CommandResult:
-        loop = self._loop
-        if loop is None:
-            raise FulcrumError(
-                "CONTROLLER_UNAVAILABLE",
-                "controller reconciliation loop is not running",
-                exit_code=4,
-            )
-        future = asyncio.run_coroutine_threadsafe(
-            self.run_once(
-                bead_id=_optional_string(request.arguments.get("bead")),
-                operation_id=_optional_string(request.arguments.get("operation")),
-                keep_runtime=True,
-            ),
-            loop,
-        )
-        try:
-            summary = future.result(timeout=request.timeout)
-        except TimeoutError as error:
-            raise FulcrumError(
-                "WAIT_TIMEOUT",
-                "bounded reconciliation continues after the client timeout",
-                exit_code=3,
-                retryable=True,
-            ) from error
-        return CommandResult.query(summary.to_dict())
-
-    def _dispatch_from_ipc(self, request: ParsedRequest) -> CommandResult:
-        mutating = request.request_id is not None
-        active_operation = (
-            operation_id_from_request(request.request_id)
-            if request.request_id is not None
-            else None
-        )
-        if (
-            mutating
-            and read_maintenance(maintenance_path(self.request.instance.instance_root))
-            is not None
-        ):
-            raise FulcrumError(
-                "MAINTENANCE_IN_PROGRESS",
-                "installed source activation is waiting at a quiescent boundary",
-                exit_code=4,
-                retryable=True,
-            )
-        if mutating:
-            with self._ipc_lock:
-                self._active_ipc_mutations += 1
-                assert active_operation is not None
-                self._active_ipc_operations[active_operation] = (
-                    self._active_ipc_operations.get(active_operation, 0) + 1
-                )
-        try:
-            return self.application.dispatch(
-                replace(request, runtime_submit=self._runtime_submit)
-            )
-        finally:
-            if mutating:
-                with self._ipc_lock:
-                    self._active_ipc_mutations -= 1
-                    assert active_operation is not None
-                    remaining = self._active_ipc_operations[active_operation] - 1
-                    if remaining:
-                        self._active_ipc_operations[active_operation] = remaining
-                    else:
-                        self._active_ipc_operations.pop(active_operation)
-
-    async def _maintenance_loop(self) -> None:
-        request_path = maintenance_path(self.request.instance.instance_root)
-        ready_path = maintenance_ready_path(self.request.instance.instance_root)
-        while not self._stop.is_set():
-            requested = read_maintenance(request_path)
-            if requested is None:
-                ready_path.unlink(missing_ok=True)
-                await self._wait(0.1)
-                continue
-            operation_id = requested.get("operation_id")
-            if not isinstance(operation_id, str):
-                await self._wait(0.1)
-                continue
-            async with self.reconcile_lock:
-                while not self._stop.is_set():
-                    with self._ipc_lock:
-                        active = self._active_ipc_mutations
-                    current = read_maintenance(request_path)
-                    if current is None or current.get("operation_id") != operation_id:
-                        break
-                    if active == 0:
-                        write_maintenance(
-                            ready_path,
-                            {
-                                "operation_id": operation_id,
-                                "acknowledged_at": _format_time(self.clock.now()),
-                                "active_ipc_mutations": 0,
-                            },
-                        )
-                        self.health.success(
-                            "maintenance", {"operation_id": operation_id, "ready": True}
-                        )
-                        while not self._stop.is_set():
-                            current = read_maintenance(request_path)
-                            if (
-                                current is None
-                                or current.get("operation_id") != operation_id
-                            ):
-                                break
-                            await self._wait(0.1)
-                        break
-                    await self._wait(0.05)
-
-    async def _source_watch_loop(self) -> None:
-        configured = self.config.get("source_watch_root")
-        if not isinstance(configured, str):
-            return
-        source = Path(configured).resolve(strict=True)
-        instance = self.request.instance.instance_root.resolve(strict=False)
-        async for changes in awatch(source, debounce=500, step=100):
-            relevant = []
-            for _kind, raw_path in changes:
-                path = Path(raw_path).resolve(strict=False)
-                relative = path.relative_to(source)
-                if path.is_relative_to(instance) or any(
-                    part in {".git", ".venv", "__pycache__"} for part in relative.parts
-                ):
-                    continue
-                if path.suffix in {".py", ".toml", ".lock", ".json", ".yaml", ".md"}:
-                    relevant.append(str(path))
-            if not relevant:
-                continue
-            try:
-                detail = await asyncio.to_thread(
-                    _launch_source_updater,
-                    instance / "services" / "updater.plist",
-                )
-                self.health.success(
-                    "source-watch", {**detail, "change_count": len(relevant)}
-                )
-                if detail.get("state") == "started":
-                    return
-            except Exception as error:
-                self.health.failure("source-watch", error)
-
-    async def _startup_reconcile(self) -> None:
-        try:
-            await self.run_once()
-        except LedgerFailure as error:
-            # Keep the inspection socket available while the supervised loops prove
-            # whether an unavailable ledger is transient or requires a restart.
-            self.health.failure("reconciliation", error)
-        try:
-            publication = await asyncio.to_thread(self.publication.tick, self.request)
-            self.health.success("publication", publication)
-        except Exception as error:
-            self.health.failure("publication", error)
-
-    async def _supervise(self, name: str, loop: Callable[[], Awaitable[None]]) -> None:
-        failures = 0
-        while not self._stop.is_set():
-            try:
-                await loop()
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                failures += 1
-                self.health.failure(name, error)
-                if failures >= 3:
-                    raise RuntimeError(
-                        f"critical controller loop {name} failed {failures} times"
-                    ) from error
-                await asyncio.sleep(RETRY_DELAYS[min(failures - 1, 1)])
-
-    async def _intake_loop(self) -> None:
-        timing = _mapping(self.config["timing"])
-        while not self._stop.is_set():
-            records = await asyncio.to_thread(self.ledger.list_records, limit=0)
-            intake = [
-                item.id
-                for item in records
-                if item.kind is None and item.status != "closed"
-            ]
-            self.health.success("intake", {"discovered": len(intake)})
-            if intake:
-                await self.run_once(keep_runtime=True)
-            delay = float(
-                timing["intake_busy_seconds"]
-                if intake
-                else timing["intake_idle_seconds"]
-            )
-            await self._wait(delay)
-
-    async def _reconciliation_loop(self) -> None:
-        interval = float(_mapping(self.config["timing"])["reconcile_seconds"])
-        while not self._stop.is_set():
-            await self.run_once(keep_runtime=True)
-            await self._wait(interval)
-
-    async def _runner_loop(self) -> None:
-        interval = float(_mapping(self.config["timing"])["reconcile_seconds"])
-        while not self._stop.is_set():
-            self.health.success("runner", {"pending": 0})
-            await self._wait(interval)
-
-    async def _publication_loop(self) -> None:
-        cadence = float(_mapping(self.config["brain"])["push_interval_seconds"])
-        while not self._stop.is_set():
-            result = await asyncio.to_thread(self.publication.tick, self.request)
-            self.health.success("publication", result)
-            delay = cadence
-            command_result = result.get("result")
-            if isinstance(command_result, Mapping):
-                operation = command_result.get("result")
-                planned = (
-                    operation.get("planned") if isinstance(operation, Mapping) else None
-                )
-                retry_at = (
-                    planned.get("next_retry_at")
-                    if isinstance(planned, Mapping)
-                    else None
-                )
-                if isinstance(retry_at, str):
-                    delay = min(
-                        cadence,
-                        max(
-                            0.1,
-                            (_parse_time(retry_at) - self.clock.now()).total_seconds(),
-                        ),
-                    )
-            await self._wait(delay)
-
-    async def _event_loop(self) -> None:
-        silence = float(_mapping(self.config["timing"])["event_silence_seconds"])
-        await self.runtime.connect()
-        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=256)
-
-        async def read() -> None:
-            async for event in self.runtime.events():
-                if queue.full():
-                    queue.get_nowait()
-                queue.put_nowait(event)
-
-        reader = asyncio.create_task(read(), name="fulcrum-runtime-events")
-        try:
-            while not self._stop.is_set():
-                next_event = asyncio.create_task(queue.get())
-                done, _ = await asyncio.wait(
-                    {next_event, reader},
-                    timeout=silence,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if reader in done:
-                    next_event.cancel()
-                    await asyncio.gather(next_event, return_exceptions=True)
-                    exception = reader.exception()
-                    if exception is not None:
-                        raise exception
-                    raise RuntimeError("runtime event reader stopped")
-                if next_event not in done:
-                    next_event.cancel()
-                    await asyncio.gather(next_event, return_exceptions=True)
-                    await self._silence_inspection()
-                    self.health.success("event", {"silence_inspection": True})
-                    continue
-                event = next_event.result()
-                await self._record_runtime_event(event)
-                self.health.success(
-                    "event", {"method": event.method, "observed_at": event.observed_at}
-                )
-        finally:
-            reader.cancel()
-            await asyncio.gather(reader, return_exceptions=True)
-
-    async def _wait(self, seconds: float) -> None:
-        try:
-            await asyncio.wait_for(self._stop.wait(), seconds)
-        except TimeoutError:
-            pass
-
     async def _inspect_tasks(self, tasks: Sequence[Any]) -> dict[str, TaskFacts]:
         async def inspect(thread_id: str) -> tuple[str, TaskFacts | None]:
             async with self.external_slots:
@@ -1226,7 +889,7 @@ class ControllerSupervisor:
         due = planned.get("next_retry_at") if isinstance(planned, Mapping) else None
         if isinstance(due, str) and self.clock.now() < _parse_time(due):
             return {**operation_view(operation), "advanced": False, "retry_due_at": due}
-        attempts = int(operation.operation.get("attempts") or 0)
+        attempts: int = int(operation.operation.get("attempts") or 0)
         if attempts >= MAX_SENDS:
             return {**operation_view(operation), "advanced": False, "exhausted": True}
         accepted = operation.operation.get("input")
@@ -1243,24 +906,35 @@ class ControllerSupervisor:
             "operation.cancel",
         }:
             return {**operation_view(operation), "advanced": False}
-        operation = await asyncio.to_thread(
-            self.ledger.update_operation, operation, attempts=attempts + 1
-        )
         try:
-            request = _restore_request(
+            request: ParsedRequest = _restore_request(
                 self.request,
                 command,
                 accepted,
                 _optional_string(operation.operation.get("request_id")),
             )
+
+            def execute() -> CommandResult:
+                assert request.request_id is not None
+                with operation_lock(self.ledger.workspace, request.request_id):
+                    with transition(self.ledger.workspace):
+                        self.ledger.update_operation(operation, attempts=attempts + 1)
+                    return self.application.dispatch(request)
+
             async with self.external_slots:
-                result = await asyncio.to_thread(self.application.dispatch, request)
+                result = await asyncio.to_thread(execute)
             return {
                 **operation_view(operation),
                 "advanced": True,
                 "result_state": result.state.value,
             }
         except FulcrumError as error:
+            if error.code == "OPERATION_BUSY":
+                return {
+                    **operation_view(operation),
+                    "advanced": False,
+                    "in_flight": True,
+                }
             return await self._record_retry_failure(operation, error)
         except LedgerFailure as error:
             return await self._record_retry_failure(operation, error)
@@ -1281,7 +955,7 @@ class ControllerSupervisor:
     async def _record_retry_failure(
         self, operation: OperationRecord, error: FulcrumError | LedgerFailure
     ) -> Mapping[str, Any]:
-        attempts = int(operation.operation.get("attempts") or 0)
+        attempts: int = int(operation.operation.get("attempts") or 0)
         uncertain = (
             error.uncertain
             if isinstance(error, LedgerFailure)
@@ -1636,7 +1310,6 @@ class ControllerSupervisor:
             instance=self.request.instance,
             request_id=request_id,
             timeout=self.request.timeout,
-            offline=True,
             runtime_submit=self._runtime_submit,
         )
         async with self.external_slots:
@@ -1666,7 +1339,6 @@ class ControllerSupervisor:
             thread_id=facts.id,
             ownership_operation=str(work.fc.get("ownership_operation")),
             timeout=self.request.timeout,
-            offline=True,
             runtime_submit=self._runtime_submit,
         )
         try:
@@ -1844,7 +1516,6 @@ class ControllerSupervisor:
             ),
             thread_id=facts.id,
             timeout=self.request.timeout,
-            offline=True,
             runtime_submit=self._runtime_submit,
         )
         operation, reused = await asyncio.to_thread(
@@ -1941,7 +1612,6 @@ class ControllerSupervisor:
                 )
             ),
             timeout=self.request.timeout,
-            offline=True,
         )
         operation, reused = await asyncio.to_thread(
             self.ledger.create_operation,
@@ -2021,7 +1691,6 @@ class ControllerSupervisor:
             thread_id=facts.id,
             ownership_operation=acquisition,
             timeout=self.request.timeout,
-            offline=True,
         )
         operation, reused = await asyncio.to_thread(
             self.ledger.create_operation,
@@ -2104,7 +1773,6 @@ class ControllerSupervisor:
             request_id=request_id,
             thread_id=marshal_thread,
             timeout=self.request.timeout,
-            offline=True,
         )
         operation, reused = await asyncio.to_thread(
             self.ledger.create_operation,
@@ -2189,62 +1857,6 @@ class ControllerSupervisor:
             "released_idle_subscriptions": released,
         }
 
-    async def _silence_inspection(self) -> None:
-        records = await asyncio.to_thread(
-            self.ledger.list_records, kind="task", limit=0
-        )
-        await self._inspect_tasks(records)
-
-    async def _shutdown_cleanup(self) -> None:
-        records = await asyncio.to_thread(
-            self.ledger.list_records, kind="task", limit=0
-        )
-        unresolved: list[str] = []
-        released: list[str] = []
-        for task in records:
-            fc = task.fc or {}
-            thread_id = _thread_id(fc)
-            facts = await self.runtime.inspect_task(thread_id)
-            if facts.active_turn is not None:
-                unresolved.append(thread_id)
-                continue
-            await self.runtime.release(thread_id)
-            released.append(thread_id)
-        flush_request = replace(
-            self.request,
-            command=("ledger", "sync"),
-            arguments={},
-            input={},
-            request_id=str(
-                uuid.uuid5(
-                    PUBLICATION_SHUTDOWN_NAMESPACE,
-                    _format_time(self.clock.now()),
-                )
-            ),
-            offline=True,
-        )
-        publication_flush: Mapping[str, Any]
-        try:
-            flushed = await asyncio.wait_for(
-                asyncio.to_thread(self.publication.flush, flush_request), 30
-            )
-            publication_flush = flushed.to_dict()
-        except Exception as error:
-            publication_flush = {
-                "state": "failed",
-                "local_work_preserved": True,
-                "error": str(error),
-            }
-        self.health.success(
-            "runner",
-            {
-                "shutdown": "drained",
-                "unresolved_active_tasks": unresolved,
-                "released_idle_subscriptions": released,
-                "publication_flush": publication_flush,
-            },
-        )
-
     async def _record_runtime_event(self, event: Any) -> None:
         thread_id = event.params.get("threadId") or event.params.get("thread_id")
         if not isinstance(thread_id, str):
@@ -2274,58 +1886,6 @@ class ControllerSupervisor:
             "observed_at": event.observed_at,
         }
         await asyncio.to_thread(self.ledger.update_fc, matches[0].id, fc)
-
-
-def _launch_source_updater(definition_path: Path) -> dict[str, Any]:
-    """Kick a separate launchd job so controller shutdown cannot kill the updater."""
-
-    try:
-        with definition_path.open("rb") as stream:
-            definition = plistlib.load(stream)
-    except (OSError, plistlib.InvalidFileException) as error:
-        raise RuntimeError(
-            f"source updater definition is unavailable: {error}"
-        ) from error
-    label = definition.get("Label") if isinstance(definition, Mapping) else None
-    arguments = (
-        definition.get("ProgramArguments") if isinstance(definition, Mapping) else None
-    )
-    if not isinstance(label, str) or not isinstance(arguments, list):
-        raise RuntimeError("source updater definition is invalid")
-    expected = tuple(str(item) for item in arguments)
-    observed = inspect_service(label)
-    domain = f"gui/{os.getuid()}"
-    if observed.running:
-        return {"label": label, "state": "coalesced", "pid": observed.pid}
-    if observed.loaded and observed.program_arguments != expected:
-        stopped = subprocess.run(
-            ["launchctl", "bootout", f"{domain}/{label}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if stopped.returncode != 0:
-            raise RuntimeError(stopped.stderr.strip() or stopped.stdout.strip())
-        observed = inspect_service(label)
-    if not observed.loaded:
-        loaded = subprocess.run(
-            ["launchctl", "bootstrap", domain, str(definition_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if loaded.returncode != 0:
-            raise RuntimeError(loaded.stderr.strip() or loaded.stdout.strip())
-    started = subprocess.run(
-        ["launchctl", "kickstart", "-k", f"{domain}/{label}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if started.returncode != 0:
-        raise RuntimeError(started.stderr.strip() or started.stdout.strip())
-    current = inspect_service(label)
-    return {"label": label, "state": "started", "pid": current.pid}
 
 
 class ReconciliationService:
@@ -2370,7 +1930,6 @@ def _restore_request(
         thread_id=_optional_string(accepted.get("thread_id")),
         ownership_operation=_optional_string(accepted.get("ownership_operation")),
         timeout=template.timeout,
-        offline=True,
         runtime_submit=template.runtime_submit,
     )
 

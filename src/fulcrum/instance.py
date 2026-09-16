@@ -93,7 +93,7 @@ def resolve_instance(
         if not allow_broken_config:
             raise
         brain_root = None
-    lock_path = brain_root / ".fulcrum-controller.lock" if brain_root else None
+    lock_path = brain_root / ".fulcrum-locks" / "maintenance" if brain_root else None
     return InstanceContext(
         instance_root=instance_root,
         config_path=config_path,

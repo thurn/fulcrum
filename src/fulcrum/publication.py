@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from fulcrum.coordination import unlocked
+
+from fulcrum.coordination import coordinated
+
 import json
 import subprocess
 import tempfile
@@ -148,6 +152,7 @@ class DoltPublicationAdapter:
         self._bd_text(("dolt", "commit", "-m", message), mutating=True)
         return self.status()
 
+    @unlocked
     def push(self, target_commit: str) -> None:
         self._bd_text(("dolt", "push", "--remote", self.remote), mutating=True)
         if self.after_push is not None:
@@ -286,6 +291,7 @@ class DoltPublicationAdapter:
             )
         return completed.stdout.strip()
 
+    @unlocked
     def _run(
         self,
         command: Sequence[str],
@@ -346,6 +352,7 @@ class LedgerPublicationService:
         self.now: Callable[[], datetime] = now or (lambda: datetime.now(timezone.utc))
         self.adapter_factory = adapter_factory
 
+    @coordinated
     def status(self, request: ParsedRequest) -> CommandResult:
         try:
             ledger, config, adapter = self._components(request)
@@ -353,6 +360,7 @@ class LedgerPublicationService:
         except DoltPublicationError as error:
             raise _public_error(error, request) from error
 
+    @coordinated
     def sync(self, request: ParsedRequest) -> CommandResult:
         try:
             ledger, config, adapter = self._components(request)
@@ -360,6 +368,7 @@ class LedgerPublicationService:
         except DoltPublicationError as error:
             raise _public_error(error, request) from error
 
+    @coordinated
     def flush(self, request: ParsedRequest) -> CommandResult:
         """Flush current work without granting a fresh exhausted retry budget."""
 
@@ -369,6 +378,7 @@ class LedgerPublicationService:
         except DoltPublicationError as error:
             raise _public_error(error, request) from error
 
+    @coordinated
     def tick(self, request: ParsedRequest) -> dict[str, Any]:
         ledger, config, adapter = self._components(request)
         observed = self.inspect(ledger, config, adapter, mark_pending=True)
@@ -395,7 +405,6 @@ class LedgerPublicationService:
                             f"automatic:{publication.get('operation_id')}",
                         )
                     ),
-                    offline=True,
                 )
                 result = self.synchronize(
                     automatic, ledger, config, adapter, explicit=False
@@ -430,7 +439,6 @@ class LedgerPublicationService:
                             f"recovered:{retained.id}:{refreshed.get('grant')}",
                         )
                     ),
-                    offline=True,
                 )
                 result = self.synchronize(
                     automatic, ledger, config, adapter, explicit=False
@@ -460,7 +468,6 @@ class LedgerPublicationService:
                             f"config:{publication['pending_since']}",
                         )
                     ),
-                    offline=True,
                 )
                 config_result = KnowledgeService().config_sync(config_request).to_dict()
                 ledger, config, adapter = self._components(request)
@@ -484,7 +491,6 @@ class LedgerPublicationService:
                         f"automatic:{publication['pending_since']}",
                     )
                 ),
-                offline=True,
             )
             result = self.synchronize(
                 automatic, ledger, config, adapter, explicit=False
@@ -501,6 +507,7 @@ class LedgerPublicationService:
             "status": observed,
         }
 
+    @coordinated
     def reconcile(
         self, request: ParsedRequest, target: OperationRecord
     ) -> CommandResult:
@@ -523,6 +530,7 @@ class LedgerPublicationService:
         )
         return self.synchronize(sync_request, ledger, config, adapter, explicit=False)
 
+    @coordinated
     def synchronize(
         self,
         request: ParsedRequest,

@@ -5,11 +5,14 @@ from contextvars import ContextVar
 from pathlib import Path
 import sys
 
+_python = ContextVar("python", default=None)
 _launcher = ContextVar("launcher", default=None)
 
 
 def _audit(event, args):
     if event == "subprocess.Popen":
+        if _python.get() is not None and args[1] == _python.get():
+            return
         allowed = _launcher.get()
         if (
             allowed is not None
@@ -33,3 +36,15 @@ def local_launcher_stub(script: Path):
         yield
     finally:
         _launcher.reset(token)
+
+
+@contextmanager
+def local_python(command):
+    """Allow this exact local interpreter command for process-boundary tests."""
+    if command[:3] != [sys.executable, "-B", "-c"]:
+        raise AssertionError("local Python probe must use the test interpreter")
+    token = _python.set(command)
+    try:
+        yield
+    finally:
+        _python.reset(token)

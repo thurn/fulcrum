@@ -85,7 +85,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         config_path=target.resolve(strict=False),
         brain_root=brain_root,
         socket_path=request.instance.instance_root / "controller.sock",
-        lock_path=brain_root / ".fulcrum-controller.lock",
+        lock_path=brain_root / ".fulcrum-locks" / "maintenance",
         explicit_selection=request.instance.explicit_selection,
     )
     setup_request = ParsedRequest(
@@ -96,7 +96,6 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         instance=instance,
         request_id=request.request_id,
         timeout=request.timeout,
-        offline=True,
     )
     created: list[str] = []
     capabilities: dict[str, Any] = {}
@@ -352,8 +351,8 @@ def _prepare_configuration(
         )
     config = default_config(brain_root)
     _merge(config, supplied)
-    if "source_watch_root" not in supplied:
-        config["source_watch_root"] = str(
+    if "source" not in supplied:
+        config["source"]["repository"] = str(
             installation_source_root().resolve(strict=True)
         )
     _resolve_missing_executables(config)
@@ -487,7 +486,7 @@ def _install_discovery_link(instance_root: Path, target: Path) -> None:
         temporary.symlink_to(target.resolve(strict=False))
         os.replace(temporary, link)
     brain_root = target.parent.resolve(strict=False)
-    lock_target = brain_root / ".fulcrum-controller.lock"
+    lock_target = brain_root / ".fulcrum-locks" / "maintenance"
     lock_link = instance_root / "controller.lock"
     if lock_link.is_symlink() and lock_link.resolve(strict=False) == lock_target:
         return

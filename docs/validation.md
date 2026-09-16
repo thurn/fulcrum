@@ -30,8 +30,8 @@ mocked external adapter results. Coverage prioritizes request reuse and conflict
 ownership, dependencies, capacity and admission, exact recovery matching, delivery
 evidence, runtime protocols, CLI contracts, and resource cleanup boundaries.
 Small temporary-file and local-socket tests remain where they test those interfaces.
-Unexpected process execution fails immediately; the only exception is the launcher
-test's copied shell script invoking its local argument-printing stub.
+Unexpected process execution fails immediately; exceptions are the launcher
+stub and exact local Python commands for source-pinning and process-lock tests.
 
 Beads, Dolt, Git, Tollgate, Codex, remote services, and model calls are not required
 to run the tests. These checks do not establish live provider compatibility or
