@@ -8,6 +8,11 @@ to agents; a small Unix-socket broker holds connections, waits, and timers.
 Required, trusted Codex command hooks supply lifecycle observations, restore
 role context, and capture native tool results through the same fresh processes.
 
+Developing Fulcrum using Fulcrum must retain the existing rapid iteration loop:
+commit ordinary changes to local master, and the next operation uses them within
+seconds, without installation, a manual rebuild, activation, or restart. Stock
+Desktop integration must preserve this invariant, not trade it for convenience.
+
 Users who do not want the experimental WebSockets/App Server API should retain
 Fulcrum's intake, implementation, review, and delivery workflow inside Desktop.
 **Beads** is Fulcrum's issue-backed durable ledger; an individual issue is a
@@ -198,6 +203,55 @@ timeout returns the operation locator without killing a possibly successful
 mutation. Beads-only inspection and repair remain possible with the broker
 stopped. Ordinary source edits require no installation, activation, remote push
 completion, or resident restart. Skills retain direct links to local master.
+
+### Live iteration is a required invariant
+
+Preserve the existing source-following launch path, including its automatic
+immutable source preparation and reuse of unchanged dependencies. Neither MCP
+nor hooks introduce a separately installed copy of Fulcrum. A local master
+commit is sufficient; remote publication is not an execution gate.
+
+- Every business operation reached through MCP, a hook, a watcher, or recovery
+  resolves local master before importing application code. Long-lived MCP
+  instances and the broker must not import or cache business handlers, policy,
+  prompt templates, model selection, or action-compilation logic.
+- Keep MCP tool definitions and saved Marshal/schedule prompts focused on the
+  calling protocol. Fresh CLI results and hook context supply current policy
+  and instructions. An ordinary policy or formula edit must not require a new
+  tool schema, recreating a task, updating its saved prompt, or redoing setup.
+- Hook commands keep their configured source-following launcher. Changing a
+  handler's implementation does not change its trusted hook definition and must
+  not require reinstalling or re-trusting that definition.
+- A running operation keeps its pinned source and assets. Already-issued native
+  actions keep their recorded arguments. Instructions already delivered to an
+  agent are not retroactively replaced; subsequent protocol calls and context
+  hooks supply the current instructions within the existing role authority.
+
+The long-wait duration and hourly recovery cadence are not source-refresh
+intervals. No update waits for either timer. For example:
+
+```text
+Marshal remains parked in the same MCP connection
+commit a completion-policy change to local master
+worker calls finish -> fresh CLI uses the new commit
+broker wakes Marshal -> fresh CLI computes the next instruction
+the older running operation and its source lease remain undisturbed
+```
+
+This guarantees freshness at the next operation boundary, not an immediate
+rewrite of every active agent's context or a forced wake when there is no work.
+If preparing the new source fails, report that failure; never silently execute
+the previous behavior to keep a connection looking healthy.
+
+Retain the existing local target of p95 below one second from a completed local
+commit to new behavior in a fresh operation with unchanged dependencies and
+state contracts. The recorded launcher baseline is 0.890 seconds p95 across 20
+disposable-repository trials; it is not a measurement of the proposed MCP/hook
+path. Measure source preparation and local invocation separately from model,
+Beads, provider, and native task latency, using a minimal behavior/asset probe
+comparable to the existing measurement. Include MCP forwarding and hook dispatch
+overhead in the new local-path measurements. A regression must be corrected
+before claiming live-iteration parity.
 
 ## Required Codex hooks
 
@@ -1188,6 +1242,7 @@ external providers. The normal repository check remains provider-independent.
 | Hook deadlines, duplicate callbacks, missed results, and one bounded Stop correction preserve outstanding effects | Report hook protocol failure; no blind retry or completion inferred from callback receipt. |
 | Thirty-minute wait returns an event promptly and renews before timeout | Report long-wait capability failure; no silent short polling substitute. |
 | Another MCP client can report while Marshal waits | Report transport concurrency failure; do not serialize the whole instance behind a parked request. |
+| Ordinary local-master changes reach the next MCP and hook operation within the live-iteration target, preserving existing connections and operations | Refuse live-iteration readiness; do not substitute installation, manual activation, or periodic source refresh. |
 | Native IDs and assignment can be registered before worker edits | Refuse dispatch readiness. |
 | Initial and updated task titles preserve the required role/emoji/bead-ID format | Admission stays closed; report normalization, persistence, or rename-tool failure. |
 | Worker can use the exact Tollgate worktree | Block the affected project and show the required access change. |
@@ -1249,6 +1304,15 @@ on their next invocation; an already running hook operation retains its source
 lease. Remove the old owned compaction-only hook when installing the complete
 handler set, without removing another instance's handlers. Re-trust/re-probe only
 actual hook-definition changes, not ordinary handler implementation edits.
+
+Keep maintenance exceptions narrow and explicit. Dependency changes may prepare
+a new isolated environment; breaking durable-state changes require the existing
+fenced migration; broker/MCP transport implementation changes require a safe
+connection handoff. Changes to the actual MCP tool surface or connection
+configuration may require reconnecting that MCP connection, and hook-definition
+changes require native trust review. None of these is an acceptable dependency
+of an ordinary business-logic, formula, or prompt-template edit. First-run
+bootstrap and the drained transport cutover are setup, not an editing workflow.
 
 ### Implementation handoff
 
@@ -1361,8 +1425,15 @@ operation boundaries without modifying production state.
     untouched.
 16. **Source freshness and isolation.** Commit a policy/instruction change to
     local master while another operation and MCP wait remain active. The next
-    fresh operation uses the new commit; the older operation retains consistent
-    imports/assets. Break source preparation and verify visible failure rather
+    MCP operation and hook invocation use the new commit; the older operation
+    retains consistent imports/assets and an issued action retains its exact
+    arguments. Repeat with no Git remote, no install/build/activation command,
+    unchanged MCP and hook configuration, and unchanged running connections.
+    Record 20 trials of the minimal behavior/asset probe separately for CLI,
+    MCP forwarding, and hook invocation; report preparation and invocation
+    times and verify the local p95 target below one second with unchanged
+    dependencies/state contracts. No trial waits for long-wait renewal or the
+    hourly schedule. Break source preparation and verify visible failure rather
     than stale fallback. One failed bead must not stop another bead's handoff.
 17. **Task naming.** Verify leader and worker titles against Fulcrum's formatter.
     Exercise Weaver entry naming, creation-time normalization, a later rename,
