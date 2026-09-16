@@ -73,7 +73,6 @@ class WeaverFixture:
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.config = default_config(self.root)
         self.config["projects"] = {"toy": {"root": str(self.root), "enabled": True}}
-        self.config["timing"]["marshal_coalesce_seconds"] = 0
         self.native = NativeFixture()
         self.ledger = FormulaLedger(
             record("fc-system", kind="system", marshal_thread="marshal"),

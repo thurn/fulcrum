@@ -722,27 +722,19 @@ class ControllerSupervisor:
                 "reason": "one Marshal decision is outstanding or requires inspection",
             }
         now = self.clock.now()
-        if not isinstance(pending, Mapping) or pending.get("kind") != brief["kind"]:
+        selected_ids = [row["bead_id"] for row in brief["rows"]]
+        if (
+            not isinstance(pending, Mapping)
+            or pending.get("kind") != brief["kind"]
+            or pending.get("selected_ids") != selected_ids
+        ):
             pending = {
                 "kind": brief["kind"],
                 "first_seen_at": _format_time(now),
-                "selected_ids": [row["bead_id"] for row in brief["rows"]],
+                "selected_ids": selected_ids,
             }
             fc["pending_decision"] = pending
             await asyncio.to_thread(self.ledger.update_fc, control.id, fc)
-            return {
-                "kind": "marshal_decision",
-                "started": False,
-                "reason": "coalescing compatible judgment events",
-                "eligible_at": _format_time(
-                    now
-                    + timedelta(
-                        seconds=float(
-                            _mapping(config["timing"])["marshal_coalesce_seconds"]
-                        )
-                    )
-                ),
-            }
         retry_at = pending.get("retry_at")
         if isinstance(retry_at, str) and now < _parse_time(retry_at):
             return {
@@ -750,15 +742,6 @@ class ControllerSupervisor:
                 "started": False,
                 "reason": "waiting to retry unavailable leadership",
                 "eligible_at": retry_at,
-            }
-        first_seen = _parse_time(str(pending["first_seen_at"]))
-        coalesce = float(_mapping(config["timing"])["marshal_coalesce_seconds"])
-        if (now - first_seen).total_seconds() < coalesce:
-            return {
-                "kind": "marshal_decision",
-                "started": False,
-                "reason": "coalescing compatible judgment events",
-                "eligible_at": _format_time(first_seen + timedelta(seconds=coalesce)),
             }
         request = ParsedRequest(
             command=("marshal", "request"),

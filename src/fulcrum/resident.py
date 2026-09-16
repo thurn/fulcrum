@@ -159,6 +159,7 @@ class Resident:
         if kind in self.jobs and not self.jobs[kind].done():
             return False
         task = asyncio.create_task(self.job(kind))
+        task.add_done_callback(lambda _: self.wake.set())
         self.jobs[kind] = task
         return True
 

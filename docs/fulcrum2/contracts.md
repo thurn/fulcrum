@@ -1771,7 +1771,6 @@ timing:
   event_silence_seconds: 120
   checkpoint_seconds: 600
   stalled_seconds: 1800
-  marshal_coalesce_seconds: 2
   archive_idle_seconds: 600
 diagnostics:
   retention_days: 14

@@ -600,16 +600,26 @@ class Ledger:
     ) -> tuple[OperationRecord, bool]:
         if request.request_id is None:
             raise ValueError("mutations require a request ID")
-        record_id = operation_id(request.request_id)
-        accepted = accepted_input(request)
-        existing = self.show(record_id)
-        if existing is not None:
+        record_id: str = operation_id(request.request_id)
+        accepted: dict[str, Any] = accepted_input(request)
+
+        def reused_operation() -> tuple[OperationRecord, bool]:
+            existing = self.show(record_id)
+            if existing is None or existing.kind != "operation":
+                raise FulcrumError(
+                    "REQUEST_CONFLICT",
+                    f"request ID {request.request_id} already exists without a matching operation",
+                    exit_code=5,
+                    request_id=request.request_id,
+                    operation_id=record_id,
+                    details={"operation_id": record_id},
+                )
             operation = OperationRecord.from_record(existing)
-            fc = operation.operation
+            retained = operation.operation
             if (
-                fc.get("request_id") != request.request_id
-                or fc.get("command") != request.command_name.replace(" ", ".")
-                or fc.get("input") != accepted
+                retained.get("request_id") != request.request_id
+                or retained.get("command") != request.command_name.replace(" ", ".")
+                or retained.get("input") != accepted
             ):
                 raise FulcrumError(
                     "REQUEST_CONFLICT",
@@ -620,6 +630,7 @@ class Ledger:
                     details={"operation_id": record_id},
                 )
             return operation, True
+
         responsible = owner or request.thread_id or request.actor.task_id or "HUMAN"
         fc = {
             "kind": "operation",
@@ -639,14 +650,19 @@ class Ledger:
             "next_action": next_action,
             "created_at": utc_now(),
         }
-        created = self.create_record(
-            record_id=record_id,
-            kind="operation",
-            title=f"Operation: {request.command_name}",
-            description=f"Receipt for {request.command_name} request {request.request_id}.",
-            owner=responsible,
-            fc=fc,
-        )
+        try:
+            created = self.create_record(
+                record_id=record_id,
+                kind="operation",
+                title=f"Operation: {request.command_name}",
+                description=f"Receipt for {request.command_name} request {request.request_id}.",
+                owner=responsible,
+                fc=fc,
+            )
+        except FulcrumError as error:
+            if error.code != "REQUEST_CONFLICT":
+                raise
+            return reused_operation()
 
         return OperationRecord.from_record(created), False
 

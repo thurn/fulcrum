@@ -10,7 +10,7 @@ _TEMP = tempfile.TemporaryDirectory(prefix="fulcrum-tests-")
 BRAIN = Path(_TEMP.name) / "brain"
 BRAIN.mkdir()
 
-from fulcrum.contracts import ActorContext, InstanceContext, ParsedRequest
+from fulcrum.contracts import ActorContext, FulcrumError, InstanceContext, ParsedRequest
 from fulcrum.ledger import CommandObservation, Ledger, LedgerRecord
 
 
@@ -71,7 +71,11 @@ class MemoryLedger(Ledger):
         self, *, record_id, kind, title, description, owner, fc, **native
     ):
         if record_id in self.rows:
-            raise AssertionError(f"unexpected duplicate storage write: {record_id}")
+            raise FulcrumError(
+                "REQUEST_CONFLICT",
+                f"existing record {record_id} does not match planned creation",
+                exit_code=5,
+            )
         value = LedgerRecord.from_native(
             {
                 "id": record_id,

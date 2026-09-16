@@ -346,8 +346,6 @@ class WeaverTests(unittest.TestCase):
         finish, _ = self.ready()
         supervisor = self.supervisor()
         self.assertEqual(asyncio.run(supervisor._start_authorized_work()), [])
-        first = asyncio.run(supervisor._request_marshal_judgment({}))
-        self.assertFalse(first["started"])
         second = asyncio.run(supervisor._request_marshal_judgment({}))
         self.assertTrue(second["started"])
         self.assertEqual(len(self.f.native.turns), 1)
@@ -391,7 +389,6 @@ class WeaverTests(unittest.TestCase):
         self.ready()
         del self.f.ledger.rows["fc-marshal"]
         supervisor = self.supervisor()
-        asyncio.run(supervisor._request_marshal_judgment({}))
         failed = asyncio.run(supervisor._request_marshal_judgment({}))
         self.assertFalse(failed["started"])
         self.assertEqual(failed["state"], "failed")
@@ -407,7 +404,6 @@ class WeaverTests(unittest.TestCase):
     ):
         self.ready()
         supervisor = self.supervisor()
-        asyncio.run(supervisor._request_marshal_judgment({}))
         with patch.object(
             self.f.native,
             "start_turn",
