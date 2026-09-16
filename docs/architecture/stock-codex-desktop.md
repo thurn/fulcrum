@@ -610,6 +610,7 @@ and action envelope; managed workers use MCP for reports.
 | Interface | Contract |
 | --- | --- |
 | `bootstrap` | Run/recover deterministic setup and return the next native action or explicit user prerequisite. |
+| `pause` / `resume` | Human/Vizier-authorized CLI/MCP transitions with stable request IDs and a reason. Pause returns the retained boundary hold plus active assignments/in-flight effects; resume revalidates held work without clearing independent fences. |
 | `register_worker` | Bind the native task/host ID to the exact creation action and assignment before substantive work. |
 | `report_progress` | Persist meaningful progress and renew the assignment's reporting deadline. |
 | `finish` | Accept a role outcome, commit the transition, and return exact authorized follow-ups. |
@@ -882,12 +883,41 @@ dependent work continues. An interrupted creation or message remains issuing or
 uncertain; Stop never authorizes blind retry, releases a worker's reservation, or
 proves that its background processes ended.
 
-All wake claims, lease acquisition, hourly recovery, and dispatch check pause
-state under the lock. While paused, retain work and outcomes but issue no new
-work or wake mutations. Previously issued effects remain subject to
-reconciliation; read-only diagnostics and explicit recovery actions remain
-available without a coordination lease. Pausing the Desktop schedule stops its
-triggers; the durable Fulcrum pause stops workflow actions from every entry point.
+Pause holds work at its next workflow boundary. An already-running worker may
+finish its current assignment, including its local checks, and report progress,
+blockers, or its sealed outcome. Accept and retain those reports without
+dispatching the next role. Pause does not terminate running workers or revoke
+their current source-writing assignment midway through an edit.
+
+All wake claims, lease acquisition, hourly recovery, dispatch, and provider
+effect issuance check pause state under the writer lock. While paused, begin no
+new role, continuation/wake message, downstream provider submission, promotion,
+remote push, or worktree deletion. A provider watcher may observe and publish
+facts but cannot initiate the next delivery step. Enforce this in fresh CLI
+provider handlers as well as native action claims; native-tool hooks cannot
+guard provider calls made directly by Fulcrum. Explicit recovery authority does
+not implicitly bypass pause for a new delivery or cleanup mutation.
+
+Retain blocked follow-ups as pending obligations on their existing work beads,
+with pause as the reason; do not mark them failed, superseded, or delivered.
+Already-issued external operations may finish. Record their actual results and
+uncertainties, including a promotion that lands after pause, without starting
+its follow-up push or cleanup. Read-only inspection, result acceptance,
+diagnostics, and pause/resume remain available without a coordination lease.
+
+Pause and effect issuance serialize under the same lock. An issuance committed
+before pause remains in flight even if the external call lands afterward; a
+pending effect whose issuance has not committed is held. The pause result names
+active assignments and in-flight effects, so acknowledgment never promises
+instantaneous quiescence. A hook may still prevent an unexecuted native call,
+but only observed native rejection proves it did so.
+
+Explicit resume removes the workflow pause, not any independent YAML project
+pause or recovery fence. Revalidate held actions against current ownership,
+source, review approval, dependencies, and policy before issuing them. A sealed
+Warden outcome alone cannot authorize promotion of changed source. Pausing the
+Desktop schedule stops its triggers; the durable Fulcrum pause holds workflow
+boundaries from every entry point.
 
 Readiness verifies this distinction inside and outside an MCP wait. It does not
 require Desktop Stop to suppress future scheduled runs or messages. Native
@@ -951,6 +981,8 @@ source; delivery does not ask Warden to finish again.
 
 Fresh CLI operations continue to own provider submission, exact-source
 validation, promotion, remote synchronization when required, and cleanup.
+Each new downstream provider effect obeys the workflow-boundary pause contract;
+an accepted finish during pause retains the next step without executing it.
 Provider watchers publish their state changes to existing work. A successful
 native turn or notification is never promotion evidence. Changed source
 invalidates review under the existing rules. Cleanup failure after promotion
@@ -1477,3 +1509,12 @@ operation boundaries without modifying production state.
     runs: the next invocation uses local master with no reinstall/re-trust;
     the older operation keeps its source. A broken required handler produces a
     visible prerequisite while reports and read-only recovery remain usable.
+23. **Pause at workflow boundaries.** Pause during Executor edits, Warden review,
+    provider validation, promotion, and source synchronization in separate
+    trials. Active workers may finish and report, and already-issued effects
+    may settle; no next role, downstream submission, promotion, push, or cleanup
+    begins after the pause commit. Race pause against issuance under the writer
+    lock and verify the returned in-flight list. Accept Warden finish while
+    paused, change source before resume, and require renewed validation/review
+    instead of releasing stale promotion. Resume preserves independent project
+    pauses and recovery fences. Missed hooks cannot bypass CLI provider guards.
