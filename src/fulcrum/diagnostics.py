@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from fulcrum.configuration import ConfigurationManager, default_config
-from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
+from fulcrum.contracts import (
+    CommandResult,
+    CommandState,
+    ErrorInfo,
+    FulcrumError,
+    ParsedRequest,
+)
 from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_view
 from fulcrum.work import work_view
 
@@ -460,7 +466,7 @@ class DiagnosticService:
         )
         components.append(_runtime_component(request))
         loops = _loop_health(request, config, now)
-        return CommandResult.query({"components": components, "loops": loops})
+        return _doctor_result(components, loops)
 
     def logs(self, request: ParsedRequest) -> CommandResult:
         arguments = request.arguments
@@ -1052,6 +1058,34 @@ def _health(
         "affected_commands": list(affected_commands),
         "next_commands": [list(command) for command in next_commands],
     }
+
+
+def _doctor_result(
+    components: Sequence[Mapping[str, Any]], loops: Sequence[Mapping[str, Any]]
+) -> CommandResult:
+    result = {
+        "components": [dict(item) for item in components],
+        "loops": [dict(item) for item in loops],
+    }
+    issues = [
+        {"kind": kind, "name": item.get("name"), "state": item.get("state")}
+        for kind, items in (("component", components), ("loop", loops))
+        for item in items
+        if item.get("state") != "healthy"
+    ]
+    if not issues:
+        return CommandResult.query(result)
+    return CommandResult(
+        ok=False,
+        state=CommandState.FAILED,
+        result=result,
+        error=ErrorInfo(
+            code="HEALTH_CHECK_FAILED",
+            message="one or more Fulcrum components or loops are not healthy",
+            retryable=True,
+            details={"issues": issues},
+        ),
+    )
 
 
 def _loop_health(

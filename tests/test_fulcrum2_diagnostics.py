@@ -13,6 +13,7 @@ from fulcrum.contracts import CommandResult
 from fulcrum.diagnostics import (
     DiagnosticLog,
     DiagnosticService,
+    _doctor_result,
     _loop_health,
     _runtime_component,
 )
@@ -21,6 +22,23 @@ from tests.support import MemoryLedger, record, request
 
 
 class DiagnosticLogTest(unittest.TestCase):
+    def test_doctor_fails_when_any_component_or_loop_is_not_healthy(self) -> None:
+        unhealthy = _doctor_result(
+            [{"name": "runtime", "state": "unavailable"}],
+            [{"name": "reconciliation", "state": "healthy"}],
+        )
+        self.assertFalse(unhealthy.ok)
+        self.assertEqual(unhealthy.error.code, "HEALTH_CHECK_FAILED")
+        self.assertEqual(
+            unhealthy.error.details["issues"],
+            [{"kind": "component", "name": "runtime", "state": "unavailable"}],
+        )
+        healthy = _doctor_result(
+            [{"name": "runtime", "state": "healthy"}],
+            [{"name": "reconciliation", "state": "healthy"}],
+        )
+        self.assertTrue(healthy.ok)
+
     def test_health_retains_recovered_failure_episode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

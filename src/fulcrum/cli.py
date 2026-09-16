@@ -1030,6 +1030,7 @@ def _exit_code(result: dict[str, Any]) -> int:
         "CONFIG_NOT_FOUND",
         "CONFIG_INVALID",
         "DEPENDENCY_UNAVAILABLE",
+        "HEALTH_CHECK_FAILED",
     }:
         return 4
     return 2

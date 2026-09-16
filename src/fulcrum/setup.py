@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import os
 import shutil
@@ -10,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from fulcrum.configuration import ConfigurationManager, default_config
 from fulcrum.contracts import (
     CommandResult,
     CommandState,
+    ErrorInfo,
     FulcrumError,
     InstanceContext,
     ParsedRequest,
@@ -102,7 +104,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
     prior_services = load_installed_services(instance.instance_root)
     prior_controller = prior_services.get("controller")
     stopped_for_setup: str | None = None
-    if prior_controller is not None and inspect_service(prior_controller.label).running:
+    if prior_controller is not None and inspect_service(prior_controller.label).loaded:
         assert setup_request.request_id is not None
         stop_request = replace(
             setup_request,
@@ -116,7 +118,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         stopped_for_setup = _stop_controller_for_setup(stop_request)
     lock_path = instance.lock_path
     assert lock_path is not None
-    with WriterLock(lock_path):
+    with _setup_writer_lock(lock_path, setup_request.timeout):
         config, config_changed = _prepare_configuration(
             target,
             brain_root,
@@ -234,9 +236,14 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "stopped_for_setup": stopped_for_setup,
         }
         if required_failures:
-            result["failure_cleanup"] = _stop_new_setup_services(
-                installed_services, running_before
-            )
+            result["failure_cleanup"] = {
+                "scheduled": [
+                    name
+                    for name in ("runtime", "dolt")
+                    if installed_services.get(name) is not None
+                    and not running_before.get(name, False)
+                ]
+            }
             operation = ledger.update_operation(
                 operation,
                 state="failed",
@@ -250,6 +257,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
                 },
                 next_action="Repair the named capabilities and repeat the setup request.",
             )
+            _stop_new_setup_services(installed_services, running_before)
             return _setup_operation_result(operation)
         operation = ledger.update_operation(
             operation,
@@ -342,6 +350,27 @@ def _stop_controller_for_setup(request: ParsedRequest) -> str | None:
             if error.code != "OPERATION_BUSY" or time.monotonic() >= deadline:
                 raise
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+@contextlib.contextmanager
+def _setup_writer_lock(path: Path, timeout: float) -> Iterator[None]:
+    """Wait for an orphaned or final in-flight worker before bootstrap writes."""
+
+    deadline = time.monotonic() + max(1.0, timeout)
+    lock: WriterLock | None = None
+    while lock is None:
+        candidate = WriterLock(path)
+        try:
+            candidate.acquire()
+            lock = candidate
+        except FulcrumError as error:
+            if error.code != "WRITER_BUSY" or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _stop_new_setup_services(
@@ -822,10 +851,26 @@ def _setup_operation_result(operation: Any) -> CommandResult:
         if value in CommandState._value2member_map_
         else CommandState.RUNNING
     )
+    failure = operation.operation.get("error")
+    error = (
+        ErrorInfo(
+            code=str(failure.get("code") or "SETUP_FAILED"),
+            message=str(failure.get("message") or "setup failed"),
+            retryable=bool(failure.get("retryable", False)),
+            details=(
+                failure.get("details")
+                if isinstance(failure.get("details"), Mapping)
+                else None
+            ),
+        )
+        if isinstance(failure, Mapping)
+        else None
+    )
     return CommandResult(
         ok=state not in {CommandState.FAILED, CommandState.CANCELLED},
         state=state,
         operation_id=operation.id,
         request_id=str(operation.operation.get("request_id")),
         result=operation_view(operation),
+        error=error,
     )

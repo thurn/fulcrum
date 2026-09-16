@@ -41,6 +41,8 @@ from fulcrum.setup import (
     _runtime_and_leadership,
     _stop_controller_for_setup,
     _stop_new_setup_services,
+    _setup_operation_result,
+    _setup_writer_lock,
 )
 
 
@@ -278,6 +280,39 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertEqual(stop.call_count, 3)
         self.assertEqual(sleep.call_count, 2)
 
+    def test_setup_waits_for_final_worker_before_taking_writer_lock(self) -> None:
+        from fulcrum.contracts import FulcrumError
+
+        class Gate:
+            attempts = 0
+            released = False
+
+            def __init__(self, _path):
+                pass
+
+            def acquire(self):
+                Gate.attempts += 1
+                if Gate.attempts < 3:
+                    raise FulcrumError(
+                        "WRITER_BUSY",
+                        "writer busy",
+                        exit_code=4,
+                        retryable=True,
+                    )
+                return self
+
+            def release(self):
+                Gate.released = True
+
+        with (
+            patch("fulcrum.setup.WriterLock", Gate),
+            patch("fulcrum.setup.time.sleep") as sleep,
+            _setup_writer_lock(self.brain / "maintenance", 1.0),
+        ):
+            self.assertEqual(Gate.attempts, 3)
+        self.assertTrue(Gate.released)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_setup_creates_idle_leadership_without_model_turns(self) -> None:
         request = self.request()
         ledger = MagicMock()
@@ -318,6 +353,21 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         stop.assert_called_once_with(dolt)
         self.assertEqual(result["dolt"]["state"], "stopped")
         self.assertNotIn("runtime", result)
+
+    def test_failed_setup_result_exposes_capability_error(self) -> None:
+        operation = MagicMock(id="fc-operation")
+        operation.operation = {
+            "state": "failed",
+            "request_id": "request",
+            "error": {
+                "code": "CAPABILITY_UNAVAILABLE",
+                "message": "runtime is unavailable",
+                "retryable": True,
+            },
+        }
+        result = _setup_operation_result(operation)
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error.code, "CAPABILITY_UNAVAILABLE")
 
     def test_desktop_launcher_uses_fulcrum_runtime_command(self) -> None:
         checkout = self.root / "checkout"
