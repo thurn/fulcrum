@@ -20,6 +20,15 @@ from fulcrum.instance import resolve_instance
 
 @timed("worker.main")
 def main() -> int:
+    if len(sys.argv) > 1 and os.environ.get("FULCRUM_WORKER_SELECTED") != "1":
+        from fulcrum.bootstrap import main as launch
+
+        return launch(
+            "fulcrum.worker",
+            sys.argv[1:],
+            Path(sys.argv[2]),
+            Path(sys.argv[3]),
+        )
     source = os.environ.get("FULCRUM_SOURCE")
     descriptor = pin(Path(source)) if source else None
     active: Path | None = None

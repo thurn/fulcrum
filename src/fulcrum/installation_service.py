@@ -233,21 +233,8 @@ class ServiceService:
         arguments = _program_arguments(controller.definition)
         controller_observation = inspect_service(controller.label)
         controller_was_running = controller_observation.running
-        controller_was_current = controller_was_running and (
-            controller_observation.program_arguments == tuple(arguments)
-        )
-        if controller_was_running and not controller_was_current:
-            _set_service_pause(
-                request,
-                config,
-                {
-                    "state": "draining",
-                    "requested_at": _now(),
-                    "operation": operation.id,
-                },
-            )
-            _stop_one(controller)
-            controller_was_running = False
+        # Updating a launcher definition is not permission to replace a live
+        # connection owner. New arguments take effect after an explicit safe stop.
         if not controller_was_running:
             from fulcrum.activation import activate
             from fulcrum.bootstrap import selection
@@ -660,7 +647,11 @@ def _service_child_failure(result: CommandResult, action: str) -> dict[str, Any]
 def _start_one(service: InstalledService, *, endpoint: str | None) -> dict[str, Any]:
     observation = inspect_service(service.label)
     expected_arguments = tuple(_program_arguments(service.definition))
-    if observation.running and observation.program_arguments != expected_arguments:
+    if (
+        observation.running
+        and observation.program_arguments != expected_arguments
+        and service.name != "controller"
+    ):
         _stop_one(service)
         observation = inspect_service(service.label)
     if observation.running:

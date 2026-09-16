@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-import venv
 from collections.abc import Mapping, MutableMapping
 from dataclasses import replace
 from pathlib import Path
@@ -25,7 +24,6 @@ from fulcrum.contracts import (
 )
 from fulcrum.install import (
     InstallationError,
-    _package_contents,
     fulcrum2_service_definitions,
     install_fulcrum2_service_definitions,
     master_source_root,
@@ -41,7 +39,7 @@ from fulcrum.instance import DEFAULT_BRAIN, WriterLock
 from fulcrum.leadership import ensure_leadership
 from fulcrum.ledger import Ledger, LedgerFailure, operation_view
 from fulcrum.runtime import AppServerRuntime
-from fulcrum.source_refresh import ensure_recovery_environment
+from fulcrum.source_refresh import ensure_recovery_launcher
 from fulcrum.tollgate import Tollgate, TollgateError
 from fulcrum.publication import (
     DoltPublicationAdapter,
@@ -126,7 +124,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         _prepare_brain(brain_root, created)
         ordinary_remote = _git_remote_url(brain_root, str(config["brain"]["remote"]))
         _install_discovery_link(instance.instance_root, target)
-        controller, controller_changed = _install_controller_environment(
+        controller, controller_changed = _prepare_controller_launcher(
             instance.instance_root
         )
         definitions = fulcrum2_service_definitions(
@@ -172,7 +170,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "uncertain",
         }:
             return _setup_operation_result(operation)
-        recovery = ensure_recovery_environment(
+        recovery = ensure_recovery_launcher(
             instance.instance_root,
             master_source_root(),
             operation.id,
@@ -498,57 +496,11 @@ def _install_discovery_link(instance_root: Path, target: Path) -> None:
     os.replace(temporary_lock, lock_link)
 
 
-def _install_controller_environment(instance_root: Path) -> tuple[Path, bool]:
-    source = master_source_root().resolve(strict=True)
-    root = instance_root / "runtime"
-    current = root / "current"
-    source_package = source / "src" / "fulcrum" if (source / "src").is_dir() else source
-    if current.is_dir():
-        installed = next(current.glob("lib/python*/site-packages/fulcrum"), None)
-        executable = current / "bin" / "fulcrum"
-        if (
-            installed is not None
-            and executable.is_file()
-            and _package_contents(installed) == _package_contents(source_package)
-        ):
-            return executable, False
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    deployment = root / f"deployment-{uuid.uuid4().hex}"
-    try:
-        venv.EnvBuilder(with_pip=True).create(deployment)
-        completed = subprocess.run(
-            [str(deployment / "bin" / "pip"), "install", str(source)],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=180,
-        )
-        if completed.returncode != 0:
-            raise InstallationError(
-                "controller package installation failed: "
-                + (completed.stderr.strip() or completed.stdout.strip())
-            )
-        executable = deployment / "bin" / "fulcrum"
-        probe = subprocess.run(
-            [str(executable), "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=30,
-        )
-        if probe.returncode != 0:
-            raise InstallationError(
-                "installed controller probe failed: "
-                + (probe.stderr.strip() or probe.stdout.strip())
-            )
-        temporary = root / f".current.{os.getpid()}"
-        temporary.unlink(missing_ok=True)
-        temporary.symlink_to(deployment.name, target_is_directory=True)
-        os.replace(temporary, current)
-        return current / "bin" / "fulcrum", True
-    except Exception:
-        shutil.rmtree(deployment, ignore_errors=True)
-        raise
+def _prepare_controller_launcher(instance_root: Path) -> tuple[Path, bool]:
+    from fulcrum.source_refresh import ensure_launchers
+
+    controller, _, changed = ensure_launchers(instance_root)
+    return controller, changed
 
 
 def _initialize_beads(
@@ -668,8 +620,12 @@ def _beads_capability(ledger: Ledger, config: Mapping[str, Any]) -> dict[str, An
 
 
 def _asset_capability(controller: Path) -> dict[str, Any]:
-    package = controller.parent.parent
-    expected = [package / "lib", package / "bin" / "fulcrum"]
+    source = master_source_root()
+    expected = [
+        controller,
+        source / "src/fulcrum/formulas",
+        source / "src/fulcrum/role_fallbacks",
+    ]
     missing = [str(path) for path in expected if not path.exists()]
     return {"required": True, "available": not missing, "missing": missing}
 

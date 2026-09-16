@@ -1,36 +1,40 @@
 # Live iteration
 
-Fulcrum is developed using Fulcrum. Published master must become available to the
+Fulcrum is developed using Fulcrum. Local master must become available to the
 next operation without interrupting the work that produced it. This is an
 architectural constraint, not an optional development optimization.
 
-## Master-only source invariant
+## Local master is authoritative
 
-Fulcrum is not installable. `~/fulcrum` on master is the sole authoritative source
-of Fulcrum application behavior, role instructions, and skills. There is no
-post-change installation, packaging, deployment, copying, activation, or restart
-step that makes Fulcrum changes live. Dependency environments and service
-definitions are support infrastructure only and must not contain an independently
-authoritative copy of Fulcrum.
+Local master in ~/fulcrum is the sole source of application behavior, formulas,
+role instructions, and skills. A commit is sufficient: no push, remote fetch,
+installation, manual activation, or restart is required for the next operation.
+Agents make changes, run the repository check, commit, and push as instructed by
+AGENTS.md. They must not add an update ritual after ordinary code changes.
 
-All `~/.codex/skills/fulcrum-*` entries are direct absolute symlinks into
-`~/fulcrum/skills`. They never follow an instance-owned pointer, selected source,
-packaged data directory, or deployment snapshot. `skills-current` is forbidden.
-Because those links target master directly, skill edits are visible without any
-reconciliation after the link has first been created.
+Application operations execute an immutable snapshot of the local master commit
+observed at launch. This internal cache is not a separately managed installation.
+selected.json is a cache of prepared source, never the authority for freshness.
+Every fresh command checks local master before using it. A new background worker
+does the same before touching events or durable state. Running operations keep
+their source lease, so delayed imports and asset reads cannot mix commits.
+Uncommitted application edits and other branches do not change application
+behavior. Preparation failure fails new operations visibly with the commit and
+reason; it never silently runs older application behavior.
 
-The immutable source selected for one already-running operation is only a
-consistency lease over published master. It is not an installation or release and
-must not become a user-visible source location. New work observes the next
-published master automatically, while the resident preserves connection
-continuity.
+Skills deliberately have a different read boundary: all owned Codex skill links
+point directly into ~/fulcrum/skills. They never follow an instance-owned pointer,
+packaged data directory, or snapshot. Subsequent skill reads see edits immediately.
+Instructions already delivered to an agent remain part of that existing turn.
 
 ## Boundaries
 
-The stable launcher selects one immutable source directory and interpreter before
-importing application code. It acquires a source lease under the activation lock.
-Imports and assets use that concrete directory throughout execution. Never put a
-moving symlink on `sys.path`: delayed imports could otherwise mix two commits.
+The stdlib launcher resolves local master and acquires a lease on one concrete
+source directory before importing application code. On a cache miss it prepares
+source automatically. Imports and assets use that directory throughout execution.
+Never put a moving symlink on application sys.path: delayed imports could
+otherwise mix two commits. Controller and recovery launchers enter this same
+selection mechanism; setup never builds a private installed copy of Fulcrum.
 
 CLI mutations execute in detached Python processes. Client timeout returns the
 operation locator and does not kill the process. Output goes to temporary files,
@@ -43,7 +47,7 @@ and bootstrap mechanisms. Business policy, typed runtime adapters, reconciliatio
 role instructions, and delivery live in fresh processes. Closing a CLI client
 must never close the shared native connection or release its subscriptions.
 
-Background jobs use the same selected source as commands. Reconciliation passes
+Background jobs independently resolve local master just like commands. Reconciliation passes
 cannot overlap. Wakeups coalesce, and publication detection runs independently
 of reconciliation. Pending native requests remain with the transport until
 resolved; application event batches are acknowledged after processing. Overflow
@@ -74,36 +78,37 @@ locks, but durable operation receipts still require postcondition inspection.
 Beads remains the source of truth; multi-record changes are recoverable sequences,
 not atomic transactions.
 
-## Ordinary activation
+## Ordinary source preparation
 
-Only the configured published integration branch is eligible (here,
-`origin/master`). Working-directory edits and local commits are not live input.
-Self-publication wakes the updater. Remote polling uses a cheap
-`ls-remote` identity probe every five seconds; it launches the full update worker
-only when the published commit changes. An explicit update request always wakes
-the updater. A candidate already retained as `maintenance_required` or `rejected`
-is not repeatedly preflighted until its identity changes or an operator retries it.
+At operation launch, read refs/heads/master locally. Reuse a matching prepared
+source, otherwise serialize preparation, archive that exact commit, reuse
+unchanged dependencies, and check imports, configuration, and required assets.
+Select source and interpreter together, then recheck master before launch.
+Concurrent callers share the prepared result. Rapid commits supersede candidates
+rather than permitting older preparation to overwrite newer code.
 
-The updater materializes exact committed source, reuses unchanged dependencies,
-checks imports/configuration/assets, and atomically selects source and interpreter
-together. It then wakes background processing. Executing commands retain their
-source; later commands, including those from existing agent tasks, use new code.
-An active agent turn retains its prompt until a later turn is created.
+Self-publication wakes the resident; its periodic probe also reads local master.
+Neither wakeups nor polling are correctness requirements for commands: launch
+itself performs the freshness check. The resident continues owning its connection,
+pending approvals, event buffer, active turns, and terminals throughout.
 
-A failed preflight keeps the old selection. Failures after activation do not
-cause automatic rollback or blind effect replay. Service status exposes selected
-and observed commits, rejected/pending activation, active operation sources,
-resident health, and stage timings. `service update --retry` retries a rejected
-candidate after repairing its environment.
+The service update command is optional diagnosis/preparation, not a required
+workflow step. Service status and service update deliberately remain available
+from retained code when master cannot prepare. Use service update --retry after
+repairing an environmental/configuration rejection; a new commit is retried
+automatically. Status includes observed and selected commits, rejected preparation,
+resident maintenance, active source identities, and stage timings.
 
-Normal activation must never install Fulcrum or dependencies, restart the
-connection owner, interrupt an agent, or discard a pending approval. Dependency
-changes provision a separate environment; no running interpreter's environment is
-modified.
+Dependency changes provision a separate environment and may take longer. Ordinary
+application edits never install packages. Recovery has a source-following launcher
+independent of the resident, and source preparation for recovery does not depend on
+valid workflow configuration. It does not maintain a second installed application.
 
 ## Exceptional maintenance
 
-Resident implementation changes are staged for an explicit safe handoff. They
+Resident implementation changes are reported for an explicit safe handoff.
+Application source can advance while the existing connection owner retains its
+loaded implementation; this is the deliberate exception to immediate behavior. They
 are not ordinary updates. Pending native requests and active turns must settle
 before replacing the connection; a busy service refuses a non-interrupting stop.
 Do not force this boundary to satisfy the normal activation latency target.
@@ -119,18 +124,35 @@ mode. Recovery shares the maintenance boundary and remains independently runnabl
 
 When adding behavior, put it in a command handler or bounded background job unless
 it literally requires connection/process continuity. Do not import application
-handlers into the resident. Do not add filesystem watchers that deploy dirty
-source. Do not rebuild dependencies for application edits. Do not hold the state
+handlers into the resident. Do not add remote discovery or manual activation gates to local commits. Do not rebuild dependencies for application edits. Do not hold the state
 lock across network calls or waits. Preserve source leases during launch and cleanup.
 
 Tests enforce the import boundary, source/asset consistency, approval retention,
-event acknowledgment, cross-process locking, and rejected activation behavior.
+event acknowledgment, cross-process locking, and rejected preparation behavior. A local Git/process fixture commits a change
+without a remote, immediately runs its new behavior, retains an older process
+across delayed imports/assets, and verifies visible failure for a broken commit.
 The normal repository check remains independent of external providers. Measure
-activation separately from remote discovery; the local target is p95 below one
+preparation and command startup separately; the local target is p95 below one
 second for unchanged dependencies and state contracts, not a guarantee about
 network latency or migrations.
 
+## Local-master acceptance measurement
+
+On 2026-09-15, 20 disposable-repository trials measured **0.890 seconds p95**
+and 0.731 seconds median from a completed local commit to its new behavior in
+a fresh command. No remote was configured. Source preparation averaged 0.040
+seconds and real application/configuration preflight averaged 0.245 seconds.
+Launch and source-resolution overhead averaged 0.415 seconds. One simulated
+WebSocket connection and pending approval remained live throughout all trials.
+
+Reproduce with .venv/bin/python scripts/measure-live-iteration.py. The experiment
+uses real imports/preflight and a small behavior/asset probe; it measures startup,
+not completion of an arbitrary workflow action. Timing is machine-dependent.
+
 ## Measured initial acceptance
+
+These historical measurements used the previous published-source mechanism;
+they do not measure the new launch path.
 
 On 2026-09-15, 20 isolated activations of committed source measured p95 **0.475 s**
 and maximum **0.488 s**, including Git archive materialization, actual import and
@@ -143,3 +165,13 @@ measured was `1501a12`.
 The initial production handoff retained the two leadership task identities and
 reused the existing Codex runtime and Dolt processes. Ordinary source selection
 is separately checked without restarting the resident.
+
+## Accepted update contract
+
+- Ordinary application changes must not restart the connection owner.
+- Local master is checked at launch; remote publication is not an execution gate.
+- New operations use local master; executing operations retain consistent code.
+- Waiting on external work must not block unrelated state transitions.
+- Preparation must not interrupt agents or discard pending approvals.
+- Skills point directly to master and never depend on source-cache selection.
+- A preparation failure is visible; using old behavior is not a silent fallback.

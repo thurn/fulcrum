@@ -948,6 +948,11 @@ def _execute(request: ParsedRequest) -> dict[str, Any]:
         stderr=error_file,
         text=True,
         env=environment,
+        pass_fds=(
+            (int(environment["FULCRUM_SOURCE_FD"]),)
+            if environment.get("FULCRUM_SOURCE_FD")
+            else ()
+        ),
         start_new_session=True,
     )
     try:

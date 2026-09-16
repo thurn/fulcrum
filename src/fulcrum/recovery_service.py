@@ -1545,35 +1545,17 @@ def _repair_reinstall(
         fulcrum2_service_definitions,
         install_fulcrum2_service_definitions,
     )
-    from fulcrum.source_refresh import (
-        build_installed_environment,
-        install_recovery_link,
-        switch_installed_pointer,
-    )
+    from fulcrum.source_refresh import ensure_launchers, install_recovery_link
+    from fulcrum.install import master_source_root
 
-    source = Path(str(arguments["source_root"])).resolve(strict=True)
-    if not source.is_dir():
+    source = master_source_root().resolve(strict=True)
+    if Path(str(arguments["source_root"])).resolve(strict=True) != source:
         raise FulcrumError.invalid(
-            "NOT_FOUND", "reinstall source_root is not a directory"
+            "INVALID_REPAIR", "repair source must be the canonical master checkout"
         )
+    controller, recovery, changed = ensure_launchers(request.instance.instance_root)
     installation = str(arguments["installation"])
-    token = operation_key.removeprefix("fc-").replace("/", "-")
     if installation == "recovery":
-        deployment = request.instance.instance_root / "recovery" / f"deployment-{token}"
-        recovery_config: Path | None = request.instance.config_path
-        try:
-            ConfigurationManager(request.instance.config_path).load()
-        except FulcrumError:
-            recovery_config = None
-        probe = build_installed_environment(
-            source,
-            deployment,
-            config_path=recovery_config,
-            recovery=True,
-        )
-        active = switch_installed_pointer(
-            request.instance.instance_root / "recovery", deployment
-        )
         launcher = install_recovery_link(
             request.instance.instance_root,
             production=not request.instance.explicit_selection,
@@ -1582,48 +1564,34 @@ def _repair_reinstall(
             "target": target,
             "installation": installation,
             "source_root": str(source),
-            "active": str(active),
             "launcher": str(launcher),
-            "probe": probe,
-            "development_environment_used": False,
+            "changed": changed,
         }
     manager = ConfigurationManager(request.instance.config_path)
     document, _ = manager.load()
     config = manager.effective(document)
     if request.instance.brain_root is None:
         raise FulcrumError(
-            "CONFIG_INVALID", "main reinstall requires a valid brain root", exit_code=4
+            "CONFIG_INVALID", "launcher repair requires a valid brain root", exit_code=4
         )
-    deployment = request.instance.instance_root / "runtime" / f"deployment-{token}"
-    probe = build_installed_environment(
-        source,
-        deployment,
-        config_path=request.instance.config_path,
-        recovery=False,
-    )
-    active = switch_installed_pointer(
-        request.instance.instance_root / "runtime", deployment
-    )
     definitions = fulcrum2_service_definitions(
         instance_root=request.instance.instance_root,
         config_path=request.instance.config_path,
         brain_root=request.instance.brain_root,
         config=config,
-        controller_executable=active / "bin" / "fulcrum",
+        controller_executable=controller,
         production=not request.instance.explicit_selection,
     )
-    _installed, changed = install_fulcrum2_service_definitions(
+    _installed, changed_services = install_fulcrum2_service_definitions(
         definitions, request.instance.instance_root
     )
     return {
         "target": target,
         "installation": installation,
         "source_root": str(source),
-        "active": str(active),
-        "probe": probe,
-        "changed_service_definitions": changed,
+        "active": str(source),
+        "changed_service_definitions": changed_services,
         "controller_started": False,
-        "development_environment_used": False,
     }
 
 

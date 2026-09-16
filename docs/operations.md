@@ -1,6 +1,6 @@
 # Operations
 
-The installed CLI is the complete operator surface. Use `--json` for stable
+The CLI is the complete operator surface. Use `--json` for stable
 envelopes and `--request-id UUID` for a mutating request that may need an exact
 retry. A timeout means observation is incomplete; inspect the retained operation
 before retrying.
@@ -56,11 +56,13 @@ fulcrum service restart --json
 fulcrum service update --json
 ```
 
-Ordinary published-source updates activate new code without restarting the resident
-or interrupting agent work. Client timeout leaves detached operation execution
-running. A failed preflight preserves the selected source. Use `service update
---retry` after repairing a rejected candidate. `service status` includes activation
-state, source identities, timings, and resident health.
+Ordinary local-master commits are available automatically at the next command or
+background operation, with no service update, network discovery, installation,
+or restart. Client timeout leaves detached operations running on their original
+source. A failed preparation fails new commands visibly instead of silently
+using old code. Service status and service update --retry remain available
+from retained code for diagnosis and repair. Skills link directly to master;
+subsequent skill reads need no commit or update operation.
 
 Service stop/restart is exceptional maintenance: without explicit `--interrupt`,
 active native turns or pending requests prevent replacement. A state migration

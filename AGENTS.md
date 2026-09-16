@@ -15,6 +15,11 @@ Before changing execution, installation, or runtime ownership, read
 [the live-iteration architecture](docs/architecture/live-iteration.md).
 Preserve its no-restart, source-pinning, and connection-continuity invariants.
 
-Any design which requires an 'installation' step after changing fulcrum
-behavior is inherently wrong. All fulcrum functionality is sourced from master
-in ~/fulcrum, changing that directory immediately changes the live system.
+Fulcrum behavior comes from local master in ~/fulcrum. Commit ordinary code,
+formula, and instruction changes to master; the next operation automatically
+prepares and uses that commit. Never add an installation, manual activation,
+remote-publication wait, or controller restart to the ordinary editing workflow.
+Per-operation immutable snapshots exist only to keep delayed imports and asset
+reads consistent. Existing operations and agent turns continue undisturbed.
+Skills are direct links into ~/fulcrum/skills and subsequent reads see edits
+immediately. See the architecture for exceptional dependency/state/host changes.

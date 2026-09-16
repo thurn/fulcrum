@@ -5,12 +5,12 @@ database or replay journal.
 
 ## Non-installation invariant
 
-Fulcrum has no installation step and must never acquire one. The checkout at
-`~/fulcrum` on master is the only authoritative source for all Fulcrum behavior,
-role instructions, and skills. Editing that checkout changes the live source; no
-one may copy, package, deploy, activate, or reinstall Fulcrum to make the change
-effective. Python environments provide only the interpreter, dependencies, and
-editable entry points. Service definitions provide process supervision only.
+Local master in ~/fulcrum is authoritative. Committing an ordinary application
+change is sufficient for the next command or background operation to use it.
+Launch automatically prepares an immutable snapshot when necessary; agents never
+run installation, activation, or restart steps to expose ordinary behavior.
+Dependency environments provide interpreters and dependencies, not independently
+installed copies of the application. Running operations retain their source.
 
 Every owned Codex skill is an absolute symlink from
 `~/.codex/skills/fulcrum-*` directly to `~/fulcrum/skills/fulcrum-*`. A link
@@ -85,12 +85,11 @@ environment and editable entry-point metadata in `.venv`; `scripts/setup` does
 this. This dependency refresh is not a Fulcrum installation and is never needed
 for ordinary application, documentation, role, or skill changes.
 
-## Published source
+## Local master
 
-Configure `source.repository`, `source.remote`, and `source.branch`; production
-uses only committed published source. The default remote and branch are `origin`
-and `master`. Source selection is automatic and may pin one operation to one
-commit for import consistency, but it is not an install/deploy boundary and never
-changes the canonical source location. See
-[live iteration](architecture/live-iteration.md) for the required execution and
-update boundaries.
+Production launches observe refs/heads/master in ~/fulcrum without waiting for
+origin/master. The source.repository setting describes the canonical repository;
+remote/branch settings do not gate execution. Uncommitted application edits do not
+change new operation behavior; commit them first. Skills remain direct live links.
+See [live iteration](architecture/live-iteration.md) for source consistency,
+diagnostics, and exceptional maintenance.

@@ -1,4 +1,4 @@
-"""Published-source activation without restarting the connection owner.
+"""Local-master source preparation without restarting the connection owner.
 
 Preparation never pauses serving. Selection is one atomic source/interpreter
 pair, and existing processes retain concrete paths until they finish.
@@ -78,13 +78,9 @@ def prepare_python(
     ):
         return previous["python"]
     if previous is None:
-        # Setup supplies its independent, already provisioned interpreter.
-        installed = instance / "runtime/current/bin/python"
-        return (
-            str(installed.parent.parent.resolve() / "bin/python")
-            if installed.exists()
-            else sys.executable
-        )
+        # The launcher already has provisioned dependencies. Never install a
+        # second application package just to obtain an interpreter.
+        return sys.executable
     environment = instance / "environments" / uuid.uuid4().hex
     venv.EnvBuilder(with_pip=True).create(environment)
     python = environment / "bin/python"
@@ -110,8 +106,9 @@ sys.path.insert(0, sys.argv[1])
 from fulcrum.application import default_application
 from fulcrum.configuration import ConfigurationManager
 manager = ConfigurationManager(pathlib.Path(sys.argv[2]))
-document, _ = manager.load()
-manager.validate_document(document)
+if pathlib.Path(sys.argv[2]).exists():
+    document, _ = manager.load()
+    manager.validate_document(document)
 default_application()
 root = pathlib.Path(sys.argv[1]) / 'fulcrum'
 assert (root / 'formulas').is_dir() and (root / 'role_fallbacks').is_dir()
@@ -145,7 +142,7 @@ def activate(
 ) -> dict[str, Any]:
     started = time.monotonic()
     status_path = instance / "activation.json"
-    with ProcessLock(instance / "update.lock", blocking=False):
+    with ProcessLock(instance / "update.lock"):
         previous = selection(instance)
         prior_status = (
             json.loads(status_path.read_text()) if status_path.exists() else {}
@@ -155,18 +152,20 @@ def activate(
             "state": "checking",
             "timings": {},
             "last_activation": prior_status.get("last_activation"),
+            "resident_maintenance": prior_status.get("resident_maintenance"),
         }
         try:
             repo = Path(source_config["repository"])
-            remote, branch = source_config["remote"], source_config["branch"]
-            # Fetch only committed remote state. Dirty files and local branches
-            # cannot affect either candidate bytes or eligibility.
-            ref = "refs/fulcrum/published"
-            git(repo, "fetch", "--no-tags", remote, f"+refs/heads/{branch}:{ref}")
+            # A local commit is sufficient. No network or installation gate may
+            # stand between committing a fix and the next command using it.
+            ref = "refs/heads/master"
             commit = git(repo, "rev-parse", ref)
             status["observed_commit"] = commit
             status["timings"]["discovery"] = time.monotonic() - started
             if previous is not None and previous["commit"] == commit:
+                if maintenance and prior_status.get("resident_maintenance"):
+                    perform_handoff(instance, config, previous)
+                    status["resident_maintenance"] = None
                 status["state"] = "current"
                 write_json(status_path, status)
                 return status
@@ -177,7 +176,9 @@ def activate(
                 and not maintenance
                 and not retry
             ):
-                return cached
+                raise RuntimeError(
+                    cached.get("reason", "local master requires maintenance")
+                )
             local_started = time.monotonic()
             root = instance / "sources" / uuid.uuid4().hex
             snapshot(repo, commit, root)
@@ -202,7 +203,12 @@ def activate(
                     not old_migration.exists()
                     or migration.read_bytes() != old_migration.read_bytes()
                 )
-                if changed or migrate:
+                if changed:
+                    status["resident_maintenance"] = {
+                        "changed": changed,
+                        "reason": "connection owner retains its running code until safe handoff",
+                    }
+                if migrate or (changed and maintenance):
                     status.update(
                         state="maintenance_required",
                         reason="resident handoff or explicit state migration required",
@@ -217,13 +223,17 @@ def activate(
                             perform_migration(instance, config, candidate)
                         status.update(state="activated", selected=candidate)
                     write_json(status_path, status)
+                    if not maintenance:
+                        raise RuntimeError(status["reason"])
                     return status
             # Recheck local observation after preparation; never select a stale
             # candidate over a newer notification or another activator.
             if git(repo, "rev-parse", ref) != commit:
                 status["state"] = "superseded"
             else:
+                selection_started = time.monotonic()
                 select_candidate(instance, candidate)
+                status["timings"]["selection"] = time.monotonic() - selection_started
                 status.update(state="activated", selected=candidate)
                 status["timings"]["local_activation"] = time.monotonic() - local_started
                 status["last_activation"] = {
@@ -244,7 +254,10 @@ def activate(
             )
             return status
         except Exception as error:
-            status.update(state="rejected", reason=str(error))
+            reason = str(error)
+            if isinstance(error, subprocess.CalledProcessError):
+                reason += ": " + str(error.stderr or error.stdout or "").strip()
+            status.update(state="rejected", reason=reason)
             write_json(status_path, status)
             raise
 
@@ -356,3 +369,24 @@ def select_candidate(instance: Path, candidate: dict[str, Any]) -> None:
 def cleanup_sources(instance: Path, selected: dict[str, Any] | None) -> None:
     with ProcessLock(instance / "activation.lock"):
         _cleanup_sources(instance, selected)
+
+
+def main() -> int:
+    """Internal preparation entry point, invoked by every stale fresh launcher."""
+    try:
+        result = activate(
+            Path(sys.argv[1]),
+            Path(sys.argv[2]),
+            {"repository": sys.argv[3], "remote": "origin", "branch": "master"},
+            retry=Path(sys.argv[2]).name == ".recovery-source-preflight",
+        )
+        return 0 if result["state"] in {"current", "activated", "superseded"} else 1
+    except Exception as error:
+        print(str(error), file=sys.stderr)
+        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+            print(error.stderr, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

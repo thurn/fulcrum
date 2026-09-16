@@ -132,7 +132,7 @@ class ResidentContinuityTests(unittest.IsolatedAsyncioTestCase):
         await resident.dispatch({"action": "ack", "ids": ["1"]})
         self.assertEqual((await resident.dispatch({"action": "events"}))["events"], [])
 
-    async def test_source_probe_skips_full_update_until_remote_commit_changes(self):
+    async def test_source_probe_skips_full_update_until_local_commit_changes(self):
         class Process:
             returncode = 0
 
@@ -167,12 +167,12 @@ class ResidentContinuityTests(unittest.IsolatedAsyncioTestCase):
                 "fulcrum.resident.asyncio.create_subprocess_exec",
                 return_value=Process("same"),
             ):
-                self.assertFalse(await resident.published_source_changed())
+                self.assertFalse(await resident.local_source_changed())
             with patch(
                 "fulcrum.resident.asyncio.create_subprocess_exec",
                 return_value=Process("new"),
             ):
-                self.assertTrue(await resident.published_source_changed())
+                self.assertTrue(await resident.local_source_changed())
             self.assertEqual(resident.last_source_probe["observed_commit"], "new")
 
 
@@ -199,7 +199,7 @@ class ActivationTests(unittest.TestCase):
             lease = pin(old)
             try:
                 with (
-                    patch("fulcrum.activation.git", side_effect=["", "new", "new"]),
+                    patch("fulcrum.activation.git", side_effect=["new", "new"]),
                     patch("fulcrum.activation.snapshot", side_effect=self.materialize),
                     patch("fulcrum.activation.preflight") as preflight,
                     patch("fulcrum.activation.subprocess.run") as process,
@@ -235,7 +235,7 @@ class ActivationTests(unittest.TestCase):
             selected = {"source": str(old), "python": sys.executable, "commit": "old"}
             write_json(root / "selected.json", selected)
             with (
-                patch("fulcrum.activation.git", side_effect=["", "new"]),
+                patch("fulcrum.activation.git", side_effect=["new"]),
                 patch("fulcrum.activation.snapshot", side_effect=self.materialize),
                 patch(
                     "fulcrum.activation.preflight", side_effect=ValueError("bad import")
@@ -256,7 +256,7 @@ class ActivationTests(unittest.TestCase):
                 json.loads((root / "activation.json").read_text())["state"], "rejected"
             )
 
-    def test_unchanged_published_commit_ignores_worktree_edits(self):
+    def test_unchanged_local_commit_ignores_worktree_edits(self):
         from fulcrum.activation import activate
 
         with tempfile.TemporaryDirectory() as directory:
@@ -267,7 +267,7 @@ class ActivationTests(unittest.TestCase):
             )
             (root / "dirty.py").write_text("broken source")
             with (
-                patch("fulcrum.activation.git", side_effect=["", "same"]),
+                patch("fulcrum.activation.git", side_effect=["same"]),
                 patch("fulcrum.activation.snapshot") as build,
             ):
                 result = activate(
@@ -427,3 +427,80 @@ class AssetSelectionTests(unittest.TestCase):
                 self.assertEqual((link / "SKILL.md").read_text(), "master")
                 self.assertEqual(link.readlink(), master / "skills" / skill)
             self.assertFalse(legacy.is_symlink())
+
+
+class ImmediateMasterTests(unittest.TestCase):
+    def test_new_launcher_definition_never_replaces_running_resident(self):
+        from fulcrum.install import InstalledService, ServiceObservation
+        from fulcrum.installation_service import _start_one
+
+        service = InstalledService("controller", "test.resident", Path("/unused"))
+        observation = ServiceObservation(
+            "test.resident", True, "running", 42, "/old", ("/old",), "/", ""
+        )
+        with (
+            patch(
+                "fulcrum.installation_service.inspect_service", return_value=observation
+            ),
+            patch(
+                "fulcrum.installation_service._program_arguments", return_value=["/new"]
+            ),
+            patch("fulcrum.installation_service._stop_one") as stop,
+            patch("fulcrum.installation_service.subprocess.run") as process,
+        ):
+            self.assertEqual(_start_one(service, endpoint=None)["pid"], 42)
+        stop.assert_not_called()
+        process.assert_not_called()
+
+    def test_commit_is_visible_to_next_command_without_remote_or_update(self):
+        # The outer test permits exactly this local Python process. Its fixture
+        # owns its Git repository and child interpreters; no provider is involved.
+        code = (Path(__file__).parent / "fixtures/local_master_probe.py").read_text()
+        command = [sys.executable, "-B", "-c", code, str(Path(__file__).parents[1])]
+        with local_python(command):
+            result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(json.loads(result.stdout)["commit_to_command_seconds"], 2)
+
+    def test_background_worker_refreshes_before_application_dispatch(self):
+        from fulcrum.worker import main
+
+        with (
+            patch.dict(os.environ, {"FULCRUM_WORKER_SELECTED": ""}),
+            patch("sys.argv", ["worker", "background", "/instance", "/config"]),
+            patch("fulcrum.bootstrap.main", return_value=0) as launch,
+        ):
+            self.assertEqual(main(), 0)
+        launch.assert_called_once_with(
+            "fulcrum.worker",
+            ["background", "/instance", "/config"],
+            Path("/instance"),
+            Path("/config"),
+        )
+
+    def test_preparation_failure_cannot_fall_back_to_old_code(self):
+        from fulcrum.bootstrap import fresh_selection
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old = root / "sources/old"
+            old.mkdir(parents=True)
+            write_json(
+                root / "selected.json",
+                {
+                    "source": str(old),
+                    "commit": "old",
+                    "python": sys.executable,
+                },
+            )
+            with (
+                patch("fulcrum.bootstrap.local_commit", return_value="new"),
+                patch(
+                    "fulcrum.bootstrap.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 1, "", "rejected import"
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "new: rejected import"):
+                    fresh_selection(root, root / "config")

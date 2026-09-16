@@ -160,26 +160,21 @@ class Resident:
         self.jobs[kind] = task
         return True
 
-    async def published_source_changed(self) -> bool:
+    async def local_source_changed(self) -> bool:
         source = self.settings.get("source")
         selected = selection(self.instance)
         if not isinstance(source, dict) or selected is None:
             return True
         repository = source.get("repository")
-        remote = source.get("remote")
-        branch = source.get("branch")
-        if not all(
-            isinstance(item, str) and item for item in (repository, remote, branch)
-        ):
+        if not isinstance(repository, str) or not repository:
             self.errors["source_probe"] = "resident source probe is not configured"
             return True
         process = await asyncio.create_subprocess_exec(
             "git",
             "-C",
             repository,
-            "ls-remote",
-            remote,
-            f"refs/heads/{branch}",
+            "rev-parse",
+            "refs/heads/master",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -188,15 +183,15 @@ class Resident:
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
-            self.errors["source_probe"] = "published source probe timed out"
+            self.errors["source_probe"] = "local master probe timed out"
             return False
         if process.returncode != 0:
             message = stderr.decode(errors="replace").strip()
-            self.errors["source_probe"] = message or "published source probe failed"
+            self.errors["source_probe"] = message or "local master probe failed"
             return False
         fields = stdout.decode(errors="replace").strip().split()
         if not fields:
-            self.errors["source_probe"] = "published source branch was not found"
+            self.errors["source_probe"] = "local master branch was not found"
             return False
         observed = fields[0]
         changed = observed != selected.get("commit")
@@ -236,7 +231,7 @@ class Resident:
             requested = self.update_requested
             if now >= next_update or requested:
                 self.update_requested = False
-                if requested or await self.published_source_changed():
+                if requested or await self.local_source_changed():
                     if not self.start_job("update"):
                         self.update_requested = True
                 next_update = now + (

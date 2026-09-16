@@ -34,17 +34,16 @@ but explicitly support a separately validated 30-task concurrency workload.
 
 ## Live iteration
 
-Fulcrum runs published application changes in fresh processes while a small
+Fulcrum runs local-master application changes in fresh processes while a small
 resident host preserves native connections and pending requests. Read the
 [live-iteration architecture](docs/architecture/live-iteration.md) before changing
 these boundaries.
 
-**Fulcrum is never installed.** The master checkout at `~/fulcrum` is the sole
-authoritative source of application behavior, role instructions, and skills. No
-copied package, deployment directory, release artifact, or activation pointer may
-become another source of Fulcrum behavior. In particular, every
-`~/.codex/skills/fulcrum-*` link points directly into `~/fulcrum/skills`; it must
-never point through `skills-current` or any instance directory.
+**Commit to local master; the next operation uses it automatically.** The master
+checkout at ~/fulcrum is authoritative. Operations retain immutable source
+snapshots for consistent imports and assets, but no installation, explicit update,
+push, or restart makes ordinary behavior changes live. Skills link directly into
+~/fulcrum/skills and subsequent reads see edits immediately.
 
 ## Bootstrap
 
@@ -60,9 +59,9 @@ authoritative YAML configuration beside the brain, initializes the Beads/Dolt
 ledger, writes uniquely owned service definitions, reconciles the nine
 human-invoked skill links and read-only compaction hook, validates provider
 identities, and creates the standing Vizier and Marshal without model turns.
-This is bootstrap, not installation: executable entry points import Fulcrum from
-`~/fulcrum`, and a source or skill edit never requires a build, install, copy,
-deployment, activation, or restart step. Rerunning the same input repairs owned
+This provisions infrastructure: launchers automatically resolve local master,
+and ordinary code changes need only a commit. Running operations retain their
+source and existing agent turns continue. Rerunning the same input repairs owned
 operational artifacts and does not duplicate leaders, providers, or services.
 
 The configuration file is authoritative. Humans may change any allowed field;
