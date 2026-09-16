@@ -44,12 +44,29 @@ def finish_request(*, request_id=None):
 
 class WardenDeliveryOwnershipTests(unittest.TestCase):
     def setUp(self):
+        contract = {
+            "authorized_role": "warden",
+            "bead_id": "fc-work",
+            "behavioral_outcome": "Review the retained source",
+            "acceptance": [],
+            "evidence": [],
+            "implementation_notes": [],
+            "scope_revision": "fc-scope",
+            "decision_operation": "fc-decision",
+        }
         self.work = record(
             owner="warden",
             role="warden",
             phase="reviewing",
             ownership_operation="fc-warden-entry",
             project="toy",
+            compiled_role={
+                "formula": "fulcrum-warden",
+                "authorized_role": "warden",
+                "thread_id": "warden",
+                "ownership_operation": "fc-warden-entry",
+                "contract": contract,
+            },
         )
         self.task = record(
             "fc-task",
@@ -59,6 +76,7 @@ class WardenDeliveryOwnershipTests(unittest.TestCase):
             role="warden",
             work_bead="fc-work",
             ownership_operation="fc-warden-entry",
+            compiled_contract=contract,
         )
         self.ledger = MemoryLedger(self.work, self.task)
         self.validation = Mock(side_effect=self._start_validation)

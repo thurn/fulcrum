@@ -39,6 +39,8 @@ class Resident:
         if action == "health":
             return {
                 "pid": os.getpid(),
+                "process_commit": os.environ.get("FULCRUM_COMMIT"),
+                "process_source": os.environ.get("FULCRUM_SOURCE"),
                 "connected": self.transport.ready,
                 "pending": {
                     key: event.to_dict()

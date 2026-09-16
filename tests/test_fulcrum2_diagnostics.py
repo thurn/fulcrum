@@ -129,6 +129,35 @@ class DiagnosticLogTest(unittest.TestCase):
             failed_delivery_finishes=[{"source_oid": initial}],
             ownership_operation="fc-entry",
             last_transition="fc-recovery",
+            dispatch={
+                "role": "executor",
+                "decision_operation": "fc-marshal",
+                "authorized_at": "2026-09-16T00:00:01Z",
+                "authorized_scope": {
+                    "summary": "Repair behavior",
+                    "acceptance": ["Behavior passes"],
+                    "evidence": [],
+                    "implementation_notes": [],
+                    "finish_operation": "fc-scope",
+                },
+            },
+            recovery_fence={
+                "operation_id": "fc-takeover",
+                "scope": "bead:fc-work",
+                "state": "released",
+                "owner_thread": "justiciar",
+                "started_at": "2026-09-16T00:00:04Z",
+                "released_at": "2026-09-16T00:00:05Z",
+            },
+            human_resolutions=[
+                {
+                    "reason_id": "human:fc-human",
+                    "answer": "Continue Executor routing.",
+                    "resume_role": "executor",
+                    "operation_id": "fc-human-resolve",
+                    "resolved_at": "2026-09-16T00:00:01Z",
+                }
+            ],
         )
         marshal_task = record(
             "fc-marshal-task",
@@ -271,6 +300,9 @@ class DiagnosticLogTest(unittest.TestCase):
         self.assertIn("reconciliation_completed", transitions)
         self.assertIn("dispatch_timeline", transitions)
         self.assertIn("publication_completed", transitions)
+        self.assertIn("scope_authorized", transitions)
+        self.assertIn("recovery_fence", transitions)
+        self.assertIn("human_resolution", transitions)
         finish_item = next(item for item in result["items"] if item["id"] == "fc-entry")
         self.assertEqual(finish_item["child_operation_ids"], ["fc-check"])
         check_item = next(item for item in result["items"] if item["id"] == "fc-check")

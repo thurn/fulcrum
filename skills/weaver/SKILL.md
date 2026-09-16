@@ -27,6 +27,12 @@ needed for a coherent result; explain exclusions that would leave a known defect
 Ask only about material uncertainty. Investigate consequential or ambiguous requests
 more deeply and give effort estimates only when supported by evidence.
 
+For `ready`, keep `summary` and `acceptance` behavioral and stable. Put suggested
+paths, symbols, APIs, and mechanisms only in the optional `implementation_notes`
+array. Those notes are a proposal, not immutable requirements: Executor must inspect
+current source and may correct stale details without another Weaver turn when the
+behavior, scope, and safety do not change.
+
 Use `answered` for a resolved question, `ready` for implementation-ready scope,
 `planned` for an authored future plan, or `blocked` for a concrete impediment.
 `ready` requires `summary` and a nonempty `acceptance` array; `evidence` is optional.

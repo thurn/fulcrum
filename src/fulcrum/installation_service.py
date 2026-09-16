@@ -96,10 +96,11 @@ def service_status_result(request: ParsedRequest) -> dict[str, Any]:
     try:
         resident = asyncio.run(
             exchange(
-                request.instance.instance_root / "resident.sock",
+                request.instance.socket_path,
                 {"action": "health", "timeout": 1},
             )
         )
+        resident = {"available": True, **resident}
     except Exception as error:
         resident = {"available": False, "reason": str(error)}
     try:
@@ -116,8 +117,24 @@ def service_status_result(request: ParsedRequest) -> dict[str, Any]:
             active.append(row)
         except (OSError, ValueError):
             pass
+    selected = selection(request.instance.instance_root)
+    client_commit = os.environ.get("FULCRUM_COMMIT")
+    selected_commit = selected.get("commit") if isinstance(selected, Mapping) else None
+    controller_commit = resident.get("process_commit")
+    observed_revisions = {
+        "client": client_commit,
+        "selected": selected_commit,
+        "controller": controller_commit,
+    }
+    known_revisions = {value for value in observed_revisions.values() if value}
+    revision_skew = len(known_revisions) > 1
+    gaps = [] if installed else ["no installed service definitions were found"]
+    if not resident.get("available"):
+        gaps.append("controller socket did not answer the health probe")
+    if revision_skew:
+        gaps.append("client, selected application, and controller revisions differ")
     return {
-        "selected": selection(request.instance.instance_root),
+        "selected": selected,
         "activation": activation,
         "resident": resident,
         "active_operations": active,
@@ -133,9 +150,12 @@ def service_status_result(request: ParsedRequest) -> dict[str, Any]:
         },
         "services": rows,
         "health": health,
-        "responsive": None,
-        "gaps": ([] if installed else ["no installed service definitions were found"])
-        + ["controller responsiveness was not inferred from its socket artifact"],
+        "responsive": bool(resident.get("available")),
+        "revisions": {
+            **observed_revisions,
+            "skew": revision_skew,
+        },
+        "gaps": gaps,
     }
 
 

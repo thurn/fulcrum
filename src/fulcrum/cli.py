@@ -681,6 +681,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "blocker",
         "attempts",
         "required_action",
+        "implementation_notes",
     },
     ("progress",): {"kind", "summary", "evidence", "bead"},
     ("report",): {
@@ -1010,6 +1011,7 @@ def _exit_code(result: dict[str, Any]) -> int:
         return 3
     if code in {
         "OWNERSHIP_CONFLICT",
+        "ROLE_MISMATCH",
         "STALE_DECISION",
         "REQUEST_CONFLICT",
         "FINISH_SEALED",

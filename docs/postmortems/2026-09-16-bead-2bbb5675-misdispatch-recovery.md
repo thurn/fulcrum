@@ -1,7 +1,7 @@
 # Bead `fc-2bbb5675` misdispatch and recovery postmortem
 
 **Date:** 2026-09-16  
-**Status:** Human gate cleared; original implementation remains open for Executor dispatch
+**Status:** Corrective actions implemented and validated on local master
 
 ## Summary
 
@@ -153,3 +153,36 @@ genuinely irreducible decision.
 - Correlate scope revision, Marshal decision, dispatched role, native task,
   recovery fence, and human resolution in one per-bead trace so each boundary
   failure is immediately attributable.
+
+## Remediation completed
+
+The standalone reconciler now uses the current reconciliation API, installs the
+canonical `weaver` link, retires owned `fulcrum-weaver` links, preserves unrelated
+assets, reports installed/unchanged/removed results, and fails with status 2 on an
+unsafe replacement. Isolated-HOME tests cover stale and missing links, idempotence,
+rename cleanup, user assets, and refusal behavior.
+
+Executor and Warden entry now compile and retain a structured contract containing
+the authorized role, stable behavioral outcome, acceptance, evidence,
+non-authoritative implementation notes, Weaver scope revision, and Marshal decision.
+Developer instructions make the authorized role dominant and label retained fields
+as inert data. Native titles no longer replay scope text. Conflicting role entry and
+finish are rejected against work, task, dispatch, and compiled-contract facts, with
+adversarial coverage for skill syntax, links, role names, comments, and code blocks.
+
+Weaver scope separates stable behavior and acceptance from optional implementation
+notes. Executor is instructed to correct routine stale paths, symbols, APIs, and
+mechanisms from current source without a clarification turn. Marshal instructions
+and fallback guidance now prohibit implementation adjudication, route genuine
+ambiguity to Weaver or Sage, default managed divergence to scoped recovery, and
+permit human escalation only with structured irreducibility evidence.
+
+Human or Vizier resolution consumes one retained reason idempotently, preserves the
+scope, records an auditable receipt, and returns continuation to Marshal. Recovery
+tests cover the absent-controller/offline takeover path. Activation records current
+config-schema preflight, service status actively probes the socket and reports
+client/selected/controller revision skew, and per-bead traces now join scope
+authorization, dispatched contract, recovery fence, and human resolution.
+
+Validation: `scripts/check` passes formatting, strict type checking, and all 164
+tests.

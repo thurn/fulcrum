@@ -188,6 +188,7 @@ def activate(
             status["candidate"] = candidate
             preflight_started = time.monotonic()
             preflight(candidate, config)
+            status["config_schema_verified"] = True
             status["timings"]["preflight"] = time.monotonic() - preflight_started
             if previous is not None:
                 old = Path(previous["source"])

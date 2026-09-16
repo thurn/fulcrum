@@ -573,6 +573,85 @@ class DiagnosticService:
                 }
             )
         fc = record.fc or {}
+        dispatch = fc.get("dispatch")
+        if isinstance(dispatch, Mapping):
+            authorized_scope = dispatch.get("authorized_scope")
+            items.append(
+                {
+                    "time": dispatch.get("authorized_at"),
+                    "id": f"{record.id}:authorized-scope",
+                    "bead_id": bead_id,
+                    "task_id": None,
+                    "turn_id": None,
+                    "operation_id": dispatch.get("decision_operation"),
+                    "transition": "scope_authorized",
+                    "effect": dispatch.get("role"),
+                    "outcome": "authorized",
+                    "evidence": [],
+                    "scope_revision": (
+                        authorized_scope.get("finish_operation")
+                        if isinstance(authorized_scope, Mapping)
+                        else None
+                    ),
+                    "compiled_contract": {
+                        "authorized_role": dispatch.get("role"),
+                        "scope_revision": (
+                            authorized_scope.get("finish_operation")
+                            if isinstance(authorized_scope, Mapping)
+                            else None
+                        ),
+                        "decision_operation": dispatch.get("decision_operation"),
+                    },
+                    "source_oid": None,
+                    "source_oids": [],
+                    "parent_operation_ids": [],
+                    "child_operation_ids": [],
+                    "provider_handles": [],
+                }
+            )
+        fence = fc.get("recovery_fence")
+        if isinstance(fence, Mapping):
+            items.append(
+                {
+                    "time": fence.get("released_at") or fence.get("started_at"),
+                    "id": f"{record.id}:recovery-fence",
+                    "bead_id": bead_id,
+                    "task_id": fence.get("owner_thread"),
+                    "turn_id": None,
+                    "operation_id": fence.get("operation_id"),
+                    "transition": "recovery_fence",
+                    "effect": fence.get("scope"),
+                    "outcome": fence.get("state"),
+                    "evidence": [],
+                    "source_oid": None,
+                    "source_oids": [],
+                    "parent_operation_ids": [],
+                    "child_operation_ids": [],
+                    "provider_handles": [],
+                }
+            )
+        for index, resolution in enumerate(fc.get("human_resolutions") or []):
+            if not isinstance(resolution, Mapping):
+                continue
+            items.append(
+                {
+                    "time": resolution.get("resolved_at"),
+                    "id": f"{record.id}:human-resolution:{index}",
+                    "bead_id": bead_id,
+                    "task_id": None,
+                    "turn_id": None,
+                    "operation_id": resolution.get("operation_id"),
+                    "transition": "human_resolution",
+                    "effect": resolution.get("reason_id"),
+                    "outcome": resolution.get("resume_role"),
+                    "evidence": [resolution.get("answer")],
+                    "source_oid": None,
+                    "source_oids": [],
+                    "parent_operation_ids": [],
+                    "child_operation_ids": [],
+                    "provider_handles": [],
+                }
+            )
         for task in ledger.list_records(kind="task", limit=0):
             task_fc = task.fc or {}
             if (
@@ -664,6 +743,8 @@ class DiagnosticService:
                     or event.get("pass_id")
                     or event.get("span_id"),
                     "correlation_id": event.get("correlation_id"),
+                    "scope_revision": event.get("scope_revision"),
+                    "compiled_contract": event.get("compiled_contract"),
                     "stages": event.get("stages"),
                 }
             )

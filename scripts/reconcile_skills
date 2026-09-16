@@ -10,18 +10,30 @@ from pathlib import Path
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT / "src"))
 
-from fulcrum.install import InstallationError, reconcile_skill_links  # noqa: E402
+from fulcrum.install import (  # noqa: E402
+    InstallationError,
+    reconcile_fulcrum2_skills,
+)
 
 
 def main() -> int:
     try:
-        installed = reconcile_skill_links(SOURCE_ROOT)
+        result = reconcile_fulcrum2_skills(
+            SOURCE_ROOT,
+            production=True,
+            source_root=SOURCE_ROOT,
+            install_hook=False,
+        )
     except InstallationError as error:
         print(f"fulcrum skill reconciliation failed: {error}", file=sys.stderr)
         return 2
 
-    for target in installed:
+    for target in result["installed"]:
         print(f"linked {target}")
+    for target in result["unchanged"]:
+        print(f"unchanged {target}")
+    for target in result["removed"]:
+        print(f"removed {target}")
     return 0
 
 

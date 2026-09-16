@@ -888,12 +888,6 @@ class HumanService:
             raise FulcrumError.invalid("INVALID_INPUT", "answer is required")
         if resume_role not in ROLES:
             raise FulcrumError.invalid("INVALID_INPUT", "resume_role is invalid")
-        reasons = _waiting_reasons(work.fc.get("waiting"))
-        selected = next((item for item in reasons if item.get("id") == reason_id), None)
-        if selected is None or selected.get("kind") != "human":
-            raise FulcrumError.invalid(
-                "HUMAN_REASON_NOT_FOUND", "reason_id is not an unresolved human reason"
-            )
         scope_change = request.input.get("scope_change")
         if scope_change is not None:
             if not isinstance(scope_change, Mapping):
@@ -924,6 +918,12 @@ class HumanService:
             "cancelled",
         }:
             return _operation_result(operation)
+        reasons = _waiting_reasons(work.fc.get("waiting"))
+        selected = next((item for item in reasons if item.get("id") == reason_id), None)
+        if selected is None or selected.get("kind") != "human":
+            raise FulcrumError.invalid(
+                "HUMAN_REASON_NOT_FOUND", "reason_id is not an unresolved human reason"
+            )
         fc = dict(work.fc)
         if scope_change is not None:
             fc.update(dict(scope_change))

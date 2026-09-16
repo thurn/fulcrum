@@ -175,6 +175,7 @@ def reconcile_fulcrum2_skills(
     production: bool,
     skills_root: Path | None = None,
     source_root: Path | None = None,
+    install_hook: bool = True,
 ) -> dict[str, Any]:
     """Link owned roles directly to the canonical master checkout."""
 
@@ -226,7 +227,7 @@ def reconcile_fulcrum2_skills(
     executable = checkout / ".venv" / "bin" / "fulcrum"
     hook_config = root.parent / "hooks.json"
     hook_command: str | None = None
-    if executable.is_file() and os.access(executable, os.X_OK):
+    if install_hook and executable.is_file() and os.access(executable, os.X_OK):
         hook_command = " ".join(
             (
                 shlex.quote(str(executable.resolve(strict=True))),

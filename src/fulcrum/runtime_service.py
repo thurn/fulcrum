@@ -275,6 +275,19 @@ class TaskService:
                 "closed work must be explicitly reopened",
                 exit_code=5,
             )
+        dispatch = work.fc.get("dispatch")
+        if isinstance(dispatch, Mapping) and dispatch.get("role") != role:
+            raise FulcrumError(
+                "ROLE_MISMATCH",
+                "task role differs from the durable dispatch authorization",
+                exit_code=5,
+                details={
+                    "bead_id": bead_id,
+                    "authorized_role": dispatch.get("role"),
+                    "observed_role": role,
+                    "decision_operation": dispatch.get("decision_operation"),
+                },
+            )
         assert request.request_id is not None
         receipt_id = operation_id(request.request_id)
         if (
@@ -307,6 +320,9 @@ class TaskService:
         model, effort, model_origin = _select_model(
             request, config, project, work.fc, role
         )
+        from fulcrum.roles import _compiled_contract, _role_authority_instructions
+
+        compiled_contract = _compiled_contract(work, role)
         creation_cwd = str(
             (request.instance.instance_root / "threads" / receipt_id).resolve(
                 strict=False
@@ -322,6 +338,7 @@ class TaskService:
             "effort": effort,
             "model_origin": model_origin,
             "turn_input": instructions,
+            "compiled_contract": compiled_contract,
         }
         operation, reused = ledger.create_operation(
             request,
@@ -365,10 +382,18 @@ class TaskService:
             developer_instructions=(
                 routing_developer_instructions(
                     request,
-                    (
-                        str(request.input["developer_instructions"])
-                        if request.input.get("developer_instructions") is not None
-                        else None
+                    "\n\n".join(
+                        item
+                        for item in (
+                            _role_authority_instructions(role, compiled_contract),
+                            (
+                                str(request.input["developer_instructions"])
+                                if request.input.get("developer_instructions")
+                                is not None
+                                else None
+                            ),
+                        )
+                        if item
                     ),
                 )
             ),
@@ -401,6 +426,7 @@ class TaskService:
             "model": model,
             "effort": effort,
             "model_origin": model_origin,
+            "compiled_contract": compiled_contract,
             "associated_beads": list(associated_beads),
             "replaced_by": None,
             "missing_finish_reminder": None,
@@ -448,6 +474,14 @@ class TaskService:
                 },
                 "last_transition": receipt_id,
                 "next_action": "Complete the active role responsibility and call fulcrum finish.",
+                "compiled_role": {
+                    "formula": f"fulcrum-{role}",
+                    "authorized_role": role,
+                    "thread_id": thread_id,
+                    "ownership_operation": receipt_id,
+                    "contract": compiled_contract,
+                    "compiled_at": utc_now(),
+                },
             }
         )
         ledger.update_fc(bead_id, work_fc, assignee=thread_id, status="in_progress")
@@ -482,6 +516,7 @@ class TaskService:
                 "thread_id": thread_id,
                 "turn_id": turn.id,
                 "ownership_operation": receipt_id,
+                "compiled_contract": compiled_contract,
                 "model": model,
                 "effort": effort,
                 "model_origin": model_origin,

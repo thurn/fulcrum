@@ -319,13 +319,31 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             working_directory=None,
             detail="observed",
         )
-        with patch(
-            "fulcrum.installation_service.inspect_service", return_value=observation
+        with (
+            patch(
+                "fulcrum.installation_service.inspect_service",
+                return_value=observation,
+            ),
+            patch(
+                "fulcrum.resident_client.exchange",
+                return_value={
+                    "pid": os.getpid(),
+                    "process_commit": "controller-commit",
+                    "connected": True,
+                    "pending": {},
+                },
+            ),
+            patch.dict(os.environ, {"FULCRUM_COMMIT": "client-commit"}, clear=False),
         ):
             result = service_status_result(self.request())
         self.assertFalse(result["socket"]["exists"])
         self.assertEqual(set(result["services"]), {"dolt", "controller"})
         self.assertTrue(all(row["running"] for row in result["services"].values()))
+        self.assertTrue(result["responsive"])
+        self.assertTrue(result["revisions"]["skew"])
+        self.assertEqual(result["revisions"]["client"], "client-commit")
+        self.assertEqual(result["revisions"]["controller"], "controller-commit")
+        self.assertIn("revisions differ", result["gaps"][-1])
 
     def test_controller_readiness_requires_a_connectable_unix_socket(self) -> None:
         path = self.root / "ready.sock"

@@ -40,6 +40,13 @@ from fulcrum.work import WorkService, work_view
 BRIEF_CHARACTER_LIMIT = 6000
 BRIEF_ROW_LIMIT = 12
 DECISION_KINDS = ("groom", "dispatch", "recover")
+HUMAN_IRREDUCIBILITY_KINDS = {
+    "intent",
+    "authority",
+    "credential",
+    "external_approval",
+    "policy",
+}
 DECISION_ACTIONS = {
     "dispatch",
     "defer",
@@ -911,6 +918,8 @@ class AdmissionService:
                 external={"entry_operation": result.operation_id},
                 result={
                     "bead_id": bead_id,
+                    "dispatched_role": role,
+                    "compiled_contract": timeline["compiled_contract"],
                     "started": started,
                     "queued": False,
                     "human_bypass": bypass,
@@ -1999,6 +2008,7 @@ def _authorized_scope(
     summary = scope.get("summary")
     acceptance = scope.get("acceptance")
     evidence = scope.get("evidence")
+    implementation_notes = scope.get("implementation_notes", [])
     finish_operation = scope.get("finish_operation")
     if (
         not isinstance(summary, str)
@@ -2008,6 +2018,10 @@ def _authorized_scope(
         or not all(isinstance(item, str) and item.strip() for item in acceptance)
         or not isinstance(finish_operation, str)
         or not finish_operation
+        or not isinstance(implementation_notes, list)
+        or not all(
+            isinstance(item, str) and item.strip() for item in implementation_notes
+        )
     ):
         raise FulcrumError(
             "SCOPE_INVALID",
@@ -2020,6 +2034,7 @@ def _authorized_scope(
         "evidence": (
             [str(item) for item in evidence] if isinstance(evidence, list) else []
         ),
+        "implementation_notes": list(implementation_notes),
         "finish_operation": finish_operation,
         "decision_operation": decision_operation,
     }
@@ -2036,6 +2051,33 @@ def _dispatch_timeline(
     entry_operation: str | None,
 ) -> dict[str, Any]:
     decision_id = _optional_string(dispatch.get("decision_operation"))
+    authorized_scope = (
+        dispatch.get("authorized_scope")
+        if isinstance(dispatch.get("authorized_scope"), Mapping)
+        else None
+    )
+    compiled_contract = {
+        "authorized_role": role,
+        "bead_id": bead_id,
+        "behavioral_outcome": (
+            authorized_scope.get("summary") if authorized_scope else None
+        ),
+        "acceptance": (
+            list(authorized_scope.get("acceptance") or []) if authorized_scope else []
+        ),
+        "evidence": (
+            list(authorized_scope.get("evidence") or []) if authorized_scope else []
+        ),
+        "implementation_notes": (
+            list(authorized_scope.get("implementation_notes") or [])
+            if authorized_scope
+            else []
+        ),
+        "scope_revision": (
+            authorized_scope.get("finish_operation") if authorized_scope else None
+        ),
+        "decision_operation": decision_id,
+    }
     decision = ledger.show(decision_id) if decision_id else None
     workspace = ledger.show(workspace_operation) if workspace_operation else None
     entry = ledger.show(entry_operation) if entry_operation else None
@@ -2054,6 +2096,10 @@ def _dispatch_timeline(
         "correlation_id": dispatch_operation.id,
         "bead_id": bead_id,
         "role": role,
+        "scope_revision": (
+            authorized_scope.get("finish_operation") if authorized_scope else None
+        ),
+        "compiled_contract": compiled_contract,
         "decision_operation": decision_id,
         "dispatch_operation": dispatch_operation.id,
         "workspace_operation": workspace_operation,
@@ -2248,6 +2294,7 @@ def _apply_decision(
     elif action == "human":
         question = supplied.get("question")
         required = supplied.get("required_action")
+        irreducibility = supplied.get("irreducibility")
         if (
             not isinstance(question, str)
             or not question
@@ -2256,6 +2303,17 @@ def _apply_decision(
         ):
             raise FulcrumError.invalid(
                 "INVALID_DECISION", "human requires question and required_action"
+            )
+        if (
+            not isinstance(irreducibility, Mapping)
+            or set(irreducibility) != {"kind", "detail"}
+            or irreducibility.get("kind") not in HUMAN_IRREDUCIBILITY_KINDS
+            or not isinstance(irreducibility.get("detail"), str)
+            or not str(irreducibility["detail"]).strip()
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_DECISION",
+                "human requires irreducibility with kind intent, authority, credential, external_approval, or policy and a nonempty detail",
             )
         fc["owner"] = "HUMAN"
         fc["role"] = None
@@ -2271,6 +2329,11 @@ def _apply_decision(
             required_action=required,
             baseline=baseline if isinstance(baseline, Mapping) else None,
         )
+        reasons = _waiting_reasons(fc.get("waiting"))
+        for item in reasons:
+            if item.get("id") == f"human:{decision_operation}":
+                item["irreducibility"] = dict(irreducibility)
+        fc["waiting"] = {"reasons": reasons}
         fc["next_action"] = required
         status = "blocked"
         assignee = "HUMAN"

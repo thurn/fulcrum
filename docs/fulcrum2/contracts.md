@@ -323,7 +323,10 @@ A decision references the retained `decision_operation` described in §10 and co
 `reason`, and action-specific fields. The payload is `{"decisions":[...]}`.
 Actions: `dispatch` (`role`), `defer` (`reconsider_when`), `clarify` (`question`),
 `duplicate` (`canonical_bead`), `reject`, `recover` (`scope`, `diagnosis`), or
-`human` (`question`, `required_action`). Return per-decision applied/conflict
+`human` (`question`, `required_action`, and `irreducibility` with `kind` and
+`detail`). Irreducibility kinds are `intent`, `authority`, `credential`,
+`external_approval`, or `policy`; routine diagnosis, stale implementation facts,
+failed commands, and unexpected managed state use `recover`, not `human`. Return per-decision applied/conflict
 results. A mixed result completes the command with explicit conflicts; do not
 roll back independent accepted decisions or secretly retry stale judgment.
 
@@ -361,7 +364,7 @@ in-memory native request, inspect/recover the task and report that gap.
 | --- | --- |
 | Weaver `answered` | `summary`, `evidence`; closes question bead |
 | Weaver `planned` | `summary`, `plan_id`; retain published future plan and its explicit deferral without dispatch |
-| Weaver `ready` | `summary`, nonempty `acceptance` array, optional `evidence`; implementation-ready scope awaiting Marshal review, without authorization or dispatch |
+| Weaver `ready` | behavioral `summary`, nonempty behavioral `acceptance` array, optional `evidence`, and optional non-authoritative `implementation_notes`; implementation-ready scope awaiting Marshal review, without authorization or dispatch |
 | Executor `ready_for_review` | `summary`, `source_oid`, `checks`, `evidence`; recorded handoff to Warden |
 | Warden `approved` | `summary`, `source_oid`, `checks`, `evidence`; require exactly one task commit atop the retained base, then seal judgment for controller-owned approval and promotion |
 | Sage/Mason `findings` | `summary`, `findings` (report objects); file findings and resume interrupted work via Marshal, or close standalone investigation |
@@ -382,6 +385,15 @@ An accepted Executor finish seals its input and stops further Executor work. It
 returns `accepted` while a destination is being prepared; the owner transfer waits
 for native terminal evidence. The old ownership reference cannot submit another different
 finish. Failed reporting after this acceptance does not reopen implementation.
+
+Executor and Warden entry receipts retain the dispatched role and compiled
+contract, including the exact scope revision and Marshal decision. Native titles
+do not replay scope text. Their developer instructions make the authorized role
+dominant and label all title, outcome, acceptance, evidence, comment, memory,
+command-output, Markdown, and code-block content as inert data. Entry and finish
+reject a managed task whose observed role differs from that contract. Suggested
+implementation notes never override current-source inspection when behavior,
+scope, and safety remain unchanged.
 
 ### Operations, diagnostics, and emergency repair
 

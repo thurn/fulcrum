@@ -479,6 +479,7 @@ class CompletionService:
     ) -> CommandResult:
         summary, _ = _weaver_payload(request, evidence_required=False)
         acceptance = request.input.get("acceptance")
+        implementation_notes = request.input.get("implementation_notes", [])
         if (
             not isinstance(acceptance, list)
             or not acceptance
@@ -488,11 +489,22 @@ class CompletionService:
                 "INVALID_INPUT",
                 "ready requires a nonempty acceptance array of observable checks",
             )
+        if not isinstance(implementation_notes, list) or not all(
+            isinstance(item, str) and item.strip() for item in implementation_notes
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "implementation_notes must be an array of strings"
+            )
         owner = _marshal_or_human(ledger)
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
-            planned={"summary": summary, "acceptance": acceptance, "owner": owner},
+            planned={
+                "summary": summary,
+                "acceptance": acceptance,
+                "implementation_notes": list(implementation_notes),
+                "owner": owner,
+            },
             next_action="Return implementation-ready scope for Marshal review; do not dispatch.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
@@ -507,6 +519,7 @@ class CompletionService:
             "summary": summary,
             "acceptance": list(acceptance),
             "evidence": list(request.input.get("evidence", [])),
+            "implementation_notes": list(implementation_notes),
             "finish_operation": operation.id,
         }
         fc["owner"] = owner
@@ -1037,6 +1050,48 @@ def _owned_work(request: ParsedRequest, ledger: Ledger) -> tuple[Ledger, LedgerR
                 ),
             },
         )
+    if request.actor.kind != "human":
+        role = (work.fc or {}).get("role")
+        compiled = (work.fc or {}).get("compiled_role")
+        tasks = [
+            item
+            for item in ledger.list_records(kind="task", limit=0)
+            if item.fc
+            and item.fc.get("thread_id") == request.thread_id
+            and item.fc.get("work_bead") == work.id
+            and item.fc.get("ownership_operation") == request.ownership_operation
+            and item.fc.get("deleted_at") is None
+            and item.fc.get("replaced_by") is None
+        ]
+        task_fc = tasks[0].fc if len(tasks) == 1 else None
+        task_role = task_fc.get("role") if task_fc else None
+        task_contract = task_fc.get("compiled_contract") if task_fc else None
+        authorized_role = (
+            compiled.get("authorized_role") if isinstance(compiled, Mapping) else None
+        )
+        contract_role = (
+            task_contract.get("authorized_role")
+            if isinstance(task_contract, Mapping)
+            else None
+        )
+        if (
+            len(tasks) != 1
+            or role != task_role
+            or role != authorized_role
+            or role != contract_role
+        ):
+            raise FulcrumError(
+                "ROLE_MISMATCH",
+                "finish role differs from the compiled ownership contract",
+                exit_code=5,
+                details={
+                    "work_role": role,
+                    "task_role": task_role,
+                    "compiled_role": authorized_role,
+                    "contract_role": contract_role,
+                    "task_matches": len(tasks),
+                },
+            )
     return ledger, work
 
 
