@@ -95,6 +95,7 @@ READ_ONLY_COMMANDS = {
     ("rates", "show"),
 }
 BROKEN_CONFIG_COMMANDS = {
+    ("runtime", "launch-desktop"),
     ("setup",),
     ("service", "status"),
     ("recover", "inspect"),

@@ -59,10 +59,7 @@ def routing_developer_instructions(
 class RuntimeService:
     def launch_desktop(self, request: ParsedRequest) -> CommandResult:
         manager = ConfigurationManager(request.instance.config_path)
-        document, _ = manager.load()
-        config = manager.effective(document)
-        runtime = config["runtime"]
-        endpoint = str(runtime["endpoint"])
+        endpoint = manager.desktop_endpoint()
         candidates = (
             Path("/Applications/Codex.app/Contents/MacOS/Codex"),
             Path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),

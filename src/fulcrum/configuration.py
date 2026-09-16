@@ -139,6 +139,22 @@ class ConfigurationManager:
         return parser
 
     def load(self) -> tuple[MutableMapping[str, Any], bytes]:
+        loaded, raw = self._read_document()
+        self.validate_document(loaded)
+        return loaded, raw
+
+    def desktop_endpoint(self) -> str:
+        """Read only Desktop's runtime settings, independent of workflow state."""
+        document, _ = self._read_document()
+        runtime = dict(default_config(self.path.parent)["runtime"])
+        runtime.update(_mapping(document.get("runtime", {}), "runtime"))
+        _known(runtime, {"kind", "endpoint", "executable"}, "runtime")
+        if runtime["kind"] != "codex":
+            raise _invalid("runtime.kind", "must be codex")
+        _nonempty(runtime["endpoint"], "runtime.endpoint")
+        return runtime["endpoint"]
+
+    def _read_document(self) -> tuple[MutableMapping[str, Any], bytes]:
         try:
             raw = self.path.read_bytes()
             loaded = self.yaml().load(raw.decode("utf-8"))
@@ -160,7 +176,6 @@ class ConfigurationManager:
                 "authoritative configuration must be a YAML mapping",
                 exit_code=4,
             )
-        self.validate_document(loaded)
         return loaded, raw
 
     def effective(self, document: Mapping[str, Any]) -> dict[str, Any]:

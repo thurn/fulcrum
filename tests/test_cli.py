@@ -229,10 +229,9 @@ class CliTests(unittest.TestCase):
                     return_value=Mock(pid=123),
                 ) as launch,
             ):
-                manager.return_value.load.return_value = ({}, b"")
-                manager.return_value.effective.return_value = {
-                    "runtime": {"endpoint": "ws://127.0.0.1:4500"}
-                }
+                manager.return_value.desktop_endpoint.return_value = (
+                    "ws://127.0.0.1:4500"
+                )
                 result = RuntimeService().launch_desktop(request())
                 self.assertEqual(launch.call_args.kwargs["env"]["CODEX_HOME"], expected)
                 self.assertEqual(launch.call_args.kwargs["cwd"], Path("/Users/example"))
@@ -246,10 +245,7 @@ class CliTests(unittest.TestCase):
             patch("fulcrum.runtime_service.shutil.which", return_value="/usr/bin/open"),
             patch("fulcrum.runtime_service.subprocess.Popen") as launch,
         ):
-            manager.return_value.load.return_value = ({}, b"")
-            manager.return_value.effective.return_value = {
-                "runtime": {"endpoint": "ws://127.0.0.1:4500"}
-            }
+            manager.return_value.desktop_endpoint.return_value = "ws://127.0.0.1:4500"
             with self.assertRaises(FulcrumError) as error:
                 RuntimeService().launch_desktop(request())
             self.assertEqual(error.exception.code, "INVALID_CODEX_HOME")
