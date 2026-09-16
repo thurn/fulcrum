@@ -5,8 +5,8 @@ workflow source of truth is one stock Beads ledger in a Git-backed brain. It doe
 not require a private workflow database, replay journal, or model-powered
 housekeeping process.
 
-The normative product definition is [Fulcrum2 design](docs/fulcrum2/design.md),
-[contracts](docs/fulcrum2/contracts.md), and the
+The normative product definition is in the
+[Fulcrum2 contracts](docs/fulcrum2/contracts.md) and the
 [implementation index](docs/fulcrum2/plan/README.md). Operational guidance lives
 in [setup](docs/setup.md), [operations](docs/operations.md),
 [hooks](docs/hooks.md), and [validation](docs/validation.md).
@@ -117,7 +117,7 @@ The independently packaged `fulcrum-recover` entry point exposes only
 `inspect`, `takeover`, `repair`, and `release`. Start with read-only inspection:
 
 ```sh
-fulcrum-recover inspect --instance INSTANCE --json
+fulcrum-recover inspect --instance INSTANCE --scope instance --json
 ```
 
 Recovery authority is explicitly scoped and retained in Beads. It does not create
@@ -125,7 +125,7 @@ a second journal. A production hard reset is separate, destructive, and requires
 an exact preview followed by explicit human confirmation:
 
 ```sh
-fulcrum recover inspect --instance INSTANCE --json
+fulcrum recover inspect --instance INSTANCE --scope instance --json
 fulcrum reset --hard --yes --instance INSTANCE --json
 scripts/setup --input setup.json --non-interactive --json
 fulcrum service status --instance INSTANCE --json

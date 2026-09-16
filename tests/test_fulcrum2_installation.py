@@ -6,7 +6,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from tests import local_launcher_stub
 
@@ -38,6 +38,8 @@ from fulcrum.setup import (
     _model_capability,
     _prepare_configuration,
     _provider_id,
+    _runtime_and_leadership,
+    _stop_controller_for_setup,
 )
 
 
@@ -251,6 +253,54 @@ class Fulcrum2InstallationTest(unittest.TestCase):
     def test_setup_reads_current_tollgate_repository_identity(self) -> None:
         self.assertEqual(
             _provider_id({"state": {"id": "repo-current"}}), "repo-current"
+        )
+
+    def test_setup_waits_for_in_flight_reconciliation_before_stopping(self) -> None:
+        from fulcrum.contracts import FulcrumError
+
+        busy = FulcrumError(
+            "OPERATION_BUSY",
+            "operation is already executing",
+            exit_code=3,
+            retryable=True,
+        )
+        stopped = MagicMock(operation_id="fc-stop")
+        with (
+            patch(
+                "fulcrum.setup.ServiceService.stop",
+                side_effect=[busy, busy, stopped],
+            ) as stop,
+            patch("fulcrum.setup.time.sleep") as sleep,
+        ):
+            operation_id = _stop_controller_for_setup(self.request())
+        self.assertEqual(operation_id, "fc-stop")
+        self.assertEqual(stop.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_setup_creates_idle_leadership_without_model_turns(self) -> None:
+        request = self.request()
+        ledger = MagicMock()
+        capability = MagicMock()
+        capability.to_dict.return_value = {"available": True}
+        runtime = MagicMock()
+        runtime.connect = AsyncMock()
+        runtime.capabilities = AsyncMock(return_value=capability)
+        runtime.close = AsyncMock()
+        with (
+            patch("fulcrum.setup.AppServerRuntime", return_value=runtime),
+            patch(
+                "fulcrum.setup.ensure_leadership",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as ensure,
+        ):
+            _runtime_and_leadership(request, ledger, self.config, {})
+        ensure.assert_awaited_once_with(
+            request,
+            ledger,
+            runtime,
+            self.config,
+            send_initial_requests=False,
         )
 
     def test_desktop_launcher_uses_fulcrum_runtime_command(self) -> None:

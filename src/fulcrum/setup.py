@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Mapping, MutableMapping
 from dataclasses import replace
@@ -111,7 +112,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
                 uuid.uuid5(uuid.UUID(setup_request.request_id), "setup-service-stop")
             ),
         )
-        stopped_for_setup = ServiceService().stop(stop_request).operation_id
+        stopped_for_setup = _stop_controller_for_setup(stop_request)
     lock_path = instance.lock_path
     assert lock_path is not None
     with WriterLock(lock_path):
@@ -320,6 +321,19 @@ def _bootstrap_target(
     else:
         brain_root = DEFAULT_BRAIN.resolve(strict=False)
     return brain_root / "fulcrum.yaml", brain_root
+
+
+def _stop_controller_for_setup(request: ParsedRequest) -> str | None:
+    """Let a short in-flight reconciliation release the maintenance gate."""
+
+    deadline = time.monotonic() + max(1.0, request.timeout)
+    while True:
+        try:
+            return ServiceService().stop(request).operation_id
+        except FulcrumError as error:
+            if error.code != "OPERATION_BUSY" or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
 
 def _prepare_configuration(
@@ -710,7 +724,7 @@ def _runtime_and_leadership(
                 ledger,
                 runtime,
                 config,
-                send_initial_requests=True,
+                send_initial_requests=False,
             )
             return (
                 {"required": True, **capabilities.to_dict(), "projects": projects},

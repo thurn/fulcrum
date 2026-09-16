@@ -31,6 +31,43 @@ Run setup from the retained checkout:
 scripts/setup --input setup.json --non-interactive --json
 ```
 
+A minimal `setup.json` is:
+
+```json
+{
+  "brain": {"root": "/absolute/path/to/brain"},
+  "runtime": {"endpoint": "ws://127.0.0.1:4500"}
+}
+```
+
+Setup discovers `bd`, `codex`, and `tg` on `PATH` when their executable fields
+are omitted. The brain must be a Git worktree with its configured remote
+(`origin` by default), and that remote must already contain at least one branch
+and commit. For a brand-new remote, create and push its initial commit before
+running setup; setup does not create the remote's first branch.
+
+The input is a partial configuration object. Accepted top-level maps are
+`brain`, `beads`, `runtime`, `delivery`, `models`, `projects`, `knowledge`,
+`source`, `timing`, `diagnostics`, `resources`, and `policy`. Omitted values use
+the defaults written to `fulcrum.yaml`. The principal fields are:
+
+- `brain`: `root`, `remote`, `branch`, `push_interval_seconds`
+- `beads`: `executable`, loopback `host`, `port`, `database`
+- `runtime`: `kind` (`codex`), `endpoint`, `executable`
+- `delivery`: `kind` (`tollgate`), `executable`
+- `models`: per-role `model` and `effort`
+- `projects`: a map keyed by project ID; each entry accepts `root`,
+  `codex_project_id`, `delivery`, `integration_branch`, `prepare_argv`,
+  `validate_argv`, `source_remote`, `require_source_sync`, `models`, and
+  `enabled`
+- `knowledge`: `root`, `remote`, `branch`, `require_remote_sync`
+- `source`: `repository`, `remote`, `branch`
+- `policy`: capacity, pause, suspension, and rationale fields
+- `timing`, `diagnostics`, and `resources`: operational overrides
+
+All roots and executable paths must be absolute. Use distinct loopback runtime
+and Beads ports for an isolated test instance.
+
 The input document supplies any non-default configuration and initial projects.
 `brain.root` is the directory containing the authoritative `fulcrum.yaml`. Runtime
 and delivery provider identities are explicit; projects include absolute roots,

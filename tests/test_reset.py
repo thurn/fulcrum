@@ -71,46 +71,40 @@ class ResetTests(unittest.TestCase):
             )
         started.assert_called_once()
 
-    def test_reset_initializes_leadership_like_setup_and_reports_started_turns(self):
+    def test_reset_initializes_idle_leadership_without_model_turns(self):
         from fulcrum.reset import ResetService
 
         request = self.request()
         ledger = MagicMock()
         runtime = MagicMock()
         runtime.close = AsyncMock()
-        for started in (True, False):
-            with self.subTest(initial_requests_started=started):
-                actions = [
-                    {
-                        "role": role,
-                        "thread_id": f"{role}-thread",
-                        "turn_started": started,
-                        "initial_request": "sent" if started else "already_sent",
-                    }
-                    for role in ("vizier", "marshal")
-                ]
-                with (
-                    patch(
-                        "fulcrum.reset._bootstrap_control_record",
-                        return_value={"created": started},
-                    ),
-                    patch.object(ResetService, "_runtime", return_value=runtime),
-                    patch(
-                        "fulcrum.leadership.ensure_leadership",
-                        new_callable=AsyncMock,
-                        return_value=actions,
-                    ) as ensure,
-                ):
-                    result = ResetService()._bootstrap_control(
-                        request, self.config, ledger
-                    )
-                ensure.assert_awaited_once_with(
-                    request, ledger, runtime, self.config, send_initial_requests=True
-                )
-                self.assertEqual(result["turns_started"], 2 if started else 0)
-                self.assertEqual(result["actions"], actions)
-                runtime.close.assert_awaited_once()
-                runtime.close.reset_mock()
+        actions = [
+            {
+                "role": role,
+                "thread_id": f"{role}-thread",
+                "turn_started": False,
+            }
+            for role in ("vizier", "marshal")
+        ]
+        with (
+            patch(
+                "fulcrum.reset._bootstrap_control_record",
+                return_value={"created": True},
+            ),
+            patch.object(ResetService, "_runtime", return_value=runtime),
+            patch(
+                "fulcrum.leadership.ensure_leadership",
+                new_callable=AsyncMock,
+                return_value=actions,
+            ) as ensure,
+        ):
+            result = ResetService()._bootstrap_control(request, self.config, ledger)
+        ensure.assert_awaited_once_with(
+            request, ledger, runtime, self.config, send_initial_requests=False
+        )
+        self.assertEqual(result["turns_started"], 0)
+        self.assertEqual(result["actions"], actions)
+        runtime.close.assert_awaited_once()
 
     def test_failed_reset_exposes_cause_and_exact_retry_command(self):
         operation = OperationRecord.from_record(

@@ -635,7 +635,7 @@ class ResetService:
                     ledger,
                     runtime,
                     config,
-                    send_initial_requests=True,
+                    send_initial_requests=False,
                 )
                 return [dict(item) for item in actions]
             finally:

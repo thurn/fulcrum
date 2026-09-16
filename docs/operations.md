@@ -101,7 +101,7 @@ Production reset is not implied by installing or reading this runbook. Obtain a
 separate explicit human instruction, preserve the `recover inspect` inventory, then:
 
 ```sh
-fulcrum recover inspect --instance INSTANCE --scope reset --json
+fulcrum recover inspect --instance INSTANCE --scope instance --json
 fulcrum reset --hard --yes --instance INSTANCE --json
 scripts/setup --input setup.json --non-interactive --json
 fulcrum service status --instance INSTANCE --json
