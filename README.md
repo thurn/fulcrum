@@ -59,7 +59,9 @@ authoritative YAML configuration beside the brain, initializes the Beads/Dolt
 ledger, writes uniquely owned service definitions, reconciles the nine
 human-invoked skill links and read-only compaction hook, validates provider
 identities, and creates the standing Vizier and Marshal without model turns.
-This provisions infrastructure: launchers automatically resolve local master,
+Production setup links the source-following `fulcrum` and `fulcrum-recover`
+launchers into `~/.local/bin` without replacing unrelated user files. This
+provisions infrastructure: launchers automatically resolve local master,
 and ordinary code changes need only a commit. Running operations retain their
 source and existing agent turns continue. Rerunning the same input repairs owned
 operational artifacts and does not duplicate leaders, providers, or services.

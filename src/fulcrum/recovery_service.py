@@ -1545,7 +1545,11 @@ def _repair_reinstall(
         fulcrum2_service_definitions,
         install_fulcrum2_service_definitions,
     )
-    from fulcrum.source_refresh import ensure_launchers, install_recovery_link
+    from fulcrum.source_refresh import (
+        ensure_launchers,
+        install_command_link,
+        install_recovery_link,
+    )
     from fulcrum.install import master_source_root
 
     source = master_source_root().resolve(strict=True)
@@ -1585,11 +1589,16 @@ def _repair_reinstall(
     _installed, changed_services = install_fulcrum2_service_definitions(
         definitions, request.instance.instance_root
     )
+    launcher = install_command_link(
+        request.instance.instance_root,
+        production=not request.instance.explicit_selection,
+    )
     return {
         "target": target,
         "installation": installation,
         "source_root": str(source),
         "active": str(source),
+        "launcher": str(launcher),
         "changed_service_definitions": changed_services,
         "controller_started": False,
     }

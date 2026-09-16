@@ -33,6 +33,7 @@ from fulcrum.installation_service import (
     _wait_for_controller,
     service_status_result,
 )
+from fulcrum.source_refresh import install_command_link
 from fulcrum.setup import (
     _missing_required,
     _model_capability,
@@ -197,6 +198,49 @@ class Fulcrum2InstallationTest(unittest.TestCase):
                 skills_root=root,
                 source_root=checkout,
             )
+
+    def test_production_setup_installs_collision_safe_command_launcher(self) -> None:
+        command = self.instance / "bin" / "fulcrum"
+        command.parent.mkdir(parents=True)
+        command.write_text("#!/bin/sh\n", encoding="utf-8")
+        command.chmod(0o755)
+        home = self.root / "home"
+
+        with (
+            patch(
+                "fulcrum.source_refresh.ensure_launchers",
+                return_value=(command, self.instance / "bin/fulcrum-recover", False),
+            ),
+            patch("fulcrum.source_refresh.Path.home", return_value=home),
+        ):
+            installed = install_command_link(self.instance, production=True)
+            repeated = install_command_link(self.instance, production=True)
+
+        self.assertEqual(installed, home / ".local/bin/fulcrum")
+        self.assertEqual(repeated, installed)
+        self.assertTrue(installed.is_symlink())
+        self.assertEqual(installed.resolve(), command.resolve())
+
+        installed.unlink()
+        installed.write_text("user-owned\n", encoding="utf-8")
+        with (
+            patch(
+                "fulcrum.source_refresh.ensure_launchers",
+                return_value=(command, self.instance / "bin/fulcrum-recover", False),
+            ),
+            patch("fulcrum.source_refresh.Path.home", return_value=home),
+        ):
+            with self.assertRaisesRegex(InstallationError, "real user launcher"):
+                install_command_link(self.instance, production=True)
+
+    def test_explicit_setup_keeps_command_launcher_inside_instance(self) -> None:
+        command = self.instance / "bin" / "fulcrum"
+        with patch(
+            "fulcrum.source_refresh.ensure_launchers",
+            return_value=(command, self.instance / "bin/fulcrum-recover", False),
+        ):
+            installed = install_command_link(self.instance, production=False)
+        self.assertEqual(installed, command)
 
     def test_existing_setup_without_patch_preserves_yaml_bytes(self) -> None:
         self.config_path.write_text(

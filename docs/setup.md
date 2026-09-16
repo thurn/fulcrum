@@ -32,9 +32,11 @@ scripts/setup --input setup.json --non-interactive --json
 ```
 
 If you pass `--instance`, it must be an absolute path. Setup writes source-following
-launchers to `<instance>/bin`; use `<instance>/bin/fulcrum` for later commands, or
-use `.venv/bin/fulcrum` from the retained checkout. The examples below abbreviate
-either launcher as `fulcrum`; setup does not add it to your shell's `PATH`.
+launchers to `<instance>/bin`. Production setup also installs
+`~/.local/bin/fulcrum` and `~/.local/bin/fulcrum-recover` as collision-safe links
+to those launchers; it refuses to replace unrelated links or real files. Ensure
+`~/.local/bin` is on `PATH`. Explicit `--instance` setups remain isolated and use
+`<instance>/bin/fulcrum` directly.
 
 A minimal `setup.json` is:
 
@@ -95,7 +97,8 @@ Setup is a one-time/rerunnable bootstrap and performs these bounded operations:
 
 1. Creates only declared instance and brain paths and provisions locked dependencies.
 2. Keeps entry points bound to the editable master checkout; it never copies Fulcrum.
-3. Provides the `fulcrum-recover` launcher from the same master source.
+3. Provides `fulcrum` and `fulcrum-recover` launchers from the same master source
+   on the production user's `PATH`.
 4. Writes uniquely named controller, Dolt, optional runtime, and updater services.
 5. Initializes one externally served `fulcrum` Beads database, then receipts all
    subsequent external effects.

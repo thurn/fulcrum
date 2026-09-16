@@ -43,7 +43,7 @@ from fulcrum.instance import DEFAULT_BRAIN, WriterLock
 from fulcrum.leadership import ensure_leadership
 from fulcrum.ledger import Ledger, LedgerFailure, operation_view
 from fulcrum.runtime import AppServerRuntime
-from fulcrum.source_refresh import ensure_recovery_launcher
+from fulcrum.source_refresh import ensure_recovery_launcher, install_command_link
 from fulcrum.tollgate import Tollgate, TollgateError
 from fulcrum.publication import (
     DoltPublicationAdapter,
@@ -178,6 +178,10 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "uncertain",
         }:
             return _setup_operation_result(operation)
+        command_launcher = install_command_link(
+            instance.instance_root,
+            production=not instance.explicit_selection,
+        )
         recovery = ensure_recovery_launcher(
             instance.instance_root,
             master_source_root(),
@@ -218,6 +222,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "assets": {
                 "controller": str(controller),
                 "controller_changed": controller_changed,
+                "command_launcher": str(command_launcher),
                 "recovery": recovery,
                 "skills": skills,
             },

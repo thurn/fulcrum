@@ -52,11 +52,12 @@ def ensure_launchers(instance_root: Path) -> tuple[Path, Path, bool]:
     return root / "fulcrum", root / "fulcrum-recover", changed
 
 
-def install_recovery_link(instance_root: Path, *, production: bool) -> Path:
-    _, source, _ = ensure_launchers(instance_root)
+def _install_user_launcher(
+    instance_root: Path, source: Path, name: str, *, production: bool
+) -> Path:
     if not production:
         return source
-    target = Path.home() / ".local/bin/fulcrum-recover"
+    target = Path.home() / ".local/bin" / name
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_symlink():
         resolved = target.resolve(strict=False)
@@ -70,6 +71,20 @@ def install_recovery_link(instance_root: Path, *, production: bool) -> Path:
     temporary.symlink_to(source)
     os.replace(temporary, target)
     return target
+
+
+def install_command_link(instance_root: Path, *, production: bool) -> Path:
+    command, _, _ = ensure_launchers(instance_root)
+    return _install_user_launcher(
+        instance_root, command, "fulcrum", production=production
+    )
+
+
+def install_recovery_link(instance_root: Path, *, production: bool) -> Path:
+    _, recovery, _ = ensure_launchers(instance_root)
+    return _install_user_launcher(
+        instance_root, recovery, "fulcrum-recover", production=production
+    )
 
 
 def ensure_recovery_launcher(
