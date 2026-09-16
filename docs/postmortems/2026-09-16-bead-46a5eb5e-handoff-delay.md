@@ -29,15 +29,17 @@ Marshal request from being created. The controller repeated the same failure
 **880 times** over **1 hour 54 minutes 38.025 seconds**, which was **90.7%** of
 the bead's total elapsed time.
 
-Several real instruction defects then made the successful portion noisier:
-downstream task text preserved the user's explicit `$fulcrum-weaver` invocation,
-so Executor and Warden both treated the intake skill as an instruction they had
-to reconcile with their active roles; the rendered terminal-stop commands
-omitted the required ownership token; and Warden was not told that provider
-submission required exactly one task commit on the promoted release. Executor
-also mistyped a commit OID, and Warden initially ran a nonexistent test name.
-These issues caused failed commands, extra inspection, and one rejected Warden
-finish, but they did not cause the two-hour delay.
+Several real instruction defects then made the successful portion noisier. The
+downstream compiler used the raw intake outcome and title instead of the exact
+Marshal-authorized Weaver scope. Because that intake contained an explicit
+`$fulcrum-weaver` invocation, Executor and Warden both treated it as an
+instruction they had to reconcile with their active roles. The rendered
+terminal-stop commands also omitted the required ownership token, and Warden
+was not told that provider submission required exactly one task commit on the
+promoted release. Executor additionally mistyped a commit OID, and Warden
+initially ran a nonexistent test name. These issues caused failed commands,
+extra inspection, and one rejected Warden finish, but they did not cause the
+two-hour delay.
 
 The observed path was:
 
@@ -180,15 +182,21 @@ initiating cause is unknown.
 The agent behavior came from four distinct sources, not one general reasoning
 failure:
 
-1. **Original skill syntax leaked into downstream prompts.** The requested
-   outcome and task title retained the literal Markdown invocation
-   `$fulcrum-weaver`. The host contract treats an explicit skill mention as a
-   command to use that skill. Executor therefore announced that it was using the
-   Weaver skill while also noting that Executor now owned the bead; Warden made
-   the same reconciliation. This is deterministic prompt contamination. The
-   original user request should be retained as quoted data, not re-emitted as an
-   active downstream skill directive. Its latency contribution is confirmed to
-   be nonzero but not measurable from the transcript.
+1. **Raw intake was compiled instead of the authorized Weaver scope.** Weaver
+   correctly retained its curated implementation contract in `fc.scope.summary`,
+   `fc.scope.acceptance`, and `fc.scope.evidence`. Downstream role compilation
+   nevertheless populated `Requested outcome` from the original `fc.outcome`
+   and populated the native task title from the original work title. It placed
+   Weaver's curated summary only inside `Current evidence`. The workers did not
+   receive the full Weaver transcript, but they did receive the raw user request
+   where they should have received the exact scope revision Marshal authorized.
+   That raw intake contained the literal Markdown invocation
+   `$fulcrum-weaver`, so Executor announced that it was using the Weaver skill
+   while also noting that Executor now owned the bead; Warden made the same
+   reconciliation. The defect is the task-contract source, not merely missing
+   escaping. Raw intake belongs in durable provenance available to Weaver and
+   Marshal, not in downstream worker instructions. Its latency contribution is
+   confirmed to be nonzero but not measurable from the transcript.
 2. **Marshal's clarification was expected.** The decision brief deliberately
    caps the whole brief at 6,000 characters and memory at 750 characters. This
    scope was marked `prepared_scope.complete: false`, and the Marshal prompt
@@ -223,7 +231,7 @@ test commands would reduce them, but neither is a controller root cause.
 | One task exception aborts all reconciliation before Marshal discovery | Orchestration | Historical source ordering and pass events | Primary cause of 1h54m38 delay | Confirmed |
 | Identical failed state retries without isolation, backoff, or circuit break | Recovery/performance | 880 repetitions | Amplified duration and resource use | Confirmed |
 | Successful pass depends on old task becoming `notLoaded` | Runtime/recovery | Successful pass facts | Accidental escape from livelock | Confirmed; cause of status change unknown |
-| Explicit intake skill mention remains active in downstream prompts | Prompt/context | Executor and Warden native transcripts | Caused role/skill reconciliation and extra reads | Confirmed; duration unmeasured |
+| Raw intake outcome/title are compiled instead of the authorized Weaver scope | Prompt/context | Role compiler, retained `fc.scope`, and Executor/Warden native transcripts | Supplied the wrong task contract and caused role/skill reconciliation | Confirmed; duration unmeasured |
 | Terminal-stop template omits ownership token | Command contract | Formula text and failed calls | Caused deterministic retries | Confirmed |
 | One-commit provider invariant absent from Warden instructions | Delivery contract | Warden commit history and first finish rejection | Added a rejected finish and squash/retest loop | Confirmed |
 | Executor mistypes source OID; Warden guesses a test name | Agent/tool use | Native transcripts and failed commands | Minor extra latency | Confirmed |
@@ -276,7 +284,7 @@ does not prove the failure mode is repaired.
 | Required P0 | Catch `FulcrumError` around controller approval and map `STALE_SOURCE` to deterministic Warden review/recovery | Removes this incident's trigger | Service and controller regression | Old finish is superseded or cleared, exact retained source is visible, and no pass exception escapes |
 | Required P0 | Add repeated-error suppression/circuit breaking while keeping unrelated work live | Stops hot retry and 880-pass churn | Resident test with stable clock and repeated signature | One recovery record is retained, retries are bounded/backed off, and unrelated beads advance |
 | Required P0 | Add the exact two-bead incident-shape regression | Prevents local unit success from masking the cross-bead failure | End-to-end test against real dispatch behavior | Test fails on `1d29f43` and passes only with failure isolation and stale-source recovery |
-| Required P1 | Compile downstream outcome/title as inert quoted data or strip explicit intake skill directives | Prevents Executor/Warden from being re-instructed to use Weaver | Prompt snapshot plus live task assertion | Downstream tasks preserve semantic scope without emitting an active `$fulcrum-weaver` trigger |
+| Required P1 | Compile Executor and Warden instructions exclusively from the exact Marshal-authorized Weaver scope revision; retain original intake only as provenance available to Weaver and Marshal | Makes the curated scope, rather than raw user text, the downstream task contract | Authorization-to-role prompt integration test | `Requested outcome`, acceptance, evidence, and derived title match the authorized `fc.scope`; raw intake is absent from worker instructions, and dispatch is bound to that exact scope revision |
 | Required P1 | Generate terminal-stop commands from the command schema, including ownership acquisition | Prevents deterministic syntax failures | Formula/CLI contract test | Rendered Executor and Warden commands succeed unchanged |
 | Required P1 | Make one-task-commit topology controller-owned or state and enforce it before Warden finish | Prevents a repair commit from reaching provider as an invalid two-commit candidate | Delivery integration test | Warden can repair source once without a provider topology rejection |
 | Required P1 | Reserve “accepted/sealed finish” for a judgment the controller can own; return a clearly correctable state otherwise | Removes contradiction between one-finish instruction and `warden_validation_unresolved` | Completion-service regression | An unresolved result explicitly permits correction; a sealed result cannot require a second finish |
@@ -303,7 +311,7 @@ The next operational test is not complete merely when a single bead ships. It
 must hold an unrelated bead in this exact stale-source condition and demonstrate
 that: the stale bead enters one bounded recovery path; a ready second bead reaches
 Marshal within the documented reconciliation interval; Marshal-to-Executor spans
-are fully correlated; downstream roles receive only role-appropriate active
-instructions; rendered terminal commands succeed; a Warden repair produces an
-acceptable candidate without topology rediscovery; and the public trace alone
-shows both the blocker and the continued progress.
+are fully correlated; downstream roles receive the exact authorized Weaver scope
+without raw intake text; rendered terminal commands succeed; a Warden repair
+produces an acceptable candidate without topology rediscovery; and the public
+trace alone shows both the blocker and the continued progress.
