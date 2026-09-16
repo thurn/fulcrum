@@ -557,58 +557,33 @@ class ControllerSupervisor:
             return work, None
         fc = dict(work.fc or {})
         delivery = dict(retained)
-        validation = dict(delivery.get("validation") or {})
-        previous_facts = validation.get("facts")
-        stable_previous = (
-            {
-                key: value
-                for key, value in previous_facts.items()
-                if key != "observed_at"
-            }
-            if isinstance(previous_facts, Mapping)
-            else None
-        )
-        stable_observed = {
-            key: value for key, value in observed.items() if key != "observed_at"
-        }
-        promotion = dict(delivery.get("promotion") or {})
-        synchronization = dict(delivery.get("synchronization") or {})
-        cleanup = dict(delivery.get("cleanup") or {})
-        changed = (
-            validation.get("state") != observed.get("validation")
-            or promotion.get("state") != observed.get("promotion")
-            or synchronization.get("state") != observed.get("synchronization")
-            or cleanup.get("state") != observed.get("cleanup")
-            or stable_previous != stable_observed
-        )
+        candidate = dict(delivery)
+        for key in (
+            "source_oid",
+            "provider_handle",
+            "validation",
+            "promotion",
+            "synchronization",
+            "cleanup",
+            "evidence",
+            "gaps",
+        ):
+            if key in observed:
+                candidate[key] = observed[key]
+        candidate["observed_at"] = observed.get("observed_at")
+        changed = _stable_delivery(candidate) != _stable_delivery(delivery)
         if not changed:
             return work, None
-        validation.update(
-            {"state": observed.get("validation"), "facts": dict(observed)}
-        )
-        promotion["state"] = observed.get("promotion")
-        synchronization["state"] = observed.get("synchronization")
-        cleanup["state"] = observed.get("cleanup")
-        delivery.update(
-            {
-                "validation": validation,
-                "promotion": promotion,
-                "synchronization": synchronization,
-                "cleanup": cleanup,
-                "observed_at": observed.get("observed_at"),
-                "evidence": observed.get("evidence"),
-            }
-        )
-        fc["delivery"] = delivery
+        fc["delivery"] = candidate
         updated = await asyncio.to_thread(self.ledger.update_fc, work.id, fc)
         return updated, {
             "kind": "delivery_observation",
             "bead_id": work.id,
             "advanced": True,
-            "validation": observed.get("validation"),
-            "promotion": observed.get("promotion"),
+            "validation": _delivery_state(observed, "validation"),
+            "promotion": _delivery_state(observed, "promotion"),
             "source_oid": observed.get("source_oid"),
-            "provider_handle": observed.get("handle"),
+            "provider_handle": observed.get("provider_handle"),
         }
 
     async def _complete_plan_roots(
@@ -1445,6 +1420,19 @@ class ControllerSupervisor:
         try:
             observed = await asyncio.to_thread(self.application.dispatch, base)
         except FulcrumError as error:
+            if error.code == "DELIVERY_NOT_STARTED":
+                child = await asyncio.to_thread(
+                    _retained_finish_child,
+                    self.ledger,
+                    finish_operation,
+                    "validation",
+                )
+                return await self._return_warden_to_review(
+                    work,
+                    delivery_finish,
+                    reason="validation_delivery_absent",
+                    evidence={"error": error.to_result().to_dict(), "child": child},
+                )
             return {
                 "kind": "warden_delivery",
                 "bead_id": work.id,
@@ -1462,8 +1450,8 @@ class ControllerSupervisor:
                 "reason": "promotion inspection returned no delivery facts",
             }
         if (
-            delivery.get("validation") == "failed"
-            or delivery.get("promotion") == "failed"
+            _delivery_state(delivery, "validation") == "failed"
+            or _delivery_state(delivery, "promotion") == "failed"
         ):
             current = await asyncio.to_thread(self.ledger.show, work.id)
             if current is not None and current.fc:
@@ -1492,7 +1480,7 @@ class ControllerSupervisor:
                 "state": "returned_to_review",
                 "delivery": dict(delivery),
             }
-        if delivery.get("validation") != "passed":
+        if _delivery_state(delivery, "validation") != "passed":
             return {
                 "kind": "warden_delivery",
                 "bead_id": work.id,
@@ -1577,6 +1565,13 @@ class ControllerSupervisor:
                 ),
             )
             if approval.state is not CommandState.COMPLETED:
+                if _command_error_code(approval) == "STALE_SOURCE":
+                    return await self._return_warden_to_review(
+                        work,
+                        delivery_finish,
+                        reason="workspace_source_changed",
+                        evidence={"approval": dict(approval.result or {})},
+                    )
                 return {
                     "kind": "warden_delivery",
                     "bead_id": work.id,
@@ -1585,7 +1580,7 @@ class ControllerSupervisor:
                     "operation_id": approval.operation_id,
                     "result_state": approval.state.value,
                 }
-        if delivery.get("promotion") != "promoted":
+        if _delivery_state(delivery, "promotion") != "observed":
             promotion = await asyncio.to_thread(
                 self.application.dispatch,
                 replace(
@@ -1598,6 +1593,13 @@ class ControllerSupervisor:
                 ),
             )
             if promotion.state is not CommandState.COMPLETED:
+                if _command_error_code(promotion) == "STALE_SOURCE":
+                    return await self._return_warden_to_review(
+                        work,
+                        delivery_finish,
+                        reason="workspace_source_changed",
+                        evidence={"promotion": dict(promotion.result or {})},
+                    )
                 return {
                     "kind": "warden_delivery",
                     "bead_id": work.id,
@@ -1611,7 +1613,7 @@ class ControllerSupervisor:
             delivery = result.get("delivery") if isinstance(result, Mapping) else None
             if (
                 not isinstance(delivery, Mapping)
-                or delivery.get("promotion") != "promoted"
+                or _delivery_state(delivery, "promotion") != "observed"
             ):
                 return {
                     "kind": "warden_delivery",
@@ -1679,6 +1681,57 @@ class ControllerSupervisor:
             "cleanup_operation": cleanup.operation_id,
             "close_operation": close.operation_id,
             "warden_release": release_result,
+        }
+
+    async def _return_warden_to_review(
+        self,
+        work: Any,
+        delivery_finish: Mapping[str, Any],
+        *,
+        reason: str,
+        evidence: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        current = await asyncio.to_thread(self.ledger.show, work.id)
+        if current is not None and current.fc:
+            fc = dict(current.fc)
+            retained = fc.get("delivery_finish")
+            sealed = (
+                dict(retained)
+                if isinstance(retained, Mapping)
+                else dict(delivery_finish)
+            )
+            history = list(fc.get("failed_delivery_finishes") or [])
+            history.append(
+                {
+                    **sealed,
+                    "state": "superseded",
+                    "reason": reason,
+                    "evidence": dict(evidence),
+                    "failed_at": _format_time(self.clock.now()),
+                }
+            )
+            fc["failed_delivery_finishes"] = history[-10:]
+            fc.pop("delivery_finish", None)
+            delivery = fc.get("delivery")
+            if isinstance(delivery, Mapping):
+                invalidated = dict(delivery)
+                invalidated["approved_source"] = None
+                invalidated["approval_invalidated_by"] = sealed.get("operation_id")
+                fc["delivery"] = invalidated
+            fc["phase"] = "reviewing"
+            fc["next_action"] = (
+                "Warden must inspect the retained validation/source evidence, repair "
+                "the same workspace, and submit a new exact-source judgment."
+            )
+            fc["last_transition"] = sealed.get("operation_id")
+            await asyncio.to_thread(self.ledger.update_fc, current.id, fc)
+        return {
+            "kind": "warden_delivery",
+            "bead_id": work.id,
+            "advanced": True,
+            "state": "returned_to_review",
+            "reason": reason,
+            "evidence": dict(evidence),
         }
 
     async def _send_review_finish_reminder(
@@ -2149,6 +2202,65 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _optional_string(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _command_error_code(result: CommandResult) -> str | None:
+    payload = result.result if isinstance(result.result, Mapping) else {}
+    error = payload.get("error") if isinstance(payload, Mapping) else None
+    return (
+        str(error.get("code"))
+        if isinstance(error, Mapping) and error.get("code")
+        else None
+    )
+
+
+def _delivery_state(delivery: Mapping[str, Any], field: str) -> str | None:
+    value = delivery.get(field)
+    if isinstance(value, Mapping):
+        state = value.get("state")
+    else:
+        state = value
+    if not isinstance(state, str):
+        return None
+    if field == "promotion" and state == "promoted":
+        return "observed"
+    if field in {"synchronization", "cleanup"} and state == "complete":
+        return "observed"
+    return state
+
+
+def _stable_delivery(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _stable_delivery(item)
+            for key, item in value.items()
+            if key != "observed_at"
+        }
+    if isinstance(value, list):
+        return [_stable_delivery(item) for item in value]
+    return value
+
+
+def _retained_finish_child(
+    ledger: Ledger, finish_operation: str, purpose: str
+) -> Mapping[str, Any] | None:
+    record = ledger.show(finish_operation)
+    if record is None or record.kind != "operation":
+        return None
+    operation = OperationRecord.from_record(record)
+    child: Mapping[str, Any] | None = None
+    for container_name in ("planned", "result"):
+        container = operation.operation.get(container_name)
+        children = container.get("children") if isinstance(container, Mapping) else None
+        candidate = children.get(purpose) if isinstance(children, Mapping) else None
+        if isinstance(candidate, Mapping):
+            child = candidate
+            break
+    child_id = child.get("operation_id") if child is not None else None
+    retained = ledger.show(str(child_id)) if child_id else None
+    if retained is not None and retained.kind == "operation":
+        return operation_view(OperationRecord.from_record(retained))
+    return dict(child) if child is not None else None
 
 
 def _delivery_request_id(finish_operation: str, step: str) -> str:

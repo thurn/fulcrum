@@ -8,8 +8,10 @@ from fulcrum.coordination import coordinated
 
 import asyncio
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Coroutine, TypeVar
+import uuid
 
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
@@ -33,6 +35,7 @@ from fulcrum.tollgate import Tollgate, TollgateError
 
 T = TypeVar("T")
 TERMINAL_STATES = {"completed", "failed", "uncertain", "cancelled"}
+LOCAL_CHECK_NAMESPACE = uuid.UUID("2783db95-33a5-4f6e-b295-bdd07c96c9a5")
 
 
 class DeliveryService:
@@ -140,6 +143,84 @@ class DeliveryService:
         return _operation_result(operation)
 
     @coordinated
+    def validation_check(self, request: ParsedRequest) -> CommandResult:
+        ledger, work, project, provider = _context(request)
+        _authorize(ledger, request, work)
+        source_oid = str(request.arguments["source"])
+        reference = _work_ref(request, work, project, _workspace_operation(work))
+        source = SourceRef(reference, source_oid)
+        canonical_request = replace(
+            request,
+            request_id=str(
+                uuid.uuid5(
+                    LOCAL_CHECK_NAMESPACE,
+                    f"{work.id}:{source_oid}:{list(reference.validate_argv)!r}",
+                )
+            ),
+        )
+        operation, reused = ledger.create_operation(
+            canonical_request,
+            bead_id=work.id,
+            planned={"source": source.to_dict()},
+            next_action="Run the configured validation command once for this exact source.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        source = _retained_source_ref(operation)
+        try:
+            facts = _call(provider.validate(source))
+        except DeliveryProviderError as error:
+            _retain_local_check(
+                ledger,
+                work,
+                {
+                    "source_oid": source.oid,
+                    "state": "unresolved",
+                    "argv": list(source.work.validate_argv),
+                    "operation_id": operation.id,
+                    "error": {
+                        "category": error.category,
+                        "message": str(error),
+                        "evidence": error.evidence,
+                    },
+                    "observed_at": utc_now(),
+                },
+            )
+            return _failed_operation(ledger, operation, error, "local_check")
+        retained = {**facts.to_dict(), "operation_id": operation.id}
+        _retain_local_check(ledger, work, retained)
+        if facts.state not in {"passed", "not_required"}:
+            operation = ledger.update_operation(
+                operation.id,
+                state="failed",
+                step="required_local_check_failed",
+                error={
+                    "code": "REQUIRED_CHECK_FAILED",
+                    "message": "the configured exact-source validation command failed",
+                    "retryable": False,
+                    "evidence": retained,
+                },
+                result={"local_check": retained},
+                next_action=(
+                    "Warden must repair this exact failure in the same workspace and "
+                    "submit a new source OID."
+                ),
+            )
+            return _operation_result(operation)
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step=(
+                "required_local_check_passed"
+                if facts.state == "passed"
+                else "local_check_not_required"
+            ),
+            result={"local_check": retained},
+            next_action="Reuse this exact-source check receipt for provider validation.",
+        )
+        return _operation_result(operation)
+
+    @coordinated
     def validation_start(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
@@ -155,6 +236,46 @@ class DeliveryService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         source = _retained_source_ref(operation)
+        local_check = self.validation_check(
+            replace(
+                request,
+                command=("validation", "check"),
+                arguments={"bead": work.id, "source": source.oid},
+                input={},
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        if local_check.state is not CommandState.COMPLETED:
+            payload = (
+                dict(local_check.result)
+                if isinstance(local_check.result, Mapping)
+                else {}
+            )
+            operation = ledger.update_operation(
+                operation.id,
+                state=(
+                    "uncertain"
+                    if local_check.state is CommandState.UNCERTAIN
+                    else "failed"
+                ),
+                step="required_local_check_unresolved",
+                external={"local_check_operation": local_check.operation_id},
+                result={"local_check": payload},
+                error=(
+                    dict(payload.get("error"))
+                    if isinstance(payload.get("error"), Mapping)
+                    else {
+                        "code": "REQUIRED_CHECK_FAILED",
+                        "message": "required exact-source validation did not pass",
+                        "retryable": False,
+                    }
+                ),
+                next_action=(
+                    "Warden must inspect the authoritative configured validation "
+                    "failure, repair the workspace, and submit a new source OID."
+                ),
+            )
+            return _operation_result(operation)
         try:
             facts = _call(provider.submit(source))
         except DeliveryProviderError as error:
@@ -216,7 +337,8 @@ class DeliveryService:
                 "source_oid": facts.source_oid,
                 "state": facts.validation,
                 "checks": facts.evidence.get("buildset"),
-                "delivery": facts.to_dict(),
+                "delivery": normalized_delivery(facts),
+                "provider_delivery": facts.to_dict(),
             }
         )
 
@@ -374,7 +496,7 @@ class DeliveryService:
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "promotion_request")
 
-        _retain_delivery(ledger, work, _delivery_update(facts), operation.id)
+        _retain_delivery(ledger, work, normalized_delivery(facts), operation.id)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
@@ -384,7 +506,10 @@ class DeliveryService:
                 "repository_id": source.work.repository_id,
                 "handle": handle,
             },
-            result={"delivery": facts.to_dict()},
+            result={
+                "delivery": normalized_delivery(facts),
+                "provider_delivery": facts.to_dict(),
+            },
             next_action=(
                 "Synchronize the observed integration commit."
                 if facts.promotion == "promoted"
@@ -401,7 +526,13 @@ class DeliveryService:
             facts = _call(provider.inspect(source, handle))
         except DeliveryProviderError as error:
             raise _public_error(error, request) from error
-        return CommandResult.query({"bead_id": work.id, "delivery": facts.to_dict()})
+        return CommandResult.query(
+            {
+                "bead_id": work.id,
+                "delivery": normalized_delivery(facts),
+                "provider_delivery": facts.to_dict(),
+            }
+        )
 
     @coordinated
     def source_sync(self, request: ParsedRequest) -> CommandResult:
@@ -434,7 +565,7 @@ class DeliveryService:
                     )
             except Exception:
                 pass  # Remote polling also observes publication; delivery remains valid.
-        _retain_delivery(ledger, work, _delivery_update(facts), operation.id)
+        _retain_delivery(ledger, work, normalized_delivery(facts), operation.id)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
@@ -445,7 +576,10 @@ class DeliveryService:
                 "handle": handle,
                 "integration_oid": facts.integration_oid,
             },
-            result={"delivery": facts.to_dict()},
+            result={
+                "delivery": normalized_delivery(facts),
+                "provider_delivery": facts.to_dict(),
+            },
             next_action=(
                 "Clean the settled managed workspace."
                 if facts.synchronization in {"complete", "not_required"}
@@ -663,7 +797,24 @@ def _retain_delivery(
     ledger.update_fc(work.id, fc)
 
 
-def _delivery_update(facts: DeliveryFacts) -> dict[str, Any]:
+def _retain_local_check(
+    ledger: Ledger, work: LedgerRecord, facts: Mapping[str, Any]
+) -> None:
+    current = ledger.show(work.id)
+    assert current is not None and current.fc
+    fc = dict(current.fc)
+    prior = fc.get("local_check")
+    if isinstance(prior, Mapping) and prior.get("source_oid") != facts.get(
+        "source_oid"
+    ):
+        history = list(fc.get("local_check_history") or [])
+        history.append(dict(prior))
+        fc["local_check_history"] = history[-10:]
+    fc["local_check"] = dict(facts)
+    ledger.update_fc(work.id, fc)
+
+
+def normalized_delivery(facts: DeliveryFacts) -> dict[str, Any]:
     promotion_state = {
         "promoted": "observed",
         "failed": "failed",
@@ -687,7 +838,9 @@ def _delivery_update(facts: DeliveryFacts) -> dict[str, Any]:
         "provider_handle": facts.handle,
         "validation": {
             "state": facts.validation,
+            "provider_state": facts.validation,
             "observed_at": facts.observed_at,
+            "facts": facts.to_dict(),
         },
         "promotion": {
             "state": promotion_state,

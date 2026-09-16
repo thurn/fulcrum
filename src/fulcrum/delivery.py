@@ -117,6 +117,20 @@ class ValidationFacts:
 
 
 @dataclass(frozen=True)
+class LocalCheckFacts:
+    source_oid: str
+    state: str
+    argv: tuple[str, ...]
+    returncode: int | None
+    stdout: str
+    stderr: str
+    observed_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _json_dict(asdict(self))
+
+
+@dataclass(frozen=True)
 class DeliveryFacts:
     handle: str
     source_oid: str
@@ -142,6 +156,7 @@ def _json_dict(value: Mapping[str, Any]) -> dict[str, Any]:
 class Delivery(Protocol):
     async def prepare(self, work: WorkRef) -> WorkspaceFacts: ...
     async def inspect_workspace(self, work: WorkRef) -> WorkspaceFacts: ...
+    async def validate(self, source: SourceRef) -> LocalCheckFacts: ...
     async def submit(self, source: SourceRef) -> ValidationFacts: ...
     async def inspect(self, source: SourceRef, handle: str | None) -> DeliveryFacts: ...
     async def promote(self, source: SourceRef, handle: str) -> DeliveryFacts: ...
@@ -159,6 +174,9 @@ class TollgateDelivery:
 
     async def inspect_workspace(self, work: WorkRef) -> WorkspaceFacts:
         return await asyncio.to_thread(self._inspect_workspace, work)
+
+    async def validate(self, source: SourceRef) -> LocalCheckFacts:
+        return await asyncio.to_thread(self._validate, source)
 
     async def submit(self, source: SourceRef) -> ValidationFacts:
         return await asyncio.to_thread(self._submit, source)
@@ -329,8 +347,6 @@ class TollgateDelivery:
     def _submit(self, source: SourceRef) -> ValidationFacts:
         path = _source_workspace(source)
         _verify_source(path, source.oid)
-        if source.work.validate_argv:
-            _run_argv(source.work.validate_argv, path)
         existing = self._find_candidates(source)
         if len(existing) > 1:
             raise DeliveryProviderError(
@@ -368,6 +384,21 @@ class TollgateDelivery:
                 evidence=facts.to_dict(),
             )
         return facts
+
+    def _validate(self, source: SourceRef) -> LocalCheckFacts:
+        path = _source_workspace(source)
+        _verify_source(path, source.oid)
+        if not source.work.validate_argv:
+            return LocalCheckFacts(
+                source.oid,
+                "not_required",
+                (),
+                0,
+                "",
+                "",
+                _git_time(),
+            )
+        return _run_check_argv(source.work.validate_argv, path, source.oid)
 
     def _inspect(self, source: SourceRef, handle: str | None) -> DeliveryFacts:
         if handle is None:
@@ -944,6 +975,50 @@ def _run_argv(arguments: Sequence[str], cwd: Path) -> None:
                 "stderr": stderr,
             },
         )
+
+
+def _run_check_argv(
+    arguments: Sequence[str], cwd: Path, source_oid: str
+) -> LocalCheckFacts:
+    if not arguments or any(
+        not isinstance(item, str) or not item for item in arguments
+    ):
+        raise DeliveryProviderError(
+            "configured argv contains an invalid argument", category="unsupported"
+        )
+    try:
+        result = subprocess.run(
+            list(arguments),
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except FileNotFoundError as error:
+        raise DeliveryProviderError(
+            f"configured executable is unavailable: {arguments[0]}",
+            category="unavailable",
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise DeliveryProviderError(
+            f"configured command timed out: {arguments[0]}",
+            category="transient",
+            evidence={
+                "stdout": _bounded_text(error.stdout),
+                "stderr": _bounded_text(error.stderr),
+            },
+        ) from error
+    return LocalCheckFacts(
+        source_oid=source_oid,
+        state="passed" if result.returncode == 0 else "failed",
+        argv=tuple(arguments),
+        returncode=result.returncode,
+        stdout=_bounded_text(result.stdout),
+        stderr=_bounded_text(result.stderr),
+        observed_at=_git_time(),
+    )
 
 
 def _git(root: Path, arguments: Sequence[str]) -> str:

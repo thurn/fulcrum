@@ -943,6 +943,7 @@ def _cook_role(
         "last_progress": fc.get("last_progress"),
         "finish": fc.get("finish"),
         "handoff": fc.get("handoff"),
+        "local_check": fc.get("local_check"),
         "delivery": fc.get("delivery"),
     }
     try:
@@ -1458,6 +1459,7 @@ def _context_work(record: LedgerRecord) -> dict[str, Any]:
         "next_action": fc.get("next_action"),
         "waiting": fc.get("waiting"),
         "last_progress": fc.get("last_progress"),
+        "local_check": fc.get("local_check"),
         "delivery": fc.get("delivery"),
         "interrupted_work": fc.get("interrupted_work"),
     }

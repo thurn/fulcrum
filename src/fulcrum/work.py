@@ -1258,7 +1258,7 @@ def _owned_work(ledger: Ledger, request: ParsedRequest, bead_id: str) -> LedgerR
                 "admitted_owner": record.fc.get("owner"),
             },
         )
-    if request.actor.kind == "human":
+    if request.actor.kind in {"human", "controller"}:
         return record
     if request.thread_id != record.fc.get(
         "owner"

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import uuid
 from typing import Any
 
@@ -39,7 +40,11 @@ def main() -> int:
             kind, instance, config = sys.argv[1:4]
             context = resolve_instance(instance=instance, config=config)
             request = ParsedRequest(
-                command=("service", "update") if kind == "update" else ("reconcile",),
+                command=(
+                    ("service", "update")
+                    if kind == "update"
+                    else ("ledger", "sync") if kind == "publication" else ("reconcile",)
+                ),
                 arguments={},
                 input={},
                 actor=ActorContext(kind="controller"),
@@ -64,7 +69,7 @@ def main() -> int:
                 }
             )
         )
-        if kind == "background":
+        if kind in {"reconcile", "publication"}:
             assert request.instance.brain_root is not None
             with (
                 ProcessLock(
@@ -72,11 +77,16 @@ def main() -> int:
                     shared=True,
                 ),
                 ProcessLock(
-                    request.instance.brain_root / ".fulcrum-locks" / "reconcile",
+                    request.instance.brain_root
+                    / ".fulcrum-locks"
+                    / ("reconcile" if kind == "reconcile" else "publication"),
                     blocking=False,
                 ),
             ):
-                asyncio.run(background(request))
+                if kind == "reconcile":
+                    asyncio.run(reconcile_background(request))
+                else:
+                    publication_background(request)
             return 0
         result = default_application().dispatch(request).to_dict()
         try:
@@ -97,7 +107,7 @@ def main() -> int:
             os.close(descriptor)
 
 
-async def background(request: ParsedRequest) -> None:
+async def reconcile_background(request: ParsedRequest) -> None:
     from fulcrum.application import default_application
     from fulcrum.resident_client import ResidentTransport, exchange
     from fulcrum.runtime import AppServerRuntime
@@ -112,7 +122,79 @@ async def background(request: ParsedRequest) -> None:
         await supervisor._record_runtime_event(RuntimeEvent(**value))
         await exchange(socket, {"action": "ack", "ids": [identifier]})
     await supervisor.run_once(keep_runtime=True)
-    await asyncio.to_thread(supervisor.publication.tick, request)
+
+
+def publication_background(request: ParsedRequest) -> None:
+    from fulcrum.diagnostics import DiagnosticLog
+    from fulcrum.publication import LedgerPublicationService
+
+    log = DiagnosticLog.from_request(request)
+    started = time.monotonic()
+    started_event = log.append(
+        {
+            "event": "publication_started",
+            "trigger": request.command_name,
+        }
+    )
+    try:
+        result = LedgerPublicationService().tick(request)
+    except BaseException as error:
+        log.append(
+            {
+                "event": "publication_failed",
+                "publication_span_id": started_event["event_id"],
+                "trigger": request.command_name,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error_category": type(error).__name__,
+                "error": str(error),
+            }
+        )
+        raise
+    log.append(
+        {
+            "event": "publication_completed",
+            "publication_span_id": started_event["event_id"],
+            "trigger": request.command_name,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "operation_id": _publication_operation_id(result),
+            "associated_beads": sorted(_publication_beads(result)),
+            "outcome": result.get("action"),
+            "result": result,
+        }
+    )
+
+
+def _publication_beads(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"bead_id", "IssueID", "issue_id"} and isinstance(item, str):
+                found.add(item)
+            elif key == "associated_beads" and isinstance(item, list):
+                found.update(str(candidate) for candidate in item)
+            else:
+                found.update(_publication_beads(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_publication_beads(item))
+    return found
+
+
+def _publication_operation_id(value: Any) -> str | None:
+    if isinstance(value, dict):
+        operation_id = value.get("operation_id")
+        if isinstance(operation_id, str):
+            return operation_id
+        for item in value.values():
+            found = _publication_operation_id(item)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _publication_operation_id(item)
+            if found is not None:
+                return found
+    return None
 
 
 if __name__ == "__main__":

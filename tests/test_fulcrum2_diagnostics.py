@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fulcrum.contracts import CommandResult
-from fulcrum.diagnostics import DiagnosticLog, _runtime_component
-from tests.support import request
+from fulcrum.diagnostics import DiagnosticLog, DiagnosticService, _runtime_component
+from tests.support import MemoryLedger, record, request
 
 
 class DiagnosticLogTest(unittest.TestCase):
@@ -81,6 +81,145 @@ class DiagnosticLogTest(unittest.TestCase):
             result = log.read(bead="fc-two", limit=0)
 
         self.assertEqual(result["items"], [retained])
+
+    def test_trace_joins_operations_tasks_provider_and_background_spans(self) -> None:
+        initial = "0" * 40
+        repaired = "a" * 40
+        work = record(
+            delivery={"source_oid": repaired, "provider_handle": "provider-repaired"},
+            failed_delivery_finishes=[{"source_oid": initial}],
+            ownership_operation="fc-entry",
+            last_transition="fc-recovery",
+        )
+        marshal_task = record(
+            "fc-marshal-task",
+            kind="task",
+            role="marshal",
+            thread_id="standing-marshal",
+            creation_operation="fc-marshal",
+            last_observed={"last_turn": {"id": "turn-marshal", "status": "completed"}},
+        )
+        marshal = record(
+            "fc-marshal",
+            kind="operation",
+            owner="fc-marshal-task",
+            state="completed",
+            command=["marshal", "decide"],
+            step="decision_applied",
+            planned={"selected_ids": ["fc-work"]},
+            external={"turn_id": "turn-marshal"},
+            created_at="2026-09-16T00:00:00Z",
+            completed_at="2026-09-16T00:00:01Z",
+        )
+        finish = record(
+            "fc-entry",
+            kind="operation",
+            owner="executor",
+            bead_id="fc-work",
+            state="completed",
+            command=["finish"],
+            step="executor_finish_sealed",
+            planned={
+                "finish": {"source_oid": initial},
+                "children": {
+                    "local_check": {"operation_id": "fc-check", "state": "failed"}
+                },
+            },
+            result={"source_oid": initial},
+            created_at="2026-09-16T00:00:02Z",
+            completed_at="2026-09-16T00:00:03Z",
+        )
+        check = record(
+            "fc-check",
+            kind="operation",
+            owner="executor",
+            state="failed",
+            command=["validation", "check"],
+            step="local_check_failed",
+            result={
+                "source_oid": initial,
+                "provider_handle": "provider-initial",
+            },
+            created_at="2026-09-16T00:00:03Z",
+            completed_at="2026-09-16T00:00:04Z",
+        )
+        recovery = record(
+            "fc-recovery",
+            kind="operation",
+            owner="warden",
+            bead_id="fc-work",
+            state="completed",
+            command=["finish"],
+            step="warden_judgment_sealed",
+            result={
+                "source_oid": repaired,
+                "delivery": {"provider_handle": "provider-repaired"},
+            },
+            created_at="2026-09-16T00:00:05Z",
+            completed_at="2026-09-16T00:00:06Z",
+        )
+        publication = record(
+            "fc-publication",
+            kind="operation",
+            owner="controller",
+            state="completed",
+            command=["ledger", "sync"],
+            step="ledger_synchronized",
+            planned={"changes": [{"id": "fc-work"}]},
+            created_at="2026-09-16T00:00:06Z",
+            completed_at="2026-09-16T00:00:07Z",
+        )
+        ledger = MemoryLedger(
+            work, marshal_task, marshal, finish, check, recovery, publication
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            log = DiagnosticLog(Path(temporary))
+            log.append(
+                {
+                    "event": "reconciliation_completed",
+                    "pass_id": "pass-1",
+                    "associated_beads": ["fc-work"],
+                    "duration_ms": 4,
+                }
+            )
+            log.append(
+                {
+                    "event": "publication_completed",
+                    "publication_span_id": "publish-1",
+                    "associated_beads": ["fc-work"],
+                    "operation_id": "fc-publication",
+                    "duration_ms": 1000,
+                }
+            )
+            trace_request = request(
+                ("trace",),
+                arguments={"bead": "fc-work", "limit": 0},
+            )
+            with (
+                patch("fulcrum.diagnostics._ledger", return_value=ledger),
+                patch(
+                    "fulcrum.diagnostics.DiagnosticLog.from_request",
+                    return_value=log,
+                ),
+            ):
+                result = DiagnosticService().trace(trace_request).result
+
+        transitions = {item["transition"] for item in result["items"]}
+        self.assertIn("task_observed", transitions)
+        self.assertIn("reconciliation_completed", transitions)
+        self.assertIn("publication_completed", transitions)
+        finish_item = next(item for item in result["items"] if item["id"] == "fc-entry")
+        self.assertEqual(finish_item["child_operation_ids"], ["fc-check"])
+        check_item = next(item for item in result["items"] if item["id"] == "fc-check")
+        self.assertEqual(check_item["parent_operation_ids"], ["fc-entry"])
+        handles = {
+            handle for item in result["items"] for handle in item["provider_handles"]
+        }
+        self.assertEqual(handles, {"provider-initial", "provider-repaired"})
+        self.assertEqual(result["source_oids"], [initial, repaired])
+        spans = {item.get("span_id") for item in result["items"]}
+        self.assertIn("pass-1", spans)
+        self.assertIn("publish-1", spans)
 
 
 if __name__ == "__main__":

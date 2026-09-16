@@ -498,38 +498,56 @@ class DiagnosticService:
         if record is None or record.kind != "work":
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
         items: list[dict[str, Any]] = []
-        for candidate in ledger.list_records(kind="operation", limit=0):
-            operation = OperationRecord.from_record(candidate)
+        operations = [
+            OperationRecord.from_record(candidate)
+            for candidate in ledger.list_records(kind="operation", limit=0)
+        ]
+        child_ids = {
+            operation.id: _trace_child_operation_ids(operation.operation)
+            for operation in operations
+        }
+        parent_ids: dict[str, list[str]] = {}
+        for parent_id, children in child_ids.items():
+            for child_id in children:
+                parent_ids.setdefault(child_id, []).append(parent_id)
+        related_ids = {
+            operation.id
+            for operation in operations
+            if _trace_operation_mentions_bead(operation.operation, bead_id)
+        }
+        related_ids.update(
+            str(identifier)
+            for identifier in (
+                (record.fc or {}).get("ownership_operation"),
+                (record.fc or {}).get("last_transition"),
+            )
+            if identifier
+        )
+        changed = True
+        while changed:
+            before = len(related_ids)
+            for operation_id in tuple(related_ids):
+                related_ids.update(child_ids.get(operation_id, []))
+                related_ids.update(parent_ids.get(operation_id, []))
+            changed = len(related_ids) != before
+        related_operations = [
+            operation for operation in operations if operation.id in related_ids
+        ]
+        related_task_ids: set[str] = set()
+        for operation in related_operations:
             fc = operation.operation
-            planned = fc.get("planned")
-            associated = (
-                planned.get("associated_beads")
-                if isinstance(planned, Mapping)
-                else None
-            )
-            selected_ids = (
-                planned.get("selected_ids") if isinstance(planned, Mapping) else None
-            )
-            related = bead_id in {
-                str(item)
-                for values in (associated, selected_ids)
-                if isinstance(values, list)
-                for item in values
-            }
-            if (
-                fc.get("bead_id") != bead_id
-                and not related
-                and operation.id
-                not in {
-                    (record.fc or {}).get("ownership_operation"),
-                    (record.fc or {}).get("last_transition"),
-                }
-            ):
-                continue
             result = fc.get("result") if isinstance(fc.get("result"), Mapping) else {}
             external = (
                 fc.get("external") if isinstance(fc.get("external"), Mapping) else {}
             )
+            for candidate in (
+                fc.get("owner"),
+                external.get("task_id"),
+                external.get("thread_id"),
+            ):
+                if isinstance(candidate, str) and candidate:
+                    related_task_ids.add(candidate)
+            source_oids = _trace_source_oids(fc)
             items.append(
                 {
                     "time": fc.get("completed_at") or fc.get("created_at"),
@@ -544,7 +562,11 @@ class DiagnosticService:
                     "effect": fc.get("command"),
                     "outcome": fc.get("state"),
                     "evidence": result.get("evidence", []),
-                    "source_oid": result.get("source_oid"),
+                    "source_oid": source_oids[-1] if source_oids else None,
+                    "source_oids": source_oids,
+                    "parent_operation_ids": sorted(parent_ids.get(operation.id, [])),
+                    "child_operation_ids": child_ids.get(operation.id, []),
+                    "provider_handles": _trace_provider_handles(fc),
                     "duration_ms": _duration_ms(
                         fc.get("created_at"), fc.get("completed_at")
                     ),
@@ -553,8 +575,12 @@ class DiagnosticService:
         fc = record.fc or {}
         for task in ledger.list_records(kind="task", limit=0):
             task_fc = task.fc or {}
-            if task_fc.get("work_bead") != bead_id and bead_id not in task_fc.get(
-                "associated_beads", []
+            if (
+                task_fc.get("work_bead") != bead_id
+                and bead_id not in task_fc.get("associated_beads", [])
+                and task.id not in related_task_ids
+                and task_fc.get("thread_id") not in related_task_ids
+                and task_fc.get("creation_operation") not in related_ids
             ):
                 continue
             retained = task_fc.get("last_observed")
@@ -581,6 +607,10 @@ class DiagnosticService:
                     ),
                     "evidence": [],
                     "source_oid": None,
+                    "source_oids": [],
+                    "parent_operation_ids": [],
+                    "child_operation_ids": [],
+                    "provider_handles": [],
                 }
             )
         items.append(
@@ -601,6 +631,10 @@ class DiagnosticService:
                     if isinstance(fc.get("delivery"), Mapping)
                     else None
                 ),
+                "source_oids": _trace_source_oids(fc),
+                "parent_operation_ids": [],
+                "child_operation_ids": [],
+                "provider_handles": _trace_provider_handles(fc),
             }
         )
         retained_log = DiagnosticLog.from_request(request)
@@ -620,7 +654,14 @@ class DiagnosticService:
                     "duration_ms": event.get("duration_ms"),
                     "evidence": event.get("result") or [],
                     "source_oid": event.get("source_oid"),
+                    "source_oids": _trace_source_oids(event),
+                    "parent_operation_ids": [],
+                    "child_operation_ids": [],
+                    "provider_handles": _trace_provider_handles(event),
                     "wait_reason": event.get("reason"),
+                    "span_id": event.get("publication_span_id")
+                    or event.get("pass_id")
+                    or event.get("span_id"),
                 }
             )
         items.sort(key=lambda item: (str(item.get("time") or ""), str(item["id"])))
@@ -658,7 +699,18 @@ class DiagnosticService:
                 }
             )
         return CommandResult.query(
-            {"items": selected, "next_cursor": next_cursor, "gaps": gaps}
+            {
+                "items": selected,
+                "next_cursor": next_cursor,
+                "gaps": gaps,
+                "source_oids": sorted(
+                    {
+                        source_oid
+                        for item in items
+                        for source_oid in item.get("source_oids", [])
+                    }
+                ),
+            }
         )
 
     def wait(self, request: ParsedRequest) -> CommandResult:
@@ -697,6 +749,104 @@ class DiagnosticService:
                     next_command=("fulcrum", "work", "show", bead_id, "--json"),
                 )
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+def _trace_operation_mentions_bead(operation: Mapping[str, Any], bead_id: str) -> bool:
+    if operation.get("bead_id") == bead_id:
+        return True
+
+    def visit(value: Any, key: str | None = None) -> bool:
+        if isinstance(value, Mapping):
+            return any(
+                visit(child, str(child_key)) for child_key, child in value.items()
+            )
+        if isinstance(value, (list, tuple)):
+            return any(visit(child, key) for child in value)
+        return (
+            isinstance(value, str)
+            and value == bead_id
+            and key
+            in {
+                "bead",
+                "bead_id",
+                "work_bead",
+                "associated_beads",
+                "selected_ids",
+                "changes",
+                "id",
+            }
+        )
+
+    return visit(operation)
+
+
+def _trace_child_operation_ids(operation: Mapping[str, Any]) -> list[str]:
+    retained: list[str] = []
+
+    def visit(value: Any, *, within_children: bool = False) -> None:
+        if isinstance(value, Mapping):
+            for key, child in value.items():
+                child_context = within_children or str(key) == "children"
+                if (
+                    child_context
+                    and str(key) == "operation_id"
+                    and isinstance(child, str)
+                    and child.startswith("fc-")
+                    and child not in retained
+                ):
+                    retained.append(child)
+                visit(child, within_children=child_context)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child, within_children=within_children)
+
+    visit(operation.get("planned"))
+    visit(operation.get("result"))
+    return retained
+
+
+def _trace_source_oids(value: Any) -> list[str]:
+    retained: list[str] = []
+
+    def visit(item: Any, key: str | None = None) -> None:
+        if isinstance(item, Mapping):
+            for child_key, child in item.items():
+                visit(child, str(child_key))
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child, key)
+        elif (
+            isinstance(item, str)
+            and re.fullmatch(r"[0-9a-f]{40}", item)
+            and key is not None
+            and (key == "oid" or key.endswith("source_oid"))
+            and item not in retained
+        ):
+            retained.append(item)
+
+    visit(value)
+    return retained
+
+
+def _trace_provider_handles(value: Any) -> list[str]:
+    retained: list[str] = []
+
+    def visit(item: Any, key: str | None = None) -> None:
+        if isinstance(item, Mapping):
+            for child_key, child in item.items():
+                visit(child, str(child_key))
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child, key)
+        elif (
+            isinstance(item, str)
+            and key in {"provider_handle", "provider_id", "submission_handle"}
+            and item not in retained
+        ):
+            retained.append(item)
+
+    visit(value)
+    return retained
 
 
 def redact(value: Any, *, capture_bytes: int = DEFAULT_CHUNK_BYTES) -> Any:

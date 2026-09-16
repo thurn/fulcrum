@@ -132,6 +132,39 @@ class ResidentContinuityTests(unittest.IsolatedAsyncioTestCase):
         await resident.dispatch({"action": "ack", "ids": ["1"]})
         self.assertEqual((await resident.dispatch({"action": "events"}))["events"], [])
 
+    async def test_slow_publication_does_not_occupy_reconciliation_lane(self):
+        resident = Resident(
+            Path("/unused"),
+            {
+                "endpoint": "ws://unused",
+                "config": "/unused",
+                "reconcile_seconds": 15,
+                "publication_seconds": 15,
+            },
+        )
+        publication_release = asyncio.Event()
+        started: dict[str, float] = {}
+
+        async def job(kind):
+            started[kind] = asyncio.get_running_loop().time()
+            if kind == "publication":
+                await publication_release.wait()
+
+        resident.job = job
+        scheduled = asyncio.create_task(resident.schedule())
+        deadline = asyncio.get_running_loop().time() + 1
+        while not {"reconcile", "publication"}.issubset(started):
+            self.assertLess(asyncio.get_running_loop().time(), deadline)
+            await asyncio.sleep(0)
+
+        self.assertFalse(resident.jobs["publication"].done())
+        self.assertLess(abs(started["reconcile"] - started["publication"]), 0.05)
+        publication_release.set()
+        resident.stop.set()
+        resident.wake.set()
+        await scheduled
+        await asyncio.gather(*resident.jobs.values())
+
     async def test_source_probe_skips_full_update_until_local_commit_changes(self):
         class Process:
             returncode = 0
@@ -462,18 +495,18 @@ class ImmediateMasterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertLess(json.loads(result.stdout)["commit_to_command_seconds"], 2)
 
-    def test_background_worker_refreshes_before_application_dispatch(self):
+    def test_reconciliation_worker_refreshes_before_application_dispatch(self):
         from fulcrum.worker import main
 
         with (
             patch.dict(os.environ, {"FULCRUM_WORKER_SELECTED": ""}),
-            patch("sys.argv", ["worker", "background", "/instance", "/config"]),
+            patch("sys.argv", ["worker", "reconcile", "/instance", "/config"]),
             patch("fulcrum.bootstrap.main", return_value=0) as launch,
         ):
             self.assertEqual(main(), 0)
         launch.assert_called_once_with(
             "fulcrum.worker",
-            ["background", "/instance", "/config"],
+            ["reconcile", "/instance", "/config"],
             Path("/instance"),
             Path("/config"),
         )

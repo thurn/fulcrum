@@ -197,6 +197,9 @@ COMMANDS = (
     CommandDefinition(("worktree", "prepare"), "prepare a managed delivery workspace"),
     CommandDefinition(("worktree", "inspect"), "inspect a managed delivery workspace"),
     CommandDefinition(("worktree", "cleanup"), "clean a settled managed workspace"),
+    CommandDefinition(
+        ("validation", "check"), "run exact-source configured validation"
+    ),
     CommandDefinition(("validation", "start"), "submit exact source for validation"),
     CommandDefinition(("validation", "show"), "show provider validation facts"),
     CommandDefinition(("review", "approve"), "approve exact Warden source"),
@@ -432,6 +435,7 @@ def _add_command_options(
     }:
         _option(parser, "--bead", required=True)
     elif path in {
+        ("validation", "check"),
         ("validation", "start"),
         ("review", "approve"),
         ("promotion", "start"),

@@ -98,6 +98,7 @@ class Application:
         self.register(("worktree", "prepare"), delivery.worktree_prepare)
         self.register(("worktree", "inspect"), delivery.worktree_inspect)
         self.register(("worktree", "cleanup"), delivery.worktree_cleanup)
+        self.register(("validation", "check"), delivery.validation_check)
         self.register(("validation", "start"), delivery.validation_start)
         self.register(("validation", "show"), delivery.validation_show)
         self.register(("review", "approve"), delivery.review_approve)

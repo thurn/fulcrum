@@ -26,7 +26,7 @@ from fulcrum.continuity import exact_successor_record_id, replace_exact_task
 from fulcrum.delivery_service import (
     _call as delivery_call,
     _context as delivery_context,
-    _delivery_update,
+    normalized_delivery,
     _retain_delivery,
     _retained_delivery_source,
 )
@@ -795,7 +795,7 @@ class RecoveryService:
                 else provider.inspect(source, handle)
             )
             _retain_delivery(
-                delivery_ledger, work, _delivery_update(facts), operation_id
+                delivery_ledger, work, normalized_delivery(facts), operation_id
             )
             return {"delivery": facts.to_dict()}
         if kind == "remove_worktree":

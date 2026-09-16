@@ -27,6 +27,7 @@ class Resident:
         self.sequence = 0
         self.update_requested = False
         self.reconcile_requested = True
+        self.publication_requested = True
         self.wake = asyncio.Event()
         self.stop = asyncio.Event()
         self.jobs: dict[str, asyncio.Task[None]] = {}
@@ -77,6 +78,7 @@ class Resident:
         if action == "wake":
             self.update_requested = self.update_requested or bool(value.get("update"))
             self.reconcile_requested = True
+            self.publication_requested = True
             self.wake.set()
             return {"ok": True}
         raise AppServerError("unknown resident action", category="rejected")
@@ -220,14 +222,22 @@ class Resident:
     async def schedule(self) -> None:
         next_update = 0.0
         next_reconcile = 0.0
+        next_publication = 0.0
         reconcile_seconds = max(1.0, float(self.settings.get("reconcile_seconds", 15)))
+        publication_seconds = max(
+            1.0, float(self.settings.get("publication_seconds", reconcile_seconds))
+        )
         while not self.stop.is_set():
             self.wake.clear()
             now = asyncio.get_running_loop().time()
             if now >= next_reconcile or self.reconcile_requested:
-                if self.start_job("background"):
+                if self.start_job("reconcile"):
                     self.reconcile_requested = False
                     next_reconcile = now + reconcile_seconds
+            if now >= next_publication or self.publication_requested:
+                if self.start_job("publication"):
+                    self.publication_requested = False
+                    next_publication = now + publication_seconds
             requested = self.update_requested
             if now >= next_update or requested:
                 self.update_requested = False

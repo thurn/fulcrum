@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fulcrum.timing import timed
 
-from fulcrum.coordination import coordinated
+from fulcrum.coordination import coordinated, external_effect
 
 import asyncio
 import subprocess
@@ -53,29 +53,33 @@ class CompletionService:
         outcome = request.input.get("outcome") or request.arguments.get("outcome")
         role = str((work.fc or {}).get("role") or "")
         if outcome == "blocked":
-            return self._blocked(request, ledger, work)
-        if role == "justiciar" and outcome == "repaired":
-            return self._justiciar_repaired(request, ledger, work)
-        if role == "weaver" and outcome == "answered":
-            return self._weaver_answered(request, ledger, work)
-        if role == "weaver" and outcome == "ready":
-            return self._weaver_ready(request, ledger, work)
-        if role == "weaver" and outcome == "planned":
-            return self._weaver_planned(request, ledger, work)
-        if role == "executor" and outcome == "ready_for_review":
-            return self._executor_finish(request, ledger, work)
-        if role == "warden" and outcome == "approved":
-            return self._warden_finish(request, ledger, work)
-        if role in {"sage", "mason"} and outcome == "findings":
-            return self._investigation_findings(request, ledger, work)
-        if role in {"vizier", "marshal"} and outcome == "completed":
-            return self._leadership_completed(request, ledger, work)
-        raise FulcrumError(
-            "OUTCOME_NOT_IMPLEMENTED",
-            f"{role or 'unassigned'} cannot finish with outcome {outcome!r} yet",
-            exit_code=4,
-            details={"role": role, "outcome": outcome},
-        )
+            result = self._blocked(request, ledger, work)
+        elif role == "justiciar" and outcome == "repaired":
+            result = self._justiciar_repaired(request, ledger, work)
+        elif role == "weaver" and outcome == "answered":
+            result = self._weaver_answered(request, ledger, work)
+        elif role == "weaver" and outcome == "ready":
+            result = self._weaver_ready(request, ledger, work)
+        elif role == "weaver" and outcome == "planned":
+            result = self._weaver_planned(request, ledger, work)
+        elif role == "executor" and outcome == "ready_for_review":
+            result = self._executor_finish(request, ledger, work)
+        elif role == "warden" and outcome == "approved":
+            result = self._warden_finish(request, ledger, work)
+        elif role in {"sage", "mason"} and outcome == "findings":
+            result = self._investigation_findings(request, ledger, work)
+        elif role in {"vizier", "marshal"} and outcome == "completed":
+            result = self._leadership_completed(request, ledger, work)
+        else:
+            raise FulcrumError(
+                "OUTCOME_NOT_IMPLEMENTED",
+                f"{role or 'unassigned'} cannot finish with outcome {outcome!r} yet",
+                exit_code=4,
+                details={"role": role, "outcome": outcome},
+            )
+        if result.request_id == request.request_id:
+            _wake_controller(request)
+        return result
 
     def _leadership_completed(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
@@ -629,6 +633,13 @@ class CompletionService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         workspace = _inspect_clean_source(request, payload["source_oid"])
+        local_check_result = DeliveryService().validation_check(
+            _child_request(
+                request, operation.id, "local-check", ("validation", "check")
+            )
+        )
+        children = {"local_check": _child_result(local_check_result)}
+        work = _reload_work(ledger, work.id)
         fc = dict(work.fc or {})
         fc["finish"] = {
             **payload,
@@ -648,6 +659,7 @@ class CompletionService:
                 "checks": payload["checks"],
                 "references": payload["evidence"],
                 "workspace": workspace,
+                "local_check": fc.get("local_check"),
             },
             "receipt": operation.id,
             "start_request_id": start_request_id,
@@ -664,10 +676,18 @@ class CompletionService:
             operation.id,
             state="completed",
             step="executor_finish_sealed",
+            planned={
+                "finish": payload,
+                "from_thread": request.thread_id,
+                "from_ownership_operation": request.ownership_operation,
+                "warden_start_request_id": start_request_id,
+                "children": children,
+            },
             result={
                 "bead_id": work.id,
                 "accepted": True,
                 "handoff": fc["handoff"],
+                "children": children,
                 "work": _work_summary(updated),
                 "report_reminder": _report_reminder(work.id),
             },
@@ -680,6 +700,7 @@ class CompletionService:
     ) -> CommandResult:
         payload = _finish_payload(request)
         sealed = (work.fc or {}).get("delivery_finish")
+        workspace: Mapping[str, Any] | None = None
         if isinstance(sealed, Mapping):
             if (
                 sealed.get("source_oid") == payload["source_oid"]
@@ -688,15 +709,25 @@ class CompletionService:
                 existing = ledger.show(str(sealed.get("operation_id")))
                 if existing is not None and existing.kind == "operation":
                     return _operation_result(OperationRecord.from_record(existing))
-            raise FulcrumError(
-                "FINISH_SEALED",
-                "Warden judgment is already sealed for this acquisition",
-                exit_code=5,
-                details={
-                    "operation_id": sealed.get("operation_id"),
-                    "source_oid": sealed.get("source_oid"),
-                },
-            )
+            if sealed.get("source_oid") != payload["source_oid"]:
+                workspace = _inspect_clean_source(request, payload["source_oid"])
+                work = _supersede_delivery_finish(
+                    ledger,
+                    work,
+                    sealed,
+                    new_source_oid=payload["source_oid"],
+                    superseding_operation=operation_id(str(request.request_id)),
+                )
+            else:
+                raise FulcrumError(
+                    "FINISH_SEALED",
+                    "Warden judgment is already sealed for this acquisition",
+                    exit_code=5,
+                    details={
+                        "operation_id": sealed.get("operation_id"),
+                        "source_oid": sealed.get("source_oid"),
+                    },
+                )
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
@@ -705,7 +736,8 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        workspace = _inspect_clean_source(request, payload["source_oid"])
+        if workspace is None:
+            workspace = _inspect_clean_source(request, payload["source_oid"])
         children: dict[str, Any] = {}
         delivery = (work.fc or {}).get("delivery")
         validation = (
@@ -724,11 +756,33 @@ class CompletionService:
                 )
             )
             children["validation"] = _child_result(validation_result)
+            if validation_result.state is not CommandState.COMPLETED:
+                return _finish_child_unresolved(
+                    ledger,
+                    work,
+                    operation,
+                    payload,
+                    children,
+                    workspace,
+                    "validation",
+                    validation_result,
+                )
             work = _reload_work(ledger, work.id)
             delivery = (work.fc or {}).get("delivery")
             validation = (
                 delivery.get("validation") if isinstance(delivery, Mapping) else None
             )
+            if not isinstance(validation, Mapping):
+                return _finish_child_unresolved(
+                    ledger,
+                    work,
+                    operation,
+                    payload,
+                    children,
+                    workspace,
+                    "validation",
+                    validation_result,
+                )
         if isinstance(validation, Mapping) and validation.get("state") == "failed":
             fc = dict(work.fc or {})
             fc["phase"] = "reviewing"
@@ -815,14 +869,13 @@ def _finish_child_unresolved(
     )
     fc["last_transition"] = operation.id
     ledger.update_fc(work.id, fc)
-    _record_task_finish(ledger, work, operation.id)
     operation = ledger.update_operation(
         operation.id,
         state="completed",
         step=f"warden_{step}_unresolved",
         result={
             "bead_id": work.id,
-            "accepted": True,
+            "accepted": False,
             "source_oid": payload["source_oid"],
             "children": dict(children),
             "workspace": dict(workspace),
@@ -832,6 +885,43 @@ def _finish_child_unresolved(
         next_action=fc["next_action"],
     )
     return _operation_result(operation)
+
+
+def _supersede_delivery_finish(
+    ledger: Ledger,
+    work: LedgerRecord,
+    sealed: Mapping[str, Any],
+    *,
+    new_source_oid: str,
+    superseding_operation: str,
+) -> LedgerRecord:
+    fc = dict(work.fc or {})
+    history = list(fc.get("failed_delivery_finishes") or [])
+    history.append(
+        {
+            **dict(sealed),
+            "state": "superseded",
+            "reason": "workspace_source_changed",
+            "superseded_by_source_oid": new_source_oid,
+            "superseded_by_operation": superseding_operation,
+            "superseded_at": utc_now(),
+        }
+    )
+    fc["failed_delivery_finishes"] = history[-10:]
+    fc.pop("delivery_finish", None)
+    delivery = fc.get("delivery")
+    if isinstance(delivery, Mapping):
+        invalidated = dict(delivery)
+        invalidated["approved_source"] = None
+        invalidated["approval_invalidated_by"] = superseding_operation
+        fc["delivery"] = invalidated
+    fc["phase"] = "reviewing"
+    fc["next_action"] = (
+        "Validate and approve the new exact workspace source; the prior Warden "
+        "judgment was superseded."
+    )
+    fc["last_transition"] = superseding_operation
+    return ledger.update_fc(work.id, fc)
 
 
 def _owned_work(request: ParsedRequest, ledger: Ledger) -> tuple[Ledger, LedgerRecord]:
@@ -1237,6 +1327,23 @@ def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -
     fc["finish_operation"] = operation_id
     fc["last_transition"] = operation_id
     ledger.update_fc(matches[0].id, fc)
+
+
+def _wake_controller(request: ParsedRequest) -> None:
+    from fulcrum.resident_client import exchange
+
+    try:
+        with external_effect():
+            asyncio.run(
+                exchange(
+                    request.instance.instance_root / "resident.sock",
+                    {"action": "wake", "timeout": 0.25},
+                )
+            )
+    except Exception:
+        # The periodic reconciliation pass is the durable fallback. A missing
+        # resident must never roll back an already-recorded finish transition.
+        pass
 
 
 def _reload_work(ledger: Ledger, bead_id: str) -> LedgerRecord:
