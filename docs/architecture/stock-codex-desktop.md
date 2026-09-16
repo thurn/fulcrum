@@ -37,15 +37,19 @@ approved scope, and **Warden** independently
 reviews it. Existing Sage, Mason, and Justiciar investigation and recovery roles
 remain available through the same dispatch mechanism.
 
-Core dispatch and messaging are expressible through the observed interfaces;
-full unattended feasibility remains conditional. Native tools expose task
-creation, messaging, inspection, archival, and scheduled follow-ups. They do not
+A live five-minute experiment established that a pending MCP call can
+return synthetic CI failure in the same native turn without model polling or in-wait token
+generation. Use this pre-finish blocking call for CI. Core dispatch and messaging
+are expressible through the observed interfaces; full unattended feasibility
+remains conditional. Native tools expose task creation, messaging, inspection,
+archival, and scheduled follow-ups. They do not
 expose the full App Server control surface. Enforced turn termination,
 event-triggered wake-up of an ended task, completion evidence without agent
 polling, restart and Stop behavior, and workspace access still require the
-specified live acceptance checks. This document fixes the storage and recovery
-algorithms; those checks establish whether a particular Desktop installation can
-run them. They do not delegate architecture choices to an implementer. No
+specified live acceptance checks. The blocking CI mechanism is validated within
+the experiment limits below. The other missing interfaces are unresolved architecture blockers,
+not implementation tasks with an assumed solution. This is not yet an
+implementation-ready design for the entire unattended replacement. No
 replacement runtime or bootstrap skill is installed by this document.
 
 ## Related information
@@ -92,19 +96,25 @@ runtime compatibility selectors. Startup checks capabilities, not application
 versions.
 
 The native task tools' callable descriptions and argument schemas were
-inspected. A read-only `list_projects` call succeeded and returned saved project
-IDs, paths, hosts, and Git-repository flags. Task creation, mutation, enforced
-turn exit, event-triggered wake, and completion tests were not performed while
-authoring this design. Required hook behavior has been checked against
-documentation, not exercised in Desktop. The schemas establish which arguments
-can be expressed, not successful end-to-end
-behavior.
+inspected. Read-only project/task inventory calls succeeded after the app reboot.
+A disposable native task then executed one local MCP wait for 300.002 seconds,
+received a synthetic failure, and completed the same turn. It made no polling
+calls, wrapper wait/resume calls, or additional model responses during the wait.
+The whole worker used 175 output tokens across discovery, call, and final
+report; that fixed overhead is distinct from the zero extra generation during
+the wait. See the [experiment report](../experiments/2026-09-16-desktop-mcp-ci-wait.md)
+for input/cache accounting, exact configuration, identities, and limitations.
 
-During inspection, the bundled `codex_app` MCP initially failed because Desktop
-had not supplied `CODEX_APP_TOOLS_PIPE_PATH`. The user rebooted, after which the
-project-list call succeeded. This establishes a recoverable startup failure in
-that session, not removal of the tools or a guarantee that reboot fixes every
-installation. Instructions mentioning a tool are not proof it is callable.
+This establishes creation and the configured five-minute blocking MCP path.
+Required hook enforcement, concurrent-recipient delivery, background wake,
+completion recovery, and restart behavior were not established by that test.
+Schemas alone are not successful end-to-end behavior.
+
+During initial inspection, the bundled `codex_app` MCP failed because Desktop
+had not supplied `CODEX_APP_TOOLS_PIPE_PATH`. Tools became callable after reboot.
+That was a recoverable failure in this session, not a guarantee that reboot
+fixes every installation. Instructions mentioning a tool are not proof it is
+callable.
 
 Bootstrap requires callable `create_thread`, `send_message_to_thread`,
 `list_projects`, `list_threads`, `read_thread`,
@@ -127,15 +137,18 @@ required capabilities therefore remain **unproven and release-blocking**:
 1. A supported runtime boundary rejects polling and further unauthorized calls,
    and ends a managed turn after its final result report, including on hook
    failure and through nested calls. Prompt compliance alone cannot pass.
-2. A supported background event mechanism wakes the existing Marshal after its
-   turn has ended, without another agent waiting or periodically checking.
+2. Fully idle background-only attention needs a supported way to reach the
+   existing Marshal without agent polling. No such interface is established.
+   CI uses the active Warden MCP response and does not depend on this mechanism;
+   other unattended transitions must not pretend that gap is solved.
 3. A supported completion source establishes exact task/turn termination and
    recovers missed observations without agent-driven task polling.
 
 Record the actual supported interfaces and live evidence before implementing
 the transport around them. If stock Desktop cannot supply a capability, report
 that incompatibility and keep admission and destructive cutover closed. Do not
-weaken these requirements or quietly restore a parked agent as a workaround.
+weaken these requirements or park a coordinator as a workaround. The explicitly
+authorized pre-finish Warden CI wait is assigned work, not coordination polling.
 
 Bootstrap also requires trusted `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse`, `Stop`, and `Interrupt` command hooks. There is no
@@ -215,12 +228,12 @@ local transport continuity. Policy still belongs in fresh processes.
 
 | Component | Responsibility |
 | --- | --- |
-| Thin MCP instance | Decode bounded requests and invoke source-following CLI operations. Never park an agent request waiting for other work. No independent queue, ledger, or scheduler policy. |
-| Unix-socket broker | Own local connections, notification delivery, timer heap, and bounded background jobs. Forward retained wake obligations through the required supported event mechanism. Keep reconstructible indexes in memory. |
+| Thin MCP instance | Decode requests and invoke source-following CLI operations. Retain the transport for an authorized Warden CI wait; promptly return ordinary coordination calls. No independent queue, ledger, or scheduler policy. |
+| Unix-socket broker | Own local connections, pending CI response subscriptions, timer heap, and bounded background jobs. Route provider results to pending MCP calls. A local signal cannot wake an ended native task. Keep reconstructible indexes in memory. |
 | Fresh CLI operation | Read current Beads/configuration, validate authority, commit transitions, compute prompts/actions, and perform provider operations. |
 | Codex command hook | Pass a scoped native event to a fresh CLI operation and return its hook response. No native dispatch, independent workflow storage, or resident policy. |
 | Marshal agent | Answer bounded judgment requests, execute its authorized handoff, report the result, and end the turn. Never monitor another task or provider. |
-| Worker agent | Register, validate its assignment/workspace, do authorized work, report progress and outcomes, and execute authorized post-finish instructions. |
+| Worker agent | Register, validate its assignment/workspace, do authorized work, await CI through the permitted pre-finish MCP call when assigned as Warden, report outcomes, and execute authorized post-finish instructions. |
 | Provider watcher | Observe an existing provider resource, publish meaningful changes durably through fresh CLI operations, and notify the broker. |
 
 The broker imports only transport/bootstrap mechanisms. It receives timer
@@ -273,7 +286,7 @@ No update waits for either timer. For example:
 Marshal has ended its turn; the MCP and broker connections remain available
 commit a completion-policy change to local master
 worker calls finish -> fresh CLI uses the new commit
-retained event wakes Marshal through the verified supported mechanism
+worker receives an authorized idle-recipient handoff, sends, reports, and ends
 Marshal requests one bounded instruction -> fresh CLI uses the new commit
 the older running operation and its source lease remain undisturbed
 ```
@@ -378,11 +391,14 @@ complete tool coverage. The separate runtime enforcement gate below is required.
 The managed-agent contract is **claim, send, report, end**. It applies to Marshal,
 Weaver, Vizier, bootstrap/recovery coordinators, and worker handoffs. No
 orchestrator remains active to monitor work it dispatched. Executor and Warden
-may perform their assigned work and local tests, but may not wait for downstream
-CI, another role, promotion, or cleanup after their handoff.
+may perform their assigned work and local tests. Warden may additionally call
+`wait_for_ci_results` before finish while retaining its assignment. One pending
+provider call suspends model execution; it is not a model status loop. No worker
+waits for another role, CI, promotion, or cleanup after its final handoff.
 
-Persist an allowance for the exact native turn: one bounded instruction request,
-its explicit decision if needed, at most one authorized native action, and its
+For coordination and terminal handoffs, persist an allowance for the exact native
+turn: one bounded instruction request, its explicit decision if needed, at most
+one authorized native action, and its
 result report. Idempotent replays return saved results without granting more
 allowance; they do not authorize an agent retry loop. Claiming the action changes
 the turn to report-only after that exact invocation; accepting its result
@@ -401,6 +417,8 @@ an exhausted allowance. Permit at most one agent result-report attempt after
 the native call. A lost or failed report leaves recoverable evidence; it cannot
 keep the actor alive retrying MCP. Apply a runtime-enforced request/turn limit
 to prevent repeated denied calls or endless reasoning before a terminal step.
+Allow the registered pre-finish CI call its explicit transport deadline; do not
+apply a short coordination timeout to legitimate pending worker work.
 Record and probe the actual supported limits; a ledger outage must not make
 the restriction fail open. Identical requests can be reconciled by background
 handlers or a separately justified recovery turn, not an automatic retry chain.
@@ -413,7 +431,10 @@ through other tools. A scoped diagnostic read requires an exact retained
 evidence request and consumes its bounded allowance. Expiration of a timer does
 not authorize an agent to repeat a status query. Cover actual tool aliases,
 direct calls, nested code-mode calls, and delegated attempts; a tool-name list
-alone cannot detect shell scripts or prevent a bypass.
+alone cannot detect shell scripts or prevent a bypass. Permit only the registered
+Warden CI wait for its exact current candidate and assignment, with one pending
+request. Marshal and other coordinators cannot use it. Returning `pending` on a
+short timer and having the model call again is prohibited polling.
 
 Hooks are an additional guard, not the promised hard boundary. Official
 documentation permits pre-tool denial on covered nested calls but exempts some
@@ -493,8 +514,9 @@ In particular, interruption persistence must not delay or veto native Stop.
 
 The explicit agent claim remains the authorization point. A native mutation's
 `PreToolUse` handler finds the actor's current claim awaiting execution, verifies
-tool/arguments, retained authority, and applicable pause/replacement fences,
-then commits its native invocation identity. Deny a call with no matching claim,
+tool/arguments, retained authority, and applicable pause/replacement fences.
+For a native send, it additionally verifies the matching recipient reservation
+and confirmed-idle evidence. It then commits its native invocation identity. Deny a call with no matching claim,
 changed arguments, or a second distinct tool-use ID. A repeated callback for the same ID can
 return its recorded decision; that is not authorization to invoke the mutation
 again. Expired leadership permits result recovery, not a new invocation. Save a
@@ -561,8 +583,8 @@ task summary never becomes a second authority. Configuration remains
 authoritative in YAML.
 
 `fc-system` is the instance's singleton control bead. It holds infrastructure
-and leadership actions, not copies of per-work authority. A transition affecting
-several work beads is a recoverable sequence of independent commits, never a
+and leadership actions plus the per-recipient delivery gates described below,
+not copies of per-work authority. A transition affecting several work beads is a recoverable sequence of independent commits, never a
 claimed multi-bead transaction.
 
 The inspected Beads update path sends ordinary metadata, status, and assignee
@@ -657,12 +679,16 @@ transition. In the normal implementation path this is Warden completion; retain
 the slot across the Executor-to-Warden handoff. An unresolved continuation or
 uncertain worker creation does not qualify for release.
 
-CI, promotion, synchronization, cleanup, or archival may remain pending after
-release without occupying an agent slot. Keep their obligations and workspace
-ownership intact; release is neither a successful-delivery claim nor permission
+The Warden CI wait retains its assignment and consumes its agent slot. CI
+failure and permitted repair within that assignment do not reacquire capacity or
+send a new native message. A successful Warden finish requires passing CI for the
+reviewed source; a blocked/failed finish may relinquish work with its obligations
+retained. Promotion, synchronization, cleanup, or archival may remain pending
+after accepted finish and verified native completion without occupying a slot.
+Keep their obligations and workspace ownership intact; release is neither a successful-delivery claim nor permission
 to delete the worktree. Provider operations use bounded broker scheduling and
-their existing resource locks. Any later repair resumes the existing role task;
-it must acquire a fresh agent reservation under current capacity and pause rules
+their existing resource locks. Any repair after that release resumes the existing
+role task; it must acquire a fresh agent reservation under current capacity and pause rules
 before its continuation is sent. A late report cannot revive an old reservation
 or editing authority. Keeping that task unarchived while delivery is pending
 does not occupy an agent slot.
@@ -733,9 +759,11 @@ and action envelope; managed workers use MCP for reports.
 | --- | --- |
 | `bootstrap` | Run/recover deterministic setup and return the next native action or explicit user prerequisite. |
 | `pause` / `resume` | Human/Vizier-authorized CLI/MCP transitions with stable request IDs and a reason. Pause returns the retained boundary hold plus active assignments/in-flight effects; resume revalidates held work without clearing independent fences. |
-| `register_worker` | Bind the native task/host ID to the exact creation or authorized continuation action and assignment before substantive work. A repair reuses the retained role task and receives a fresh assignment token. |
+| `register_worker` | Bind the native task/host ID to the exact creation or authorized continuation action and assignment before substantive work. A post-finish repair reuses the retained role task with a fresh assignment token; pre-finish CI repair retains its current assignment. |
 | `report_progress` | Persist meaningful progress and renew the assignment's reporting deadline. |
-| `finish` | Accept a role outcome, commit the transition, and return exact authorized follow-ups. |
+| `submit_candidate` | Warden only, before finish: retain exact reviewed source and local-check evidence, then submit or recover its provider candidate idempotently without transferring assignment ownership or granting promotion. |
+| `wait_for_ci_results` | Warden only, before finish: validate the exact submitted candidate and current assignment, register one pending MCP response, and return terminal CI evidence or an explicit blocker. No periodic `pending` responses. |
+| `finish` | Accept a role outcome, commit the transition, and return exact authorized follow-ups. Warden success requires passing CI for the exact reviewed source; blocked/failed outcomes retain unresolved delivery. |
 | `get_instruction` | Acquire bounded Marshal coordination and promptly return one decision request, native action, end, or pause result. Never wait for external progress. |
 | `claim_action` | Revalidate a pending action and durably mark its execution attempt before an external call. |
 | `report_action_result` | Record success, definitive rejection, or uncertainty and compute dependent work. |
@@ -789,9 +817,13 @@ arguments, calls the named tool once, reports its result, and ends its turn.
 Another action requires a later authorized turn. Independent agents can execute
 actions for different work.
 
-`claim_action` commits the executing actor, current token, attempt ID, and
-expected result before returning arguments. A repeated claim while issuing
-returns status and reconciliation instructions, not permission to resend. A
+`claim_action` revalidates the matching recipient gate for any native message
+and commits the executing actor, current token, attempt ID, and expected result
+before returning arguments. A busy/ending/unknown recipient holds the action
+without granting a call. Recheck at invocation; a stale idle observation cannot
+authorize delivery after another native turn has started. Enforcing that final
+race against user/scheduler input requires the still-unproven runtime boundary.
+A repeated claim while issuing returns status and reconciliation instructions, not permission to resend. A
 definitive rejection permits a fresh recorded attempt after its cause is fixed.
 An ambiguous error is uncertain even if its message sounds like a timeout.
 
@@ -874,11 +906,58 @@ notification but does not clear Marshal attention; the work transition that
 handles the attention does that. The sender may report only actions granted to
 it; the recipient's acknowledgment grants no sender authority.
 
-Recovery may create a new wake action for a later recovery generation while an
-older message remains uncertain. This is an explicitly redundant coordination
-hint, containing no worker dispatch or editable scope. Keep the older attempt
-uncertain, and suppress new hints while one current recovery hint is pending.
-Never use this exception for creation, worker instructions, or schedule changes.
+Uncertain delivery retains the recipient reservation. There is no redundant
+wake exception: a newer recovery generation cannot send another native message
+while an older delivery is unacknowledged or uncertain. Pending information
+remains durable and is merged only before delivery, never by repeating a send.
+
+### One outstanding delivery per recipient
+
+Use recipient state, not whether the whole system is idle. Apply the same rule
+to Marshal, Vizier, Executor, Warden, and recovery tasks. The control bead
+`fc-system` owns one delivery gate per exact native task/host across all senders
+and work beads. This gate holds only delivery coordination: observed native turn,
+idle/active/ending/unknown state, one reserved action or MCP response, and its
+acknowledgment. Work scope, pending payloads, assignments, and outcomes remain on
+their owning work beads; task summaries remain projections.
+
+All delivery channels consult this gate under the shared writer lock:
+
+| Recipient state | Delivery |
+| --- | --- |
+| Positively idle, no outstanding delivery or unresolved continuation | Reserve one exact native message action. Its authorized sender may claim, send, report, and end. |
+| Active with an eligible MCP response not yet committed | Reserve that response and include applicable current-assignment information there. No native message. |
+| Active without an eligible MCP response | Retain pending information until its next normal MCP call or positively observed idle state. Do not interrupt or ask it to poll. |
+| Ending, unknown, or with an unacknowledged/uncertain delivery | Hold further delivery. Do not queue a second native prompt. |
+
+A response is eligible only if its tool contract permits the information.
+`wait_for_ci_results` returns the candidate outcome and applicable blocker/control
+information. It does not return early merely because unrelated mail arrived.
+Terminal `finish`/result-report responses still say end and never admit a new
+assignment. New scope waits until the current assignment is released and the
+task is positively idle. MCP acknowledgment alone is not idle evidence.
+
+The originating work transition first retains the obligation. Under the writer
+lock, reserve its action/response locator on `fc-system`, then bind that
+reservation to the originating record before exposing delivery. These are
+recoverable separate commits, not an atomic cross-bead transaction. A crash
+between them leaves the gate occupied; reconcile the exact recorded locator
+before proceeding. Never return send permission before both are confirmed.
+Acknowledgments settle the origin first and then clear only the matching gate
+reservation. A crash here delays another delivery rather than permitting two.
+Only one response can claim a payload; concurrent MCP calls cannot both drain it.
+
+The agent acknowledges an MCP delivery on its next normal protocol request; no
+acknowledgment-only polling turn is created. A terminal response requires native
+completion evidence to settle its gate if no subsequent request exists. Lost
+responses retain uncertainty and their original IDs. Native acknowledgment can
+settle delivery but the observed active turn still prevents another native send.
+
+This specifies the invariant; the experiment did not prove its enforcement.
+Native user input and Desktop scheduling can bypass Fulcrum's gate, so no claim
+of an absolute native guarantee is valid without a tested runtime boundary.
+An hourly scheduler must gate before injecting its prompt; queuing it inside a
+busy native task does not satisfy this contract.
 
 ## Marshal lifecycle and wake delivery
 
@@ -893,53 +972,43 @@ Marshal's turn alive. Task identity persists across separate event-driven turns.
 - `action`: claim it, execute its exact native call once, report, and end.
 - `end` or `paused`: close the turn allowance, release the lease, and end.
 
-There is no `wait` or `renew` disposition, parked MCP request, or long-wait
-configuration. An unchanged status cannot authorize another instruction request
+Marshal has no `wait` or `renew` disposition, parked MCP request, or long-wait
+configuration. The Warden CI tool is a separate pre-finish worker contract. An unchanged status cannot authorize another instruction request
 in the same turn. Native creation returns accepted identity/setup evidence or
 uncertainty; the creator reports it and ends without waiting for the worker to
 finish. More pending actions require subsequent authorized turns under the
 retained event protocol, not a loop inside the current turn.
 
-### Event-triggered wake and exit races
+### Attention delivery and exit races
 
-An incoming work transition commits its attention generation and pending wake
+An incoming work transition commits its attention generation and delivery
 obligation with the work state under the writer lock. Closing Marshal's turn
 commits its handled generation and releases its lease under that same lock.
-New attention is never cleared merely because a wake was accepted, a message
-was acknowledged, or the old turn had not visibly ended.
+Native delivery or acknowledgment alone never clears unhandled attention.
 
-For an agent-originated handoff, Weaver or another authorized actor may execute
-one returned native wake action and report it before ending. Background events
-require a supported non-agent mechanism to deliver a retained wake to the exact
-existing Marshal. The broker's local socket signal cannot itself resume an
-ended Desktop task. Hooks do not invoke native task tools; a provider watcher
-cannot call an agent-only tool or silently open an internal Desktop connection.
+For an agent-originated handoff, return a native message action only when the
+recipient gate permits it. If Marshal is active, retain the attention for an
+eligible MCP response; otherwise hold it. The sender reports its own result and
+ends without waiting for Marshal. Warden CI results return through Warden's
+pending MCP call, so the normal five-minute failure case needs neither a new
+Marshal turn nor a background native wake.
 
-The supported event-to-task interface remains a release-blocking capability
-question. Its accepted contract must identify the target task/host, correlate
-an attention generation, deliver while the previous turn is ending, expose
-acceptance or uncertainty, and recover after app/broker restart. Record its
-actual schema and evidence before implementation. Do not invent an API or use
-GUI automation, undocumented pipes/databases, an App Server connection, a
-waiting assistant, or frequent scheduled assistant turns to emulate it. The
-hourly heartbeat is exceptional recovery, not a five-minute CI notification
-mechanism and not a replacement for this gate.
+There is currently no verified supported way for background code to wake a fully
+idle Marshal, or to deliver held attention once the last eligible sender has
+ended. A broker signal is not a native task message. Do not base implementation
+on an unspecified event-to-task API, GUI automation, undocumented pipes/databases,
+an App Server connection, a waiting coordinator, or frequent assistant timers.
+Human resumption can discover retained attention, but is not unattended delivery.
+This remaining gap blocks claims of a complete unattended architecture; the CI
+experiment does not resolve it. Resolve that separate design question with a
+concrete supported experiment before implementing dependent transitions.
 
-The broker reconstructs pending wake obligations and background deadlines from
-Beads on restart. Fresh CLI operations revalidate pause, current leader, and
-attention generation before delivery through the verified mechanism. Retain
-uncertain deliveries; reconcile acknowledgments rather than blindly resending.
-Coalesce hints only while preserving all underlying work obligations. A new
-turn must find pending attention even when a notification was lost.
-
-Exercise events committed immediately before and after the exit commit, while
-the old native turn is ending, and while another message is being delivered.
-Every generation is either handled by the authorized turn or remains pending
-for a later wake. No implementation may clear attention and then rely on an
-unrecorded send. Duplicate wakes cannot create duplicate authority; unchanged
-state cannot perpetuate a chain of wake-only turns. A resumed turn settles
-retained effects and receives a fresh bounded instruction instead of replaying
-its last native call.
+Reconstruct pending attention and delivery reservations from Beads after restart.
+Events committed before, during, or after exit remain pending until handled.
+Ending and unknown states prohibit native sends. Never use a lease expiry,
+missing summary, or receipt acknowledgment as proof that a recipient is idle.
+Tests must cover multiple senders, response commitment races, lost replies,
+uncertain sends, and restart without duplicate delivery or lost generations.
 
 ### Leadership leases and turn allowances
 
@@ -971,7 +1040,9 @@ separate mandatory terminal-handoff enforcement gate.
 
 ### Hourly recovery
 
-Bootstrap creates one heartbeat attached to the Marshal task, recurring hourly.
+After verifying pre-delivery gating, bootstrap creates one heartbeat attached
+to the Marshal task, recurring hourly. Until that check passes, keep it disabled
+and report recovery scheduling as unavailable.
 It does not create a new standalone task each hour. The saved prompt directs
 Marshal to call `get_instruction` with recovery intent, settle durable
 pending actionable work within one turn allowance, and end in every case.
@@ -979,14 +1050,14 @@ Notification policy is stored through the automation tool; the prompt says to
 produce no routine status message when there is no actionable change.
 
 The hourly trigger is a nominal cadence, not a guaranteed recovery SLA. Desktop
-must be running and the machine available. Busy-task scheduling behavior must be
-tested: a bounded active turn must not accumulate an unbounded prompt queue or
-lose an in-flight native mutation. Persisted action claims make an
-interrupted call recoverable; they do not prove whether that call happened.
-
-An hourly prompt arriving during an active turn must coalesce or queue for a
-later authorized turn; it cannot reset the current allowance or admit a second
-coordinator. The heartbeat cannot repair a broken native-tool MCP
+must be running and the machine available. Scheduling must obey the recipient
+gate before native prompt injection: when busy, ending, unknown, or reserved,
+retain/coalesce the obligation outside the native task. Do not queue or steer
+another native prompt into an active turn. The available schedule schema alone
+does not establish such a guard; this is unproven and blocks enabling the
+heartbeat. A guard that runs only after the prompt arrives is too late.
+Persisted action claims make an interrupted call recoverable; they do not prove
+whether that call happened. An hourly event cannot reset a turn allowance. The heartbeat cannot repair a broken native-tool MCP
 connection by itself. Bootstrap/doctor reports that dependency failure with the
 specific missing capability. A task that remains natively hung despite scheduled
 follow-ups requires a visible operator recovery action; this design promises no
@@ -1060,7 +1131,10 @@ requirement for a working hook installation.
 
 Workers report meaningful progress at least every ten minutes when able to call
 tools. The reporting deadline is thirty minutes after registration or accepted
-progress. A long-running local tool may delay reporting. Deadline expiry records
+progress. A long-running local tool may delay reporting. An authorized pending CI call
+records its own deadline and suspends the ordinary progress deadline until it
+returns; do not wake the model merely to report unchanged waiting status.
+Deadline expiry records
 a missing-progress obligation; it is not failure evidence, permission to start
 a duplicate worker, or permission for Marshal to poll the task. Emit one scoped
 recovery notice for the changed condition; unchanged overdue status does not
@@ -1100,60 +1174,89 @@ Executor finish seals its source-writing outcome. Warden starts only after the
 old assignment relinquishes source access and native completion is established.
 Warden may fix findings directly. One accepted Warden finish seals review for
 the exact source and assignment; delivery never asks it to repeat that finish.
-A repair uses a fresh assignment in the same task and seals a new outcome.
+A repair after final finish uses a fresh assignment in the same task and seals
+a new outcome. Pre-finish CI repair retains the current assignment.
 
-### Background CI and the five-minute failure case
+### Blocking Warden CI wait and the five-minute failure case
 
-Fresh CLI operations own provider submission, exact-source validation,
-promotion, required remote synchronization, and cleanup. Executor, Warden, and
-Marshal do not poll CI, run CI watch commands, sleep until completion, or hold
-MCP calls open for provider progress. Workers may run the local checks required
-by their assignment before finish; that does not authorize downstream monitoring.
+Warden reviews and fixes the candidate, runs local checks, and submits its exact
+source through `submit_candidate` and the existing delivery handler before final
+`finish`. The candidate approval identifies immutable source and permits CI
+validation only; it neither relinquishes Warden ownership nor authorizes promotion. Fresh CLI
+operations still own provider submission, source/review checks, promotion,
+synchronization, and cleanup. Persist candidate/run identity and submission
+uncertainty before waiting; neither reconnect nor a lost reply resubmits it.
 
-Persist the provider candidate/run locator, exact source, state, and next
-background observation deadline on the work bead. Prefer provider events when
-available; otherwise bounded software jobs query that exact candidate using the
-existing Tollgate adapter. These jobs execute outside the model and use no
-agent tokens. Use a 30-second default interval for pending/running CI, with
-errors backing off to 60, 120, then 300 seconds. These are background deadlines,
-not agent wake intervals. Record a changed observation once; unchanged status
-creates neither a workflow event nor a model turn. Restart reconstructs pending
-observations without resubmission. The interval is an observation target, not a
-latency guarantee when the host or provider is unavailable.
+Warden then calls `wait_for_ci_results(candidate_id, assignment_token, request_id)`
+once. These define the proposed production arguments; the experiment used a
+small synthetic tool and did not implement this handler. The handler verifies
+caller, assignment, source, candidate, and absence of another pending wait. It
+returns already-terminal retained evidence immediately, or registers a pending
+response and releases the policy process and all state/resource locks. The thin
+MCP transport and broker hold the connection/subscription, not model execution
+or a resident policy computation. Registration and terminal-result lookup must
+serialize with event publication so a result cannot fall between them.
+
+Prefer provider events. Where the provider requires status queries, bounded
+software jobs query the exact run through Tollgate; this is server-side polling,
+not Executor/Warden/Marshal polling. Use a 30-second pending interval and error
+backoff of 60, 120, then 300 seconds. Unchanged observations generate no agent
+response, token generation, or durable event. A terminal result launches a fresh
+CLI operation from current local master, validates candidate/source identity,
+persists the evidence, and completes the pending MCP response. No policy process
+or old source snapshot is kept alive for the wait.
 
 For CI that takes five minutes and fails:
 
-1. Warden submits its exact-source finish, executes at most its authorized
-   handoff, reports the result, and ends. After verified native completion,
-   release its agent reservation; keep its task and Tollgate workspace.
-2. Background delivery submits or recovers the retained candidate once. During
-   the five minutes, provider software observes progress. No worker or Marshal
-   turn remains alive on behalf of that CI run.
-3. The failure event or next scheduled background observation commits failure
-   evidence, source identity, and a repair-attention obligation together. It
-   triggers the verified event-to-task wake for the existing Marshal. An hourly
-   heartbeat cannot be the normal path for this notification.
-4. Marshal uses one bounded turn to authorize repair under scope, pause, and
-   capacity rules, send the exact continuation to the same Warden, report, and
-   end. If capacity is unavailable, retain the request and wake on capacity
-   release; do not keep Marshal checking it.
-5. Warden registers the fresh assignment, repairs, runs its local checks, seals
-   a new exact-source finish, and ends through the same handoff protocol.
-   Background software observes the new validation attempt. The repair-cycle
-   allowance below applies; waiting and duplicate failure reports do not count.
+1. Warden retains its task, turn, assignment, worktree, and capacity reservation
+   while the single MCP call is pending. Marshal may be ended throughout.
+2. Software receives/observes terminal failure and returns exact candidate,
+   source, failed checks, and bounded diagnostics in that call's response.
+   No native message, new assignment, or Marshal wake is needed.
+3. A fresh transition grants a repair cycle under the existing scope, pause,
+   and failed-cycle allowance. Warden repairs within the same assignment,
+   resubmits changed source, and waits once for that new candidate. A terminal
+   failure justifies substantive repair; a timer or unchanged status does not.
+4. Passing CI for the reviewed source permits final successful `finish`, its
+   authorized handoff, result report, and turn exit. Native completion evidence
+   then permits capacity release. If repair is blocked, paused, or exhausted,
+   return that disposition; Warden reports a blocked outcome and ends instead
+   of waiting for human action or automatically starting another wait.
 
-If CI passes, software advances only the authorized delivery steps under the
-existing source/review and pause guards. A native turn's success or message
-acceptance is never promotion evidence. Source changes invalidate review.
-Cleanup failure after promotion does not turn delivered code into an
-implementation failure. If native action or judgment is needed, persist it and
-wake the appropriate existing task through the verified event path.
+Capacity is deliberately occupied during CI. This is the cost of retaining the
+active assignment and simple in-turn repair. Executor does not wait for Warden's
+CI. Promotion/cleanup after final handoff run in software; further agent work
+then needs the post-finish repair protocol below.
 
-Before deleting a worktree, require accepted outcomes, observed native
-completion, settled delivery, and no unresolved owned background-process
-obligation. Workers terminate their owned background commands before finish and
-report retained process locators. A completed turn does not prove all processes
-ended; unknown ownership blocks deletion. Never terminate unrelated processes.
+Configure an explicit MCP deadline and, when code mode is used, a wrapper yield
+budget longer than the intended wait. The measured configuration was
+`tool_timeout_sec=420` and wrapper `yield_time_ms=360000` for a 300-second result.
+The default MCP timeout is 60 seconds. This proves neither arbitrary durations
+nor that production can use an infinite wait. Before enabling real CI, measure
+the supported duration and choose a finite provider deadline below both transport
+budgets. If that deadline expires, return an explicit blocked/unknown outcome,
+not `pending` plus instructions to call again. Do not implement model-driven
+short-timeout retries or wrapper-resume loops as the production wait mechanism.
+
+On cancellation, disconnect, or restart, preserve the candidate, wait request,
+ownership, and delivery uncertainty. Software may reconcile provider state but
+must not infer native completion, release the slot, resubmit, or blindly deliver
+a second response/message. Resumption reconciles that exact wait and candidate
+under the recipient gate before further work. Automatic reconnection and long
+wait recovery remain untested; do not claim transparent restart support.
+
+The live [five-minute experiment](../experiments/2026-09-16-desktop-mcp-ci-wait.md)
+passed with zero worker polling and no extra model generation during the wait.
+Real-provider integration, concurrent delivery, long-duration limits,
+cancellation, and restart are still required acceptance tests.
+
+Passing CI or native turn success alone is not promotion evidence. Delivery
+revalidates the exact source, approval, and pause state. Source changes invalidate
+review and prior CI. Cleanup failure after promotion remains a cleanup obligation.
+Before deleting a worktree, require accepted outcomes, observed native completion,
+settled delivery, and no unresolved owned background-process obligation. Workers
+terminate their own background commands before finish and retain process locators;
+unknown ownership blocks deletion. Never terminate unrelated processes.
 
 ### Same-task repair and deferred archival
 
@@ -1164,7 +1267,9 @@ Executor stays available while Warden reviews; Warden stays available while
 delivery runs. Routine failure, delay, or retry never creates a replacement
 native task.
 
-When CI or delivery requires Warden repair, retain the exact failure evidence
+Pre-finish CI repair stays in Warden's active assignment as described above; it
+does not send a continuation or allocate another slot. When a failure discovered
+after final handoff requires Warden repair, retain the exact failure evidence
 and current source, then reserve capacity for the existing Warden native ID.
 After verifying its prior turn is complete and no conflicting writer or native
 continuation remains, commit a fresh assignment token and an exact
@@ -1189,8 +1294,9 @@ do not treat archival as task deletion.
 Allow at most three unsuccessful automatic repair cycles per bead before
 requiring a human decision. The original implementation/review and the failure
 that first requests repair do not consume this allowance. Start a cycle when
-Fulcrum grants a substantive repair assignment against retained failure
-evidence; associate any Executor-to-Warden return with that same cycle so role
+Fulcrum grants substantive repair against retained failure evidence, either
+within the active pre-finish Warden assignment or in a fresh post-finish
+assignment; associate any Executor-to-Warden return with that same cycle so role
 handoffs cannot multiply or reset the allowance. Record its identity,
 assignments, source before/after, attempted correction, and observed result on
 the work bead.
@@ -1207,7 +1313,9 @@ cycles. Passing one check, changing source, switching roles, restarting Desktop,
 or resuming the same task does not reset the bead's failed-cycle total.
 
 On the third failed cycle, atomically retain the failure history and a
-`repair_limit_reached` human blocker instead of another continuation action.
+`repair_limit_reached` human blocker instead of another repair grant or
+continuation action. An active Warden receives it through MCP, reports the
+blocked outcome, and ends.
 Hold only that bead; keep its tasks visible, preserve its worktree, and let
 unrelated work continue. Once its current worker is confirmed complete, release
 the agent slot under the normal completion rules. Surface one actionable summary
@@ -1267,8 +1375,10 @@ includes exhausted repair allowances and native approvals or interruption that
 Fulcrum cannot perform. Native approvals still require action in the original
 Desktop task; a response in Vizier is not evidence that Desktop accepted one.
 
-Marshal executes a returned `send_message_to_thread` action to the retained
-Vizier ID using the normal claim/result protocol and structured action marker.
+Delivery uses the same recipient gate: Marshal may execute a returned native
+message to the retained Vizier ID only while Vizier is confirmed idle and
+unreserved. If Vizier is busy, retain the request for an eligible MCP response
+or later idle delivery. Use the normal claim/result protocol and action marker.
 Hooks and provider watchers only publish the durable obligation; they do not
 send native messages. Such a wake authorizes Vizier to acknowledge the action,
 read current decision evidence, present one actionable request, and end its
@@ -1289,8 +1399,8 @@ only when it changes the required decision or invalidates the prior request;
 routine progress does not. Supersede unissued notices when their blocker is
 resolved. An issued notice still requires settlement, and Vizier rereads current
 state before presenting a request so stale delivery cannot reopen a blocker.
-Use the normal uncertain-message evidence rules; the redundant Marshal recovery
-hint exception does not permit duplicate Vizier notices. A missing or unusable
+Use the normal uncertain-message evidence rules; no redundant wake exception
+permits a second unacknowledged delivery. A missing or unusable
 Vizier task leaves notification pending and exposes the failure in diagnostics;
 never create a replacement inbox automatically.
 
@@ -1298,9 +1408,9 @@ Global pause holds these unissued notification wakes like other messages.
 Pending decisions remain readable through status and explicit human interaction
 with Vizier. Resume revalidates pending notices before sending them. Exercise
 delivery while Vizier is already handling a human response: incoming notices
-must preserve the response and action receipts, and cannot grant a second
-independent policy authority. This reuses the required busy-task native delivery
-check rather than assuming that a send starts an isolated turn.
+must remain pending or use its eligible MCP response, preserving the human
+response and action receipts. No native prompt may be injected into that active
+turn, and no second independent policy authority is granted.
 
 ## Workspace and authority preservation
 
@@ -1379,7 +1489,9 @@ resource.
    following launchers, Beads services, skill links, and local broker using
    deterministic commands. Preserve unrelated files and configuration.
 2. Configure local Fulcrum MCP for bounded protocol calls through supported
-   Codex configuration. Do not configure agent long waits. Restart only that
+   Codex configuration. Configure the explicit pre-finish Warden CI timeout and
+   wrapper budget after measuring supported bounds; other coordination calls
+   return promptly. Restart only that
    MCP connection when initial configuration
    requires it; a full application restart is a reported exceptional
    prerequisite, not an ordinary update step. Resume the same bootstrap record
@@ -1388,8 +1500,10 @@ resource.
    preserving unrelated and other-instance definitions. Present any native hook
    trust prerequisite and verify effective configuration plus observed callback
    execution; a file on disk is not evidence that Desktop loaded or trusted it.
-   Establish the separately required runtime turn restriction, event-triggered
-   wake mechanism, and completion source with their supported configurations.
+   Establish the separately required runtime turn restriction, recipient gate,
+   and completion source with tested supported configurations. Fully idle
+   background delivery still requires resolution of the documented design gap;
+   it is not an assumed configuration option.
    Missing capabilities stop setup before product admission.
    Retain exact installed definitions and probe results on `fc-system`, without
    a configuration hash. Hook verification is required even if MCP is healthy.
@@ -1401,8 +1515,8 @@ resource.
    existing Vizier task, configured model/effort values, saved-project
    local targeting with Tollgate worktrees, managed-task hook observations and
    bounded pre-handoff worker corrections, enforced send-report-end turns,
-   event-triggered wakes, background completion/CI observation, and hourly
-   same-task recovery. Disclose that Desktop Stop interrupts one turn while
+   recipient-gated delivery, the pre-finish blocking Warden CI call, background
+   completion/provider observation, and verified hourly same-task recovery. Disclose that Desktop Stop interrupts one turn while
    "pause Fulcrum" durably pauses new
    coordination. The user's bootstrap request supplies this scope; request only
    missing choices or permissions Desktop itself requires.
@@ -1417,7 +1531,9 @@ resource.
    performing leadership work. Vizier completes readiness and ends its turn;
    human direction or retained decision notifications can resume it. Marshal
    handles a bounded instruction and ends, even while other work is active.
-7. Create or update the hourly heartbeat on Marshal. Persist its returned ID,
+7. Verify pre-injection recipient gating before enabling the hourly heartbeat
+   on Marshal; unavailable gating leaves scheduling disabled and readiness
+   incomplete. Persist its returned ID,
    exact target, prompt, cadence, and observed state on `fc-system`.
 8. Exercise the readiness probe described below, finalize the bootstrap result,
    and expose task links, schedule identity, verified capabilities, and any
@@ -1529,8 +1645,9 @@ creation and messaging, notification-only decision requests in the existing
 Vizier task, local-project targeting with assigned Tollgate worktrees,
 required persistent tool approvals, managed-task hooks with bounded reporting
 corrections before worker handoff, enforced send-report-end turns, supported
-event-triggered wakes and completion observation, and one hourly follow-up on
-Marshal. Confirm missing model choices and explain the scope of each approval
+recipient-gated delivery and completion observation, the pre-finish Warden CI
+wait, and one hourly follow-up on Marshal only after its delivery gate is
+verified. Confirm missing model choices and explain the scope of each approval
 configuration. Complete native hook trust
 review through the supported user flow; do not bypass it. Explain that Desktop
 Stop ends the current turn and "pause Fulcrum" durably pauses coordination.
@@ -1564,6 +1681,10 @@ input, or meaningful completed work.
 
 ## Feasibility checks and operational evidence
 
+The five-minute pending-MCP mechanism has passed the linked disposable test.
+That result corrects the earlier assumption that a long tool call necessarily
+burns model tokens. It does not establish enforcement or the entire architecture.
+
 Before the runtime rewrite or destructive production reset, use a disposable
 instance to prove the three unresolved capability gates: enforced terminal
 handoff without polling, background event-triggered wake of an ended Marshal,
@@ -1578,8 +1699,10 @@ The first assembled-product check crosses the actual boundary: a stock Desktop
 Marshal dispatches a registered probe worker, reports, and ends. The worker
 finishes; background completion evidence releases the next transition, and the
 verified wake mechanism resumes the same Marshal exactly as authorized. Repeat
-with a separate Weaver handoff and with a provider failure after five minutes of
-CI while all involved agent turns are ended. Include real Beads persistence,
+with a separate Weaver handoff and a provider failure after five minutes of
+CI while Warden has one pending MCP call and Marshal is ended. The CI result
+returns directly to Warden in its existing assignment without a native wake.
+Include real Beads persistence,
 broker scheduling, separate MCP clients, hooks, and supported native interfaces.
 Component doubles cannot establish this behavior or the absence of model
 execution while only external work remains.
@@ -1607,7 +1730,9 @@ external providers. The normal repository check remains provider-independent.
 | Startup/resume/compaction restore bounded current role context; initial prompts and resumed turns acquire hook admission evidence | Refuse affected task admission; never authorize work from stale context or cwd alone. |
 | Hook deadlines, duplicate callbacks, missed results, and one bounded Stop correction preserve outstanding effects | Report hook protocol failure; no blind retry or completion inferred from callback receipt. |
 | Runtime denies direct/nested/alternate polling and ends the managed turn after terminal reporting even when hooks fail | Admission and cutover stay closed; hook-only or prompt-only compliance cannot pass. |
-| Background provider/worker events wake the exact ended Marshal through a supported interface | Admission and cutover stay closed; no parked agent or periodic assistant status checks as a substitute. |
+| Fully idle background attention has a concrete supported delivery path | Unresolved architecture blocker for unattended operation; the Warden CI wait removes CI from this dependency but does not solve other cases. |
+| One registered Warden CI call returns terminal evidence without polling or intermediate model responses | Synthetic five-minute case passed; real provider, supported duration, cancellation, and restart still require evidence. |
+| Native sends and eligible MCP responses share one per-recipient reservation | Reject concurrent/uncertain delivery, busy native sends, and heartbeat injection that bypasses the gate; experiment did not establish enforcement. |
 | Independent MCP clients and background provider jobs progress while Marshal is ended or handling one bounded action | Report transport concurrency failure; one actor cannot block unrelated work. |
 | Ordinary local-master changes reach the next MCP and hook operation within the live-iteration target, preserving existing connections and operations | Refuse live-iteration readiness; do not substitute installation, manual activation, or periodic source refresh. |
 | Native IDs and assignment can be registered before worker edits | Refuse dispatch readiness. |
@@ -1722,9 +1847,11 @@ flow, scoped to the changed connection or handler.
 Implement in dependency order, with each step's checks passing before the next:
 
 1. Capture disposable native/hook capability evidence and accepted result
-   shapes. Prove runtime-enforced exit, event-triggered wake, and background
-   completion evidence first. Stop here on a missing required capability; record
-   it as a feasibility blocker, not a future best-effort improvement.
+   shapes. Reuse the measured blocking-CI evidence within its limits. Prove
+   runtime-enforced exit, per-recipient delivery, and background completion;
+   resolve fully idle background delivery before implementing dependent flows.
+   Stop here on a missing required capability; record it as a feasibility blocker,
+   not a future best-effort improvement.
 2. Implement authoritative transitions, action attempts, hook observations, and
    deduplication and per-turn allowances in the ledger/coordination layer.
    Cover crash boundaries with local process fixtures, including lock
@@ -1736,9 +1863,11 @@ Implement in dependency order, with each step's checks passing before the next:
    cases. Integrate the independently verified runtime enforcement boundary.
 4. Implement bounded CLI/MCP action handlers, background broker timers, the
    verified wake/completion interfaces, registration, and agent prompt changes.
-   Keep existing provider validation/promotion semantics; replace direct runtime
+   Add the single pending Warden CI response and real-provider tests without
+   changing exact-source validation/promotion authority; replace direct runtime
    dispatch in role/completion/leadership services.
-   Cover boundary pause, early capacity release, same-task repair with its
+   Cover boundary pause, capacity retained during CI, release after final
+   completion, pre-finish and post-finish same-task repair with their
    failed-cycle allowance, deferred archival, and the Vizier decision inbox.
 5. Assemble bootstrap and run the full disposable scenarios below, including
    five-minute CI failure, enforced exit, restart recovery, and actual heartbeat
@@ -1774,17 +1903,23 @@ operation boundaries without modifying production state.
    scope under one turn allowance and ends after its handoff. Native message
    acceptance alone cannot authorize implementation. Repeat for Vizier resolving
    existing blocked work. No actor checks the recipient after sending.
-4. **Background wake.** End Marshal while a worker or CI is active. Publish a
-   meaningful provider/worker event with no other agent available to send a
-   message. The supported background mechanism wakes that same Marshal promptly;
-   record event, wake, and turn identities. Lost signals remain durable and
-   recoverable. No assistant wait, status loop, or hourly trigger may explain
-   successful normal-path delivery.
-5. **Exit race.** Commit Weaver ready immediately before and after Marshal's
-   terminal allowance/lease write. Deliver a wake while the old turn is ending
-   and while another wake is arriving. No attention generation disappears and
-   no issuing action is replayed. Duplicate hints cannot authorize extra work
-   or create an unchanged-state chain of model turns.
+4. **Per-recipient delivery.** Race multiple senders and pending MCP responses
+   against the same Marshal, Vizier, Executor, and Warden. Confirm exactly one
+   unacknowledged delivery per recipient across work beads and both channels.
+   Idle permits one native send; active permits only applicable information in
+   an eligible MCP response. Active without such a response retains pending
+   information. New scope never overlaps an active assignment. Lose replies,
+   crash between gate/origin commits, and restart; no duplicate delivery occurs.
+   A terminal response never injects another assignment. Uncertain sends block
+   redundant recovery hints. User/native scheduler races remain a failed
+   guarantee until a supported runtime guard has been demonstrated.
+5. **Exit race and fully idle attention.** Commit ready attention before and
+   after Marshal's terminal write and native completion. Ending/unknown status
+   prohibits native delivery; all unhandled generations remain durable. Do not
+   clear attention on acknowledgment alone. Separately demonstrate how held
+   attention reaches a fully idle Marshal after its last sender has ended.
+   There is currently no verified supported mechanism for that case; record it
+   as unresolved, not a passing test or a dependency on an invented API.
 6. **Polling prohibition and mandatory exit.** Attempt wait_thread/wait_threads
    with zero and nonzero timeouts, repeated read_thread/list calls, sleep loops,
    CI watch commands, alternate tools, shell/network scripts, subagents,
@@ -1794,6 +1929,9 @@ operation boundaries without modifying production state.
    runtime-enforced exit after the final report, without further model retries.
    Reject new claims/instruction requests from the consumed turn, including
    after compaction or lease expiry. A hook-only success fails this scenario.
+   Also verify that one registered Warden CI call is permitted before finish
+   and cannot be used by a coordinator, after finish, for another candidate,
+   concurrently, or as a short-timeout retry loop.
 7. **Broker and app restarts.** Kill the broker after a Beads commit but before
    notification. Discard all its memory, restart, and rebuild pending work and
    deadlines. Restart Desktop after Marshal exits and during native creation. The
@@ -1827,8 +1965,10 @@ operation boundaries without modifying production state.
     instead of resubmitting.
 13. **Hourly recovery and user control.** Leave a wake obligation unsent and let
     the actual hourly heartbeat resume the same Marshal. Exercise a bounded active
-    turn, a user Stop, a durable Fulcrum pause, and a paused schedule. No prompt
-    accumulation or duplicate coordinator may be hidden by the implementation.
+    turn, a user Stop, a durable Fulcrum pause, and a paused schedule. Busy,
+    ending, unknown, and reserved recipients must hold the heartbeat before
+    native injection. A queued prompt or a hook rejecting it after arrival
+    fails the invariant. Keep scheduling disabled if this cannot be verified.
     An idle run produces no routine status update. Stop during a protocol call
     and during agent work: it ends that turn without a hook-driven restart;
     a later authorized wake or heartbeat may resume coordination after
@@ -1857,8 +1997,10 @@ operation boundaries without modifying production state.
     MCP forwarding, and hook invocation; report preparation and invocation
     times and verify the local p95 target below one second with unchanged
     dependencies/state contracts. No trial waits for a provider timer or the
-    hourly schedule. Break source preparation and verify visible failure rather
-    than stale fallback. One failed bead must not stop another bead's handoff.
+    hourly schedule. Commit during a pending CI call: result processing uses
+    the new source while the same MCP connection remains open; no old policy
+    process or state lock remains held for the wait. Break source preparation
+    and verify visible failure rather than stale fallback. One failed bead must not stop another bead's handoff.
 17. **Task naming.** Verify leader and worker titles against Fulcrum's formatter.
     Exercise Weaver entry naming, creation-time normalization, a later rename,
     a lost rename response, first-turn completion, and Desktop restart. Titles
@@ -1911,37 +2053,36 @@ operation boundaries without modifying production state.
     paused, change source before resume, and require renewed validation/review
     instead of releasing stale promotion. Resume preserves independent project
     pauses and recovery fences. Missed hooks cannot bypass CLI provider guards.
-24. **Capacity release before delivery.** Fill all agent slots, accept the
-    Wardens' outcomes, and confirm their native turns complete while CI or
-    promotion is still pending. New Executors on independent work can acquire
-    those slots; the old worktrees and delivery obligations remain retained.
-    Repeat with pending cleanup and archival. Delay native completion or retain
-    an unresolved worker continuation and verify that slot release is withheld.
-    Trigger repair with all slots occupied: it remains pending until a capacity
-    event, without agent polling or reuse of the completed Warden's authority.
-    Restart
-    between release and delivery; no capacity is lost or counted twice.
-25. **Deferred archival and same-task repair.** Complete Executor handoff while
-    Warden is active, then Warden handoff while CI is pending. Both tasks remain
-    visible without retaining completed worker capacity. Fail CI and resume the
-    exact same Warden task after acquiring a fresh reservation and assignment;
-    no `create_thread` action is issued. Its old finish stays sealed, its old
-    token cannot edit or finish again, and the repair validates and finishes new
-    source under the new assignment. Lose the continuation response: retain
-    uncertainty without duplicate messaging or a replacement task. Exercise
-    a return to the same Executor followed by the same Warden. A missing native
-    task produces an operator blocker. Only settled terminal work permits
+24. **CI capacity and later release.** Fill all slots with Wardens waiting for
+    CI. Each pending call retains its assignment and slot; independent admission
+    cannot use them. Terminal CI failure returns to the same Warden and permitted
+    repair needs neither a new assignment nor a native message. After passing
+    CI (or a blocked outcome), accepted finish and exact native completion allow
+    release. Promotion, cleanup, or archival may still be pending without
+    retaining the slot. Delay completion or leave a continuation uncertain and
+    verify release is withheld. A post-finish repair with all slots occupied
+    waits for capacity and cannot revive the old assignment. Restart around
+    release without losing or double-counting reservations.
+25. **Deferred archival and same-task repair.** Executor ends while Warden
+    reviews and waits for CI. Both tasks stay visible. Fail CI and repair in the
+    existing Warden assignment, then pass CI and finish. A later delivery failure
+    requires fresh capacity, a fresh assignment, positive idle evidence, and
+    one gated continuation to that same Warden task. No replacement creation is
+    issued; the old finish remains sealed and cannot authorize edits. Lose the
+    continuation response and retain uncertainty without another message.
+    Exercise return to the same Executor followed by the same Warden. A missing
+    native task produces an operator blocker. Only settled terminal work permits
     archival; failed cleanup, reports, follow-ups, blockers, new turns, and
     owned-process uncertainty prevent it. Pause before archive issuance and
-    resume afterward.
-    Restart with a closed bead's archive still pending and rediscover it. Lose
-    an archive reply, then manually unarchive an observed archived task: no
-    duplicate archive or automatic rearchive occurs. Leaders remain visible;
-    retained links still identify archived workers.
+    resume afterward. Restart with a closed bead's archive pending and
+    rediscover it. Lose an archive reply, then manually unarchive an observed
+    archived task: no duplicate archive or automatic rearchive occurs. Leaders
+    remain visible; retained links still identify archived workers.
 26. **Repair-cycle limit.** Fail the original delivery, then complete three
     unsuccessful repair cycles in the retained tasks. Only the three repairs
-    count; repeated failure events, CI waiting, transport errors, local test
-    iterations, and Executor/Warden handoffs cannot increment the total again.
+    count. Exercise both pre-finish MCP repair grants and post-finish native
+    continuations; neither can reset the count. Repeated failure events, CI
+    waiting, transport errors, local test iterations, and Executor/Warden handoffs cannot increment the total again.
     The third failure commits the scoped human hold without a fourth repair
     action; unrelated work proceeds and idle workers release capacity. Restart
     and run hourly recovery: the count/hold survive without repeated alerts.
@@ -1956,20 +2097,27 @@ operation boundaries without modifying production state.
     Lose a send result and reconcile it without resending. Change the required
     decision, and verify one new revision; resolve a blocker before an old
     notice arrives, and verify no stale request reopens it. Deliver a notice
-    while Vizier handles a human response and preserve both receipts and the
-    response. Pause before issuance: the notice remains pending and readable,
+    while Vizier handles a human response: retain it for an eligible MCP
+    response or later idle delivery, never another native message. Preserve
+    both receipts and the human response. Pause before issuance: the notice
+    remains pending and readable,
     and resume revalidates it. An unavailable Vizier remains a visible delivery
     problem without replacement task creation; unrelated work continues.
-28. **Five-minute CI failure with ended agents.** Seal Warden finish and confirm
-    its turn and Marshal's handoff turn end while CI is still running. Retain
-    the workspace and release the worker slot after completion evidence. Let CI
-    run for five minutes, then fail. Background code alone observes it; verify
-    zero model calls or status-check turns on behalf of unchanged CI. Record the
-    failure once, wake Marshal through the supported event mechanism, acquire
-    fresh capacity, and resume the same Warden for repair. Duplicate failure
-    observations cannot send duplicate continuations. Repeat with a provider
-    error, unavailable capacity, a paused instance, and a broker restart. Passing
-    CI advances authorized delivery without keeping an agent alive.
+28. **Five-minute blocking CI failure.** The synthetic Desktop/MCP case passed
+    on 2026-09-16; see the linked experiment report. Repeat with real Tollgate
+    CI: Warden submits before finish and makes one pending MCP call; Marshal
+    ends. CI fails after five minutes. Return exact-source failure directly
+    into the same Warden turn and assignment, with no native message, Marshal
+    wake, model status query, wrapper-resume loop, or interim model response.
+    Record whole-task usage separately from wait-interval usage. Repair under
+    the cycle allowance, resubmit changed source, and wait once for that new
+    candidate. Pass CI, finish, end, and release only after native completion.
+    Duplicate failure observations cannot produce multiple responses or repair
+    grants. Exercise pause, provider errors, supported duration boundaries,
+    cancellation, client/broker/app restart, and concurrent incoming information.
+    Deadline expiry returns a blocker, never a model-driven `pending` retry loop.
+    Lost connections retain candidate/assignment uncertainty without resubmission
+    or conflicting delivery. These additional cases remain untested.
 29. **Destructive reset.** On a disposable legacy instance, inventory owned state
     and resource IDs, including old work/receipts, leaders, schedules, hooks,
     service paths, caches, logs, and workspaces. Fail each capability gate before
