@@ -551,7 +551,10 @@ async def reconcile_archive_once(
                 ledger.update_fc(task.id, fc)
         due = _parse_time(fc.get("archive_due_at"))
         if due is None:
-            due = now + timedelta(seconds=archive_idle_seconds)
+            delay = (
+                0.0 if _task_ownership_released(ledger, task) else archive_idle_seconds
+            )
+            due = now + timedelta(seconds=delay)
             fc["archive_state"] = "pending"
             fc["archive_due_at"] = _format_time(due)
             ledger.update_fc(task.id, fc)
@@ -1013,9 +1016,26 @@ def _archive_eligible(ledger: Ledger, task: LedgerRecord, facts: TaskFacts) -> b
         work = ledger.show(str(identifier))
         if work is None or work.kind != "work" or work.status == "closed":
             continue
+        if (work.fc or {}).get("owner") != _thread_id(task):
+            continue
         if not _future_only(work):
             return False
     return True
+
+
+def _task_ownership_released(ledger: Ledger, task: LedgerRecord) -> bool:
+    fc = task.fc or {}
+    identifiers = [fc.get("work_bead"), *(fc.get("associated_beads") or [])]
+    retained = [str(identifier) for identifier in identifiers if identifier]
+    if not retained:
+        return False
+    thread_id = _thread_id(task)
+    return all(
+        (work := ledger.show(identifier)) is None
+        or work.status == "closed"
+        or (work.fc or {}).get("owner") != thread_id
+        for identifier in retained
+    )
 
 
 def _future_only(work: LedgerRecord) -> bool:

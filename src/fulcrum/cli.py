@@ -915,6 +915,8 @@ def _serve(request: ParsedRequest) -> CommandResult:
         {
             "endpoint": config["runtime"]["endpoint"],
             "config": str(request.instance.config_path),
+            "source": dict(config["source"]),
+            "reconcile_seconds": float(config["timing"]["reconcile_seconds"]),
         },
     )
     # Exec discards all imported business logic from the resident's interpreter.

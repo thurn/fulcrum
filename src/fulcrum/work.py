@@ -171,6 +171,7 @@ class WorkService:
             parent=None,
             issue_type="epic" if child_specs else "task",
             request=request,
+            check_existing=reused,
         )
         for key, spec in child_specs.items():
             self._create_planned_work(
@@ -183,6 +184,7 @@ class WorkService:
                 parent=root_id,
                 issue_type="task",
                 request=request,
+                check_existing=reused,
             )
         for key, spec in child_specs.items():
             child_id = children_by_key[key]
@@ -192,9 +194,10 @@ class WorkService:
             _reconcile_dependencies(ledger, child_id, expected)
             ledger.set_parent(child_id, root_id)
         root_dependencies = root_spec.get("depends_on", [])
-        _reconcile_dependencies(
-            ledger, root_id, [str(item) for item in root_dependencies]
-        )
+        if root_dependencies:
+            _reconcile_dependencies(
+                ledger, root_id, [str(item) for item in root_dependencies]
+            )
 
         operation = ledger.update_operation(
             operation,
@@ -217,8 +220,9 @@ class WorkService:
         parent: str | None,
         issue_type: str,
         request: ParsedRequest,
+        check_existing: bool,
     ) -> LedgerRecord:
-        existing = ledger.show(bead_id)
+        existing = ledger.show(bead_id) if check_existing else None
         if existing is not None:
             fc = existing.fc
             if (
@@ -948,6 +952,7 @@ class WorkService:
             parent=None,
             issue_type="bug",
             request=request,
+            check_existing=reused,
         )
         fc = dict(record.fc or {})
         fc["caused_by"] = payload.get("discovered_from")

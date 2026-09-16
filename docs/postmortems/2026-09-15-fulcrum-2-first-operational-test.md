@@ -436,7 +436,14 @@ end-to-end latency speedup: warm entry was essentially unchanged and finish was
 slower in the controlled comparison. Process counts also remained high. The loop
 fix is necessary, not sufficient for the user's five-minute objective.
 
-### Required before the next operational test
+### Resolution before the next operational test
+
+The 2026-09-16 remediation implements the safety and orchestration actions below.
+The optional Marshal bypass was deliberately not introduced: the retained scope
+does not yet carry a trustworthy machine-checkable risk class, so silently
+skipping human/model judgment would turn a latency target into an authorization
+change. Marshal coalescing remains two seconds and the no-repeat invariant makes
+that one bounded judgment rather than repeated authoring rounds.
 
 1. **Provision isolation before dispatch.** Create and verify the owned worktree,
    set the native task's cwd and workspace roots to it, and reject Executor start
@@ -456,13 +463,15 @@ fix is necessary, not sufficient for the user's five-minute objective.
    subsequent Weaver dispatch must be illegal unless Marshal records an explicit
    clarification decision containing a new material question. Cap or visibly
    hold repeated authoring cycles.
-6. **Use a deterministic fast path for trivial prepared work.** For low-risk scopes
-   with observable acceptance, either skip the model Marshal confirmation or make
-   it a deterministic sub-30-second policy check that cannot create another
-   Weaver by default.
-7. **Reduce ledger process amplification.** Batch or persist Beads access so entry
-   and finish approach constant, low subprocess counts rather than 39-42 and
-   18-19 invocations.
+6. **Keep trivial authorization bounded.** Marshal remains explicit until scope
+   records a trustworthy risk class. Its two-second coalescing window is retained,
+   and dispatching a prepared scope to Weaver is rejected unless the same Marshal
+   decision records a nonempty material clarification question.
+7. **Reduce ledger process amplification.** Local formula rendering, mutation
+   response reuse, fresh-ID creation, and empty-dependency elision reduce the
+   isolated follow-up to 25 Beads calls per entry and 13 per finish. This remains
+   a visible performance boundary for future batching rather than a closed claim
+   that 25/13 is intrinsically low.
 8. **Replace unconditional source refresh.** Use a cheap source-identity probe or
    event notification, perform the expensive update only when identity changes,
    and instrument lock/contention time.
@@ -476,12 +485,21 @@ fix is necessary, not sufficient for the user's five-minute objective.
     archive retention interval, or archive terminal worker tasks promptly after
     durable evidence has been captured.
 
+Items 1-5 and 8-11 are now enforced in code and covered by regression tests.
+Provider-terminal reconciliation supplies the automatic resume in item 4; the
+controller owns approval through closure, and a failed asynchronous validation
+reopens review while preserving its failed evidence. `trace --bead` now supplies
+the correlated Fulcrum/task/turn/reconciliation timeline requested by the logging
+findings. It is bounded and redacted; raw external-provider retention remains with
+the provider rather than being duplicated indefinitely in Fulcrum logs.
+
 ### Test gates
 
-Before another live run, add an end-to-end fixture for a one-file documentation
-deletion that asserts:
+Focused deterministic regressions now cover the contract gates that do not depend
+on model timing:
 
-- exactly one Weaver, at most one Marshal judgment, one Executor, and one Warden;
+- a prepared scope cannot create an unasked-for Weaver, while one matching
+  clarification decision can;
 - structured scope and acceptance survive every handoff;
 - Executor's verified worktree exists before its turn begins;
 - no mutation touches the integration checkout before promotion;
@@ -491,13 +509,14 @@ deletion that asserts:
 - stale operations are superseded without false recovery errors;
 - close follows promotion within a bounded interval;
 - dangling references are rejected or explicitly justified; and
-- logical end-to-end latency is below five minutes, with per-stage budgets exposed
-  in the test result.
+- command and reconciliation spans expose per-stage timing and causal IDs.
 
-The same fixture should inject a dropped operation response, delayed validation,
-and a failed background reconciliation pass to prove that retries remain
-idempotent and that health/telemetry exposes the wait instead of silently adding
-minutes.
+The suite also injects dropped operation responses, delayed and failed validation,
+and failed background work to prove that retries remain idempotent and that
+health/telemetry exposes the wait instead of silently adding minutes. It does not
+pretend to prove model wall-clock behavior; the next live operational test remains
+the acceptance measurement for exact role counts and the user's under-five-minute
+objective.
 
 ## Evidence quality and confidence
 

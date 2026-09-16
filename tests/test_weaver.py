@@ -10,7 +10,12 @@ import uuid
 
 from fulcrum.completion import CompletionService
 from fulcrum.contracts import ActorContext, CommandResult, CommandState, FulcrumError
-from fulcrum.leadership import LeadershipService, build_brief, comparison_facts
+from fulcrum.leadership import (
+    LeadershipService,
+    _apply_decision,
+    build_brief,
+    comparison_facts,
+)
 from fulcrum.ledger import LedgerFailure, OperationRecord, operation_view
 from fulcrum.roles import RoleService
 from fulcrum.supervision import ControllerSupervisor
@@ -96,6 +101,26 @@ class WeaverTests(unittest.TestCase):
         self.assertEqual(
             brief["rows"][0]["unknowns"], ["Confirm external consumers have migrated."]
         )
+
+    def test_prepared_scope_cannot_be_dispatched_to_another_weaver(self):
+        finish, _ = self.ready()
+        work = self.f.ledger.show(finish.arguments["bead"])
+        before = list(self.f.ledger.writes)
+
+        with self.assertRaises(FulcrumError) as error:
+            _apply_decision(
+                self.f.ledger,
+                work,
+                {
+                    "action": "dispatch",
+                    "role": "weaver",
+                    "reason": "Repeat grooming without a material question.",
+                },
+                "fc-decision",
+            )
+
+        self.assertEqual(error.exception.code, "REPEATED_AUTHORING")
+        self.assertEqual(self.f.ledger.writes, before)
 
     def test_large_scope_stays_visible_with_full_scope_continuation(self):
         finish = self.f.finish(self.enter("Investigate a consequential migration."))

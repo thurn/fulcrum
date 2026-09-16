@@ -679,11 +679,29 @@ class CompletionService:
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
     ) -> CommandResult:
         payload = _finish_payload(request)
+        sealed = (work.fc or {}).get("delivery_finish")
+        if isinstance(sealed, Mapping):
+            if (
+                sealed.get("source_oid") == payload["source_oid"]
+                and sealed.get("summary") == payload["summary"]
+            ):
+                existing = ledger.show(str(sealed.get("operation_id")))
+                if existing is not None and existing.kind == "operation":
+                    return _operation_result(OperationRecord.from_record(existing))
+            raise FulcrumError(
+                "FINISH_SEALED",
+                "Warden judgment is already sealed for this acquisition",
+                exit_code=5,
+                details={
+                    "operation_id": sealed.get("operation_id"),
+                    "source_oid": sealed.get("source_oid"),
+                },
+            )
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
             planned={"finish": payload, "children": {}},
-            next_action="Validate, approve, and request promotion of the exact Warden source.",
+            next_action="Submit exact-source validation, then seal one Warden judgment for controller-owned delivery.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
@@ -711,25 +729,21 @@ class CompletionService:
             validation = (
                 delivery.get("validation") if isinstance(delivery, Mapping) else None
             )
-        if not isinstance(validation, Mapping) or validation.get("state") != "passed":
+        if isinstance(validation, Mapping) and validation.get("state") == "failed":
             fc = dict(work.fc or {})
             fc["phase"] = "reviewing"
             fc["next_action"] = (
                 "Inspect failed validation, fix the same workspace, and submit a new source."
-                if isinstance(validation, Mapping)
-                and validation.get("state") == "failed"
-                else "Wait for exact-source validation, then inspect and finish approval again."
             )
             fc["last_transition"] = operation.id
             ledger.update_fc(work.id, fc)
-            _record_task_finish(ledger, work, operation.id)
             operation = ledger.update_operation(
                 operation.id,
                 state="completed",
-                step="warden_validation_pending",
+                step="warden_validation_failed",
                 result={
                     "bead_id": work.id,
-                    "accepted": True,
+                    "accepted": False,
                     "source_oid": payload["source_oid"],
                     "validation": validation,
                     "children": children,
@@ -739,43 +753,6 @@ class CompletionService:
                 next_action=fc["next_action"],
             )
             return _operation_result(operation)
-        approved = (
-            delivery.get("approved_source") if isinstance(delivery, Mapping) else None
-        )
-        if (
-            not isinstance(approved, Mapping)
-            or approved.get("oid") != payload["source_oid"]
-        ):
-            approval_result = service.review_approve(
-                _child_request(request, operation.id, "approval", ("review", "approve"))
-            )
-            children["approval"] = _child_result(approval_result)
-            if approval_result.state != CommandState.COMPLETED:
-                return _finish_child_unresolved(
-                    ledger,
-                    work,
-                    operation,
-                    payload,
-                    children,
-                    workspace,
-                    "approval",
-                    approval_result,
-                )
-        promotion_result = service.promotion_start(
-            _child_request(request, operation.id, "promotion", ("promotion", "start"))
-        )
-        children["promotion"] = _child_result(promotion_result)
-        if promotion_result.state == CommandState.FAILED:
-            return _finish_child_unresolved(
-                ledger,
-                work,
-                operation,
-                payload,
-                children,
-                workspace,
-                "promotion",
-                promotion_result,
-            )
         work = _reload_work(ledger, work.id)
         fc = dict(work.fc or {})
         fc["phase"] = "delivering"
@@ -783,12 +760,19 @@ class CompletionService:
             "operation_id": operation.id,
             "source_oid": payload["source_oid"],
             "summary": payload["summary"],
-            "state": "waiting_for_warden_terminal",
+            "checks": payload["checks"],
+            "evidence": payload["evidence"],
+            "state": (
+                "waiting_for_warden_terminal"
+                if isinstance(validation, Mapping)
+                and validation.get("state") == "passed"
+                else "waiting_for_validation"
+            ),
             "requested_at": utc_now(),
         }
         fc["next_action"] = (
-            "End the Warden turn; the controller will observe promotion, source "
-            "synchronization, cleanup, and closure independently."
+            "End the Warden turn; the controller will observe validation and then "
+            "approve, promote, synchronize, clean up, and close independently."
         )
         fc["last_transition"] = operation.id
         ledger.update_fc(work.id, fc)
@@ -796,12 +780,13 @@ class CompletionService:
         operation = ledger.update_operation(
             operation.id,
             state="completed",
-            step="warden_delivery_started",
+            step="warden_judgment_sealed",
             planned={"finish": payload, "children": children},
             result={
                 "bead_id": work.id,
                 "accepted": True,
                 "source_oid": payload["source_oid"],
+                "validation": validation,
                 "children": children,
                 "workspace": workspace,
                 "report_reminder": _report_reminder(work.id),
@@ -922,6 +907,27 @@ def _finish_replay(request: ParsedRequest, ledger: Ledger) -> CommandResult | No
     ):
         assert work is not None
         return _complete_scope_return(ledger, operation, work)
+    if work is not None and work.fc:
+        for field in ("finish", "delivery_finish"):
+            sealed = work.fc.get(field)
+            if (
+                isinstance(sealed, Mapping)
+                and sealed.get("operation_id")
+                and sealed.get("operation_id") != operation.id
+            ):
+                operation = ledger.update_operation(
+                    operation,
+                    state="cancelled",
+                    step="finish_superseded",
+                    result={
+                        "bead_id": work.id,
+                        "accepted": False,
+                        "superseded_by": sealed.get("operation_id"),
+                        "source_oid": sealed.get("source_oid"),
+                    },
+                    next_action="No recovery is required; a later accepted finish advanced the work.",
+                )
+                return _operation_result(operation)
     return None
 
 

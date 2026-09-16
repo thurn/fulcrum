@@ -68,6 +68,20 @@ class DiagnosticLogTest(unittest.TestCase):
             self.assertIn(old.name, result["removed_files"])
             self.assertFalse(old.exists())
 
+    def test_bead_filter_includes_correlated_multi_bead_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            log = DiagnosticLog(Path(temporary))
+            retained = log.append(
+                {
+                    "event": "reconciliation_completed",
+                    "associated_beads": ["fc-one", "fc-two"],
+                }
+            )
+
+            result = log.read(bead="fc-two", limit=0)
+
+        self.assertEqual(result["items"], [retained])
+
 
 if __name__ == "__main__":
     unittest.main()

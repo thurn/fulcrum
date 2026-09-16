@@ -132,6 +132,49 @@ class ResidentContinuityTests(unittest.IsolatedAsyncioTestCase):
         await resident.dispatch({"action": "ack", "ids": ["1"]})
         self.assertEqual((await resident.dispatch({"action": "events"}))["events"], [])
 
+    async def test_source_probe_skips_full_update_until_remote_commit_changes(self):
+        class Process:
+            returncode = 0
+
+            def __init__(self, oid):
+                self.oid = oid
+
+            async def communicate(self):
+                return (
+                    f"{self.oid}\trefs/heads/master\n".encode(),
+                    b"",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_json(
+                root / "selected.json",
+                {"source": "/selected", "python": sys.executable, "commit": "same"},
+            )
+            resident = Resident(
+                root,
+                {
+                    "endpoint": "ws://unused",
+                    "config": "/unused",
+                    "source": {
+                        "repository": "/repo",
+                        "remote": "origin",
+                        "branch": "master",
+                    },
+                },
+            )
+            with patch(
+                "fulcrum.resident.asyncio.create_subprocess_exec",
+                return_value=Process("same"),
+            ):
+                self.assertFalse(await resident.published_source_changed())
+            with patch(
+                "fulcrum.resident.asyncio.create_subprocess_exec",
+                return_value=Process("new"),
+            ):
+                self.assertTrue(await resident.published_source_changed())
+            self.assertEqual(resident.last_source_probe["observed_commit"], "new")
+
 
 class ActivationTests(unittest.TestCase):
     def materialize(self, _repo, commit, destination):

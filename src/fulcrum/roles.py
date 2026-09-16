@@ -192,6 +192,7 @@ class RoleService:
             model, effort, model_origin = _select_model(
                 request, config, project, work.fc, role
             )
+            workspace_root = _role_workspace(work, role, project)
             existing_task = next(
                 item
                 for item in ledger.list_records(kind="task", limit=0)
@@ -201,7 +202,7 @@ class RoleService:
                 and item.fc.get("ownership_operation") == existing[1]
             )
             if not _entry_configuration_compatible(
-                existing_task, project, model, effort
+                existing_task, workspace_root, model, effort
             ):
                 raise FulcrumError(
                     "TASK_CONFIGURATION_CHANGED",
@@ -356,7 +357,7 @@ class RoleService:
             model = str(retained["model"])
             effort = str(retained["effort"])
             model_origin = str(retained["model_origin"])
-        root = str(Path(str(project["root"])).resolve(strict=True))
+        root = _role_workspace(work, role, project)
         routing_instructions = routing_developer_instructions(request)
         if request.thread_id:
             thread_id = request.thread_id
@@ -1335,7 +1336,7 @@ def _valid_existing_entry(
 
 def _entry_configuration_compatible(
     task: LedgerRecord,
-    project: Mapping[str, Any],
+    expected_root: str,
     model: str,
     effort: str,
 ) -> bool:
@@ -1353,10 +1354,6 @@ def _entry_configuration_compatible(
         # workspace.  The recovery fence, rebound work identity, and retained
         # acquisition authorize the narrower scope; model/effort must still match.
         return True
-    root_value = project.get("root")
-    if not isinstance(root_value, str):
-        return False
-    expected_root = str(Path(root_value).resolve(strict=True))
     observed = fc.get("last_observed")
     if not isinstance(observed, Mapping):
         return False
@@ -1364,6 +1361,44 @@ def _entry_configuration_compatible(
     return isinstance(roots, list) and expected_root in {
         str(Path(str(item)).resolve(strict=False)) for item in roots
     }
+
+
+def _role_workspace(work: LedgerRecord, role: str, project: Mapping[str, Any]) -> str:
+    project_root = str(Path(str(project["root"])).resolve(strict=True))
+    if role not in {"executor", "warden"}:
+        return project_root
+    retained = (work.fc or {}).get("worktree")
+    path = retained.get("path") if isinstance(retained, Mapping) else None
+    if (
+        not isinstance(path, str)
+        or not retained.get("exists")
+        or not retained.get("owned")
+        or retained.get("dirty") is True
+    ):
+        raise FulcrumError(
+            "WORKSPACE_NOT_READY",
+            f"{role} requires a verified clean owned worktree before role entry",
+            exit_code=5,
+            retryable=True,
+            details={"bead_id": work.id, "workspace": retained},
+        )
+    try:
+        workspace = str(Path(path).resolve(strict=True))
+    except OSError as error:
+        raise FulcrumError(
+            "WORKSPACE_NOT_READY",
+            f"{role} worktree is not present: {path}",
+            exit_code=5,
+            retryable=True,
+        ) from error
+    if workspace == project_root:
+        raise FulcrumError(
+            "WORKSPACE_NOT_ISOLATED",
+            f"{role} cannot run in the live integration checkout",
+            exit_code=5,
+            details={"bead_id": work.id, "workspace": workspace},
+        )
+    return workspace
 
 
 def _return_prior_work(

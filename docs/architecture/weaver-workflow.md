@@ -110,11 +110,13 @@ native review startup lacked an explicit uncertain send checkpoint. These are
 separate from hypotheses about the first test's latency.
 
 Durable checkpoints, source leases, immutable source selection, and the resident's
-native connection ownership remain in place. No resident, launcher, transport,
-installation, or dependency changes are required. No live deletion bead or unrelated
-active task is used for reproduction. Tests use provider doubles; benchmarks use
-an isolated real Beads database and a simulated native task-naming endpoint.
-Neither establishes production end-to-end delivery reliability or model behavior.
+native connection ownership remain in place. Remediation changed the resident's
+scheduling policy without changing that ownership boundary: cheap source probes
+replace unconditional update workers, and reconciliation is event-driven with a
+bounded periodic fallback. No live deletion bead or unrelated active task is used
+for reproduction. Tests use provider doubles; benchmarks use an isolated real
+Beads database and a simulated native task-naming endpoint. Neither establishes
+production end-to-end delivery reliability or model behavior.
 
 ## Timing method
 
@@ -215,6 +217,43 @@ and less redundant process work, not a production speedup or an explanation of
 its approximately 13 s wait. Further production-representative server-backed
 measurement is needed before additional latency claims or policy changes.
 
+## First-test remediation
+
+The operational-test postmortem produced the following enforced workflow:
+
+1. A prepared scope cannot be dispatched to another Weaver unless a Marshal
+   records a nonempty material clarification question. The guard also applies to
+   direct human authorization and previously persisted stale authorizations.
+2. Executor admission prepares an owned, clean worktree before role entry.
+   Executor and Warden task roots are that worktree, never the live project root.
+   The live project config runs `scripts/prepare-check` during preparation, so the
+   review environment is ready before either role starts.
+3. Executor finish transfers to one Warden. One Warden finish submits validation
+   once and seals one judgment. The controller then waits for validation, verifies
+   the task is terminal, releases its subscription, approves review, promotes,
+   observes source synchronization, cleans the worktree, and closes the bead.
+   Delivery never requires a second Warden instruction or finish.
+4. An older nonterminal finish receipt is cancelled as superseded when a later
+   accepted finish already advanced the work. It is not reported as a sealed
+   recovery failure. Terminal tasks become immediately archive-eligible after
+   ownership transfers to another thread; the current owner retains the normal
+   idle threshold.
+5. Command diagnostics retain bounded redacted request/result projections,
+   operation/thread/turn IDs, associated bead IDs, and durations. `trace --bead`
+   merges those events with operation receipts and managed-task observations.
+   Reconciliation spans make duplicate scheduling rounds attributable.
+6. Role prompts contain exact accepted progress, stop, and finish schemas and
+   state that Warden finishes once. Formula cooking is local, successful Beads
+   mutations reuse their returned record, fresh random operation IDs skip a
+   redundant existence read, and empty dependency sets skip list calls.
+
+A two-sample isolated follow-up on 2026-09-16 measured warm entry at **21.047 s**
+and warm finish at **11.592 s**, versus the earlier candidate medians of 37.034 s
+and 23.670 s. The follow-up used 25 Beads subprocesses per entry and 13 per finish,
+down from 39 and 18. This is a small, non-concurrent sample and is evidence of the
+removed process amplification, not a production latency guarantee. The remaining
+25/13 subprocess boundary is intentionally visible as further batching work.
+
 ## Validation and delivery
 
 The required `scripts/check` passes formatting, strict type checks, and the complete
@@ -226,7 +265,11 @@ HUMAN fallback, failed-leader backoff, uncertain sends, interrupted checkpoints,
 exact replay, stale ownership, and merge safety. Existing source-pinning,
 connection-continuity, detached-client, and cross-process lock checks also pass.
 
-At the user's explicit direction, delivery uses direct commit, Tollgate validation
-and promotion, and remote synchronization rather than Executor finish or Warden
-handoff. No dependency files changed, and no resident restart is needed.
-
+The postmortem remediation is covered by formatting, strict type checking, and the
+complete unit suite. It adds regression cases for isolated Executor/Warden roots,
+workspace-preparation failure, repeated Weaver rejection, one-shot Warden judgment,
+controller-owned approval/promotion/synchronization/cleanup/closure, superseded
+finish replay, immediate archive eligibility after transfer, source probing, and
+multi-bead diagnostic correlation. Resident changes require the explicit safe
+maintenance handoff described in the live-iteration architecture; they are never
+silently activated as ordinary application code.

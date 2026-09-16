@@ -28,6 +28,13 @@ of reconciliation. Pending native requests remain with the transport until
 resolved; application event batches are acknowledged after processing. Overflow
 is observable and requires reconciliation, never an assumption of success.
 
+Reconciliation is event-driven and also runs at the configured bounded interval
+(15 seconds by default). The resident does not spawn a fresh worker every second.
+Every pass records its identifier, start and completion or failure, duration,
+action counts, pressure, gaps, and associated work IDs in the diagnostic journal.
+This preserves prompt event handling while making idle operation inexpensive and
+the cause of repeated scheduling directly inspectable.
+
 ## Coordination
 
 Operation locks exclude duplicate execution across CLI processes and background
@@ -50,8 +57,11 @@ not atomic transactions.
 
 Only the configured published integration branch is eligible (here,
 `origin/master`). Working-directory edits and local commits are not live input.
-Self-publication wakes the updater; remote polling every five seconds covers
-other publishers, with backoff after failure.
+Self-publication wakes the updater. Remote polling uses a cheap
+`ls-remote` identity probe every five seconds; it launches the full update worker
+only when the published commit changes. An explicit update request always wakes
+the updater. A candidate already retained as `maintenance_required` or `rejected`
+is not repeatedly preflighted until its identity changes or an operator retries it.
 
 The updater materializes exact committed source, reuses unchanged dependencies,
 checks imports/configuration/assets, and atomically selects source and interpreter

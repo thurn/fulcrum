@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 from fulcrum.analytics import AnalyticsService
 from fulcrum.completion import CompletionService
@@ -253,11 +254,23 @@ class Application:
             or request.arguments.get("bead")
             or request.input.get("bead"),
             "task_id": request.thread_id,
-            "turn_id": None,
+            "turn_id": _result_turn_id(result),
+            "associated_beads": _result_associated_beads(result),
             "role": request.arguments.get("role"),
             "adapter": "beads" if adapter_error else "application",
             "duration_ms": int((time.monotonic() - started) * 1000),
             "outcome": result.state.value if result else "failed",
+            "request": _bounded_diagnostic_mapping(
+                {
+                    "arguments": dict(request.arguments),
+                    "input": dict(request.input),
+                    "project": request.project,
+                    "ownership_operation": request.ownership_operation,
+                }
+            ),
+            "result": _bounded_diagnostic_mapping(
+                result.to_dict() if result is not None else {}
+            ),
             "error_category": (
                 adapter_error.category
                 if adapter_error
@@ -478,6 +491,46 @@ class Application:
 
 def default_application() -> Application:
     return Application()
+
+
+def _result_payload(result: CommandResult | None) -> Mapping[str, Any]:
+    if result is None or not isinstance(result.result, Mapping):
+        return {}
+    nested = result.result.get("result")
+    return nested if isinstance(nested, Mapping) else result.result
+
+
+def _result_turn_id(result: CommandResult | None) -> str | None:
+    payload = _result_payload(result)
+    turn = payload.get("turn")
+    return str(turn["id"]) if isinstance(turn, Mapping) and turn.get("id") else None
+
+
+def _result_associated_beads(result: CommandResult | None) -> list[str]:
+    payload = _result_payload(result)
+    values = payload.get("selected_ids") or payload.get("associated_beads") or []
+    if isinstance(values, list) and values:
+        return [str(item) for item in values]
+    rows = payload.get("rows")
+    if isinstance(rows, list):
+        return [
+            str(row["bead_id"])
+            for row in rows
+            if isinstance(row, Mapping) and row.get("bead_id")
+        ]
+    bead_id = payload.get("bead_id")
+    return [str(bead_id)] if bead_id else []
+
+
+def _bounded_diagnostic_mapping(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded.encode("utf-8")) <= 32 * 1024:
+        return dict(value)
+    return {
+        "truncated": True,
+        "encoded_bytes": len(encoded.encode("utf-8")),
+        "keys": sorted(str(key) for key in value),
+    }
 
 
 def _operation_result(operation: OperationRecord) -> CommandResult:

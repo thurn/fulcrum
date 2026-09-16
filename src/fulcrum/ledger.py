@@ -10,6 +10,7 @@ from fulcrum.timing import timed
 
 import json
 import copy
+import re
 import shutil
 import subprocess
 import tempfile
@@ -362,7 +363,7 @@ class Ledger:
         if status != "open":
             arguments.extend(("--status", status))
         try:
-            self.run(arguments, mutating=True)
+            observation = self.run(arguments, mutating=True)
         except LedgerFailure as error:
             existing = (
                 self.show(record_id)
@@ -380,7 +381,11 @@ class Ledger:
                 ) from error
             created = existing
         else:
-            created = self.show(record_id)
+            created = _record_from_value(observation.value, record_id)
+            if created is None or created.kind != kind or created.fc != dict(fc):
+                created = self.show(record_id)
+            elif created is not None:
+                self._observed[record_id] = copy.deepcopy(dict(created.fc or {}))
         if created is None:
             raise LedgerFailure(
                 f"created record {record_id} could not be observed",
@@ -465,8 +470,12 @@ class Ledger:
             ):
                 if value is not None:
                     arguments.extend((flag, str(value)))
-            self.run(arguments, mutating=True)
-            observed = self.show(record_id)
+            observation = self.run(arguments, mutating=True)
+            observed = _record_from_value(observation.value, record_id)
+            if observed is None or observed.fc != dict(fc):
+                observed = self.show(record_id)
+            else:
+                self._observed[record_id] = copy.deepcopy(dict(observed.fc or {}))
             if observed is None or observed.fc != dict(fc):
                 raise LedgerFailure(
                     f"update of {record_id} could not be verified",
@@ -477,12 +486,15 @@ class Ledger:
             return observed
 
     def add_labels(self, record_id: str, labels: Sequence[str]) -> LedgerRecord:
+        observed: LedgerRecord | None = None
         if labels:
-            self.run(
+            observation = self.run(
                 ("update", record_id, "--add-label", ",".join(labels)),
                 mutating=True,
             )
-        observed = self.show(record_id)
+            observed = _record_from_value(observation.value, record_id)
+        if observed is None or any(label not in observed.labels for label in labels):
+            observed = self.show(record_id)
         if observed is None or any(label not in observed.labels for label in labels):
             raise LedgerFailure(
                 f"label update for {record_id} could not be verified",
@@ -517,13 +529,27 @@ class Ledger:
 
     @timed("ledger.cook")
     def cook(self, formula: str, variables: Mapping[str, str]) -> dict[str, str]:
-        arguments: list[str] = ["cook", formula, "--mode", "runtime"]
-        for key in sorted(variables):
-            arguments.extend(("--var", f"{key}={variables[key]}"))
-        value = self.run(arguments).value
+        try:
+            value = json.loads(Path(formula).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise LedgerFailure(
+                f"role formula could not be read: {error}",
+                category="unsupported",
+                retryable=False,
+            ) from error
         if not isinstance(value, Mapping):
             raise LedgerFailure(
-                "Beads formula returned no object",
+                "role formula returned no object",
+                category="unsupported",
+                retryable=False,
+            )
+        declared = value.get("vars")
+        if not isinstance(declared, Mapping) or any(
+            isinstance(spec, Mapping) and spec.get("required") and key not in variables
+            for key, spec in declared.items()
+        ):
+            raise LedgerFailure(
+                "role formula is missing a required variable",
                 category="unsupported",
                 retryable=False,
             )
@@ -553,7 +579,14 @@ class Ledger:
                 category="unsupported",
                 retryable=False,
             )
-        return {"title": title, "description": description}
+        token: re.Pattern[str] = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
+
+        def render(template: str) -> str:
+            return token.sub(
+                lambda match: variables.get(match.group(1), match.group(0)), template
+            )
+
+        return {"title": render(title), "description": render(description)}
 
     @timed("ledger.create_operation")
     def create_operation(
@@ -668,8 +701,9 @@ class Ledger:
                 state in {"completed", "failed", "cancelled"}
                 and updated.status != "closed"
             ):
+                close_observation: CommandObservation | None = None
                 try:
-                    self.run(
+                    close_observation = self.run(
                         ("close", record_id, "--reason", f"operation {state}"),
                         mutating=True,
                     )
@@ -677,8 +711,24 @@ class Ledger:
                     observed = self.show(record_id)
                     if observed is None or observed.status != "closed":
                         raise
-                updated = self.show(record_id) or updated
+                    updated = observed
+                if close_observation is not None:
+                    updated = (
+                        _record_from_value(close_observation.value, record_id)
+                        or self.show(record_id)
+                        or updated
+                    )
             return OperationRecord.from_record(updated)
+
+
+def _record_from_value(value: Any, record_id: str) -> LedgerRecord | None:
+    candidates = value if isinstance(value, list) else [value]
+    matches = [
+        item
+        for item in candidates
+        if isinstance(item, Mapping) and str(item.get("id")) == record_id
+    ]
+    return LedgerRecord.from_native(matches[0]) if len(matches) == 1 else None
 
 
 def accepted_input(request: ParsedRequest) -> dict[str, Any]:

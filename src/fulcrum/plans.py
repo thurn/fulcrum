@@ -453,6 +453,7 @@ class PlanService:
                     parent=root.id,
                     issue_type="task",
                     request=request,
+                    check_existing=False,
                 )
             else:
                 child = ledger.set_parent(child_id, root.id)

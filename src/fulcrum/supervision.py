@@ -32,6 +32,7 @@ from fulcrum.continuity import (
     fleet_admission_pause,
     reconcile_archive_once,
 )
+from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.ipc import IpcServer
 from fulcrum.install import inspect_service
 from fulcrum.ledger import (
@@ -247,12 +248,73 @@ class ControllerSupervisor:
         operation_id: str | None = None,
         keep_runtime: bool = False,
     ) -> PassSummary:
-        async with self.reconcile_lock:
-            return await self._run_once(
-                bead_id=bead_id,
-                operation_id=operation_id,
-                keep_runtime=keep_runtime,
+        pass_id = str(uuid.uuid4())
+        started = self.clock.monotonic()
+        self._record_reconciliation(
+            {
+                "event": "reconciliation_started",
+                "pass_id": pass_id,
+                "bead_id": bead_id,
+                "operation_id": operation_id,
+                "trigger": self.request.command_name,
+            }
+        )
+        try:
+            async with self.reconcile_lock:
+                summary = await self._run_once(
+                    bead_id=bead_id,
+                    operation_id=operation_id,
+                    keep_runtime=keep_runtime,
+                )
+        except BaseException as error:
+            self._record_reconciliation(
+                {
+                    "event": "reconciliation_failed",
+                    "pass_id": pass_id,
+                    "bead_id": bead_id,
+                    "operation_id": operation_id,
+                    "duration_ms": int((self.clock.monotonic() - started) * 1000),
+                    "error_category": type(error).__name__,
+                    "error": str(error),
+                }
             )
+            raise
+        self._record_reconciliation(
+            {
+                "event": "reconciliation_completed",
+                "pass_id": pass_id,
+                "bead_id": bead_id,
+                "operation_id": operation_id,
+                "duration_ms": int((self.clock.monotonic() - started) * 1000),
+                "counts": {
+                    "intake": len(summary.intake),
+                    "operations": len(summary.operations),
+                    "work": len(summary.work),
+                    "tasks": len(summary.tasks),
+                    "actions": len(summary.next_actions),
+                    "gaps": len(summary.gaps),
+                },
+                "actions": list(summary.next_actions),
+                "gaps": list(summary.gaps),
+                "pressure": dict(summary.pressure),
+                "associated_beads": sorted(
+                    {
+                        str(value)
+                        for row in tuple(summary.work) + tuple(summary.next_actions)
+                        if isinstance(row, Mapping)
+                        for value in (row.get("bead_id"),)
+                        if value
+                    }
+                ),
+            }
+        )
+        return summary
+
+    def _record_reconciliation(self, event: Mapping[str, Any]) -> None:
+        try:
+            DiagnosticLog.from_request(self.request).append(event)
+        except (OSError, FulcrumError):
+            pass
 
     async def _run_once(
         self,
@@ -1372,10 +1434,10 @@ class ControllerSupervisor:
             command=("promotion", "show"),
             arguments={"bead": work.id},
             input={},
-            actor=ActorContext(kind="task", task_id=facts.id),
+            actor=ActorContext(kind="controller"),
             instance=self.request.instance,
             request_id=None,
-            thread_id=facts.id,
+            thread_id=None,
             ownership_operation=str(work.fc.get("ownership_operation")),
             timeout=self.request.timeout,
             runtime_submit=self._runtime_submit,
@@ -1406,6 +1468,16 @@ class ControllerSupervisor:
             current = await asyncio.to_thread(self.ledger.show, work.id)
             if current is not None and current.fc:
                 fc = dict(current.fc)
+                failed_finishes = list(fc.get("failed_delivery_finishes") or [])
+                failed_finishes.append(
+                    {
+                        **dict(delivery_finish),
+                        "provider": dict(delivery),
+                        "failed_at": _format_time(self.clock.now()),
+                    }
+                )
+                fc["failed_delivery_finishes"] = failed_finishes[-10:]
+                fc.pop("delivery_finish", None)
                 fc["phase"] = "reviewing"
                 fc["next_action"] = (
                     "Warden must inspect failed delivery evidence, fix the same workspace, "
@@ -1420,12 +1492,12 @@ class ControllerSupervisor:
                 "state": "returned_to_review",
                 "delivery": dict(delivery),
             }
-        if delivery.get("promotion") != "promoted":
+        if delivery.get("validation") != "passed":
             return {
                 "kind": "warden_delivery",
                 "bead_id": work.id,
                 "advanced": False,
-                "state": "provider_pending",
+                "state": "validation_pending",
                 "delivery": dict(delivery),
             }
         try:
@@ -1449,29 +1521,106 @@ class ControllerSupervisor:
                 "reason": "Warden still owns running background terminals",
                 "terminals": running,
             }
-        try:
-            released = await self.runtime.release(facts.id)
-        except AppServerError as error:
-            return {
-                "kind": "warden_delivery",
-                "bead_id": work.id,
-                "advanced": False,
-                "reason": str(error),
-            }
-        if released.active_terminals:
-            return {
-                "kind": "warden_delivery",
-                "bead_id": work.id,
-                "advanced": False,
-                "reason": "Warden release still observed active terminals",
-                "release": released.to_dict(),
-            }
+        retained_release = (task.fc or {}).get("subscription_release")
+        if (task.fc or {}).get("subscription_state") == "released" and isinstance(
+            retained_release, Mapping
+        ):
+            release_result = dict(retained_release)
+        else:
+            try:
+                released = await self.runtime.release(facts.id)
+            except AppServerError as error:
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": False,
+                    "reason": str(error),
+                }
+            if released.active_terminals:
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": False,
+                    "reason": "Warden release still observed active terminals",
+                    "release": released.to_dict(),
+                }
+            release_result = released.to_dict()
         current_task = await asyncio.to_thread(self.ledger.show, task.id)
         if current_task is not None and current_task.fc:
             task_fc = dict(current_task.fc)
             task_fc["subscription_state"] = "released"
-            task_fc["subscription_release"] = released.to_dict()
+            task_fc["subscription_release"] = release_result
             await asyncio.to_thread(self.ledger.update_fc, current_task.id, task_fc)
+        source_oid = str(delivery_finish.get("source_oid") or "")
+        retained_delivery = (work.fc or {}).get("delivery")
+        approved = (
+            retained_delivery.get("approved_source")
+            if isinstance(retained_delivery, Mapping)
+            else None
+        )
+        if not isinstance(approved, Mapping) or approved.get("oid") != source_oid:
+            approval = await asyncio.to_thread(
+                self.application.dispatch,
+                replace(
+                    base,
+                    command=("review", "approve"),
+                    arguments={
+                        "bead": work.id,
+                        "source": source_oid,
+                        "summary": str(
+                            delivery_finish.get("summary") or "Warden approved"
+                        ),
+                    },
+                    request_id=_delivery_request_id(
+                        finish_operation, "controller-approval"
+                    ),
+                ),
+            )
+            if approval.state is not CommandState.COMPLETED:
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": False,
+                    "state": "approval_unresolved",
+                    "operation_id": approval.operation_id,
+                    "result_state": approval.state.value,
+                }
+        if delivery.get("promotion") != "promoted":
+            promotion = await asyncio.to_thread(
+                self.application.dispatch,
+                replace(
+                    base,
+                    command=("promotion", "start"),
+                    arguments={"bead": work.id, "source": source_oid},
+                    request_id=_delivery_request_id(
+                        finish_operation, "controller-promotion"
+                    ),
+                ),
+            )
+            if promotion.state is not CommandState.COMPLETED:
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": False,
+                    "state": "promotion_unresolved",
+                    "operation_id": promotion.operation_id,
+                    "result_state": promotion.state.value,
+                }
+            observed = await asyncio.to_thread(self.application.dispatch, base)
+            result = observed.result or {}
+            delivery = result.get("delivery") if isinstance(result, Mapping) else None
+            if (
+                not isinstance(delivery, Mapping)
+                or delivery.get("promotion") != "promoted"
+            ):
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": True,
+                    "state": "promotion_pending",
+                    "operation_id": promotion.operation_id,
+                    "delivery": dict(delivery or {}),
+                }
         sync = await asyncio.to_thread(
             self.application.dispatch,
             replace(
@@ -1529,7 +1678,7 @@ class ControllerSupervisor:
             "source_sync_operation": sync.operation_id,
             "cleanup_operation": cleanup.operation_id,
             "close_operation": close.operation_id,
-            "warden_release": released.to_dict(),
+            "warden_release": release_result,
         }
 
     async def _send_review_finish_reminder(

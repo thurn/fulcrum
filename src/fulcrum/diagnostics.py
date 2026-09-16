@@ -31,6 +31,17 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _duration_ms(start: Any, finish: Any) -> float | None:
+    if not isinstance(start, str) or not isinstance(finish, str):
+        return None
+    try:
+        start_at = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        finish_at = datetime.fromisoformat(finish.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return round((finish_at - start_at).total_seconds() * 1000, 3)
+
+
 def _runtime_component(request: ParsedRequest) -> dict[str, Any]:
     from fulcrum.runtime_service import RuntimeService
 
@@ -191,7 +202,12 @@ class DiagnosticLog:
                         continue
                     if not isinstance(value, dict):
                         continue
-                    if bead and value.get("bead_id") != bead:
+                    associated = value.get("associated_beads")
+                    if (
+                        bead
+                        and value.get("bead_id") != bead
+                        and not (isinstance(associated, list) and bead in associated)
+                    ):
                         continue
                     if operation and value.get("operation_id") != operation:
                         continue
@@ -485,28 +501,88 @@ class DiagnosticService:
         for candidate in ledger.list_records(kind="operation", limit=0):
             operation = OperationRecord.from_record(candidate)
             fc = operation.operation
-            if fc.get("bead_id") != bead_id and operation.id not in {
-                (record.fc or {}).get("ownership_operation"),
-                (record.fc or {}).get("last_transition"),
-            }:
+            planned = fc.get("planned")
+            associated = (
+                planned.get("associated_beads")
+                if isinstance(planned, Mapping)
+                else None
+            )
+            selected_ids = (
+                planned.get("selected_ids") if isinstance(planned, Mapping) else None
+            )
+            related = bead_id in {
+                str(item)
+                for values in (associated, selected_ids)
+                if isinstance(values, list)
+                for item in values
+            }
+            if (
+                fc.get("bead_id") != bead_id
+                and not related
+                and operation.id
+                not in {
+                    (record.fc or {}).get("ownership_operation"),
+                    (record.fc or {}).get("last_transition"),
+                }
+            ):
                 continue
             result = fc.get("result") if isinstance(fc.get("result"), Mapping) else {}
+            external = (
+                fc.get("external") if isinstance(fc.get("external"), Mapping) else {}
+            )
             items.append(
                 {
                     "time": fc.get("completed_at") or fc.get("created_at"),
+                    "created_at": fc.get("created_at"),
+                    "completed_at": fc.get("completed_at"),
                     "id": operation.id,
                     "bead_id": bead_id,
                     "task_id": fc.get("owner"),
-                    "turn_id": None,
+                    "turn_id": external.get("turn_id"),
                     "operation_id": operation.id,
                     "transition": fc.get("step"),
                     "effect": fc.get("command"),
                     "outcome": fc.get("state"),
                     "evidence": result.get("evidence", []),
                     "source_oid": result.get("source_oid"),
+                    "duration_ms": _duration_ms(
+                        fc.get("created_at"), fc.get("completed_at")
+                    ),
                 }
             )
         fc = record.fc or {}
+        for task in ledger.list_records(kind="task", limit=0):
+            task_fc = task.fc or {}
+            if task_fc.get("work_bead") != bead_id and bead_id not in task_fc.get(
+                "associated_beads", []
+            ):
+                continue
+            retained = task_fc.get("last_observed")
+            turn = retained.get("last_turn") if isinstance(retained, Mapping) else None
+            items.append(
+                {
+                    "time": task.native.get("created_at")
+                    or task.native.get("updated_at"),
+                    "id": f"{task.id}:task",
+                    "bead_id": bead_id,
+                    "task_id": task_fc.get("thread_id"),
+                    "turn_id": turn.get("id") if isinstance(turn, Mapping) else None,
+                    "operation_id": task_fc.get("creation_operation"),
+                    "transition": "task_observed",
+                    "effect": task_fc.get("role"),
+                    "outcome": (
+                        turn.get("status")
+                        if isinstance(turn, Mapping)
+                        else (
+                            (retained or {}).get("runtime_status")
+                            if isinstance(retained, Mapping)
+                            else None
+                        )
+                    ),
+                    "evidence": [],
+                    "source_oid": None,
+                }
+            )
         items.append(
             {
                 "time": record.native.get("updated_at")
@@ -527,6 +603,26 @@ class DiagnosticService:
                 ),
             }
         )
+        retained_log = DiagnosticLog.from_request(request)
+        log_result = retained_log.read(bead=bead_id, limit=0)
+        for event in log_result["items"]:
+            items.append(
+                {
+                    "time": event.get("time"),
+                    "id": event.get("event_id") or f"log:{len(items)}",
+                    "bead_id": bead_id,
+                    "task_id": event.get("task_id"),
+                    "turn_id": event.get("turn_id"),
+                    "operation_id": event.get("operation_id"),
+                    "transition": event.get("event"),
+                    "effect": event.get("command") or event.get("trigger"),
+                    "outcome": event.get("outcome"),
+                    "duration_ms": event.get("duration_ms"),
+                    "evidence": event.get("result") or [],
+                    "source_oid": event.get("source_oid"),
+                    "wait_reason": event.get("reason"),
+                }
+            )
         items.sort(key=lambda item: (str(item.get("time") or ""), str(item["id"])))
         cursor = _optional_string(request.arguments.get("cursor"))
         start = _cursor_start(
@@ -543,8 +639,6 @@ class DiagnosticService:
             if selected and start + len(selected) < len(items)
             else None
         )
-        retained_log = DiagnosticLog.from_request(request)
-        log_result = retained_log.read(bead=bead_id, limit=1)
         gaps = list(log_result["gaps"])
         pruning = retained_log.read(limit=0)
         for event in pruning["items"]:

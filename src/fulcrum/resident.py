@@ -14,7 +14,7 @@ import signal
 import sys
 from typing import Any
 
-from fulcrum.bootstrap import launch_arguments, pinned_selection
+from fulcrum.bootstrap import launch_arguments, pinned_selection, selection
 from fulcrum.transport import AppServerError, Transport
 
 
@@ -26,10 +26,12 @@ class Resident:
         self.events: dict[str, dict[str, Any]] = {}
         self.sequence = 0
         self.update_requested = False
+        self.reconcile_requested = True
         self.wake = asyncio.Event()
         self.stop = asyncio.Event()
         self.jobs: dict[str, asyncio.Task[None]] = {}
         self.errors: dict[str, str] = {}
+        self.last_source_probe: dict[str, Any] | None = None
 
     async def dispatch(self, value: dict[str, Any]) -> dict[str, Any]:
         action = value["action"]
@@ -44,6 +46,7 @@ class Resident:
                 "jobs": list(self.jobs),
                 "errors": self.errors,
                 "event_count": len(self.events),
+                "last_source_probe": self.last_source_probe,
             }
         if action == "request":
             await self.transport.connect()
@@ -73,6 +76,7 @@ class Resident:
             return {"ok": True}
         if action == "wake":
             self.update_requested = self.update_requested or bool(value.get("update"))
+            self.reconcile_requested = True
             self.wake.set()
             return {"ok": True}
         raise AppServerError("unknown resident action", category="rejected")
@@ -112,6 +116,7 @@ class Resident:
                             "event overflow; reconciliation required"
                         )
                     self.events[str(self.sequence)] = event.to_dict()
+                    self.reconcile_requested = True
                     self.wake.set()
             except AppServerError as error:
                 self.errors["transport"] = str(error)
@@ -148,22 +153,97 @@ class Resident:
         else:
             self.errors.pop(kind, None)
 
-    def start_job(self, kind: str) -> None:
+    def start_job(self, kind: str) -> bool:
         if kind in self.jobs and not self.jobs[kind].done():
-            return
+            return False
         task = asyncio.create_task(self.job(kind))
         self.jobs[kind] = task
+        return True
+
+    async def published_source_changed(self) -> bool:
+        source = self.settings.get("source")
+        selected = selection(self.instance)
+        if not isinstance(source, dict) or selected is None:
+            return True
+        repository = source.get("repository")
+        remote = source.get("remote")
+        branch = source.get("branch")
+        if not all(
+            isinstance(item, str) and item for item in (repository, remote, branch)
+        ):
+            self.errors["source_probe"] = "resident source probe is not configured"
+            return True
+        process = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            repository,
+            "ls-remote",
+            remote,
+            f"refs/heads/{branch}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            self.errors["source_probe"] = "published source probe timed out"
+            return False
+        if process.returncode != 0:
+            message = stderr.decode(errors="replace").strip()
+            self.errors["source_probe"] = message or "published source probe failed"
+            return False
+        fields = stdout.decode(errors="replace").strip().split()
+        if not fields:
+            self.errors["source_probe"] = "published source branch was not found"
+            return False
+        observed = fields[0]
+        changed = observed != selected.get("commit")
+        suppressed_state: str | None = None
+        activation_path = self.instance / "activation.json"
+        try:
+            activation = json.loads(activation_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            activation = {}
+        if (
+            changed
+            and activation.get("observed_commit") == observed
+            and activation.get("state") in {"maintenance_required", "rejected"}
+        ):
+            suppressed_state = str(activation["state"])
+            changed = False
+        self.last_source_probe = {
+            "observed_commit": observed,
+            "selected_commit": selected.get("commit"),
+            "changed": changed,
+            "suppressed_state": suppressed_state,
+        }
+        self.errors.pop("source_probe", None)
+        return changed
 
     async def schedule(self) -> None:
         next_update = 0.0
+        next_reconcile = 0.0
+        reconcile_seconds = max(1.0, float(self.settings.get("reconcile_seconds", 15)))
         while not self.stop.is_set():
             self.wake.clear()
-            self.start_job("background")
             now = asyncio.get_running_loop().time()
-            if now >= next_update or self.update_requested:
+            if now >= next_reconcile or self.reconcile_requested:
+                if self.start_job("background"):
+                    self.reconcile_requested = False
+                    next_reconcile = now + reconcile_seconds
+            requested = self.update_requested
+            if now >= next_update or requested:
                 self.update_requested = False
-                self.start_job("update")
-                next_update = now + (30 if "update" in self.errors else 5)
+                if requested or await self.published_source_changed():
+                    if not self.start_job("update"):
+                        self.update_requested = True
+                next_update = now + (
+                    30
+                    if "update" in self.errors or "source_probe" in self.errors
+                    else 5
+                )
             try:
                 await asyncio.wait_for(self.wake.wait(), 1)
             except asyncio.TimeoutError:

@@ -10,6 +10,7 @@ import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -121,12 +122,15 @@ class LeadershipService:
             requested_kind=str(request.arguments.get("kind", "auto")),
             bead_id=_optional_string(request.arguments.get("bead")),
         )
+        selected_ids = [str(row["bead_id"]) for row in brief["rows"]]
         operation, reused = ledger.create_operation(
             request,
+            bead_id=selected_ids[0] if len(selected_ids) == 1 else None,
             owner=_marshal_owner(ledger),
             planned={
                 "brief": brief,
-                "selected_ids": [row["bead_id"] for row in brief["rows"]],
+                "selected_ids": selected_ids,
+                "associated_beads": selected_ids,
                 "comparison_facts": comparisons,
                 "serialized_brief": _serialize(brief),
             },
@@ -325,7 +329,11 @@ class LeadershipService:
         receipt, reused = ledger.create_operation(
             request,
             owner=_marshal_owner(ledger),
-            planned={"decision_operation": decision_operation_id},
+            bead_id=supplied_ids[0] if len(supplied_ids) == 1 else None,
+            planned={
+                "decision_operation": decision_operation_id,
+                "associated_beads": supplied_ids,
+            },
             next_action="Apply each unchanged decision independently.",
         )
         if reused and receipt.operation.get("state") in {
@@ -505,6 +513,7 @@ class AdmissionService:
             if authorize or human_bypass:
                 _require_authorizer(request, ledger, human_bypass=human_bypass)
                 role = str(fc.get("requested_role") or "weaver")
+                _require_material_weaver_question(fc, role, None)
                 operation, reused = ledger.create_operation(
                     request,
                     bead_id=bead_id,
@@ -537,6 +546,17 @@ class AdmissionService:
                 fc["last_transition"] = operation.id
                 record = ledger.update_fc(record.id, fc)
             else:
+                existing_dispatch = fc.get("dispatch")
+                if isinstance(existing_dispatch, Mapping):
+                    _require_material_weaver_question(
+                        fc,
+                        str(
+                            existing_dispatch.get("role")
+                            or fc.get("requested_role")
+                            or "weaver"
+                        ),
+                        _optional_string(existing_dispatch.get("decision_operation")),
+                    )
                 operation, reused = ledger.create_operation(
                     request,
                     bead_id=bead_id,
@@ -565,6 +585,11 @@ class AdmissionService:
                     next_action="Request a grooming or dispatch decision.",
                 )
                 return _operation_result(operation)
+            _require_material_weaver_question(
+                fc,
+                str(dispatch.get("role") or fc.get("requested_role") or "weaver"),
+                _optional_string(dispatch.get("decision_operation")),
+            )
             plan = fc.get("plan")
             if isinstance(plan, Mapping) and plan.get("activation") == "future":
                 _set_waiting(
@@ -733,6 +758,82 @@ class AdmissionService:
                     ledger.update_fc(record.id, fc)
 
         role = str(dispatch.get("role") or fc.get("requested_role") or "weaver")
+        _require_material_weaver_question(
+            fc, role, _optional_string(dispatch.get("decision_operation"))
+        )
+        workspace_operation: str | None = None
+        if role == "executor":
+            from fulcrum.delivery_service import DeliveryService
+
+            workspace_request = replace(
+                request,
+                command=("worktree", "prepare"),
+                arguments={"bead": bead_id},
+                input={},
+                actor=ActorContext(kind="controller"),
+                request_id=str(
+                    uuid.uuid5(
+                        ADMISSION_NAMESPACE,
+                        f"{operation.id}:{bead_id}:workspace",
+                    )
+                ),
+                thread_id=None,
+                ownership_operation=None,
+            )
+            workspace_result = DeliveryService().worktree_prepare(workspace_request)
+            workspace_operation = workspace_result.operation_id
+            if workspace_result.state is not CommandState.COMPLETED:
+                with self._bead_lock(bead_id):
+                    current = _work(ledger, bead_id)
+                    current_fc = dict(current.fc or {})
+                    current_dispatch = dict(current_fc.get("dispatch") or dispatch)
+                    current_reservation = dict(
+                        current_dispatch.get("reservation") or {}
+                    )
+                    unresolved = workspace_result.state in {
+                        CommandState.RUNNING,
+                        CommandState.UNCERTAIN,
+                        CommandState.DEGRADED,
+                    }
+                    current_reservation["state"] = "unknown" if unresolved else "failed"
+                    current_reservation["workspace_operation"] = workspace_operation
+                    current_reservation["settled_at"] = utc_now()
+                    current_dispatch["reservation"] = current_reservation
+                    current_fc["dispatch"] = current_dispatch
+                    current_fc["active_operation"] = None
+                    ledger.update_fc(current.id, current_fc)
+                    operation = ledger.update_operation(
+                        operation,
+                        state="uncertain" if unresolved else "failed",
+                        step=(
+                            "workspace_prepare_unresolved"
+                            if unresolved
+                            else "workspace_prepare_failed"
+                        ),
+                        external={"workspace_operation": workspace_operation},
+                        result={
+                            "bead_id": bead_id,
+                            "started": False,
+                            "queued": False,
+                            "workspace": workspace_result.to_dict(),
+                        },
+                        next_action=(
+                            "Inspect the retained workspace operation before replay."
+                            if unresolved
+                            else "Repair workspace preparation before dispatching Executor."
+                        ),
+                    )
+                return _operation_result(operation)
+            refreshed = _work(ledger, bead_id)
+            fc = dict(refreshed.fc or {})
+            dispatch = fc.get("dispatch")
+            if not isinstance(dispatch, Mapping):
+                raise FulcrumError(
+                    "STATE_CONFLICT",
+                    "workspace preparation lost dispatch authorization",
+                    exit_code=5,
+                    retryable=True,
+                )
         entry_request = ParsedRequest(
             command=("enter",),
             arguments={"role": role, "origin": "dispatch"},
@@ -799,6 +900,7 @@ class AdmissionService:
                     "queued": False,
                     "human_bypass": bypass,
                     "entry": result.to_dict(),
+                    "workspace_operation": workspace_operation,
                 },
                 next_action=(
                     "Observe the admitted native task."
@@ -1916,6 +2018,11 @@ def _apply_decision(
             raise FulcrumError.invalid(
                 "INVALID_ROLE", "dispatch requires an executable role"
             )
+        if role == "weaver" and isinstance(fc.get("scope"), Mapping):
+            raise FulcrumError.invalid(
+                "REPEATED_AUTHORING",
+                "prepared scope cannot be dispatched to another Weaver; use clarify with a new material question",
+            )
         fc["dispatch"] = {
             "role": role,
             "reason": reason,
@@ -2315,6 +2422,28 @@ def _priority(record: LedgerRecord) -> int:
 
 def _created_at(record: LedgerRecord) -> str:
     return str(record.native.get("created_at") or "")
+
+
+def _require_material_weaver_question(
+    fc: Mapping[str, Any], role: str, decision_operation: str | None
+) -> None:
+    """Prevent stale or manually authorized Weaver loops after scope exists."""
+    if role != "weaver" or not isinstance(fc.get("scope"), Mapping):
+        return
+    clarification = fc.get("clarification")
+    if (
+        isinstance(clarification, Mapping)
+        and isinstance(clarification.get("question"), str)
+        and str(clarification.get("question")).strip()
+        and decision_operation is not None
+        and clarification.get("decision_operation") == decision_operation
+    ):
+        return
+    raise FulcrumError(
+        "REPEATED_AUTHORING",
+        "prepared scope cannot be dispatched to Weaver without a material clarification question",
+        exit_code=5,
+    )
 
 
 def _why_now(
