@@ -126,6 +126,11 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             (skill / "agents").mkdir(parents=True)
             (skill / "SKILL.md").write_text(name)
             (skill / "agents/openai.yaml").write_text("interface: {}")
+        legacy_skill = checkout / "skills" / "fulcrum-weaver"
+        legacy_skill.mkdir()
+        owned_legacy = root / "fulcrum-weaver"
+        root.mkdir()
+        owned_legacy.symlink_to(legacy_skill, target_is_directory=True)
         executable = checkout / ".venv" / "bin" / "fulcrum"
         executable.parent.mkdir(parents=True)
         executable.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -138,6 +143,12 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         )
         self.assertEqual(len(HUMAN_SKILLS), 9)
         self.assertEqual(len(result["installed"]), 9)
+        weaver = root / "weaver"
+        self.assertTrue(weaver.is_symlink())
+        self.assertTrue(weaver.readlink().is_absolute())
+        self.assertEqual(weaver.readlink(), checkout / "skills" / "weaver")
+        self.assertIn(str(owned_legacy), result["removed"])
+        self.assertFalse(owned_legacy.is_symlink())
         self.assertTrue(result["hook"]["installed"])
         hooks = (root.parent / "hooks.json").read_text(encoding="utf-8")
         self.assertIn("hook context --input - --instance", hooks)
@@ -152,7 +163,26 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             source_root=checkout,
         )
         self.assertIn(str(broken), repaired["installed"])
-        conflict = root / HUMAN_SKILLS[-1]
+        broken_legacy = root / "fulcrum-weaver"
+        broken_legacy.symlink_to(self.root / "missing-legacy", target_is_directory=True)
+        cleaned = reconcile_fulcrum2_skills(
+            self.instance,
+            production=False,
+            skills_root=root,
+            source_root=checkout,
+        )
+        self.assertIn(str(broken_legacy), cleaned["removed"])
+        self.assertFalse(broken_legacy.is_symlink())
+        broken_legacy.mkdir()
+        preserved = reconcile_fulcrum2_skills(
+            self.instance,
+            production=False,
+            skills_root=root,
+            source_root=checkout,
+        )
+        self.assertNotIn(str(broken_legacy), preserved["removed"])
+        self.assertTrue(broken_legacy.is_dir())
+        conflict = root / "weaver"
         conflict.unlink()
         conflict.mkdir()
         with self.assertRaisesRegex(InstallationError, "real user skill directory"):

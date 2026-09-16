@@ -23,7 +23,7 @@ class InstallationError(RuntimeError):
 HUMAN_SKILLS = (
     "fulcrum-vizier",
     "fulcrum-marshal",
-    "fulcrum-weaver",
+    "weaver",
     "fulcrum-executor",
     "fulcrum-warden",
     "fulcrum-sage",
@@ -32,6 +32,7 @@ HUMAN_SKILLS = (
     "fulcrum-bead",
 )
 REMOVED_SKILLS = (
+    "fulcrum-weaver",
     "fulcrum-setup",
     "fulcrum-archon",
     "fulcrum-operative",

@@ -22,10 +22,11 @@ Uncommitted application edits and other branches do not change application
 behavior. Preparation failure fails new operations visibly with the commit and
 reason; it never silently runs older application behavior.
 
-Skills deliberately have a different read boundary: all owned Codex skill links
-point directly into ~/fulcrum/skills. They never follow an instance-owned pointer,
-packaged data directory, or snapshot. Subsequent skill reads see edits immediately.
-Instructions already delivered to an agent remain part of that existing turn.
+Skills deliberately have a different read boundary: all owned Codex skill links,
+including the unprefixed `weaver` skill, point directly into ~/fulcrum/skills. They
+never follow an instance-owned pointer, packaged data directory, or snapshot.
+Subsequent skill reads see edits immediately. Instructions already delivered to an
+agent remain part of that existing turn.
 
 ## Boundaries
 

@@ -237,6 +237,9 @@ class ActivationTests(unittest.TestCase):
                     patch("fulcrum.activation.preflight") as preflight,
                     patch("fulcrum.activation.subprocess.run") as process,
                     patch(
+                        "fulcrum.install.reconcile_fulcrum2_skills"
+                    ) as reconcile_skills,
+                    patch(
                         "fulcrum.resident_client.exchange",
                         new=AsyncMock(return_value={"ok": True}),
                     ),
@@ -255,6 +258,7 @@ class ActivationTests(unittest.TestCase):
                 self.assertTrue(old.exists())
                 preflight.assert_called_once()
                 process.assert_not_called()  # No install, restart, or native interruption.
+                reconcile_skills.assert_called_once_with(root, production=False)
             finally:
                 os.close(lease)
 
@@ -458,6 +462,7 @@ class AssetSelectionTests(unittest.TestCase):
             for skill in HUMAN_SKILLS:
                 link = root / "codex/skills" / skill
                 self.assertEqual((link / "SKILL.md").read_text(), "master")
+                self.assertTrue(link.readlink().is_absolute())
                 self.assertEqual(link.readlink(), master / "skills" / skill)
             self.assertFalse(legacy.is_symlink())
 
