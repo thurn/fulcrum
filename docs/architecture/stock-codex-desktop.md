@@ -87,9 +87,10 @@ installation. Instructions mentioning a tool are not proof it is callable.
 
 Bootstrap requires callable `create_thread`, `send_message_to_thread`,
 `list_projects`, `list_threads`, `read_thread`, `wait_threads`,
-`set_thread_archived`, and `automation_update`, plus Fulcrum MCP. It checks
-required argument fields and accepted result shapes. An omitted or unsupported
-required model/effort pair is a visible failure, never a substitution.
+`set_thread_title`, `set_thread_archived`, and `automation_update`, plus Fulcrum
+MCP. It checks required argument fields and accepted result shapes. An omitted
+or unsupported required model/effort pair is a visible failure, never a
+substitution.
 
 ### Mapping the existing runtime
 
@@ -100,6 +101,7 @@ automation to compensate for a missing task tool.
 | Existing capability | Stock Desktop mechanism and resulting behavior |
 | --- | --- |
 | Create/start a worker | `create_thread` with exact prompt, model, `thinking`, title, and saved project ID. Creation also starts its initial prompt; worker registration gates substantive work. |
+| Name or rename a task | Pass `title` at creation and use `set_thread_title` with the exact native ID for subsequent naming or correction. Preserve Fulcrum's current role/emoji/bead-ID titles; naming is a required usability capability. |
 | Continue an existing task | `send_message_to_thread` with exact prompt and settings. It is an externally recorded action, not an assumed exactly-once send. |
 | Resolve projects | `list_projects`; validate exact root and host. No observed native project-creation tool exists, so bootstrap guides the user to add a missing saved project. |
 | Set a worker's actual cwd | No arbitrary existing-worktree parameter. Create under the saved project with `environment.type=local`, then use verified absolute Tollgate worktree paths. |
@@ -128,6 +130,28 @@ setup. Optional lifecycle controls can report unavailable without preventing
 that path. If required workspace access, coordination tools, or outcome evidence
 are unavailable, bootstrap reports the affected capability and leaves admission
 closed. It never silently enables an experimental runtime.
+
+### Task names are part of workflow usability
+
+Fulcrum retains its existing `role_title` formatter: standing tasks use
+`🧭 MARSHAL 🧭` and `🔮 VIZIER 🔮`; workers use titles such as
+`🛠️[exe-123abc] Fix retry handling` and `🛡️[war-123abc] Fix retry handling`.
+Fulcrum computes these titles along with the role prompt. The agent does not
+choose a replacement name. Weaver entry also names its already-existing task.
+
+The observed `create_thread.title` field is normalized like an automatically
+generated title. Therefore passing that field alone does not establish exact
+title preservation. After binding the native ID, inspect the observed title
+and return a `set_thread_title` action when it differs. The action contains
+`threadId` and the exact `title`; its result is recorded like other native
+effects. Later authorized title changes use that same path. Names are display
+state, never identifiers for adopting a task or recovering a lost creation.
+
+Readiness must verify initial naming, subsequent renaming, emoji and bead-ID
+preservation, and persistence after the first turn and Desktop restart. If
+Desktop rewrites the names and the rename tool cannot restore them durably,
+report the failed naming capability and leave admission closed. Persistent
+approval setup includes `set_thread_title` with the other required tools.
 
 ## Process ownership and source freshness
 
@@ -438,6 +462,7 @@ authorize retrying the mutation they inspect.
 | Create a schedule | Adopt one exact inventory match for instance, action marker, and target, confirmed by native view. Zero incomplete-inventory matches or several candidates remain uncertain. |
 | Update/pause a schedule | Native view must match the intended target, cadence, prompt, notification policy, and state. Read back before any repair attempt. A different value alone is not proof the earlier call cannot still land; reconcile the old caller first. |
 | Archive/unarchive a task | Native inventory/history must positively show the requested state for the exact task. Missing from the recent list is not archived evidence. Do not repeat a possibly still executing call. |
+| Rename a task | A native observation of the exact task ID with the intended title settles success. A different title alone does not prove an outstanding call failed; retain uncertainty until that attempt is settled before issuing a correction. |
 | Delete a retired paused schedule | Native view reports the exact retained ID absent and complete local inventory confirms absence. Unknown/error is not absence; keep replacement fenced. Never delete a merely similar schedule. |
 | Inspect a task | Record the returned observation or error. An interrupted read may be issued again under current authority; it has no native mutation to duplicate. |
 
@@ -906,6 +931,7 @@ external providers. The normal repository check remains provider-independent.
 | Thirty-minute wait returns an event promptly and renews before timeout | Report long-wait capability failure; no silent short polling substitute. |
 | Another MCP client can report while Marshal waits | Report transport concurrency failure; do not serialize the whole instance behind a parked request. |
 | Native IDs and assignment can be registered before worker edits | Refuse dispatch readiness. |
+| Initial and updated task titles preserve the required role/emoji/bead-ID format | Admission stays closed; report normalization, persistence, or rename-tool failure. |
 | Worker can use the exact Tollgate worktree | Block the affected project and show the required access change. |
 | Targeted inspection distinguishes completion from unknown/error | Admission stays closed: safe review handoff and cleanup both require it. |
 | Hourly same-task scheduling coexists with an active wait and respects Fulcrum pause | Report recovery scheduling failure; do not substitute standalone agents or a perpetual goal. |
@@ -1045,3 +1071,8 @@ operation boundaries without modifying production state.
     fresh operation uses the new commit; the older operation retains consistent
     imports/assets. Break source preparation and verify visible failure rather
     than stale fallback. One failed bead must not stop another bead's handoff.
+17. **Task naming.** Verify leader and worker titles against Fulcrum's formatter.
+    Exercise Weaver entry naming, creation-time normalization, a later rename,
+    a lost rename response, first-turn completion, and Desktop restart. Titles
+    remain exact; recovery binds by native ID and never creates a replacement
+    to fix a name. Missing or ineffective naming tools fail readiness.
