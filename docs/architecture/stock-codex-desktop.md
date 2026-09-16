@@ -545,6 +545,21 @@ assignment relinquishes source-writing authority. Late Executor reports cannot
 acquire the Warden's assignment. Independent work admission sees the complete
 committed reservation or its absence, never a counter/work-row disagreement.
 
+Agent capacity is separate from provider delivery, task archival, and worktree
+retention. After the final worker's outcome is accepted and its native turn is
+confirmed complete, release its agent reservation in one authoritative work-bead
+transition. In the normal implementation path this is Warden completion; retain
+the slot across the Executor-to-Warden handoff. An unresolved continuation or
+uncertain worker creation does not qualify for release.
+
+CI, promotion, synchronization, cleanup, or archival may remain pending after
+release without occupying an agent slot. Keep their obligations and workspace
+ownership intact; release is neither a successful-delivery claim nor permission
+to delete the worktree. Provider operations use bounded broker scheduling and
+their existing resource locks. Any later repair or renewed worker turn must
+acquire a fresh agent reservation under current capacity and pause rules before
+dispatch. A late report cannot revive an old reservation or editing authority.
+
 ### Events and cursors
 
 Store each meaningful worker, hook, or watcher event on its authoritative work
@@ -721,9 +736,11 @@ the design does not invent one.
 
 ### Settling other native effects
 
-An uncertain action keeps its reservation and dependent work blocked until
+An uncertain action keeps any agent reservation it still owns and its dependent
+work blocked until
 positive evidence settles it. Validated hook-captured results use the same
 evidence rules as agent-reported results; a callback alone proves no effect.
+Provider or archival uncertainty does not recreate a released agent reservation.
 Read-only inspections can be retried; they do not
 authorize retrying the mutation they inspect.
 
@@ -1518,3 +1535,12 @@ operation boundaries without modifying production state.
     paused, change source before resume, and require renewed validation/review
     instead of releasing stale promotion. Resume preserves independent project
     pauses and recovery fences. Missed hooks cannot bypass CLI provider guards.
+24. **Capacity release before delivery.** Fill all agent slots, accept the
+    Wardens' outcomes, and confirm their native turns complete while CI or
+    promotion is still pending. New Executors on independent work can acquire
+    those slots; the old worktrees and delivery obligations remain retained.
+    Repeat with pending cleanup and archival. Delay native completion or retain
+    an unresolved worker continuation and verify that slot release is withheld.
+    Trigger a later repair with all slots occupied: it waits for a fresh
+    reservation and cannot reuse the completed Warden's authority. Restart
+    between release and delivery; no capacity is lost or counted twice.
