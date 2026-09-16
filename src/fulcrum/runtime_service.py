@@ -80,10 +80,23 @@ class RuntimeService:
             argv = [str(executable.resolve(strict=True))]
         environment = dict(os.environ)
         environment["CODEX_APP_SERVER_WS_URL"] = endpoint
+        # Desktop also stores local sidebar state outside the app-server. An
+        # empty/relative home can select a different profile from the runtime.
+        codex_home = Path(
+            environment.get("CODEX_HOME") or Path.home() / ".codex"
+        ).expanduser()
+        if not codex_home.is_absolute():
+            raise FulcrumError(
+                "INVALID_CODEX_HOME",
+                "CODEX_HOME must be absolute; unset it to use ~/.codex",
+                exit_code=2,
+            )
+        environment["CODEX_HOME"] = str(codex_home)
         try:
             process = subprocess.Popen(
                 argv,
                 env=environment,
+                cwd=Path.home(),
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -103,6 +116,7 @@ class RuntimeService:
                 "launched": True,
                 "pid": process.pid,
                 "endpoint": endpoint,
+                "codex_home": str(codex_home),
                 "attachment": {
                     "state": "unknown",
                     "reason": (

@@ -14,6 +14,7 @@ from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.instance import WriterLock, resolve_instance
 from fulcrum.ipc import ControllerTimedOut, ControllerUnavailable
 from fulcrum.ledger import operation_id
+from fulcrum.runtime_service import RuntimeService
 from tests.support import request
 
 
@@ -199,6 +200,54 @@ class CliTests(unittest.TestCase):
                 launch.call_args.kwargs["env"]["CODEX_APP_SERVER_WS_URL"],
                 "ws://127.0.0.1:9876",
             )
+
+    def test_desktop_launch_uses_explicit_absolute_home(self):
+        for supplied, expected in [
+            ("", "/Users/example/.codex"),
+            ("/custom/codex", "/custom/codex"),
+        ]:
+            with (
+                self.subTest(home=supplied),
+                patch.dict("os.environ", {"CODEX_HOME": supplied}),
+                patch(
+                    "fulcrum.runtime_service.Path.home",
+                    return_value=Path("/Users/example"),
+                ),
+                patch("fulcrum.runtime_service.ConfigurationManager") as manager,
+                patch("fulcrum.runtime_service.Path.is_file", return_value=False),
+                patch(
+                    "fulcrum.runtime_service.shutil.which", return_value="/usr/bin/open"
+                ),
+                patch(
+                    "fulcrum.runtime_service.subprocess.Popen",
+                    return_value=Mock(pid=123),
+                ) as launch,
+            ):
+                manager.return_value.load.return_value = ({}, b"")
+                manager.return_value.effective.return_value = {
+                    "runtime": {"endpoint": "ws://127.0.0.1:4500"}
+                }
+                result = RuntimeService().launch_desktop(request())
+                self.assertEqual(launch.call_args.kwargs["env"]["CODEX_HOME"], expected)
+                self.assertEqual(launch.call_args.kwargs["cwd"], Path("/Users/example"))
+                self.assertEqual(result.result["codex_home"], expected)
+
+    def test_desktop_launch_rejects_relative_home_before_starting(self):
+        with (
+            patch.dict("os.environ", {"CODEX_HOME": ".codex"}),
+            patch("fulcrum.runtime_service.ConfigurationManager") as manager,
+            patch("fulcrum.runtime_service.Path.is_file", return_value=False),
+            patch("fulcrum.runtime_service.shutil.which", return_value="/usr/bin/open"),
+            patch("fulcrum.runtime_service.subprocess.Popen") as launch,
+        ):
+            manager.return_value.load.return_value = ({}, b"")
+            manager.return_value.effective.return_value = {
+                "runtime": {"endpoint": "ws://127.0.0.1:4500"}
+            }
+            with self.assertRaises(FulcrumError) as error:
+                RuntimeService().launch_desktop(request())
+            self.assertEqual(error.exception.code, "INVALID_CODEX_HOME")
+            launch.assert_not_called()
 
     def test_writer_lock_is_shared_by_instance_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
