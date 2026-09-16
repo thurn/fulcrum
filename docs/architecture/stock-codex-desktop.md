@@ -126,7 +126,7 @@ automation to compensate for a missing task tool.
 | Observe worker progress | Workers report outcomes and meaningful progress through MCP; hooks capture lifecycle and native-result evidence; provider watchers publish existing-work events. No routine native task inventory polling. |
 | Inspect one unresolved task | `wait_threads` with one target and `timeoutMs=0`; use `read_thread` for scoped evidence when needed. Schedule later checks through broker timers. |
 | Recover a lost creation reply | Worker self-registration and correlated native history. Inventory search is a bounded exceptional recovery operation, never a normal polling loop. |
-| Archive/unarchive | `set_thread_archived`; retain the existing archive-once and manual-unarchive rules. Archival is not termination. |
+| Archive/unarchive | `set_thread_archived`; archive eligible workers after their own completed handoff, once per native task. Manual unarchive suppresses automatic rearchive. Archival is not termination or delivery. |
 | Interrupt a worker or answer a native approval | No observed task-tool equivalent. Expose the specific Desktop task for user action and retain the blocker. Do not invent a response or start a conflicting writer. |
 | Observe a user interruption | The required `Interrupt` hook records the exact managed turn when delivered. It does not interrupt another task, pause Fulcrum, or prove all processes have stopped. |
 | Delete tasks/projects | No observed native deletion tool. Mark automatic deletion unavailable; retain/archive owned task evidence. Hard reset cannot claim native deletion occurred. |
@@ -1012,6 +1012,37 @@ commands before finish and reporting any retained process locators. A completed
 turn is not proof that all terminals or subprocesses ended; unknown resource
 ownership blocks automatic deletion. Never terminate unrelated processes.
 
+### Archival after each worker's handoff
+
+Archive a non-leader worker as soon as its own handoff is settled: its required
+outcome is accepted, current native completion is positively observed, ownership
+has transferred or its work is closed, and all follow-up actions assigned to
+that task are settled. Keep tasks with missing reports, human blockers, uncertain
+effects assigned to them, or unresolved owned processes visible. Recheck these
+conditions when claiming the archive action; a new native turn or assignment
+invalidates an unissued archive. A completed Executor may archive while Warden
+reviews; a completed Warden may archive while provider CI or promotion runs.
+Neither waits for the entire bead to be delivered or its worktree deleted.
+
+Persist the archive obligation and exact native task/host locator on the owning
+work bead, even after it closes. Discovery includes these unfinished obligations
+on closed beads; archival must not depend on a task-summary projection or an
+open-work-only scan. Marshal executes the exact native archive action through
+the normal claim/result protocol. Pause holds unissued archives. Archival does
+not retain or release agent capacity, grant editing authority, delete evidence,
+or authorize worktree cleanup. Retain all role task links and outcomes on the
+bead for later inspection.
+
+Preserve one automatic archive request per native task lifetime. Record its
+attempt before issuing it; an uncertain result requires positive native
+reconciliation, never a second blind archive. A failed automatic request stays
+visible for explicit repair rather than starting an automatic retry loop.
+After an observed automatic archive, an explicit or positively observed manual
+unarchive suppresses future automatic archival of that native task. A missing
+inventory entry alone cannot establish either archive or unarchive. Standing
+Marshal and Vizier tasks are never automatically archived; explicit leadership
+replacement retains its separate recovery protocol.
+
 ## Workspace and authority preservation
 
 Fulcrum prepares the Tollgate worktree and records its actual path, branch,
@@ -1544,3 +1575,12 @@ operation boundaries without modifying production state.
     Trigger a later repair with all slots occupied: it waits for a fresh
     reservation and cannot reuse the completed Warden's authority. Restart
     between release and delivery; no capacity is lost or counted twice.
+25. **Independent archival.** Complete Executor handoff while Warden is active,
+    then complete Warden handoff while CI is pending. Each old worker archives
+    without waiting for bead delivery or deleting its worktree. Missing reports,
+    unsettled follow-ups, blockers, new turns, and owned-process uncertainty
+    prevent archival. Pause before archive issuance and resume afterward.
+    Restart with a closed bead's archive still pending and rediscover it. Lose
+    an archive reply, then manually unarchive an observed archived task: no
+    duplicate archive or automatic rearchive occurs. Leaders remain visible;
+    retained links still identify archived workers.
