@@ -183,7 +183,7 @@ automation to compensate for a missing capability.
 | Observe a user interruption | The required `Interrupt` hook records the exact managed turn when delivered. It does not interrupt another task, pause Fulcrum, or prove all processes have stopped. |
 | Delete tasks/projects | No observed native deletion tool. Mark automatic deletion unavailable; retain/archive owned task evidence. Hard reset cannot claim native deletion occurred. |
 | Release subscriptions, inspect arbitrary terminals, measure native FD use | Desktop owns its runtime resources. Do not reproduce these App Server controls or infer their state from process-name guesses. |
-| Read output and accounting | Native summaries are scoped evidence and may be truncated. Missing turn IDs, detailed tool output, or usage accounting remain unknown. |
+| Read output and accounting | Native summaries are scoped evidence and may be truncated. Preserve task/workflow token usage and API-equivalent cost reports through the hook-supplied transcript collector below; missing evidence stays explicitly partial or unknown. |
 | Wake a dormant Marshal | Agent-originated handoffs may send one authorized native message and end. Background changes require the separately verified event-triggered wake mechanism; hourly recovery cannot substitute for it. |
 
 All new work enters through `$weaver`. Internal CLI commands still perform
@@ -220,6 +220,50 @@ preservation, and persistence after the first turn and Desktop restart. If
 Desktop rewrites the names and the rename tool cannot restore them durably,
 report the failed naming capability and leave admission closed. Persistent
 approval setup includes `set_thread_title` with the other required tools.
+
+### Preserve token usage and cost estimates
+
+Task and workflow accounting is required product functionality. Preserve the
+existing `usage`, `cost`, rate-card, attribution, and completion-summary contracts;
+replace their App Server evidence source with a scoped transcript collector.
+The [documented hooks][hooks-doc] supply `session_id`, `transcript_path`, and
+turn-scoped `turn_id`, not token counters directly. Read only the transcript
+identified by a hook for a registered Fulcrum task; no Desktop database access,
+global transcript scanning, or agent polling is needed.
+
+Local inspection on 2026-09-16 found `token_usage_record` entries containing
+task/turn/response IDs, per-response input, cached-input, cache-write, output,
+and reasoning counters, plus cumulative turn and task totals. This is evidence
+from the inspected installation, not a guarantee for the target stock Desktop.
+The transcript format is explicitly unstable; readiness must verify the fields
+and semantics used by the collector rather than assume a stable hook usage API.
+
+Hooks trigger bounded collection through fresh source-following CLI operations.
+The broker observes changes to registered transcript files and launches the same
+collector to catch delayed writes without keeping an agent alive. Keep parsing
+and pricing out of the resident broker. Persist normalized accounting evidence
+and collection progress in Beads; incremental reads tolerate incomplete trailing
+lines, and bounded replay after restart or missed hooks deduplicates by native
+task/turn/response identity. Reconcile unique response usage against cumulative
+totals; never sum successive cumulative samples. A Stop callback or usage record
+does not establish native completion or release capacity.
+
+Reuse existing bead/role/workflow attribution and retained rate cards. Correlate
+usage with native model/tier and reroute evidence; configured settings alone do
+not prove the effective model. Price disjoint input categories and output per
+response, including applicable long-context rules; reasoning is already included
+in output. Missing model, tier, counter, or pricing evidence preserves observed
+tokens but marks the affected cost partial or unknown, never zero. Retain the
+existing priced subtotals, frozen completion summaries, and explicit late
+corrections. These remain API-equivalent estimates, not subscription bills.
+
+Before cutover, verify target-stock transcript access and accounting through
+multiple turns, repair continuations, compaction, interruption, delayed writes,
+duplicate callbacks, restart, and model changes. Demonstrate correct attribution
+and deduplication, plus honest coverage when evidence is unavailable. Missing
+collection capability blocks readiness; an individual recoverable accounting gap
+is recorded without blocking delivery. This permission to read usage evidence
+does not establish a supported background completion or wake interface.
 
 ## Process ownership and source freshness
 
@@ -1724,6 +1768,7 @@ external providers. The normal repository check remains provider-independent.
 
 | Required observation | Failure consequence |
 | --- | --- |
+| Registered-task transcripts support recoverable token accounting and cost reports with verified attribution and coverage | Admission and cutover stay closed if the collection capability is unavailable; individual evidence gaps remain explicit in reports. |
 | Native task tools callable with required schemas | Admission stays closed; report missing tool/field or MCP startup error. |
 | All six command hooks load, are trusted, and execute for projectless leaders and local-project workers | Admission stays closed; report the exact trust, loading, identity, or handler failure. |
 | Direct and nested native calls expose matching pre/post invocation IDs and parseable results | Admission stays closed; do not promise result capture for an unobserved path. |
