@@ -52,6 +52,8 @@ replacement runtime or bootstrap skill is installed by this document.
   within an existing task and the requirement for the local app to be running.
 - [Official goal documentation][goal-doc]: goals pursue continuing objectives;
   the Marshal lifecycle here deliberately does not require a standing goal.
+- [Official hooks documentation][hooks-doc]: lifecycle observations, context
+  injection, tool interception, and hook trust requirements.
 - [Beads update command][bd-update] and [Dolt update
   implementation][bd-storage]: source matching the inspected installed Beads
   commit, establishing the single-issue transaction used by this design.
@@ -60,6 +62,7 @@ replacement runtime or bootstrap skill is installed by this document.
 [mcp-doc]: https://learn.chatgpt.com/docs/extend/mcp
 [schedule-doc]: https://learn.chatgpt.com/docs/automations?surface=app
 [goal-doc]: https://learn.chatgpt.com/docs/long-running-work
+[hooks-doc]: https://learn.chatgpt.com/docs/hooks
 [bd-update]: https://github.com/steveyegge/beads/blob/6c124203e771/cmd/bd/update.go
 [bd-storage]: https://github.com/steveyegge/beads/blob/6c124203e771/internal/storage/dolt/issues.go#L135-L184
 
@@ -101,7 +104,7 @@ automation to compensate for a missing task tool.
 | Resolve projects | `list_projects`; validate exact root and host. No observed native project-creation tool exists, so bootstrap guides the user to add a missing saved project. |
 | Set a worker's actual cwd | No arbitrary existing-worktree parameter. Create under the saved project with `environment.type=local`, then use verified absolute Tollgate worktree paths. |
 | Configure allowed roots or permissions per task | No corresponding create-task fields. Validate access under the user's Desktop configuration and report missing access explicitly. |
-| Deliver role instructions | Put the complete cooked role contract in the native user-visible prompt. Developer-message injection is unavailable. |
+| Deliver role instructions | Put the complete cooked role contract in the native user-visible prompt. Hook-provided developer context is also available; its lifecycle contract must be specified before relying on it. |
 | Select model/effort | Use explicit `model` and `thinking` arguments derived from authorized Fulcrum configuration. Reject unavailable settings. |
 | Observe worker progress | Workers report through MCP; provider watchers publish existing-work events. No routine native task inventory polling. |
 | Inspect one unresolved task | `wait_threads` with one target and `timeoutMs=0`; use `read_thread` for scoped evidence when needed. Schedule later checks through broker timers. |
@@ -564,40 +567,40 @@ specific missing capability. A task that remains natively hung despite scheduled
 follow-ups requires a visible operator recovery action; this design promises no
 automatic kill through an unavailable tool.
 
-Explicit Fulcrum pause is durable and honored by every entry point. A user Stop
-is not interchangeable with a crash. The control bead holds
-`run_control=enabled|paused|resume_required`, a reason, and the accepting
-request. An explicit agent-mediated stop commits `paused` before acknowledging
-it. Existing YAML policy pause also denies work; the control bead does not
-mirror or override that policy. Only an explicit authorized resume clears a
-pause.
+Desktop's Stop interrupts the current turn. It does not durably pause Fulcrum:
+later authorized wake messages and the hourly heartbeat may resume coordination.
+Bootstrap explicitly discloses this behavior and the separate "pause Fulcrum"
+command. An interruption handler must not immediately restart the stopped turn.
+No standing goal is created or resumed.
 
-On an explicit MCP cancellation, the front end invokes a fresh CLI operation to
-record `resume_required` before releasing the wait. A socket disconnect alone is
-recorded as transport loss, not as a claimed user stop. If cancellation cannot
-be persisted, no success acknowledgment is returned. Before recovery or an idle
-wake, Fulcrum returns a targeted inspection action to the requesting agent when
-the prior Marshal turn's exit reason is unresolved. An unknown reason commits
-`resume_required`; it does not guess crash or Stop. Confirmed transport failure
-can recover automatically, preserving all issued actions.
+Explicit Fulcrum pause is durable and honored by every entry point. The control
+bead holds `run_control=enabled|paused`, a reason, and the accepting request. An
+explicit agent-mediated workflow pause commits `paused` before acknowledging it.
+Existing YAML policy pause also denies work; the control bead does not mirror or
+override that policy. Only an explicit authorized resume clears a pause.
 
-All wake claims, lease acquisition, hourly recovery, and dispatch check this
-control state under the lock. While paused or requiring resume, retain work and
-outcomes but issue no new work or wake mutations. Previously issued effects
-remain subject to reconciliation; read-only diagnostics and explicit recovery
-actions remain available without a coordination lease. Pausing the Desktop
-schedule stops its triggers; the durable Fulcrum pause stops workflow actions
-from every entry point.
+MCP cancellation releases the parked wait and records interruption evidence when
+available; a socket disconnect is transport-loss evidence. Neither changes
+`run_control`. An unknown exit reason remains unknown and does not require a
+global human resume. Recovery inspects and reconciles outstanding effects before
+dependent work continues. An interrupted creation or message remains issuing or
+uncertain; Stop never authorizes blind retry, releases a worker's reservation, or
+proves that its background processes ended.
 
-Desktop's Stop outside an MCP wait needs a supported native interruption fact or
-native suppression of later messages/scheduled execution. The readiness probe
-must demonstrate one of those protections before accepting unattended operation.
-If Desktop exposes only an indistinguishable completed turn and automatically
-resumes after Stop, this installation fails the stop-safety gate. The current
-tool schemas do not establish that protection. Do not claim a prompt mentioning
-Stop supplies it, or silently reinterpret Stop as consent to resume. Bootstrap
-discloses the missing capability and leaves admission closed. No standing goal
-is created or resumed.
+All wake claims, lease acquisition, hourly recovery, and dispatch check pause
+state under the lock. While paused, retain work and outcomes but issue no new
+work or wake mutations. Previously issued effects remain subject to
+reconciliation; read-only diagnostics and explicit recovery actions remain
+available without a coordination lease. Pausing the Desktop schedule stops its
+triggers; the durable Fulcrum pause stops workflow actions from every entry point.
+
+Readiness verifies this distinction inside and outside an MCP wait. It does not
+require Desktop Stop to suppress future scheduled runs or messages. Native
+interruption observations improve diagnosis without becoming a prerequisite for
+durable pause. The documented `Interrupt` hook supplies a turn ID, while `Stop`
+can request continuation and therefore is not by itself proof of final native
+completion. Hook integration and delivery guarantees require their own explicit
+contract and live checks.
 
 ## Reporting, targeted checks, and delivery
 
@@ -868,7 +871,7 @@ The hourly saved prompt has a similarly bounded purpose:
 
 ```text
 Resume coordination for the registered Fulcrum instance through
-wait_for_instruction with recovery intent. Honor explicit pause/stop state.
+wait_for_instruction with recovery intent. Honor explicit Fulcrum pause state.
 Settle retained actions before new effects. Follow Fulcrum's exact instructions.
 If idle, end the turn without a routine status update. Report only actionable
 failures, required user input, or meaningful completed work.
@@ -905,7 +908,7 @@ external providers. The normal repository check remains provider-independent.
 | Native IDs and assignment can be registered before worker edits | Refuse dispatch readiness. |
 | Worker can use the exact Tollgate worktree | Block the affected project and show the required access change. |
 | Targeted inspection distinguishes completion from unknown/error | Admission stays closed: safe review handoff and cleanup both require it. |
-| Hourly same-task scheduling coexists with an active wait and respects stop | Report recovery scheduling failure; do not substitute standalone agents or a perpetual goal. |
+| Hourly same-task scheduling coexists with an active wait and respects Fulcrum pause | Report recovery scheduling failure; do not substitute standalone agents or a perpetual goal. |
 | Restart reconnects or exposes a recoverable state without duplicate effects | Retain the affected action as uncertain and show its recovery step. |
 
 Measure Beads calls and elapsed time independently from model latency. The
@@ -1019,11 +1022,13 @@ operation boundaries without modifying production state.
 13. **Hourly recovery and user control.** Leave a wake obligation unsent and let
     the actual hourly heartbeat resume the same Marshal. Exercise a healthy busy
     wait, a user Stop, a durable Fulcrum pause, and a paused schedule. No prompt
-    accumulation, duplicate coordinator, or unsolicited resumption may be hidden
-    by the implementation. An idle run produces no routine status update. Stop
-    both inside and outside an MCP wait. If native evidence cannot distinguish
-    an intentional stop or prevent automatic resumption, readiness fails
-    explicitly. An unresolved interruption requires human resume.
+    accumulation or duplicate coordinator may be hidden by the implementation.
+    An idle run produces no routine status update. Stop both inside and outside
+    an MCP wait: it ends that turn without an immediate hook-driven restart;
+    a later authorized wake or heartbeat may resume coordination after
+    reconciliation. Explicit "pause Fulcrum" instead prevents new coordination
+    actions until authorized resume. An unknown interruption does not globally
+    pause the instance or permit reissuing an uncertain effect.
 14. **Unavailable tools and approvals.** Remove access to one required native
     tool, reject a model setting, and interrupt the app-tools MCP connection.
     Admission reports the exact dependency failure. Trigger a real
