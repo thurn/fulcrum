@@ -2,7 +2,7 @@
 
 **Incident date:** 2026-09-15 PDT (2026-09-16 UTC)  
 **Timezone:** America/Los_Angeles (PDT, UTC-07:00)  
-**Status:** Source recovered and delivered after 29 minutes 40 seconds; workflow still not closed at the investigation cutoff  
+**Status:** Source recovered and delivered after 29 minutes 40 seconds; P0/P1 system remediation completed on 2026-09-15
 **Severity:** Critical workflow failure; no user-data loss or production outage  
 **Bead:** `fc-1ba7f515`  
 **Incident source revision:** `afb013db1ec82a319331f2250ca027f63221896c`  
@@ -387,20 +387,23 @@ in current source and durable work state.
 | Status | Action | Failure prevented or detected | Proof / remaining acceptance |
 | --- | --- | --- | --- |
 | Completed for this source | Correct the worktree-sensitive setup test and deliver the metadata change in one commit based on promoted release | Removes the immediate CI trigger | `a6ab985c...`; 144 tests passed; provider CI passed; local and remote `master` match |
-| Required P0 | In `_warden_finish`, treat any failed or unresolved child validation as non-acceptance before writing `delivery_finish`; retain the child receipt, keep Warden ownership, and return to `reviewing` | Prevents a failed validation from becoming a sealed approval | Add a real test where `validation_start` fails before retaining delivery; assert no seal, `phase=reviewing`, and a later amended finish is accepted |
-| Required P0 | In controller reconciliation, recover a sealed finish whose provider delivery is absent by inspecting the child operation and deterministically returning it to review | Repairs already-created orphan states and defends against response-loss variants | Regression begins with this incident's durable shape and reaches a new Warden finish without manual direct delivery commands |
-| Required P0 | Invalidate or supersede Warden approval whenever the workspace source changes; require the repaired exact source to receive a new finish/approval identity | Prevents stale `delivery_finish.source_oid` after repair | Test changes source after failed validation and proves closure references only the new OID |
-| Required P0 | Normalize provider facts once and use one delivery-state vocabulary in reconciliation and `_delivery_settled` | Allows delivered work to close | Test provider states `promoted/complete/complete` through reconciliation and assert `work close --outcome delivered` succeeds exactly once |
-| Required P1 | Run publication independently from reconciliation; a slow remote ledger push must never occupy the only background workflow lane | Removes the confirmed 45.2-second handoff blocker | Integration test holds publication for 60 seconds and proves Marshal eligibility/dispatch still advances; validate with a live timing run, not only mocks |
-| Required P1 | Schedule the next eligible role directly from the durable finish transition and service that wakeup ahead of periodic reconciliation or publication | Removes polling/coalescing delay from the 85.8-second Weaver-to-Marshal and 34.9-second Executor-to-Warden handoffs | In 20 live trivial-change trials, finish receipt to successor-operation creation is below two seconds p95, including while publication is held for 60 seconds; report native-provider scheduling separately |
-| Required P1 | Persist one authoritative local-check receipt keyed by source OID and reuse it across Executor, Warden, and reconciliation; any source change invalidates the receipt | Eliminates repeated full-suite checks and the model/tool time spent rediscovering an unchanged result | Instrumented end-to-end tests execute `scripts/check` exactly once per source OID, reuse both green and red results, and execute it once again after a repair creates a new OID |
-| Required P1 | Make the full configured validation result authoritative in Warden UI/instructions; do not allow “unrelated” to satisfy a red required gate | Ensures Warden repairs CI as assigned | A red `scripts/check` must leave Warden active with exact failure evidence and no accepted finish |
-| Required P1 | Make `trace --bead` join parent/child operations, standing-leader turns, provider handles, reconciliation passes, and publication spans | Makes this incident reconstructable from one command | Golden trace contains all stages and both initial/recovery source OIDs without global-log searches |
+| Completed P0 | In `_warden_finish`, treat any failed or unresolved child validation as non-acceptance before writing `delivery_finish`; retain the child receipt, keep Warden ownership, and return to `reviewing` | Prevents a failed validation from becoming a sealed approval | Real `DeliveryService` regression fails before retained delivery, proves no seal and `phase=reviewing`, then accepts an amended finish |
+| Completed P0 | In controller reconciliation, recover a sealed finish whose provider delivery is absent by inspecting the child operation and deterministically returning it to review | Repairs already-created orphan states and defends against response-loss variants | Incident-shape regression retains the failed child evidence, clears the seal, and returns the ordinary Warden path to review |
+| Completed P0 | Invalidate or supersede Warden approval whenever the workspace source changes; require the repaired exact source to receive a new finish/approval identity | Prevents stale `delivery_finish.source_oid` after repair | Completion and controller regressions supersede the old judgment, clear approval, and retain only the repaired OID in the new finish |
+| Completed P0 | Normalize provider facts once and use one delivery-state vocabulary in reconciliation and `_delivery_settled` | Allows delivered work to close | Provider states `promoted/complete/complete` normalize to `observed`; replayed `work close --outcome delivered` closes exactly once |
+| Completed P1 | Run publication independently from reconciliation; a slow remote ledger push must never occupy the only background workflow lane | Removes the confirmed 45.2-second handoff blocker | Resident uses separate reconciliation/publication jobs and locks. The live scheduler/stock-Beads measurement held publication for 60 seconds while all 20 durable successor trials advanced |
+| Completed P1 | Schedule the next eligible role directly from the durable finish transition and service that wakeup ahead of periodic reconciliation or publication | Removes polling/coalescing delay from the 85.8-second Weaver-to-Marshal and 34.9-second Executor-to-Warden handoffs | Finish now wakes the resident after its durable transition, completed jobs wake queued work, and Marshal coalescing was removed globally. Twenty live scheduler/receipt trials measured 0.780 s p95 and 0.840 s maximum while publication was held for 60 seconds. Native task-provider scheduling was not measured and remains a separately reported boundary |
+| Completed P1 | Persist one authoritative local-check receipt keyed by source OID and reuse it across Executor, Warden, and reconciliation; any source change invalidates the receipt | Eliminates repeated full-suite checks and the model/tool time spent rediscovering an unchanged result | End-to-end service regression runs the configured project command once for a red OID, reuses the red receipt across validation, then runs once for the repaired green OID and reuses it for provider submission |
+| Completed P1 | Make the full configured validation result authoritative in Warden UI/instructions; do not allow “unrelated” to satisfy a red required gate | Ensures Warden repairs CI as assigned | Executor finish retains exact output for Warden context; Warden instructions require repair and forbid dismissing configured failures as unrelated; red validation leaves Warden active with no accepted finish |
+| Completed P1 | Make `trace --bead` join parent/child operations, standing-leader turns, provider handles, reconciliation passes, and publication spans | Makes this incident reconstructable from one command | Golden trace regression contains every requested relationship, both source OIDs, both provider handles, and reconciliation/publication span IDs without a global-log search |
 | Required P2 | Record explicit stage budgets and flag overruns for trivial changes, including model time, worktree preparation, handoffs, and provider waits separately | Exposes needless overhead before users do | Live benchmark reports named boundaries and percentiles; no latency claim is complete from mocks alone |
 
-No orchestration corrective action above is marked complete. The recovery commit
-fixed the immediate test and delivered this particular source; it did not repair
-the completion, reconciliation, publication-scheduling, trace, or closure defects.
+The P0/P1 implementation is in commits `9235634` and `a3be365`. The complete
+repository gate passed 152 tests. The repeatable latency command is
+`.venv/bin/python scripts/measure-handoff-latency.py`; it uses the real resident
+socket, lane scheduler, process locks, stock-Beads server, and durable operation
+receipts. Its successor is a benchmark receipt, so the 0.780-second p95 is a
+controller/persistence claim, not a native-provider or model-start claim.
 
 ## Evidence quality and final assessment
 
@@ -416,19 +419,10 @@ there is no direct joined span. The reasons for most intra-model elapsed time ar
 unknown because historical native output was unavailable. Those gaps should not
 be converted into claims about model reasoning, locks, or network time.
 
-The next operational test must demonstrate all of the following in one run:
-
-1. a required CI failure returns the same Warden to review without sealing;
-2. the Warden can amend and submit one new exact source through the ordinary
-   finish contract;
-3. a concurrent 60-second ledger publication does not delay Marshal or delivery
-   reconciliation;
-4. both measured role handoffs create the successor operation below two seconds
-   p95 in live trials, with provider scheduling reported separately;
-5. unchanged source OIDs reuse one authoritative local-check receipt, while a
-   repaired OID triggers one new check;
-6. successful provider cleanup closes the Bead automatically;
-7. one Bead trace contains the complete causal path and exact stage durations.
-
-Until those behaviors are observed live, this incident is source-recovered but
-not system-remediated.
+Remediation validation now demonstrates the failed-validation return to Warden,
+amended exact-source finish, independent publication/reconciliation lanes,
+sub-two-second durable successor scheduling, exact-source local-check reuse,
+automatic closure on normalized provider cleanup, and joined Bead tracing.
+Native provider/model scheduling remains explicitly outside the controller
+latency result and should continue to be reported as its own boundary. The P2
+stage-budget action remains open.
