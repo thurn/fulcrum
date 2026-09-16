@@ -249,3 +249,33 @@ def maintenance_operation(function: Any) -> Any:
                 return function(self, request, *args, **kwargs)
 
     return invoke
+
+
+def waiting_maintenance_operation(function: Any) -> Any:
+    """Wait for a bounded current pass before taking service maintenance."""
+
+    import functools
+
+    @functools.wraps(function)
+    def invoke(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
+        root = request.instance.brain_root
+        if root is None:
+            return function(self, request, *args, **kwargs)
+        deadline = time.monotonic() + max(1.0, request.timeout)
+        gate: ProcessLock | None = None
+        while gate is None:
+            candidate = ProcessLock(root / ".fulcrum-locks/maintenance", blocking=False)
+            try:
+                candidate.__enter__()
+                gate = candidate
+            except FulcrumError as error:
+                if error.code != "OPERATION_BUSY" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        try:
+            with transition(root):
+                return function(self, request, *args, **kwargs)
+        finally:
+            gate.__exit__()
+
+    return invoke

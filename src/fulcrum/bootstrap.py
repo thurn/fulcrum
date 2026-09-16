@@ -131,6 +131,9 @@ def main(
         module = "fulcrum.recovery_entry"
         args.pop(0)
     instance = instance or instance_from_args(args)
+    instance = instance.expanduser()
+    if not instance.is_absolute():
+        return _invalid_path(args, "instance")
     if config is None:
         config = instance / "config"
         for i, arg in enumerate(args):
@@ -138,6 +141,9 @@ def main(
                 config = Path(args[i + 1])
             elif arg.startswith("--config="):
                 config = Path(arg.split("=", 1)[1])
+    config = config.expanduser()
+    if not config.is_absolute():
+        return _invalid_path(args, "config")
     if module == "fulcrum.recovery_entry":
         # Recovery must remain available when the workflow configuration is broken.
         config = instance / ".recovery-source-preflight"
@@ -194,6 +200,34 @@ def main(
     argv = launch_arguments(selected, module, args)
     os.execve(argv[0], argv, env)
     return 1
+
+
+def _invalid_path(args: list[str], field: str) -> int:
+    message = f"{field} must be an absolute path"
+    if "--json" in args:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "state": "failed",
+                    "operation_id": None,
+                    "request_id": None,
+                    "result": None,
+                    "warnings": [],
+                    "error": {
+                        "code": "INVALID_PATH",
+                        "message": message,
+                        "retryable": False,
+                        "next_command": None,
+                        "details": {"field": field},
+                    },
+                },
+                separators=(",", ":"),
+            )
+        )
+    else:
+        print(f"INVALID_PATH: {message}", file=sys.stderr)
+    return 2
 
 
 def pinned_selection(instance: Path) -> tuple[dict[str, Any] | None, int | None]:

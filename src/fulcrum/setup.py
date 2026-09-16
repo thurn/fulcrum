@@ -33,6 +33,7 @@ from fulcrum.install import (
 from fulcrum.installation_service import (
     ServiceService,
     _start_one,
+    _stop_one,
     load_installed_services,
 )
 from fulcrum.install import inspect_service
@@ -139,6 +140,10 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         installed_services, changed_services = install_fulcrum2_service_definitions(
             definitions, instance.instance_root
         )
+        running_before = {
+            name: inspect_service(service.label).running
+            for name, service in installed_services.items()
+        }
         # The dedicated ledger runtime is a permitted pre-ledger bootstrap
         # primitive. Every later external effect belongs to the setup receipt.
         (brain_root / ".beads" / "dolt").mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -229,6 +234,9 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             "stopped_for_setup": stopped_for_setup,
         }
         if required_failures:
+            result["failure_cleanup"] = _stop_new_setup_services(
+                installed_services, running_before
+            )
             operation = ledger.update_operation(
                 operation,
                 state="failed",
@@ -334,6 +342,26 @@ def _stop_controller_for_setup(request: ParsedRequest) -> str | None:
             if error.code != "OPERATION_BUSY" or time.monotonic() >= deadline:
                 raise
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+def _stop_new_setup_services(
+    services: Mapping[str, Any], running_before: Mapping[str, bool]
+) -> dict[str, Any]:
+    """Undo services started by an incomplete setup without hiding its cause."""
+
+    cleanup: dict[str, Any] = {}
+    for name in ("runtime", "dolt"):
+        service = services.get(name)
+        if service is None or running_before.get(name, False):
+            continue
+        try:
+            cleanup[name] = _stop_one(service)
+        except FulcrumError as error:
+            cleanup[name] = {
+                "state": "failed",
+                "error": error.to_result().to_dict()["error"],
+            }
+    return cleanup
 
 
 def _prepare_configuration(

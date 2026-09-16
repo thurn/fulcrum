@@ -31,6 +31,11 @@ Run setup from the retained checkout:
 scripts/setup --input setup.json --non-interactive --json
 ```
 
+If you pass `--instance`, it must be an absolute path. Setup writes source-following
+launchers to `<instance>/bin`; use `<instance>/bin/fulcrum` for later commands, or
+use `.venv/bin/fulcrum` from the retained checkout. The examples below abbreviate
+either launcher as `fulcrum`; setup does not add it to your shell's `PATH`.
+
 A minimal `setup.json` is:
 
 ```json
@@ -66,7 +71,18 @@ the defaults written to `fulcrum.yaml`. The principal fields are:
 - `timing`, `diagnostics`, and `resources`: operational overrides
 
 All roots and executable paths must be absolute. Use distinct loopback runtime
-and Beads ports for an isolated test instance.
+and Beads ports for an isolated test instance. Production setup owns and starts
+its configured runtime service. For an explicit isolated instance, start the
+documented runtime prerequisite yourself before setup, for example:
+
+```sh
+codex app-server --listen ws://127.0.0.1:4500
+```
+
+The command must remain running at the endpoint in `setup.json` while setup
+validates capabilities. If required capability validation fails, setup retains
+its configuration, service definitions, and failure receipt for the documented
+rerun, but stops any runtime or Dolt service that this failed attempt started.
 
 The input document supplies any non-default configuration and initial projects.
 `brain.root` is the directory containing the authoritative `fulcrum.yaml`. Runtime

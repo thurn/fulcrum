@@ -2,19 +2,33 @@
 
 import ast
 import asyncio
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from tests import local_python
 from fulcrum.activation import cleanup_sources, write_json
-from fulcrum.bootstrap import launch_arguments, pin, pinned_selection
-from fulcrum.coordination import ProcessLock, merge_change, transition, external_effect
+from fulcrum.bootstrap import (
+    launch_arguments,
+    main as bootstrap_main,
+    pin,
+    pinned_selection,
+)
+from fulcrum.coordination import (
+    ProcessLock,
+    external_effect,
+    merge_change,
+    transition,
+    waiting_maintenance_operation,
+)
 from fulcrum.contracts import FulcrumError
 from fulcrum.resident import Resident
 from fulcrum.resident_client import ResidentTransport
@@ -427,6 +441,54 @@ class MaintenanceBoundaryTests(unittest.TestCase):
                 self.assertTrue(pool.submit(shared).result(timeout=1))
                 with self.assertRaises(FulcrumError):
                     pool.submit(exclusive).result(timeout=1)
+
+    def test_service_maintenance_waits_for_current_shared_pass(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / ".fulcrum-locks" / "maintenance"
+            acquired = threading.Event()
+            release = threading.Event()
+
+            def hold_shared() -> None:
+                with ProcessLock(path, shared=True):
+                    acquired.set()
+                    release.wait(timeout=1)
+
+            holder = threading.Thread(target=hold_shared)
+            holder.start()
+            self.assertTrue(acquired.wait(timeout=1))
+            timer = threading.Timer(0.05, release.set)
+            timer.start()
+
+            class Handler:
+                @waiting_maintenance_operation
+                def stop(self, request):
+                    return "stopped"
+
+            request = SimpleNamespace(
+                instance=SimpleNamespace(brain_root=root), timeout=1.0
+            )
+            self.assertEqual(Handler().stop(request), "stopped")
+            holder.join(timeout=1)
+            timer.join(timeout=1)
+            self.assertFalse(holder.is_alive())
+
+
+class BootstrapValidationTests(unittest.TestCase):
+    def test_relative_instance_is_rejected_before_source_preparation(self):
+        with (
+            patch("fulcrum.bootstrap.fresh_selection") as prepare,
+            redirect_stdout(StringIO()) as output,
+            redirect_stderr(StringIO()),
+        ):
+            result = bootstrap_main(
+                arguments=["status", "--instance", "relative-instance", "--json"]
+            )
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(output.getvalue())["error"]["code"], "INVALID_PATH")
+        prepare.assert_not_called()
 
 
 class AssetSelectionTests(unittest.TestCase):

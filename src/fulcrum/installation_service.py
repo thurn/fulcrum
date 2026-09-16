@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fulcrum.configuration import ConfigurationManager
-from fulcrum.coordination import maintenance_operation
+from fulcrum.coordination import waiting_maintenance_operation
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.install import (
     InstalledService,
@@ -311,7 +311,7 @@ class ServiceService:
         )
         return _operation_result(operation)
 
-    @maintenance_operation
+    @waiting_maintenance_operation
     def stop(self, request: ParsedRequest) -> CommandResult:
         services = load_installed_services(request.instance.instance_root)
         controller = services.get("controller")

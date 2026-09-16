@@ -40,6 +40,7 @@ from fulcrum.setup import (
     _provider_id,
     _runtime_and_leadership,
     _stop_controller_for_setup,
+    _stop_new_setup_services,
 )
 
 
@@ -302,6 +303,21 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             self.config,
             send_initial_requests=False,
         )
+
+    def test_failed_setup_stops_only_services_started_by_that_attempt(self) -> None:
+        runtime = MagicMock()
+        dolt = MagicMock()
+        with patch(
+            "fulcrum.setup._stop_one",
+            side_effect=lambda service: {"state": "stopped", "service": service},
+        ) as stop:
+            result = _stop_new_setup_services(
+                {"runtime": runtime, "dolt": dolt},
+                {"runtime": True, "dolt": False},
+            )
+        stop.assert_called_once_with(dolt)
+        self.assertEqual(result["dolt"]["state"], "stopped")
+        self.assertNotIn("runtime", result)
 
     def test_desktop_launcher_uses_fulcrum_runtime_command(self) -> None:
         checkout = self.root / "checkout"
