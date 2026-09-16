@@ -227,6 +227,12 @@ async def benchmark(trials: int, publication_hold_seconds: float) -> dict[str, o
             server.close()
             await server.wait_closed()
             socket_path.unlink(missing_ok=True)
+            await asyncio.to_thread(
+                subprocess.run,
+                [executable, "-C", str(brain), "dolt", "stop"],
+                check=False,
+                capture_output=True,
+            )
         ordered = sorted(latencies)
         p95_index = max(0, int(0.95 * len(ordered) + 0.999999) - 1)
         publication_overlapped = all(bool(row["publication_active"]) for row in rows)
