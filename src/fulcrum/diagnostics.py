@@ -639,6 +639,7 @@ class DiagnosticService:
         )
         retained_log = DiagnosticLog.from_request(request)
         log_result = retained_log.read(bead=bead_id, limit=0)
+        event_gaps: list[dict[str, Any]] = []
         for event in log_result["items"]:
             items.append(
                 {
@@ -662,8 +663,21 @@ class DiagnosticService:
                     "span_id": event.get("publication_span_id")
                     or event.get("pass_id")
                     or event.get("span_id"),
+                    "correlation_id": event.get("correlation_id"),
+                    "stages": event.get("stages"),
                 }
             )
+            retained_gaps = event.get("gaps")
+            if isinstance(retained_gaps, list):
+                for gap in retained_gaps:
+                    if isinstance(gap, Mapping):
+                        event_gaps.append(
+                            {
+                                **dict(gap),
+                                "event_id": event.get("event_id"),
+                                "pass_id": event.get("pass_id"),
+                            }
+                        )
         items.sort(key=lambda item: (str(item.get("time") or ""), str(item["id"])))
         cursor = _optional_string(request.arguments.get("cursor"))
         start = _cursor_start(
@@ -680,7 +694,7 @@ class DiagnosticService:
             if selected and start + len(selected) < len(items)
             else None
         )
-        gaps = list(log_result["gaps"])
+        gaps = [*log_result["gaps"], *event_gaps]
         pruning = retained_log.read(limit=0)
         for event in pruning["items"]:
             if event.get("event") == "logs_pruned" and event.get("removed_files"):
@@ -1033,6 +1047,16 @@ def _loop_health(
                     "consecutive_failures": failures,
                     "error": (
                         value.get("error") if isinstance(value, Mapping) else None
+                    ),
+                    "failure_episode": (
+                        value.get("failure_episode")
+                        if isinstance(value, Mapping)
+                        else None
+                    ),
+                    "last_failure_episode": (
+                        value.get("last_failure_episode")
+                        if isinstance(value, Mapping)
+                        else None
                     ),
                 },
                 affected_commands=(

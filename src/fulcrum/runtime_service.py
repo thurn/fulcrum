@@ -11,6 +11,7 @@ from fulcrum.coordination import coordinated
 import asyncio
 import concurrent.futures
 import os
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -38,6 +39,29 @@ from fulcrum.runtime import (
     TurnFacts,
     TurnInput,
 )
+
+
+def terminal_stop_command(
+    thread_id: str, ownership_operation: str, *, reason: str
+) -> str:
+    """Render the owner-qualified all-terminal command used by role formulas."""
+
+    return shlex.join(
+        [
+            "fulcrum",
+            "task",
+            "terminal",
+            "stop",
+            thread_id,
+            "--ownership-operation",
+            ownership_operation,
+            "--all-owned",
+            "--reason",
+            reason,
+            "--json",
+        ]
+    )
+
 
 T = TypeVar("T")
 

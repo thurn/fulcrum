@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+import subprocess
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import uuid
@@ -160,7 +161,9 @@ class WardenDeliveryOwnershipTests(unittest.TestCase):
             failed = CompletionService().finish(finish)
 
         self.assertEqual(failed.result["step"], "warden_validation_unresolved")
+        self.assertEqual(failed.state, CommandState.FAILED)
         self.assertFalse(failed.result["accepted"])
+        self.assertTrue(failed.result["correctable"])
         work = self.ledger.show("fc-work")
         self.assertEqual(work.fc["phase"], "reviewing")
         self.assertNotIn("delivery_finish", work.fc)
@@ -436,11 +439,11 @@ class WardenDeliveryOwnershipTests(unittest.TestCase):
                     }
                 )
             if value.command == ("review", "approve"):
-                return CommandResult(
-                    ok=False,
-                    state=CommandState.FAILED,
-                    operation_id="fc-stale-approval",
-                    result={"error": {"code": "STALE_SOURCE"}},
+                raise FulcrumError(
+                    "STALE_SOURCE",
+                    "requested source differs from retained validation",
+                    exit_code=5,
+                    details={"requested": SOURCE, "validated": REPAIRED_SOURCE},
                 )
             self.fail(f"unexpected command: {value.command}")
 
@@ -471,6 +474,8 @@ class WardenDeliveryOwnershipTests(unittest.TestCase):
         self.assertEqual(
             reopened.fc["failed_delivery_finishes"][-1]["source_oid"], SOURCE
         )
+        retained = reopened.fc["failed_delivery_finishes"][-1]["evidence"]
+        self.assertEqual(retained["retained_delivery"]["source_oid"], REPAIRED_SOURCE)
 
     def test_controller_recovers_sealed_finish_without_delivery_from_child_receipt(
         self,
@@ -543,6 +548,89 @@ class WardenDeliveryOwnershipTests(unittest.TestCase):
         evidence = reopened.fc["failed_delivery_finishes"][-1]["evidence"]
         self.assertEqual(evidence["child"]["id"], "fc-validation")
         self.assertEqual(evidence["child"]["state"], "failed")
+
+    def test_warden_topology_is_correctable_before_single_provider_submission(self):
+        base_oid = "0" * 40
+        two_commit_source = "1" * 40
+        workspace = {
+            "path": "/managed/worktree",
+            "base_oid": base_oid,
+            "head_oid": two_commit_source,
+            "owned": True,
+            "dirty": False,
+        }
+        first_request = replace(
+            finish_request(),
+            input={**finish_request().input, "source_oid": two_commit_source},
+        )
+        with (
+            patch("fulcrum.completion._ledger", return_value=self.ledger),
+            patch("fulcrum.completion._inspect_clean_source", return_value=workspace),
+            patch(
+                "fulcrum.completion.subprocess.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, "", ""),
+                    subprocess.CompletedProcess([], 0, "2\n", ""),
+                ],
+            ),
+            patch("fulcrum.completion.DeliveryService.validation_start") as submit,
+        ):
+            rejected = CompletionService().finish(first_request)
+
+        self.assertEqual(rejected.state, CommandState.FAILED)
+        self.assertEqual(rejected.result["step"], "warden_source_topology_correctable")
+        self.assertTrue(rejected.result["correctable"])
+        submit.assert_not_called()
+        self.assertNotIn("delivery_finish", self.ledger.show("fc-work").fc)
+
+        repaired_source = "2" * 40
+
+        def validate(_request):
+            current = self.ledger.show("fc-work")
+            self.ledger.update_fc(
+                current.id,
+                {
+                    **current.fc,
+                    "delivery": {
+                        "source_oid": repaired_source,
+                        "provider_handle": "candidate",
+                        "validation": {"state": "pending"},
+                        "approved_source": None,
+                    },
+                },
+            )
+            return CommandResult(
+                ok=True,
+                state=CommandState.COMPLETED,
+                operation_id="fc-validation",
+                result={"validation": {"state": "pending"}},
+            )
+
+        retry = replace(
+            first_request,
+            request_id=str(uuid.uuid4()),
+            input={**first_request.input, "source_oid": repaired_source},
+        )
+        workspace = {**workspace, "head_oid": repaired_source}
+        with (
+            patch("fulcrum.completion._ledger", return_value=self.ledger),
+            patch("fulcrum.completion._inspect_clean_source", return_value=workspace),
+            patch(
+                "fulcrum.completion.subprocess.run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, "", ""),
+                    subprocess.CompletedProcess([], 0, "1\n", ""),
+                ],
+            ),
+            patch(
+                "fulcrum.completion.DeliveryService.validation_start",
+                side_effect=validate,
+            ) as submit,
+        ):
+            accepted = CompletionService().finish(retry)
+
+        self.assertTrue(accepted.result["accepted"])
+        submit.assert_called_once()
 
 
 class FinishReplayTests(unittest.TestCase):

@@ -4,16 +4,55 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fulcrum.contracts import CommandResult
-from fulcrum.diagnostics import DiagnosticLog, DiagnosticService, _runtime_component
+from fulcrum.diagnostics import (
+    DiagnosticLog,
+    DiagnosticService,
+    _loop_health,
+    _runtime_component,
+)
+from fulcrum.supervision import HealthFile
 from tests.support import MemoryLedger, record, request
 
 
 class DiagnosticLogTest(unittest.TestCase):
+    def test_health_retains_recovered_failure_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            clock = Mock()
+            clock.now.return_value = datetime(2026, 9, 16, tzinfo=timezone.utc)
+            health = HealthFile(root / "service-health.json", clock)
+            health.failure("reconciliation", RuntimeError("stale approval"))
+            health.failure("reconciliation", RuntimeError("stale approval"))
+            health.success("reconciliation", {"work": 2})
+
+            retained = health.values["reconciliation"]
+            base = request()
+            health_request = replace(
+                base,
+                instance=replace(base.instance, instance_root=root),
+            )
+            loops = _loop_health(
+                health_request,
+                {"timing": {"reconcile_seconds": 15}},
+                clock.now(),
+            )
+
+        self.assertEqual(retained["state"], "healthy")
+        self.assertIsNone(retained["failure_episode"])
+        self.assertEqual(retained["last_failure_episode"]["count"], 2)
+        self.assertEqual(retained["last_failure_episode"]["error"], "stale approval")
+        self.assertIn("recovered_at", retained["last_failure_episode"])
+        reconciliation = next(
+            loop for loop in loops if loop["name"] == "reconciliation"
+        )
+        self.assertEqual(reconciliation["evidence"]["last_failure_episode"]["count"], 2)
+
     def test_runtime_component_uses_live_capabilities(self) -> None:
         capabilities = {
             "available": True,
@@ -178,8 +217,31 @@ class DiagnosticLogTest(unittest.TestCase):
                 {
                     "event": "reconciliation_completed",
                     "pass_id": "pass-1",
-                    "associated_beads": ["fc-work"],
+                    "associated_beads": ["fc-work", "fc-blocker"],
                     "duration_ms": 4,
+                    "gaps": [
+                        {
+                            "component": "task_reconciliation",
+                            "bead_id": "fc-blocker",
+                            "code": "STALE_SOURCE",
+                            "reason": "stale approval isolated",
+                        }
+                    ],
+                }
+            )
+            log.append(
+                {
+                    "event": "dispatch_timeline",
+                    "correlation_id": "fc-dispatch",
+                    "associated_beads": ["fc-work"],
+                    "bead_id": "fc-work",
+                    "stages": {
+                        "marshal_decision_received_at": "2026-09-16T00:00:01Z",
+                        "dispatch_enqueued_at": "2026-09-16T00:00:02Z",
+                        "worktree_preparation_completed_at": "2026-09-16T00:00:03Z",
+                        "role_entry_completed_at": "2026-09-16T00:00:04Z",
+                        "native_task_observed_at": "2026-09-16T00:00:04Z",
+                    },
                 }
             )
             log.append(
@@ -207,6 +269,7 @@ class DiagnosticLogTest(unittest.TestCase):
         transitions = {item["transition"] for item in result["items"]}
         self.assertIn("task_observed", transitions)
         self.assertIn("reconciliation_completed", transitions)
+        self.assertIn("dispatch_timeline", transitions)
         self.assertIn("publication_completed", transitions)
         finish_item = next(item for item in result["items"] if item["id"] == "fc-entry")
         self.assertEqual(finish_item["child_operation_ids"], ["fc-check"])
@@ -220,6 +283,20 @@ class DiagnosticLogTest(unittest.TestCase):
         spans = {item.get("span_id") for item in result["items"]}
         self.assertIn("pass-1", spans)
         self.assertIn("publish-1", spans)
+        timeline = next(
+            item
+            for item in result["items"]
+            if item["transition"] == "dispatch_timeline"
+        )
+        self.assertEqual(timeline["correlation_id"], "fc-dispatch")
+        self.assertIn("native_task_observed_at", timeline["stages"])
+        self.assertTrue(
+            any(
+                gap.get("component") == "task_reconciliation"
+                and gap.get("bead_id") == "fc-blocker"
+                for gap in result["gaps"]
+            )
+        )
 
 
 if __name__ == "__main__":

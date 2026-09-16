@@ -147,6 +147,10 @@ Successful finish reports discovery eligibility, not notification. Failed review
 requests remain eligible for bounded retries; uncertain requests require inspection.
 Missing leadership explicitly leaves HUMAN responsible. Only a subsequent Marshal
 decision records dispatch authorization; capacity/dependencies still gate launch.
+Dispatch authorization copies that exact scope revision into the dispatch receipt.
+Executor and Warden compilation uses only its summary, acceptance, and evidence;
+the original intake remains provenance for Weaver and Marshal and is not worker
+instruction text. A later scope change makes the authorization stale.
 Long prepared scope is excerpted with an explicit `complete: false` and `work show`
 continuation; Marshal must inspect that full scope before deciding.
 
@@ -359,7 +363,7 @@ in-memory native request, inspect/recover the task and report that gap.
 | Weaver `planned` | `summary`, `plan_id`; retain published future plan and its explicit deferral without dispatch |
 | Weaver `ready` | `summary`, nonempty `acceptance` array, optional `evidence`; implementation-ready scope awaiting Marshal review, without authorization or dispatch |
 | Executor `ready_for_review` | `summary`, `source_oid`, `checks`, `evidence`; recorded handoff to Warden |
-| Warden `approved` | `summary`, `source_oid`, `checks`, `evidence`; approve and promote current source |
+| Warden `approved` | `summary`, `source_oid`, `checks`, `evidence`; require exactly one task commit atop the retained base, then seal judgment for controller-owned approval and promotion |
 | Sage/Mason `findings` | `summary`, `findings` (report objects); file findings and resume interrupted work via Marshal, or close standalone investigation |
 | Justiciar `repaired` | `summary`, `changes`, `waived_requirements`, `known_defects`, `source_oid` when applicable, `evidence`; reconcile actual results and finish/reassign residual work |
 | Any worker `blocked` | `summary`, `blocker`, `attempts`, `required_action`; transfer accountability to Marshal for a decision |
@@ -369,6 +373,10 @@ Checks are objects `{name, status, evidence}`, with status `passed|failed|not_ru
 and an explanation for `not_run`. A check is evidence, not a new required ceremony.
 The application verifies referenced source and provider facts; it does not trust
 an assertion of promotion without observing Git/provider results.
+Topology, local-check, or validation failures return `accepted:false` and
+`correctable:true`, leave Warden in review, and do not create `delivery_finish`.
+Only an accepted Warden judgment is sealed, so correction never requires a second
+finish after acceptance.
 
 An accepted Executor finish seals its input and stops further Executor work. It
 returns `accepted` while a destination is being prepared; the owner transfer waits
@@ -1573,8 +1581,8 @@ clipped into the comparison facts or a worker prompt.
 | `task output ID [--turn-id ID]` | Bounded native messages/tool evidence with `items`, `next_cursor`, `observed_at`, and `gaps`; read without resuming. Supports `--limit`, `--cursor`, `--max-bytes` (default 262144). |
 | `task wait ID [--turn-id ID] --until idle\|terminal` | Native observed condition, turn ID, pending requests, and gaps; common timeout, never implicit cancellation. A failed turn satisfies terminal observation but is returned as failed evidence. |
 | `task terminals ID` | Exact owned terminal IDs, running/completed/unknown status and output references; read-only. |
-| `task terminal stop ID --terminal TERMINAL_ID --reason TEXT` | Owner/human/scoped Justiciar; record intent and observe termination. If the native API only supports all-terminal cleanup, reject targeted stopping as unsupported rather than stopping additional running terminals. |
-| `task terminal stop ID --all-owned --reason TEXT` | Explicitly stop all background terminals belonging to that managed task through the supported native method, then observe; mutually exclusive with `--terminal`. |
+| `task terminal stop ID --ownership-operation OP --terminal TERMINAL_ID --reason TEXT` | Owner/human/scoped Justiciar; record intent and observe termination. If the native API only supports all-terminal cleanup, reject targeted stopping as unsupported rather than stopping additional running terminals. |
+| `task terminal stop ID --ownership-operation OP --all-owned --reason TEXT` | Explicitly stop all background terminals belonging to that managed acquisition through the supported native method, then observe; mutually exclusive with `--terminal`. |
 | `marshal request [--bead ID] [--kind auto\|groom\|dispatch\|recover]` | Initiate the selected recorded decision; return its receipt/work, or an explicit no-decision result without a model turn. |
 
 `work update` additionally accepts `priority` (0–4) and `title`. Its known fields
@@ -1713,6 +1721,7 @@ source, promoted integration source, source synchronization, and cleanup.
 loop health separately from service/socket liveness. Default reconciliation is
 stale after two missed 15-second deadlines plus one external-request budget
 (60 seconds); loops expose their own configured expected interval/deadline.
+Recovered loop failures remain visible as bounded `last_failure_episode` evidence.
 
 `trace.result` has ordered `items`, `next_cursor`, and `gaps`; items carry time,
 bead/task/turn/operation IDs, transition/effect, outcome, evidence references, and
@@ -1720,6 +1729,9 @@ source identities when applicable. Reconstruct the durable summary from Beads
 receipts and live facts, optionally enriching it from logs. Pruned logs produce
 an explicit gap, never an invented complete transcript. `task output` exposes
 native output without loading idle tasks; unavailable native history is a gap.
+Cross-bead reconciliation blockers and dispatch timeline stages are joined by
+associated bead and correlation IDs; retained event gaps are included in the
+trace's top-level `gaps`.
 `operation show` includes accepted input, planned IDs/steps, attempt count,
 external locators, current observations, errors and next argv commands.
 

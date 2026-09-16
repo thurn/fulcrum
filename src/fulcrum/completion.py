@@ -738,6 +738,40 @@ class CompletionService:
             return _operation_result(operation)
         if workspace is None:
             workspace = _inspect_clean_source(request, payload["source_oid"])
+        topology = _single_task_commit_topology(workspace, payload["source_oid"])
+        if topology is not None and not topology["accepted"]:
+            fc = dict(work.fc or {})
+            fc["phase"] = "reviewing"
+            fc["next_action"] = (
+                "Consolidate the reviewed source to exactly one task commit atop "
+                "the retained worktree base, then finish with the new source OID."
+            )
+            fc["last_transition"] = operation.id
+            ledger.update_fc(work.id, fc)
+            operation = ledger.update_operation(
+                operation.id,
+                state="failed",
+                step="warden_source_topology_correctable",
+                result={
+                    "bead_id": work.id,
+                    "accepted": False,
+                    "correctable": True,
+                    "source_oid": payload["source_oid"],
+                    "topology": topology,
+                    "workspace": workspace,
+                },
+                error={
+                    "code": "SOURCE_TOPOLOGY_INVALID",
+                    "message": (
+                        "Warden source must contain exactly one task commit atop "
+                        "the retained worktree base"
+                    ),
+                    "retryable": False,
+                    "evidence": topology,
+                },
+                next_action=fc["next_action"],
+            )
+            return _operation_result(operation)
         children: dict[str, Any] = {}
         delivery = (work.fc or {}).get("delivery")
         validation = (
@@ -793,11 +827,12 @@ class CompletionService:
             ledger.update_fc(work.id, fc)
             operation = ledger.update_operation(
                 operation.id,
-                state="completed",
+                state="failed",
                 step="warden_validation_failed",
                 result={
                     "bead_id": work.id,
                     "accepted": False,
+                    "correctable": True,
                     "source_oid": payload["source_oid"],
                     "validation": validation,
                     "children": children,
@@ -871,11 +906,17 @@ def _finish_child_unresolved(
     ledger.update_fc(work.id, fc)
     operation = ledger.update_operation(
         operation.id,
-        state="completed",
+        state=(
+            "uncertain"
+            if child.state
+            in {CommandState.RUNNING, CommandState.UNCERTAIN, CommandState.DEGRADED}
+            else "failed"
+        ),
         step=f"warden_{step}_unresolved",
         result={
             "bead_id": work.id,
             "accepted": False,
+            "correctable": True,
             "source_oid": payload["source_oid"],
             "children": dict(children),
             "workspace": dict(workspace),
@@ -885,6 +926,57 @@ def _finish_child_unresolved(
         next_action=fc["next_action"],
     )
     return _operation_result(operation)
+
+
+def _single_task_commit_topology(
+    workspace: Mapping[str, Any], source_oid: str
+) -> dict[str, Any] | None:
+    """Enforce the provider's one-task-commit shape before external submission."""
+
+    path = workspace.get("path")
+    base_oid = workspace.get("base_oid")
+    if not isinstance(path, str) or not isinstance(base_oid, str):
+        return None
+    try:
+        ancestor = subprocess.run(
+            ["git", "-C", path, "merge-base", "--is-ancestor", base_oid, source_oid],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+        count = subprocess.run(
+            ["git", "-C", path, "rev-list", "--count", f"{base_oid}..{source_oid}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise FulcrumError(
+            "SOURCE_TOPOLOGY_UNAVAILABLE",
+            f"could not verify source commit topology: {error}",
+            exit_code=4,
+            retryable=True,
+        ) from error
+    try:
+        commit_count = int(count.stdout.strip()) if count.returncode == 0 else None
+    except ValueError:
+        commit_count = None
+    if ancestor.returncode not in {0, 1} or commit_count is None:
+        raise FulcrumError(
+            "SOURCE_TOPOLOGY_UNAVAILABLE",
+            "Git could not verify the retained base-to-source topology",
+            exit_code=4,
+            details={"stderr": count.stderr.strip() or ancestor.stderr.strip()},
+        )
+    return {
+        "accepted": ancestor.returncode == 0 and commit_count == 1,
+        "base_oid": base_oid,
+        "source_oid": source_oid,
+        "commit_count": commit_count,
+        "base_is_ancestor": ancestor.returncode == 0,
+    }
 
 
 def _supersede_delivery_finish(

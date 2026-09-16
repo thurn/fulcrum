@@ -538,6 +538,7 @@ class AdmissionService:
                     "decision_operation": operation.id,
                     "authorized_at": utc_now(),
                     "human_bypass": human_bypass,
+                    "authorized_scope": _authorized_scope(fc, operation.id),
                     "reservation": None,
                 }
                 fc["next_action"] = (
@@ -840,7 +841,12 @@ class AdmissionService:
             input={
                 "bead": bead_id,
                 "description": str(
-                    fc.get("next_action")
+                    (
+                        dispatch.get("authorized_scope", {}).get("summary")
+                        if isinstance(dispatch.get("authorized_scope"), Mapping)
+                        else None
+                    )
+                    or fc.get("next_action")
                     or fc.get("outcome")
                     or f"Carry out authorized {role} work."
                 ),
@@ -881,6 +887,15 @@ class AdmissionService:
             current_fc["dispatch"] = current_dispatch
             current_fc["active_operation"] = None
             ledger.update_fc(current.id, current_fc)
+            timeline = _dispatch_timeline(
+                ledger,
+                bead_id=bead_id,
+                role=role,
+                dispatch=current_dispatch,
+                dispatch_operation=operation,
+                workspace_operation=workspace_operation,
+                entry_operation=result.operation_id,
+            )
             operation = ledger.update_operation(
                 operation,
                 state=(
@@ -901,6 +916,7 @@ class AdmissionService:
                     "human_bypass": bypass,
                     "entry": result.to_dict(),
                     "workspace_operation": workspace_operation,
+                    "timeline": timeline,
                 },
                 next_action=(
                     "Observe the admitted native task."
@@ -912,6 +928,7 @@ class AdmissionService:
                     )
                 ),
             )
+        _record_dispatch_timeline(request, timeline)
         return _operation_result(operation)
 
 
@@ -1971,6 +1988,109 @@ def _decision_row(
     }
 
 
+def _authorized_scope(
+    fc: Mapping[str, Any], decision_operation: str
+) -> dict[str, Any] | None:
+    """Copy the exact Weaver scope revision authorized by Marshal."""
+
+    scope = fc.get("scope")
+    if not isinstance(scope, Mapping):
+        return None
+    summary = scope.get("summary")
+    acceptance = scope.get("acceptance")
+    evidence = scope.get("evidence")
+    finish_operation = scope.get("finish_operation")
+    if (
+        not isinstance(summary, str)
+        or not summary.strip()
+        or not isinstance(acceptance, list)
+        or not acceptance
+        or not all(isinstance(item, str) and item.strip() for item in acceptance)
+        or not isinstance(finish_operation, str)
+        or not finish_operation
+    ):
+        raise FulcrumError(
+            "SCOPE_INVALID",
+            "Marshal cannot authorize an incomplete Weaver scope revision",
+            exit_code=5,
+        )
+    return {
+        "summary": summary,
+        "acceptance": list(acceptance),
+        "evidence": (
+            [str(item) for item in evidence] if isinstance(evidence, list) else []
+        ),
+        "finish_operation": finish_operation,
+        "decision_operation": decision_operation,
+    }
+
+
+def _dispatch_timeline(
+    ledger: Ledger,
+    *,
+    bead_id: str,
+    role: str,
+    dispatch: Mapping[str, Any],
+    dispatch_operation: OperationRecord,
+    workspace_operation: str | None,
+    entry_operation: str | None,
+) -> dict[str, Any]:
+    decision_id = _optional_string(dispatch.get("decision_operation"))
+    decision = ledger.show(decision_id) if decision_id else None
+    workspace = ledger.show(workspace_operation) if workspace_operation else None
+    entry = ledger.show(entry_operation) if entry_operation else None
+
+    def timestamp(record: LedgerRecord | None, key: str) -> Any:
+        return (record.fc or {}).get(key) if record is not None else None
+
+    entry_external = (
+        entry.fc.get("external")
+        if entry is not None
+        and entry.fc
+        and isinstance(entry.fc.get("external"), Mapping)
+        else {}
+    )
+    return {
+        "correlation_id": dispatch_operation.id,
+        "bead_id": bead_id,
+        "role": role,
+        "decision_operation": decision_id,
+        "dispatch_operation": dispatch_operation.id,
+        "workspace_operation": workspace_operation,
+        "entry_operation": entry_operation,
+        "task_id": entry_external.get("thread_id"),
+        "stages": {
+            "marshal_decision_received_at": (
+                timestamp(decision, "completed_at") or dispatch.get("authorized_at")
+            ),
+            "dispatch_enqueued_at": dispatch_operation.operation.get("created_at"),
+            "worktree_preparation_started_at": timestamp(workspace, "created_at"),
+            "worktree_preparation_completed_at": timestamp(workspace, "completed_at"),
+            "role_entry_started_at": timestamp(entry, "created_at"),
+            "role_entry_completed_at": timestamp(entry, "completed_at"),
+            "native_task_observed_at": timestamp(entry, "completed_at"),
+        },
+    }
+
+
+def _record_dispatch_timeline(
+    request: ParsedRequest, timeline: Mapping[str, Any]
+) -> None:
+    from fulcrum.diagnostics import DiagnosticLog
+
+    try:
+        DiagnosticLog.from_request(request).append(
+            {
+                "event": "dispatch_timeline",
+                **dict(timeline),
+                "associated_beads": [timeline["bead_id"]],
+                "outcome": "observed",
+            }
+        )
+    except (OSError, FulcrumError):
+        pass
+
+
 def _apply_decision(
     ledger: Ledger,
     record: LedgerRecord,
@@ -2029,6 +2149,7 @@ def _apply_decision(
             "decision_operation": decision_operation,
             "authorized_at": now,
             "human_bypass": False,
+            "authorized_scope": _authorized_scope(fc, decision_operation),
             "reservation": None,
         }
         fc["waiting"] = _remove_waiting_events(
@@ -2066,6 +2187,7 @@ def _apply_decision(
             "decision_operation": decision_operation,
             "authorized_at": now,
             "human_bypass": False,
+            "authorized_scope": None,
             "reservation": None,
         }
         fc["next_action"] = f"Weaver must answer: {question}"

@@ -36,6 +36,7 @@ from fulcrum.runtime_service import (
     _select_model,
     _start_or_recover,
     routing_developer_instructions,
+    terminal_stop_command,
 )
 from fulcrum.work import WorkService
 
@@ -361,7 +362,7 @@ class RoleService:
         routing_instructions = routing_developer_instructions(request)
         if request.thread_id:
             thread_id = request.thread_id
-            expected_title = role_title(role, bead_id, work.title)
+            expected_title = role_title(role, bead_id, _work_title_for_role(work, role))
             try:
                 native = _runtime_call(
                     request,
@@ -447,7 +448,7 @@ class RoleService:
                     else None
                 ),
                 workspace_roots=(root,),
-                title=role_title(role, bead_id, work.title),
+                title=role_title(role, bead_id, _work_title_for_role(work, role)),
                 model=model,
                 effort=effort,
                 developer_instructions=routing_instructions,
@@ -555,7 +556,9 @@ class RoleService:
                             ledger=ledger,
                             config=leadership_config,
                             role=role,
-                            title=role_title(role, bead_id, work.title),
+                            title=role_title(
+                                role, bead_id, _work_title_for_role(work, role)
+                            ),
                             work_id=bead_id,
                             operation=operation,
                             ownership_operation=receipt_id,
@@ -925,6 +928,7 @@ def _cook_role(
     start_operation: str,
 ) -> dict[str, str]:
     fc = work.fc or {}
+    authorized_scope = _authorized_scope_for_role(fc, role)
     _, project = _project_config(request, str(fc.get("project")))
     worktree = fc.get("worktree")
     workspace = (
@@ -932,14 +936,19 @@ def _cook_role(
         if isinstance(worktree, Mapping) and worktree.get("path")
         else str(project["root"])
     )
-    acceptance = fc.get("acceptance")
+    acceptance = (
+        authorized_scope.get("acceptance")
+        if authorized_scope is not None
+        else fc.get("acceptance")
+    )
     acceptance_text = (
         "\n".join(f"- {item}" for item in acceptance)
         if isinstance(acceptance, list) and acceptance
         else "- Acceptance is not yet specified; resolve it before risky work."
     )
     evidence = {
-        "summary": fc.get("summary"),
+        "authorized_scope": authorized_scope,
+        "summary": fc.get("summary") if authorized_scope is None else None,
         "last_progress": fc.get("last_progress"),
         "finish": fc.get("finish"),
         "handoff": fc.get("handoff"),
@@ -954,19 +963,29 @@ def _cook_role(
         )
     except LedgerFailure:
         selected_memory = {"items": []}
-    work_context = _render_facts(fc.get("context"), "No additional task context.")
-    memory_context = (
-        work_context
-        if not selected_memory["items"]
-        else work_context
-        + "\n\nCurated memory:\n"
-        + render_selected_memory(selected_memory)
+    work_context = _render_facts(
+        (
+            authorized_scope.get("evidence")
+            if authorized_scope is not None
+            else fc.get("context")
+        ),
+        "No additional task context.",
+    )
+    memory_context = work_context
+    if authorized_scope is None and selected_memory["items"]:
+        memory_context += "\n\nCurated memory:\n" + render_selected_memory(
+            selected_memory
+        )
+    scope_summary = (
+        str(authorized_scope["summary"])
+        if authorized_scope is not None
+        else str(fc.get("outcome") or work.native.get("description") or work.title)
     )
     variables = {
-        "title": work.title,
-        "outcome": str(
-            fc.get("outcome") or work.native.get("description") or work.title
+        "title": (
+            _scope_title(scope_summary) if authorized_scope is not None else work.title
         ),
+        "outcome": scope_summary,
         "project": str(fc.get("project")),
         "workspace": workspace,
         "acceptance": acceptance_text,
@@ -981,6 +1000,16 @@ def _cook_role(
         "thread": thread_id,
         "ownership_operation": ownership_operation,
     }
+    if role in {"executor", "warden"}:
+        variables["terminal_stop_command"] = terminal_stop_command(
+            thread_id,
+            ownership_operation,
+            reason=(
+                "executor work complete"
+                if role == "executor"
+                else "warden review complete"
+            ),
+        )
     asset = files("fulcrum").joinpath("formulas", f"fulcrum-{role}.formula.json")
     cooked = ledger.cook(str(asset), variables)
     correlation = (
@@ -992,6 +1021,52 @@ def _cook_role(
         "description": cooked["description"],
         "instructions": cooked["description"] + "\n\n" + correlation,
     }
+
+
+def _authorized_scope_for_role(
+    fc: Mapping[str, Any], role: str
+) -> Mapping[str, Any] | None:
+    if role not in {"executor", "warden"}:
+        return None
+    current = fc.get("scope")
+    if not isinstance(current, Mapping):
+        return None
+    dispatch = fc.get("dispatch")
+    authorized = (
+        dispatch.get("authorized_scope") if isinstance(dispatch, Mapping) else None
+    )
+    if not isinstance(authorized, Mapping):
+        raise FulcrumError(
+            "SCOPE_NOT_AUTHORIZED",
+            f"{role.title()} requires the exact Marshal-authorized Weaver scope",
+            exit_code=5,
+        )
+    for key in ("summary", "acceptance", "evidence", "finish_operation"):
+        if authorized.get(key) != current.get(key):
+            raise FulcrumError(
+                "STALE_DECISION",
+                "the Weaver scope changed after Marshal authorization",
+                exit_code=5,
+                details={"field": key},
+            )
+    return authorized
+
+
+def _work_title_for_role(work: LedgerRecord, role: str) -> str:
+    authorized = _authorized_scope_for_role(work.fc or {}, role)
+    return (
+        _scope_title(str(authorized["summary"]))
+        if authorized is not None
+        else work.title
+    )
+
+
+def _scope_title(summary: str) -> str:
+    first_line = next(
+        (line.strip() for line in summary.splitlines() if line.strip()),
+        "Authorized implementation scope",
+    )
+    return first_line
 
 
 async def _name_current_task(runtime: Any, thread_id: str, title: str) -> TaskFacts:

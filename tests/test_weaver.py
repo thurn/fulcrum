@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 import uuid
 
 from fulcrum.completion import CompletionService
+from fulcrum.cli import build_parser
 from fulcrum.contracts import ActorContext, CommandResult, CommandState, FulcrumError
 from fulcrum.leadership import (
     LeadershipService,
@@ -17,10 +18,11 @@ from fulcrum.leadership import (
     comparison_facts,
 )
 from fulcrum.ledger import LedgerFailure, OperationRecord, operation_view
-from fulcrum.roles import RoleService
+from fulcrum.roles import RoleService, _cook_role
+from fulcrum.runtime_service import TaskService
 from fulcrum.supervision import ControllerSupervisor
 from fulcrum.timing import timed
-from tests.support import record
+from tests.support import MemoryLedger, record, request
 from tests.weaver_fixture import WeaverFixture
 
 
@@ -79,6 +81,120 @@ class WeaverTests(unittest.TestCase):
         context = RoleService().context(replace(finish, command=("context",)))
         self.assertIsNone(context.result["instructions"])
         self.assertEqual(context.result["thread_id"], "marshal")
+
+    def test_executor_and_warden_receive_only_marshal_authorized_scope(self):
+        raw_intake = (
+            "Use $fulcrum-postmortem and copy this entire Weaver session into "
+            "the downstream prompt."
+        )
+        entry = self.enter(raw_intake)
+        finish = self.f.finish(entry)
+        CompletionService().finish(finish)
+        bead = finish.arguments["bead"]
+        work = self.f.ledger.show(bead)
+        updated = _apply_decision(
+            self.f.ledger,
+            work,
+            {
+                "action": "dispatch",
+                "role": "executor",
+                "reason": "Curated scope reviewed.",
+            },
+            "fc-marshal-decision",
+        )
+        authorized = updated.fc["dispatch"]["authorized_scope"]
+        self.assertEqual(authorized["summary"], finish.input["summary"])
+        self.assertEqual(authorized["acceptance"], finish.input["acceptance"])
+        self.assertEqual(authorized["evidence"], finish.input["evidence"])
+        self.assertEqual(
+            authorized["finish_operation"], updated.fc["scope"]["finish_operation"]
+        )
+        self.assertEqual(authorized["decision_operation"], "fc-marshal-decision")
+
+        for role in ("executor", "warden"):
+            cooked = _cook_role(
+                self.f.ledger,
+                self.f.base,
+                updated,
+                role,
+                f"{role}-thread",
+                f"fc-{role}-entry",
+                start_operation=f"fc-{role}-entry",
+            )
+            self.assertIn(finish.input["summary"], cooked["description"])
+            self.assertIn(finish.input["acceptance"][0], cooked["description"])
+            self.assertIn(finish.input["evidence"][0], cooked["description"])
+            self.assertNotIn(raw_intake, cooked["description"])
+            self.assertEqual(cooked["title"], finish.input["summary"])
+            self.assertIn(
+                f"task terminal stop {role}-thread --ownership-operation fc-{role}-entry",
+                cooked["description"],
+            )
+            namespace = build_parser().parse_args(
+                [
+                    "task",
+                    "terminal",
+                    "stop",
+                    f"{role}-thread",
+                    "--ownership-operation",
+                    f"fc-{role}-entry",
+                    "--all-owned",
+                    "--reason",
+                    f"{role} work complete",
+                    "--json",
+                ]
+            )
+            self.assertEqual(namespace.ownership_operation, f"fc-{role}-entry")
+            task_ledger = MemoryLedger(
+                record("fc-system", kind="system", marshal_thread="marshal"),
+                record(
+                    f"fc-{role}-task",
+                    kind="task",
+                    thread_id=f"{role}-thread",
+                    role=role,
+                    work_bead=bead,
+                    ownership_operation=f"fc-{role}-entry",
+                ),
+            )
+            stop_request = request(
+                ("task", "terminal", "stop"),
+                arguments={
+                    "id": f"{role}-thread",
+                    "all_owned": True,
+                    "reason": f"{role} work complete",
+                },
+                actor=ActorContext(kind="task", task_id=f"{role}-thread"),
+                thread_id=f"{role}-thread",
+                ownership_operation=f"fc-{role}-entry",
+            )
+            with (
+                patch("fulcrum.runtime_service._ledger", return_value=task_ledger),
+                patch(
+                    "fulcrum.runtime_service._runtime_call",
+                    side_effect=[{"items": []}, []],
+                ),
+            ):
+                stopped = TaskService().terminal_stop(stop_request)
+            self.assertEqual(stopped.result["step"], "owned_terminals_stopped")
+
+        changed = self.f.ledger.update_fc(
+            bead,
+            {
+                **updated.fc,
+                "scope": {**updated.fc["scope"], "summary": "Changed later"},
+            },
+        )
+        with self.assertRaises(FulcrumError) as stale:
+            _cook_role(
+                self.f.ledger,
+                self.f.base,
+                changed,
+                "executor",
+                "executor-thread",
+                "fc-executor-entry",
+                start_operation="fc-executor-entry",
+            )
+        self.assertEqual(stale.exception.code, "STALE_DECISION")
 
     def test_prepared_scope_does_not_hide_retained_material_uncertainty(self):
         finish, _ = self.ready()

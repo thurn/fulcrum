@@ -131,6 +131,13 @@ class HealthFile:
     def success(self, name: str, evidence: Mapping[str, Any]) -> None:
         now = _format_time(self.clock.now())
         previous = self.values.get(name, {})
+        active_episode = previous.get("failure_episode")
+        last_episode = previous.get("last_failure_episode")
+        if isinstance(active_episode, Mapping):
+            last_episode = {
+                **dict(active_episode),
+                "recovered_at": now,
+            }
         self.values[name] = {
             **previous,
             "state": "healthy",
@@ -138,6 +145,8 @@ class HealthFile:
             "last_success_at": now,
             "consecutive_failures": 0,
             "error": None,
+            "failure_episode": None,
+            "last_failure_episode": last_episode,
             "evidence": dict(evidence),
             "pid": os.getpid(),
         }
@@ -147,12 +156,24 @@ class HealthFile:
         now = _format_time(self.clock.now())
         previous = self.values.get(name, {})
         failures = int(previous.get("consecutive_failures", 0)) + 1
+        prior_episode = previous.get("failure_episode")
+        episode = dict(prior_episode) if isinstance(prior_episode, Mapping) else {}
+        episode.update(
+            {
+                "first_seen_at": episode.get("first_seen_at") or now,
+                "last_seen_at": now,
+                "count": int(episode.get("count", 0)) + 1,
+                "error_category": type(error).__name__,
+                "error": str(error),
+            }
+        )
         self.values[name] = {
             **previous,
             "state": "unavailable",
             "last_attempt_at": now,
             "consecutive_failures": failures,
             "error": str(error),
+            "failure_episode": episode,
             "pid": os.getpid(),
         }
         self._write()
@@ -265,6 +286,7 @@ class ControllerSupervisor:
                     bead_id=bead_id,
                     operation_id=operation_id,
                     keep_runtime=keep_runtime,
+                    pass_id=pass_id,
                 )
         except BaseException as error:
             self._record_reconciliation(
@@ -322,6 +344,7 @@ class ControllerSupervisor:
         bead_id: str | None = None,
         operation_id: str | None = None,
         keep_runtime: bool = False,
+        pass_id: str | None = None,
     ) -> PassSummary:
         current_loop = asyncio.get_running_loop()
         if self._loop is not None and self._loop is not current_loop:
@@ -372,14 +395,48 @@ class ControllerSupervisor:
                     "NOT_FOUND", f"unknown operation {operation_id}"
                 )
         ordered_operations = sorted(operations, key=lambda item: item.id)
-        resumed = list(
-            await asyncio.gather(
-                *(
-                    self._ordered_reconcile(operation)
-                    for operation in ordered_operations
-                )
-            )
+        resumed: list[Mapping[str, Any]] = []
+        operation_outcomes = await asyncio.gather(
+            *(self._ordered_reconcile(operation) for operation in ordered_operations),
+            return_exceptions=True,
         )
+        for operation, outcome in zip(ordered_operations, operation_outcomes):
+            if isinstance(outcome, BaseException):
+                if not isinstance(outcome, Exception):
+                    raise outcome
+                operation_bead = operation.operation.get("bead_id")
+                failure = {
+                    "kind": "operation_reconciliation_failure",
+                    "operation_id": operation.id,
+                    "bead_id": operation_bead,
+                    "reason": str(outcome),
+                    "effect": "isolated; unrelated work continued",
+                }
+                gap = {
+                    "component": "operation_reconciliation",
+                    "availability": "degraded",
+                    "operation_id": operation.id,
+                    "bead_id": operation_bead,
+                    "reason": str(outcome),
+                }
+                actions.append(failure)
+                gaps.append(gap)
+                self.health.failure("reconciliation", outcome)
+                self._record_reconciliation(
+                    {
+                        "event": "operation_reconciliation_failed",
+                        "pass_id": pass_id,
+                        "operation_id": operation.id,
+                        "bead_id": operation_bead,
+                        "associated_beads": (
+                            [operation_bead] if operation_bead else []
+                        ),
+                        "reason": str(outcome),
+                        "outcome": "isolated",
+                    }
+                )
+                continue
+            resumed.append(outcome)
         tasks = [
             record
             for record in records
@@ -398,7 +455,37 @@ class ControllerSupervisor:
             if record.kind == "work" and (bead_id is None or record.id == bead_id)
         }
         for work_id, work in list(work_by_id.items()):
-            refreshed, delivery_action = await self._reconcile_work_delivery(work)
+            try:
+                refreshed, delivery_action = await self._reconcile_work_delivery(work)
+            except Exception as error:
+                actions.append(
+                    {
+                        "kind": "work_delivery_reconciliation_failure",
+                        "bead_id": work.id,
+                        "reason": str(error),
+                        "effect": "isolated; unrelated work continued",
+                    }
+                )
+                gaps.append(
+                    {
+                        "component": "work_delivery_reconciliation",
+                        "availability": "degraded",
+                        "bead_id": work.id,
+                        "reason": str(error),
+                    }
+                )
+                self.health.failure("reconciliation", error)
+                self._record_reconciliation(
+                    {
+                        "event": "work_delivery_reconciliation_failed",
+                        "pass_id": pass_id,
+                        "bead_id": work.id,
+                        "associated_beads": [work.id],
+                        "reason": str(error),
+                        "outcome": "isolated",
+                    }
+                )
+                continue
             work_by_id[work_id] = refreshed
             if delivery_action is not None:
                 actions.append(delivery_action)
@@ -438,6 +525,18 @@ class ControllerSupervisor:
                 }
             )
         try:
+            pending_tasks: list[Any] = []
+            for task in tasks:
+                suppression = self._task_reconciliation_suppression(task)
+                if suppression is None:
+                    pending_tasks.append(task)
+                    continue
+                row, action, gap = self._suppressed_task_reconciliation(
+                    task, suppression
+                )
+                task_rows.append(row)
+                actions.append(action)
+                gaps.append(gap)
             reconciled_tasks = await asyncio.gather(
                 *(
                     self._ordered_task_reconcile(
@@ -445,12 +544,37 @@ class ControllerSupervisor:
                         work_by_id,
                         facts.get(_thread_id(task.fc or {})),
                     )
-                    for task in tasks
-                )
+                    for task in pending_tasks
+                ),
+                return_exceptions=True,
             )
-            for task_row, task_actions in reconciled_tasks:
+            isolated_failures = 0
+            for task, outcome in zip(pending_tasks, reconciled_tasks):
+                if isinstance(outcome, BaseException):
+                    if not isinstance(outcome, Exception):
+                        raise outcome
+                    isolated_failures += 1
+                    action, gap = await self._retain_task_reconciliation_failure(
+                        task, outcome, pass_id=pass_id
+                    )
+                    task_rows.append(
+                        {
+                            "task_record_id": task.id,
+                            "thread_id": _thread_id(task.fc or {}),
+                            "work_bead": (task.fc or {}).get("work_bead"),
+                            "observed": facts.get(_thread_id(task.fc or {}))
+                            is not None,
+                            "reconciliation": "isolated_failure",
+                        }
+                    )
+                    actions.append(action)
+                    gaps.append(gap)
+                    self.health.failure("reconciliation", outcome)
+                    continue
+                task_row, task_actions = outcome
                 task_rows.append(task_row)
                 actions.extend(task_actions)
+                await self._clear_task_reconciliation_failure(task)
             if recovery_fence is None:
                 archive_actions = await reconcile_archive_once(
                     self.ledger,
@@ -499,6 +623,7 @@ class ControllerSupervisor:
                     "operations": len(operations),
                     "tasks": len(tasks),
                     "work": len(work_by_id),
+                    "isolated_failures": isolated_failures,
                 },
             )
             self.health.success(
@@ -1530,23 +1655,43 @@ class ControllerSupervisor:
             else None
         )
         if not isinstance(approved, Mapping) or approved.get("oid") != source_oid:
-            approval = await asyncio.to_thread(
-                self.application.dispatch,
-                replace(
-                    base,
-                    command=("review", "approve"),
-                    arguments={
-                        "bead": work.id,
-                        "source": source_oid,
-                        "summary": str(
-                            delivery_finish.get("summary") or "Warden approved"
+            try:
+                approval = await asyncio.to_thread(
+                    self.application.dispatch,
+                    replace(
+                        base,
+                        command=("review", "approve"),
+                        arguments={
+                            "bead": work.id,
+                            "source": source_oid,
+                            "summary": str(
+                                delivery_finish.get("summary") or "Warden approved"
+                            ),
+                        },
+                        request_id=_delivery_request_id(
+                            finish_operation, "controller-approval"
                         ),
-                    },
-                    request_id=_delivery_request_id(
-                        finish_operation, "controller-approval"
                     ),
-                ),
-            )
+                )
+            except FulcrumError as error:
+                if error.code == "STALE_SOURCE":
+                    return await self._return_warden_to_review(
+                        work,
+                        delivery_finish,
+                        reason="workspace_source_changed",
+                        evidence={
+                            "approval": error.to_result().to_dict(),
+                            "retained_delivery": dict(retained_delivery or {}),
+                        },
+                    )
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": False,
+                    "state": "approval_unresolved",
+                    "code": error.code,
+                    "reason": error.message,
+                }
             if approval.state is not CommandState.COMPLETED:
                 if _command_error_code(approval) == "STALE_SOURCE":
                     return await self._return_warden_to_review(
@@ -1564,17 +1709,37 @@ class ControllerSupervisor:
                     "result_state": approval.state.value,
                 }
         if _delivery_state(delivery, "promotion") != "observed":
-            promotion = await asyncio.to_thread(
-                self.application.dispatch,
-                replace(
-                    base,
-                    command=("promotion", "start"),
-                    arguments={"bead": work.id, "source": source_oid},
-                    request_id=_delivery_request_id(
-                        finish_operation, "controller-promotion"
+            try:
+                promotion = await asyncio.to_thread(
+                    self.application.dispatch,
+                    replace(
+                        base,
+                        command=("promotion", "start"),
+                        arguments={"bead": work.id, "source": source_oid},
+                        request_id=_delivery_request_id(
+                            finish_operation, "controller-promotion"
+                        ),
                     ),
-                ),
-            )
+                )
+            except FulcrumError as error:
+                if error.code == "STALE_SOURCE":
+                    return await self._return_warden_to_review(
+                        work,
+                        delivery_finish,
+                        reason="workspace_source_changed",
+                        evidence={
+                            "promotion": error.to_result().to_dict(),
+                            "retained_delivery": dict(retained_delivery or {}),
+                        },
+                    )
+                return {
+                    "kind": "warden_delivery",
+                    "bead_id": work.id,
+                    "advanced": False,
+                    "state": "promotion_unresolved",
+                    "code": error.code,
+                    "reason": error.message,
+                }
             if promotion.state is not CommandState.COMPLETED:
                 if _command_error_code(promotion) == "STALE_SOURCE":
                     return await self._return_warden_to_review(
@@ -1895,6 +2060,139 @@ class ControllerSupervisor:
             return await self._reconcile_task(
                 fresh if fresh is not None else task, work_by_id, facts
             )
+
+    def _task_reconciliation_suppression(self, task: Any) -> Mapping[str, Any] | None:
+        failure = (task.fc or {}).get("reconciliation_failure")
+        if not isinstance(failure, Mapping):
+            return None
+        if failure.get("ownership_operation") != (task.fc or {}).get(
+            "ownership_operation"
+        ):
+            return None
+        next_retry_at = failure.get("next_retry_at")
+        if not isinstance(next_retry_at, str):
+            return None
+        try:
+            return failure if self.clock.now() < _parse_time(next_retry_at) else None
+        except ValueError:
+            return None
+
+    def _suppressed_task_reconciliation(
+        self, task: Any, failure: Mapping[str, Any]
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+        bead_id = (task.fc or {}).get("work_bead")
+        row = {
+            "task_record_id": task.id,
+            "thread_id": (task.fc or {}).get("thread_id"),
+            "work_bead": bead_id,
+            "observed": False,
+            "reconciliation": "backed_off",
+        }
+        action = {
+            "kind": "task_reconciliation_suppressed",
+            "task_record_id": task.id,
+            "bead_id": bead_id,
+            "attempts": failure.get("attempts"),
+            "next_retry_at": failure.get("next_retry_at"),
+        }
+        gap = {
+            "component": "task_reconciliation",
+            "availability": "degraded",
+            "task_record_id": task.id,
+            "bead_id": bead_id,
+            "reason": failure.get("error"),
+            "code": failure.get("code"),
+            "retry_at": failure.get("next_retry_at"),
+        }
+        return row, action, gap
+
+    async def _retain_task_reconciliation_failure(
+        self, task: Any, error: Exception, *, pass_id: str | None
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        current = await asyncio.to_thread(self.ledger.show, task.id) or task
+        fc = dict(current.fc or {})
+        previous = fc.get("reconciliation_failure")
+        code = error.code if isinstance(error, FulcrumError) else type(error).__name__
+        message = error.message if isinstance(error, FulcrumError) else str(error)
+        signature = f"{code}:{message}"[:1000]
+        acquisition = fc.get("ownership_operation")
+        same_episode = (
+            isinstance(previous, Mapping)
+            and previous.get("signature") == signature
+            and previous.get("ownership_operation") == acquisition
+        )
+        attempts = int(previous.get("attempts", 0)) + 1 if same_episode else 1
+        delays = (15, 30, 60, 120, 300)
+        delay = delays[min(attempts - 1, len(delays) - 1)]
+        now = self.clock.now()
+        retained = {
+            "signature": signature,
+            "code": code,
+            "error": message,
+            "attempts": attempts,
+            "first_seen_at": (
+                previous.get("first_seen_at")
+                if same_episode and isinstance(previous, Mapping)
+                else _format_time(now)
+            ),
+            "last_seen_at": _format_time(now),
+            "next_retry_at": _format_time(now + timedelta(seconds=delay)),
+            "ownership_operation": acquisition,
+            "pass_id": pass_id,
+        }
+        fc["reconciliation_failure"] = retained
+        await asyncio.to_thread(self.ledger.update_fc, current.id, fc)
+        bead_id = fc.get("work_bead")
+        event = {
+            "event": "task_reconciliation_failed",
+            "pass_id": pass_id,
+            "task_id": fc.get("thread_id"),
+            "task_record_id": current.id,
+            "bead_id": bead_id,
+            "associated_beads": [bead_id] if bead_id else [],
+            "error_category": type(error).__name__,
+            "code": code,
+            "reason": message,
+            "attempts": attempts,
+            "next_retry_at": retained["next_retry_at"],
+            "outcome": "isolated",
+        }
+        self._record_reconciliation(event)
+        action = {
+            "kind": "task_reconciliation_failure",
+            "task_record_id": current.id,
+            "bead_id": bead_id,
+            "code": code,
+            "reason": message,
+            "attempts": attempts,
+            "next_retry_at": retained["next_retry_at"],
+            "effect": "isolated; unrelated work continued",
+        }
+        gap = {
+            "component": "task_reconciliation",
+            "availability": "degraded",
+            "task_record_id": current.id,
+            "bead_id": bead_id,
+            "code": code,
+            "reason": message,
+            "retry_at": retained["next_retry_at"],
+        }
+        return action, gap
+
+    async def _clear_task_reconciliation_failure(self, task: Any) -> None:
+        if not isinstance((task.fc or {}).get("reconciliation_failure"), Mapping):
+            return
+        current = await asyncio.to_thread(self.ledger.show, task.id)
+        if current is None or not current.fc:
+            return
+        fc = dict(current.fc)
+        failure = fc.pop("reconciliation_failure", None)
+        if isinstance(failure, Mapping):
+            fc["last_reconciliation_failure"] = {
+                **dict(failure),
+                "recovered_at": _format_time(self.clock.now()),
+            }
+            await asyncio.to_thread(self.ledger.update_fc, current.id, fc)
 
     async def _send_task_notice(
         self, task: Any, facts: TaskFacts, work: Any, *, kind: str, text: str

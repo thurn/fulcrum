@@ -228,11 +228,15 @@ The operational-test postmortem produced the following enforced workflow:
    Executor and Warden task roots are that worktree, never the live project root.
    The live project config runs `scripts/prepare-check` during preparation, so the
    review environment is ready before either role starts.
-3. Executor finish transfers to one Warden. One Warden finish submits validation
-   once and seals one judgment. The controller then waits for validation, verifies
+3. Executor finish transfers to one Warden. Marshal dispatch retains the exact
+   authorized Weaver scope revision; Executor and Warden titles, outcomes,
+   acceptance, and scope evidence compile only from that revision, never raw
+   intake. A Warden finish first enforces one task commit atop the retained base.
+   Correctable topology or validation failures do not seal judgment. One accepted
+   Warden finish seals judgment. The controller then waits for validation, verifies
    the task is terminal, releases its subscription, approves review, promotes,
    observes source synchronization, cleans the worktree, and closes the bead.
-   Delivery never requires a second Warden instruction or finish.
+   After acceptance, delivery never requires a second Warden instruction or finish.
 4. An older nonterminal finish receipt is cancelled as superseded when a later
    accepted finish already advanced the work. It is not reported as a sealed
    recovery failure. Terminal tasks become immediately archive-eligible after
@@ -241,9 +245,12 @@ The operational-test postmortem produced the following enforced workflow:
 5. Command diagnostics retain bounded redacted request/result projections,
    operation/thread/turn IDs, associated bead IDs, and durations. `trace --bead`
    merges those events with operation receipts and managed-task observations.
-   Reconciliation spans make duplicate scheduling rounds attributable.
-6. Role prompts contain exact accepted progress, stop, and finish schemas and
-   state that Warden finishes once. Formula cooking is local, successful Beads
+   Reconciliation spans make duplicate scheduling rounds attributable. Dispatch
+   timelines correlate Marshal receipt, enqueue, worktree preparation, role entry,
+   and native observation. Per-bead failures are isolated and retained as trace
+   gaps and recovered health episodes while unrelated backlog continues.
+6. Role prompts contain exact accepted progress, ownership-qualified stop, and
+   finish schemas and state that Warden finishes once after acceptance. Formula cooking is local, successful Beads
    mutations reuse their returned record, fresh random operation IDs skip a
    redundant existence read, and empty dependency sets skip list calls.
 
