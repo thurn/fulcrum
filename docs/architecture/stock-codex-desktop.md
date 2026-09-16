@@ -22,8 +22,9 @@ and promotion. Neither is replaced by Desktop's task storage.
 **Marshal** is the standing coordination task: it exercises bounded backlog
 judgment and executes the exact native actions returned by Fulcrum. Its task
 identity persists, but its agent turn ends when coordination becomes idle.
-**Vizier** is the standing human-directed policy task. **Weaver** prepares new
-work, **Executor** implements approved scope, and **Warden** independently
+**Vizier** is the standing human-directed policy task and inbox for decisions
+requiring human intervention. **Weaver** prepares new work, **Executor** implements
+approved scope, and **Warden** independently
 reviews it. Existing Sage, Mason, and Justiciar investigation and recovery roles
 remain available through the same dispatch mechanism.
 
@@ -1123,6 +1124,50 @@ inventory entry alone cannot establish either archive or unarchive. Standing
 Marshal and Vizier tasks are never automatically archived; explicit leadership
 replacement retains its separate recovery protocol.
 
+### Human decision inbox
+
+Route requests for human intervention to the existing Vizier task. Persist the
+decision obligation on the affected work bead, with the exact blocker, current
+evidence, requested decision, and links to the relevant native tasks. This
+includes exhausted repair allowances and native approvals or interruption that
+Fulcrum cannot perform. Native approvals still require action in the original
+Desktop task; a response in Vizier is not evidence that Desktop accepted one.
+
+Marshal executes a returned `send_message_to_thread` action to the retained
+Vizier ID using the normal claim/result protocol and structured action marker.
+Hooks and provider watchers only publish the durable obligation; they do not
+send native messages. Such a wake authorizes Vizier to acknowledge the action,
+read current decision evidence, present one actionable request, and end its
+turn awaiting human direction. It does not authorize autonomous resolution,
+additional repair cycles, policy changes, or resume. Include this restricted
+notification authority in bootstrap and the cooked Vizier prompt.
+
+Keep notification delivery separate from blocker resolution. Acceptance or
+acknowledgment of a message never clears the blocker. A human response uses the
+existing resolution path with the exact blocker and stable request ID; validate
+that the decision is still applicable before granting any dependent action.
+Unrelated beads continue while one waits for that decision.
+
+Retain one notification obligation per blocker and material decision revision.
+Repeated observations, hourly recovery, and app restart cannot create another
+notification for unchanged evidence. Changed evidence warrants a new revision
+only when it changes the required decision or invalidates the prior request;
+routine progress does not. Supersede unissued notices when their blocker is
+resolved. An issued notice still requires settlement, and Vizier rereads current
+state before presenting a request so stale delivery cannot reopen a blocker.
+Use the normal uncertain-message evidence rules; the redundant Marshal recovery
+hint exception does not permit duplicate Vizier notices. A missing or unusable
+Vizier task leaves notification pending and exposes the failure in diagnostics;
+never create a replacement inbox automatically.
+
+Global pause holds these unissued notification wakes like other messages.
+Pending decisions remain readable through status and explicit human interaction
+with Vizier. Resume revalidates pending notices before sending them. Exercise
+delivery while Vizier is already handling a human response: incoming notices
+must preserve the response and action receipts, and cannot grant a second
+independent policy authority. This reuses the required busy-task native delivery
+check rather than assuming that a send starts an isolated turn.
+
 ## Workspace and authority preservation
 
 Fulcrum prepares the Tollgate worktree and records its actual path, branch,
@@ -1212,7 +1257,8 @@ resource.
    exact missing fields or tools. Discover saved projects; guide the user
    through adding a project if the native tool surface cannot create it.
 4. Present the explicit coordination authorization: native task creation and
-   messaging for admitted work, configured model/effort values, saved-project
+   messaging for admitted work, notification-only decision requests in the
+   existing Vizier task, configured model/effort values, saved-project
    local targeting with Tollgate worktrees, managed-task hook observations and
    bounded reporting corrections, and hourly same-task recovery. Disclose that
    Desktop Stop interrupts one turn while "pause Fulcrum" durably pauses new
@@ -1227,7 +1273,8 @@ resource.
 6. Create or recover projectless local Marshal and Vizier tasks. Their complete
    initial prompts require registration against the bootstrap action before
    performing leadership work. Vizier completes readiness and waits for human
-   direction; Marshal coordinates pending work or ends idle.
+   direction, with notification-only wakes for retained human decisions;
+   Marshal coordinates pending work or ends idle.
 7. Create or update the hourly heartbeat on Marshal. Persist its returned ID,
    exact target, prompt, cadence, and observed state on `fc-system`.
 8. Exercise the readiness probe described below, finalize the bootstrap result,
@@ -1333,7 +1380,8 @@ or the equivalent connected bootstrap MCP tool. Preserve the request ID on retry
 Use returned instructions; do not recreate policy or setup state yourself.
 
 This setup authorizes the specified Marshal/Vizier tasks, configured worker task
-creation and messaging, local-project targeting with assigned Tollgate worktrees,
+creation and messaging, notification-only decision requests in the existing
+Vizier task, local-project targeting with assigned Tollgate worktrees,
 required persistent tool approvals, managed-task hooks with bounded reporting
 corrections, and one hourly follow-up on Marshal. Confirm missing model choices
 and explain the scope of each approval configuration. Complete native hook trust
@@ -1490,6 +1538,8 @@ Implement in dependency order, with each step's checks passing before the next:
 4. Implement CLI/MCP action handlers, broker waits/timers, registration, and
    agent prompt changes. Keep existing provider validation/promotion semantics;
    replace direct runtime dispatch in role/completion/leadership services.
+   Cover boundary pause, early capacity release, same-task repair with its
+   failed-cycle allowance, deferred archival, and the Vizier decision inbox.
 5. Assemble bootstrap and run the full disposable live scenarios below,
    including long waits and actual heartbeat delivery. Then perform the drained
    migration, remove obsolete runtime paths, and update operational docs.
@@ -1682,3 +1732,15 @@ operation boundaries without modifying production state.
     Generic resume cannot clear it. Resolve the exact blocker with a human
     allowance for one more cycle, retry that resolution, and verify precisely
     one additional cycle is authorized with the full prior history retained.
+27. **Human decision inbox.** Commit a repair-limit blocker and a native approval
+    blocker on separate beads. Send each retained request to the same existing
+    Vizier, preserving worker links and the original native approval location.
+    Notification receipt cannot resolve either blocker or authorize repair.
+    Restart, replay events, and run hourly recovery without duplicate notices.
+    Lose a send result and reconcile it without resending. Change the required
+    decision, and verify one new revision; resolve a blocker before an old
+    notice arrives, and verify no stale request reopens it. Deliver a notice
+    while Vizier handles a human response and preserve both receipts and the
+    response. Pause before issuance: the notice remains pending and readable,
+    and resume revalidates it. An unavailable Vizier remains a visible delivery
+    problem without replacement task creation; unrelated work continues.
