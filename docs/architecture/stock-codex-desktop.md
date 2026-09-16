@@ -5,6 +5,8 @@ the native task tools in an unmodified public Codex Desktop installation.
 Fulcrum continues to decide workflow policy in fresh CLI processes, with Beads
 as its only durable workflow store. A local MCP server exposes those processes
 to agents; a small Unix-socket broker holds connections, waits, and timers.
+Required, trusted Codex command hooks supply lifecycle observations, restore
+role context, and capture native tool results through the same fresh processes.
 
 Users who do not want the experimental WebSockets/App Server API should retain
 Fulcrum's intake, implementation, review, and delivery workflow inside Desktop.
@@ -76,8 +78,10 @@ versions.
 The native task tools' callable descriptions and argument schemas were
 inspected. A read-only `list_projects` call succeeded and returned saved project
 IDs, paths, hosts, and Git-repository flags. Task creation, mutation, and
-long-wait tests were not performed while authoring this design. The schemas
-establish which arguments can be expressed, not successful end-to-end behavior.
+long-wait tests were not performed while authoring this design. Required hook
+behavior has been checked against documentation, not exercised in Desktop. The
+schemas establish which arguments can be expressed, not successful end-to-end
+behavior.
 
 During inspection, the bundled `codex_app` MCP initially failed because Desktop
 had not supplied `CODEX_APP_TOOLS_PIPE_PATH`. The user rebooted, after which the
@@ -91,6 +95,12 @@ Bootstrap requires callable `create_thread`, `send_message_to_thread`,
 MCP. It checks required argument fields and accepted result shapes. An omitted
 or unsupported required model/effort pair is a visible failure, never a
 substitution.
+
+Bootstrap also requires trusted `SessionStart`, `UserPromptSubmit`,
+`PreToolUse`, `PostToolUse`, `Stop`, and `Interrupt` command hooks. There is no
+supported mode without hooks. A verified installation is still subject to
+individual missed callbacks, process failures, and uncertain native effects;
+those use the recovery protocol below rather than an alternate runtime.
 
 ### Mapping the existing runtime
 
@@ -106,13 +116,14 @@ automation to compensate for a missing task tool.
 | Resolve projects | `list_projects`; validate exact root and host. No observed native project-creation tool exists, so bootstrap guides the user to add a missing saved project. |
 | Set a worker's actual cwd | No arbitrary existing-worktree parameter. Create under the saved project with `environment.type=local`, then use verified absolute Tollgate worktree paths. |
 | Configure allowed roots or permissions per task | No corresponding create-task fields. Validate access under the user's Desktop configuration and report missing access explicitly. |
-| Deliver role instructions | Put the complete cooked role contract in the native user-visible prompt. Hook-provided developer context is also available; its lifecycle contract must be specified before relying on it. |
+| Deliver role instructions | Put the complete cooked role contract in the native user-visible prompt. Required hooks restore bounded, authoritative role context on startup, resume, compaction, and incoming prompts. |
 | Select model/effort | Use explicit `model` and `thinking` arguments derived from authorized Fulcrum configuration. Reject unavailable settings. |
-| Observe worker progress | Workers report through MCP; provider watchers publish existing-work events. No routine native task inventory polling. |
+| Observe worker progress | Workers report outcomes and meaningful progress through MCP; hooks capture lifecycle and native-result evidence; provider watchers publish existing-work events. No routine native task inventory polling. |
 | Inspect one unresolved task | `wait_threads` with one target and `timeoutMs=0`; use `read_thread` for scoped evidence when needed. Schedule later checks through broker timers. |
 | Recover a lost creation reply | Worker self-registration and correlated native history. Inventory search is a bounded exceptional recovery operation, never a normal polling loop. |
 | Archive/unarchive | `set_thread_archived`; retain the existing archive-once and manual-unarchive rules. Archival is not termination. |
 | Interrupt a worker or answer a native approval | No observed task-tool equivalent. Expose the specific Desktop task for user action and retain the blocker. Do not invent a response or start a conflicting writer. |
+| Observe a user interruption | The required `Interrupt` hook records the exact managed turn when delivered. It does not interrupt another task, pause Fulcrum, or prove all processes have stopped. |
 | Delete tasks/projects | No observed native deletion tool. Mark automatic deletion unavailable; retain/archive owned task evidence. Hard reset cannot claim native deletion occurred. |
 | Release subscriptions, inspect arbitrary terminals, measure native FD use | Desktop owns its runtime resources. Do not reproduce these App Server controls or infer their state from process-name guesses. |
 | Read output and accounting | Native summaries are scoped evidence and may be truncated. Missing turn IDs, detailed tool output, or usage accounting remain unknown. |
@@ -127,9 +138,9 @@ the same attention instructions as Weaver's handoff.
 
 The normal Executor-to-Warden-to-delivery path must work autonomously after
 setup. Optional lifecycle controls can report unavailable without preventing
-that path. If required workspace access, coordination tools, or outcome evidence
-are unavailable, bootstrap reports the affected capability and leaves admission
-closed. It never silently enables an experimental runtime.
+that path. If required workspace access, coordination tools, hooks, or outcome
+evidence are unavailable, bootstrap reports the affected capability and leaves
+admission closed. It never silently enables an experimental runtime.
 
 ### Task names are part of workflow usability
 
@@ -163,6 +174,7 @@ local transport continuity. Policy still belongs in fresh processes.
 | Thin MCP instance | Decode requests, invoke source-following CLI operations, and forward waits to the broker. No independent queue, ledger, or scheduler policy. |
 | Unix-socket broker | Own wait registrations, notification generations, timer heap, and bounded job scheduling. Keep reconstructible indexes in memory. |
 | Fresh CLI operation | Read current Beads/configuration, validate authority, commit transitions, compute prompts/actions, and perform provider operations. |
+| Codex command hook | Pass a scoped native event to a fresh CLI operation and return its hook response. No native dispatch, independent workflow storage, or resident policy. |
 | Marshal agent | Answer explicit judgment requests, execute claimed native actions exactly, and report results. |
 | Worker agent | Register, validate its assignment/workspace, do authorized work, report progress and outcomes, and execute authorized post-finish instructions. |
 | Provider watcher | Observe an existing provider resource, publish meaningful changes durably through fresh CLI operations, and notify the broker. |
@@ -186,6 +198,195 @@ timeout returns the operation locator without killing a possibly successful
 mutation. Beads-only inspection and repair remain possible with the broker
 stopped. Ordinary source edits require no installation, activation, remote push
 completion, or resident restart. Skills retain direct links to local master.
+
+## Required Codex hooks
+
+Hooks are a supported extension point in the stock application. The
+[documented contract][hooks-doc] includes developer context from session/prompt
+hooks, session and turn identifiers, tool invocation IDs and results, and an
+`Interrupt` event. `Stop` can request continuation; it is not a final completion
+notification. Hook definitions require native trust, multiple matching hooks
+can run, and tool coverage is incomplete. Interrupt command handlers have a
+three-second maximum. None of these observations establishes reliable delivery
+in this installation; readiness must exercise the selected paths.
+
+### Installation, routing, and source selection
+
+Extend `install_hook_config` in `src/fulcrum/install.py` and replace the narrow
+compaction-only behavior of `RoleService.hook_context` in `src/fulcrum/roles.py`
+with the contract here. Install one Fulcrum-owned command handler per required
+event and instance in the user's active Codex hook configuration, preserving
+unrelated handlers and other instances. User-level installation covers both
+projectless leaders and project-local workers. Match `SessionStart` sources
+`startup|resume|clear|compact`; use exact inspected tool names for tool hooks.
+Perform session/instance filtering inside all handlers, including events whose
+native matchers do not filter by task.
+
+Each handler runs the retained absolute source-following launcher with proposed
+argv `fulcrum hook handle --instance ABSOLUTE_PATH --input -`. Read the native
+JSON from stdin and emit only the event-specific hook JSON on stdout; diagnostics
+go to stderr. Use command hooks, not MCP-tool hooks, so startup and interruption
+reporting do not depend on an initialized MCP connection. Never execute strings
+from the event as shell commands. Configure synchronous handlers, a three-second
+timeout for `Interrupt`, and a ten-second timeout for the other required hooks.
+Set context output to at most 2,000 tokens. Readiness measures these budgets;
+timeouts must not be hidden by claiming the event was persisted.
+
+The launcher resolves local master for each invocation and pins its operation's
+source and interpreter. Handler implementation changes therefore require no
+hook reinstall, approval ritual, or resident restart. Changes to the actual
+hook configuration are exceptional setup changes: present the new definition
+for native trust review and re-probe affected capabilities. Do not implement a
+Fulcrum trust hash, overwrite native trust records, or bypass hook review.
+
+The instance comes from installed argv, never the task's cwd or arbitrary prompt
+text. Resolve `session_id` against authoritative work/control bindings; a task
+summary is only a lookup hint. Unknown sessions are a no-op except for initial
+identity evidence: an exact creation marker or the PreToolUse event for
+`register_worker`, with matching creation action and assignment token, can
+record a prospective worker binding against that instance's retained action.
+This is evidence, not permission to edit. `register_worker` still performs
+workspace and single-owner checks.
+Bootstrap binds its caller explicitly on `fc-system`; `$weaver` entry binds its
+existing task before substantive preparation. Those bindings include hook
+participation without granting leadership or worker authority prematurely.
+
+### Event responsibilities
+
+The following is Fulcrum's required behavior, not an assumption that a hook can
+enforce every native operation. Hooks never invoke native task tools themselves.
+
+| Event | Fulcrum operation and response |
+| --- | --- |
+| `SessionStart` | Read current assignment/control state and return bounded role context for an already bound task. Unknown tasks receive no Fulcrum instructions. Include assigned worktree, authority, phase, pause state, and exact pending protocol steps. |
+| `UserPromptSubmit` | Record the managed turn, validate any action marker, acknowledge matched delivery, and provide current protocol context. A new worker's marker records prospective identity only. An ordinary human prompt never creates authority merely by mentioning an action ID. |
+| `PreToolUse` | Associate covered Fulcrum MCP entry calls with native session/turn evidence. For native coordination mutations, validate the one claimed attempt and exact arguments, then bind `tool_use_id` before execution. Return a native deny decision on a known mismatch; do not rewrite calls or approve permissions. |
+| `PostToolUse` | For a bound native invocation, record its result through the shared action-result transition and notify the broker. Return without replacing or hiding the tool output. Do not convert ordinary tool activity into worker progress or successful role outcomes. |
+| `Stop` | Record a stop attempt and run the bounded missing-report correction below. Notify the broker of a due completion check; never declare final native completion or release a worktree. |
+| `Interrupt` | Record interruption of the identified managed turn. Preserve issued effects, ownership, and reservations. Return without requesting continuation, cleanup, or a change to workflow pause. |
+
+Context is compiled from current authoritative state, not replayed wholesale
+from the original work description. Keep approved scope as data and include its
+locator; do not promote raw intake, arbitrary prompt text, or tool output into
+developer instructions. After finish, context describes the retained reporting
+permission and forbids further edits. A new source commit may refresh policy
+instructions but must not rewrite already-issued native arguments.
+
+`PermissionRequest`, `SessionEnd`, and subagent hooks are not required or
+installed by this design. Approvals remain human/native policy decisions;
+session disposal is not role completion; native worker tasks are not subagents.
+Tool guards cover the inspected native coordination mutations and selected
+Fulcrum entry calls, not arbitrary shell parsing or filesystem isolation.
+
+### Identity, acceptance, and duplicate observations
+
+Native messages and creation prompts start with one machine-readable JSON line
+under the literal prefix `Fulcrum-Action: `. Its object contains `instance`,
+`record_id`, and `action_id`; creation also carries `assignment_token`.
+Invocation records supply the attempt ID without changing the action's
+fixed prompt on retry. Validate marker values against retained arguments and
+intended recipient before acknowledging delivery. A marker from another instance
+or an unmatched marker grants nothing. Never infer an action from a title or parse
+prose to choose a mutation. Scheduled prompts use their retained schedule action
+marker and are validated against the current leader and schedule binding.
+
+Lifecycle observations carry the native session and, when supplied, turn ID.
+Tool observations also retain `tool_use_id`, native tool name, and normalized
+arguments/result. Key tool-event deduplication by session, turn, tool-use ID,
+and event name; key prompt and interruption acceptance by session, turn, and
+event name. Use structured values or literal tuples, not content hashes. Store
+the resulting input/result on the owning bead using the same transition and
+projection rules as other events. Equal duplicate input returns the saved
+result; conflicting input retains a diagnostic conflict without overwriting
+accepted evidence. Context-only reads allocate no durable event. Repeated Stop
+callbacks retain a bounded per-turn observation and correction state, not an
+unbounded receipt per callback.
+
+Admission-call observations are bounded handshake metadata: retain at most one
+unconsumed invocation per actor, keyed by request ID, until the corresponding
+MCP entry consumes it or scoped recovery settles it. Reject a competing request
+instead of overwriting that binding. A repeated callback returns its acceptance;
+an older consumed
+binding cannot authorize a new request. Overwrite only consumed handshake
+metadata, retaining workflow decisions in their ordinary transition receipts.
+An unchanged wait renewal therefore adds no historical hook event or receipt.
+Native mutation results and unresolved invocation evidence are never pruned as
+handshake metadata.
+
+Hook delivery has no assumed total order or replay guarantee. A late callback
+may add evidence to its old assignment/attempt but cannot change current
+ownership, clear a newer blocker, or supply authority for another turn. Store
+turns by native ID; do not order opaque IDs or let a delayed callback overwrite
+the current turn. Fulcrum MCP admission calls (`register_worker`,
+`wait_for_instruction`, and `claim_action`) require a matching invocation
+observation from their `PreToolUse` hook before authorizing new work, correlated
+by actor and stable request ID in the MCP arguments. This also supplies turn
+evidence when initial prompt
+delivery preceded binding. A missing observation returns a hook prerequisite;
+reporting, saved-result replay, diagnostics, pause, and recovery remain
+available. Do not hold a writer lock while waiting for another hook or an agent.
+
+Each hook mutation follows the detached-operation mechanism. A deadline may
+expire while its operation continues; only a verified Beads commit is accepted
+delivery. The broker registry, temporary files, and spawned process are not
+durable substitutes. If the event is lost before acceptance, normal outstanding
+action checks, worker deadlines, and hourly recovery retain the unresolved work.
+In particular, interruption persistence must not delay or veto native Stop.
+
+### Native invocation and result capture
+
+The explicit agent claim remains the authorization point. A native mutation's
+`PreToolUse` handler finds the actor's current claim awaiting execution, verifies
+tool/arguments, retained authority, and applicable pause/replacement fences,
+then commits its native invocation identity. Deny a call with no matching claim,
+changed arguments, or a second distinct tool-use ID. A repeated callback for the same ID can
+return its recorded decision; that is not authorization to invoke the mutation
+again. Expired leadership permits result recovery, not a new invocation. Save a
+deny decision as an intended hook response, not proof that Desktop applied it.
+Only a correlated native rejection establishes pre-execution failure; a lost
+hook response can still leave the action uncertain. After an actor reports an
+uncertain result, unrelated actions may proceed through a new claim, but the old
+attempt and reservation remain unresolved and cannot be reissued.
+
+On normal return, `PostToolUse` calls the same result validator as
+`report_action_result`. The validator derives action/attempt identity from the
+recorded invocation, checks returned IDs and result shape, and commits the
+accepted effect before waking dependents. It records tool errors as evidence;
+an error is not automatically proof of no external effect. An unknown shape
+retains uncertainty. Agent reports remain mandatory and idempotent: hook and
+agent observations of the same normalized result converge on one effect; an
+additional uncertainty report cannot downgrade proven success, and conflicting
+concrete outcomes require reconciliation. Hook evidence may settle an old
+attempt without renewing the actor's expired authority.
+
+A missing pre-hook or post-hook is never evidence of rejection or success.
+Supported tool paths and failure behavior must be probed, including nested
+code-mode calls. Hook failures cannot provide a universal enforcement boundary;
+explicit claims, cooperative agent instructions, registration, and exact
+postconditions remain necessary. Known broken hook configuration closes new
+admission until repaired; one missed result callback leaves its effect subject
+to normal reporting/reconciliation rather than globally pausing the instance.
+Unmatched results remain scoped diagnostics, not permission to adopt a task.
+
+### Bounded correction at normal turn exit
+
+When an authorized worker attempts to end without its required finish or a
+claimed native result report, the `Stop` handler may return one continuation
+asking it to settle that exact obligation through MCP. Commit the correction
+claim before returning it. Track the allowance by assignment and obligation,
+not only native turn ID, so a hook-created continuation cannot reset the budget.
+Honor `stop_hook_active` as an additional veto. The correction may report a
+blocker or uncertainty; it may not retry a native mutation, invent an outcome,
+or resume source edits after finish.
+
+No correction is issued when Fulcrum is paused, hook readiness is broken, the
+turn was interrupted, the worker is awaiting human input, or no immediate
+reporting correction is possible. Marshal idle/wait behavior is never sustained
+by a Stop-hook continuation loop. If the one correction is lost or ineffective,
+retain the missing-report obligation for targeted recovery. Return neutral hook
+JSON when allowing exit. A Stop callback, including one that allows exit, is
+only a prompt for native inspection: another hook or a queued message may still
+continue the task. Keep the exact-task completion and process-cleanup gates.
 
 ## Beads commit boundaries
 
@@ -270,9 +471,9 @@ growth without silently losing deduplication evidence.
 
 ### Concurrency and capacity
 
-All Fulcrum mutations, including MCP, watcher, recovery, and operator commands,
-use the same lock. Direct edits to reserved workflow metadata are break-glass
-operations. This is the existing trusted local-user model, not exclusion against
+All Fulcrum mutations, including MCP, hook, watcher, recovery, and operator
+commands, use the same lock. Direct edits to reserved workflow metadata are
+break-glass operations. This is the existing trusted local-user model, not exclusion against
 an arbitrary process writing Beads or Git behind Fulcrum's back. Observed native
 assignee conflicts fence the affected bead for reconciliation.
 
@@ -292,9 +493,9 @@ committed reservation or its absence, never a counter/work-row disagreement.
 
 ### Events and cursors
 
-Store each meaningful worker or watcher event on its authoritative work bead
-before acknowledging publication. Workers use stable request IDs. Watchers use
-their provider's stable event ID when available; snapshot watchers persist a
+Store each meaningful worker, hook, or watcher event on its authoritative work
+bead before acknowledging publication. Workers use stable request IDs. Watchers
+use their provider's stable event ID when available; snapshot watchers persist a
 locally allocated event ID in the same work-bead update as the snapshot. Under
 the lock, compare the observation with the latest accepted snapshot for that
 resource. Equal state returns the saved acceptance; changed state receives a new
@@ -341,6 +542,7 @@ external operations. It does not promise exactly-once native task execution.
 | Summary or historical receipt write failed | Recreate it from the authoritative transition; no workflow replay. |
 | Event processing committed but publisher missed acknowledgment | Repeated event ID returns its recorded acceptance/result. |
 | Agent disappeared before claiming an action | The pending action remains eligible for an authorized actor. |
+| Hook saw a result but persistence failed | Keep the claimed effect unresolved; accept the agent's report or inspect exact postconditions. Never infer success from hook execution alone. |
 | Native effect may have happened | Preserve issuing/uncertain state and inspect its exact locator. Never reset it to pending on a timeout. |
 | Beads is unavailable | Acknowledge no new event or outcome; start no new external action. Preserve accessible diagnostics and return a retryable failure. |
 
@@ -361,6 +563,7 @@ and action envelope; managed workers use MCP for reports.
 | `claim_action` | Revalidate a pending action and durably mark its execution attempt before an external call. |
 | `report_action_result` | Record success, definitive rejection, or uncertainty and compute dependent work. |
 | `marshal_decide` | Validate bounded judgment against the supplied scope and current state; commit accepted decisions independently by bead. |
+| `hook handle` (CLI only) | Validate a native hook event, route it to the shared transition/context handlers, and return event-specific hook JSON. It does not expose an agent-callable hook-identity override. |
 
 Every mutating request includes a stable request ID, actor task ID, and relevant
 assignment/leadership token. The MCP instance derives caller identity from its
@@ -368,6 +571,11 @@ Desktop-provided session context where available; otherwise it requires the
 explicit native ID and checks it against registration. Tokens prevent accidental
 stale operations in the cooperative model; they are not a security boundary
 against another process controlled by the same local user.
+
+For admission calls, also match the hook-recorded native invocation by actor and
+request ID. Hook-originated observations use the native identity and retained
+binding instead of manufacturing an agent ownership token. They may add evidence
+to a retained attempt but cannot grant a fresh assignment or execute an action.
 
 An action contains these fields. Complete prompts are stored without ellipses;
 the small example illustrates the shape only.
@@ -381,7 +589,7 @@ the small example illustrates the shape only.
   "tool": "send_message_to_thread",
   "arguments": {
     "threadId": "marshal-thread-id",
-    "prompt": "Fulcrum action random-action-id: call wait_for_instruction.",
+    "prompt": "Fulcrum-Action: {\"instance\":\"/absolute/instance\",\"record_id\":\"work-bead-id\",\"action_id\":\"random-action-id\"}\nCall wait_for_instruction.",
     "model": "configured-marshal-model",
     "thinking": "configured-marshal-effort"
   },
@@ -409,11 +617,13 @@ returns status and reconciliation instructions, not permission to resend. A
 definitive rejection permits a fresh recorded attempt after its cause is fixed.
 An ambiguous error is uncertain even if its message sounds like a timeout.
 
-Every native message and creation prompt carries its action ID as literal
-content. The recipient acknowledges that ID through MCP before acting on the
-message. Schedule prompts carry their creation ID and instance marker. These are
-correlation markers, not native idempotency keys. The saved result-reporting
-instructions include record ID, action ID, attempt ID, request ID, and token;
+Every native message and creation prompt carries the structured marker defined
+above. The recipient hook acknowledges matching delivery; the recipient's MCP
+entry also acknowledges it idempotently before acting, covering a missed hook.
+Schedule prompts carry their creation ID and instance marker. These are
+correlation markers, not native idempotency keys. Acknowledgment never implies
+the requested work ran. The saved result-reporting instructions include record
+ID, action ID, attempt ID, request ID, and token;
 the actor must not reconstruct them from prose or replace them on retry.
 
 Successful `finish` transfers workflow ownership. It also grants the old worker
@@ -429,23 +639,27 @@ therefore requires registration before repository work. The complete role prompt
 includes instance, work bead, creation action, assigned role, exact workspace,
 assignment token, model/effort, and reporting instructions.
 
-The creator immediately reports `threadId` and `hostId` through MCP before any
-unrelated action. Fulcrum binds them to the authoritative work/control record. A
-returned `clientThreadId` is retained as a pending setup locator and is never
+The creation result hook records `threadId` and `hostId` when delivered. The
+creator also immediately reports them through MCP before any unrelated action;
+both paths use the same idempotent binding transition. Fulcrum binds them to the
+authoritative work/control record. A returned `clientThreadId` is retained as a
+pending setup locator and is never
 passed to a tool requiring `threadId`. Registration by the new worker can finish
 the binding even if the creator never receives a final creation response.
 
 The registering worker obtains its native task ID from supported session context
-or `CODEX_THREAD_ID`; it may not invent an ID from a title. Registration
-verifies the exact creation action, role, project/host, assignment, and
+or `CODEX_THREAD_ID`, checked against its admission-call hook evidence; it may
+not invent an ID from a title. Registration verifies the exact creation action,
+role, project/host, assignment, and
 workspace evidence. One native task can win that assignment. A second claimant
 records a conflict and receives no permission to edit. Duplicate native tasks
 are possible after an uncertain external boundary; duplicate authorized workers
 are not.
 
-If creation is uncertain and no worker registers, recover through the retained
-locator and a bounded native inventory/history search for the exact creation
-marker. A title alone, truncated summaries, or absence from a recent-task list
+If creation is uncertain and no worker registers, first inspect retained hook
+results and prospective worker identity, then use the retained locator and a
+bounded native inventory/history search for the exact creation marker. A title
+alone, truncated summaries, or absence from a recent-task list
 cannot establish absence. Ambiguity remains scoped recovery with no replacement
 creation. The Desktop surface lacks a client-supplied creation idempotency key;
 the design does not invent one.
@@ -453,7 +667,9 @@ the design does not invent one.
 ### Settling other native effects
 
 An uncertain action keeps its reservation and dependent work blocked until
-positive evidence settles it. Read-only inspections can be retried; they do not
+positive evidence settles it. Validated hook-captured results use the same
+evidence rules as agent-reported results; a callback alone proves no effect.
+Read-only inspections can be retried; they do not
 authorize retrying the mutation they inspect.
 
 | Effect | Settlement evidence and retry rule |
@@ -622,10 +838,10 @@ triggers; the durable Fulcrum pause stops workflow actions from every entry poin
 Readiness verifies this distinction inside and outside an MCP wait. It does not
 require Desktop Stop to suppress future scheduled runs or messages. Native
 interruption observations improve diagnosis without becoming a prerequisite for
-durable pause. The documented `Interrupt` hook supplies a turn ID, while `Stop`
-can request continuation and therefore is not by itself proof of final native
-completion. Hook integration and delivery guarantees require their own explicit
-contract and live checks.
+durable pause. The required `Interrupt` hook supplies turn-specific evidence
+under the hook acceptance contract. An individual missed callback leaves the
+reason unknown; it does not change the agreed semantics or waive readiness's
+requirement for a working hook installation.
 
 ## Reporting, targeted checks, and delivery
 
@@ -635,7 +851,9 @@ progress. A tool that runs longer may delay reporting; deadline expiry requests
 inspection, not a fabricated failure or duplicate worker.
 
 After an accepted finish, checks of that exact native task protect handoff and
-cleanup. The first check is immediate. Unresolved checks use delays of 5, 15,
+cleanup. The first check is immediate. A Stop/Interrupt observation can also
+make a targeted check due, coalescing with the retained check rather than
+creating another polling chain. Unresolved checks use delays of 5, 15,
 45, 135, then 300 seconds, capped at 300 seconds. An accepted new progress event
 resets the reporting deadline and ends the obsolete missing-report check. Each
 pending check retains its purpose, target, attempts, and next due time on the
@@ -649,11 +867,14 @@ is retained as observation context; it is distinct from Beads event progress.
 Absence of newly returned final text does not prove a task is running or
 complete.
 
-Accepted completion evidence is a successful native snapshot identifying the
-exact task and explicitly reporting that its current turn is no longer running,
-with the registered assignment identified in its observed history. When a turn
-ID is available, retain and match it. Otherwise require the registered role's
-completion acknowledgment plus a current non-running snapshot and no unresolved
+Stop, Interrupt, and successful PostToolUse reports are not final native
+completion. Accepted completion evidence is a successful native snapshot
+identifying the exact task and explicitly reporting that its current turn is no
+longer running,
+with the registered assignment identified in its observed history. Retain the
+hook-observed turn ID and match it whenever the native snapshot exposes one.
+When the snapshot omits it, require the registered role's completion
+acknowledgment plus a current non-running snapshot and no unresolved
 continuation action. A final-text snippet alone is insufficient. Unknown status,
 per-target errors, ambiguous history, and missing targets remain unknown.
 
@@ -767,17 +988,28 @@ resource.
    requires it; a full application restart is a reported exceptional
    prerequisite, not an ordinary update step. Resume the same bootstrap record
    afterward.
+   Install the six required command hooks with stable absolute launcher argv,
+   preserving unrelated and other-instance definitions. Present any native hook
+   trust prerequisite and verify effective configuration plus observed callback
+   execution; a file on disk is not evidence that Desktop loaded or trusted it.
+   Retain exact installed definitions and probe results on `fc-system`, without
+   a configuration hash. Hook verification is required even if MCP is healthy.
 3. Inspect callable native tools and run read-only connectivity checks. Explain
    exact missing fields or tools. Discover saved projects; guide the user
    through adding a project if the native tool surface cannot create it.
 4. Present the explicit coordination authorization: native task creation and
    messaging for admitted work, configured model/effort values, saved-project
-   local targeting with Tollgate worktrees, and hourly same-task recovery. The
-   user's bootstrap request supplies this scope; request only missing choices or
-   permissions Desktop itself requires.
+   local targeting with Tollgate worktrees, managed-task hook observations and
+   bounded reporting corrections, and hourly same-task recovery. Disclose that
+   Desktop Stop interrupts one turn while "pause Fulcrum" durably pauses new
+   coordination. The user's bootstrap request supplies this scope; request only
+   missing choices or permissions Desktop itself requires.
 5. Merge supported persistent per-tool approval settings for Fulcrum MCP and the
    native coordination tools. Verify effective settings after reconnection. Do
    not expand filesystem permissions or disable the sandbox as a side effect.
+   Native tool approvals and native hook trust are separate prerequisites;
+   satisfying one never substitutes for the other. Fulcrum does not install a
+   PermissionRequest hook to answer approvals.
 6. Create or recover projectless local Marshal and Vizier tasks. Their complete
    initial prompts require registration against the bootstrap action before
    performing leadership work. Vizier completes readiness and waits for human
@@ -792,6 +1024,13 @@ Bootstrap explicitly authorizes the named native operations in its instructions;
 it does not expect an agent to infer permission to create user-visible tasks.
 Model configuration is confirmed as the user's desired configuration when not
 already established. Both leader and worker prompts retain that authorization.
+
+Before creating leaders, the bootstrap caller is explicitly bound to its
+retained bootstrap request and verifies a covered Fulcrum admission call's
+PreToolUse observation. Only disposable probe actions and bootstrap infrastructure
+actions are eligible while readiness is incomplete. A newly registered leader
+can help finish probes but cannot admit product work until all gates pass. This
+avoids requiring ready product coordination to establish readiness itself.
 
 The native task tools are bundled under `codex-app-tools`. Supported per-tool
 approval overrides allow creation, messaging, and schedule management to run
@@ -821,6 +1060,8 @@ preserving fields unrelated to this request; never write scheduler files.
 A bootstrap call may return setup accepted with a remaining prerequisite. That
 does not mean ready. Its retained control record determines the next step after
 credentials, approvals, or a required MCP restart are supplied.
+Hook trust or hook-loading prerequisites likewise resume the same record;
+they never authorize replacement leader creation or a duplicate schedule.
 
 ### Replacing a standing Marshal
 
@@ -868,7 +1109,7 @@ document.
 ---
 name: fulcrum-bootstrap
 description: Set up or repair Fulcrum on stock Codex Desktop, including local
-  infrastructure, MCP, leadership tasks, tool approvals, and hourly recovery.
+  infrastructure, MCP, trusted hooks, leadership tasks, and hourly recovery.
 ---
 
 Inspect the retained checkout and existing instance, then run the deterministic
@@ -879,13 +1120,17 @@ Use returned instructions; do not recreate policy or setup state yourself.
 
 This setup authorizes the specified Marshal/Vizier tasks, configured worker task
 creation and messaging, local-project targeting with assigned Tollgate worktrees,
-required persistent tool approvals, and one hourly follow-up on Marshal. Confirm
-missing model choices and explain the scope of each approval configuration.
+required persistent tool approvals, managed-task hooks with bounded reporting
+corrections, and one hourly follow-up on Marshal. Confirm missing model choices
+and explain the scope of each approval configuration. Complete native hook trust
+review through the supported user flow; do not bypass it. Explain that Desktop
+Stop ends the current turn and "pause Fulcrum" durably pauses coordination.
 
 For every returned native action, claim it, execute its exact arguments once,
 then report the result through Fulcrum MCP. Record returned task and schedule IDs
-immediately. Register leaders before they act. Resume retained uncertain steps
-through inspection; never create replacements merely because a reply was lost.
+immediately, even when a hook also captured them. Register leaders before they
+act. Resume retained uncertain steps through inspection; never create
+replacements merely because a reply was lost.
 
 Guide the user through prerequisites that supported tools cannot perform. Do not
 start an experimental runtime, change unrelated settings, or claim readiness
@@ -904,22 +1149,31 @@ failures, required user input, or meaningful completed work.
 
 ## Feasibility checks and operational evidence
 
+Before the runtime rewrite or production state migration, use a disposable
+instance to prove required hook loading/trust, identity fields, native-call
+coverage, result shapes, and turn-completion observation. A minimal source-
+following probe handler is sufficient for this first gate; it does not claim
+the complete workflow is ready. Record exact observed payloads after removing
+unrelated/private content. A failed native capability produces a bounded
+feasibility report before committing to a destructive cutover.
+
 The first assembled-product check crosses the actual boundary: a stock Desktop
 Marshal coordinating a registered probe worker parks in Fulcrum MCP; a separate
 disposable Weaver task commits prepared scope, executes any returned native wake
 instruction, and Marshal receives that exact work once. This check includes real
-Beads persistence, the Unix-socket broker, two MCP clients, and native Desktop
-tools. Component doubles do not establish this behavior.
+Beads persistence, the Unix-socket broker, two MCP clients, required hooks, and
+native Desktop tools. Component doubles do not establish this behavior.
 
 Bootstrap's readiness probe uses disposable control probe records, not product
-work admitted outside Weaver. It verifies native creation/registration,
-messaging, worker access to a disposable Tollgate worktree, report/result
-delivery, explicit completion observation, and the required long-wait duration.
+work admitted outside Weaver. It verifies required hook observations and trust,
+native creation/registration, messaging, worker access to a disposable Tollgate
+worktree, report/result delivery, explicit completion observation, and the
+required long-wait duration.
 Retain probe task IDs and clean them through observed archive/cleanup actions.
 Initial full setup is not ready while the long-wait probe is outstanding. On
-rerun, preserve already verified steps unless effective tool schemas,
-configuration, or connection behavior changed; a failed step never inherits an
-earlier success silently.
+rerun, preserve already verified steps unless effective tool schemas, hook
+definitions/trust, configuration, or connection behavior changed; a failed step
+never inherits an earlier success silently.
 
 These are manual compatibility checks on a disposable instance. They do not
 restore the retired expensive live harnesses or make ordinary code edits run
@@ -928,6 +1182,10 @@ external providers. The normal repository check remains provider-independent.
 | Required observation | Failure consequence |
 | --- | --- |
 | Native task tools callable with required schemas | Admission stays closed; report missing tool/field or MCP startup error. |
+| All six command hooks load, are trusted, and execute for projectless leaders and local-project workers | Admission stays closed; report the exact trust, loading, identity, or handler failure. |
+| Direct and nested native calls expose matching pre/post invocation IDs and parseable results | Admission stays closed; do not promise result capture for an unobserved path. |
+| Startup/resume/compaction restore bounded current role context; initial prompts and resumed turns acquire hook admission evidence | Refuse affected task admission; never authorize work from stale context or cwd alone. |
+| Hook deadlines, duplicate callbacks, missed results, and one bounded Stop correction preserve outstanding effects | Report hook protocol failure; no blind retry or completion inferred from callback receipt. |
 | Thirty-minute wait returns an event promptly and renews before timeout | Report long-wait capability failure; no silent short polling substitute. |
 | Another MCP client can report while Marshal waits | Report transport concurrency failure; do not serialize the whole instance behind a parked request. |
 | Native IDs and assignment can be registered before worker edits | Refuse dispatch readiness. |
@@ -947,11 +1205,18 @@ ticks; it does not claim an unmeasured speedup.
 Diagnostics report accepted transition time, source commit, Beads call count and
 duration, broker notification time, action claim/result, native IDs, wake
 latency, lease state, oldest unhandled event, deadlines, and projection
-failures. Logs are bounded diagnostic evidence, not replay state. Failed work
-must not abort discovery or completion of unrelated work. Monitor the age of
-pending actions, not merely whether the socket answers.
+failures. Hook diagnostics add event/session/turn/tool-use identity, source,
+latency, committed acceptance or timeout, correction allowance, and effective
+trust/configuration failures. Do not log full unrelated prompts, transcripts,
+or arbitrary tool output. Logs are bounded diagnostic evidence, not replay state.
+Failed work must not abort discovery or completion of unrelated work. Monitor
+the age of pending actions, not merely whether the socket answers.
 
 ## Cutover and ongoing maintenance
+
+Pass the disposable native-capability gate before fencing the existing instance
+or migrating its ledger. Scope probe hooks to that disposable instance. Do not
+attach the new hook protocol to old-runtime tasks that are still draining.
 
 Existing operations finish on their pinned source and existing transport. Fence
 new old-runtime admission, let active turns, pending approvals, provider work,
@@ -962,8 +1227,9 @@ is a drained transport cutover, not a permanent dual-backend mode.
 Under exclusive maintenance ownership, convert authoritative pending work to the
 single-record transition representation. Reconcile existing task/receipt facts
 before choosing authority; conflicting ownership remains fenced. Transfer
-standing IDs only if native inspection verifies them. Run stock Desktop
-bootstrap/readiness against the migrated instance, then retire Fulcrum's owned
+standing IDs only if native inspection verifies them. Install and trust the
+required handlers for the migrated instance, establish its caller/turn bindings,
+and run stock Desktop bootstrap/readiness, then retire Fulcrum's owned
 App Server connection/service and obsolete configuration. Remove only resources
 proven owned; never stop Desktop's own internal runtime. A failed cutover
 retains the maintenance fence and repair evidence.
@@ -978,7 +1244,34 @@ available from local master on the next operation. Replacing broker
 implementation or changing its state contract is exceptional maintenance: wait
 for safe transport handoff, preserve durable obligations, and re-register waits.
 An application policy change does not restart the broker, MCP instances, or
-agent turns.
+agent turns. Hook commands retain their stable launcher and obtain fresh policy
+on their next invocation; an already running hook operation retains its source
+lease. Remove the old owned compaction-only hook when installing the complete
+handler set, without removing another instance's handlers. Re-trust/re-probe only
+actual hook-definition changes, not ordinary handler implementation edits.
+
+### Implementation handoff
+
+Implement in dependency order, with each step's checks passing before the next:
+
+1. Capture disposable native/hook capability evidence and accepted result
+   shapes. Stop here on a missing required capability.
+2. Implement authoritative transitions, action attempts, hook observations, and
+   deduplication in the ledger/coordination layer. Cover crash boundaries with
+   local process fixtures, including lock inheritance and duplicate reports.
+3. Add the source-following hook command, event routing, context compilation,
+   and installation/trust diagnostics. Replace the current compact-only handler;
+   add direct and nested invocation fixtures, bounded Stop-correction checks,
+   and old-assignment/out-of-order-event cases.
+4. Implement CLI/MCP action handlers, broker waits/timers, registration, and
+   agent prompt changes. Keep existing provider validation/promotion semantics;
+   replace direct runtime dispatch in role/completion/leadership services.
+5. Assemble bootstrap and run the full disposable live scenarios below,
+   including long waits and actual heartbeat delivery. Then perform the drained
+   migration, remove obsolete runtime paths, and update operational docs.
+
+The normal repository check stays provider-independent. Live probe evidence is
+a separate release prerequisite, not a substitute for fault-injection coverage.
 
 ## Manual QA
 
@@ -988,9 +1281,9 @@ a scenario passed because its component tests passed. Inject failures at
 operation boundaries without modifying production state.
 
 1. **Complete setup and rerun.** Start from a retained checkout with no
-   instance. Configure infrastructure, MCP and approvals, register both leaders,
-   create the hourly heartbeat, and pass readiness. Rerun; retain the same
-   leader/schedule IDs and unrelated configuration. Missing project enrollment
+   instance. Configure infrastructure, MCP, hook trust, and approvals, register
+   both leaders, create the hourly heartbeat, and pass readiness. Rerun; retain
+   the same leader/schedule IDs and unrelated configuration. Missing project enrollment
    or credentials produces one exact prerequisite and resumes the same bootstrap
    record.
 2. **Partial bootstrap.** Lose each leader-creation response and the schedule
@@ -1076,3 +1369,40 @@ operation boundaries without modifying production state.
     a lost rename response, first-turn completion, and Desktop restart. Titles
     remain exact; recovery binds by native ID and never creates a replacement
     to fix a name. Missing or ineffective naming tools fail readiness.
+18. **Hook installation and isolation.** Exercise all six handlers in a
+    projectless leader, a saved-project worker, and an unrelated task. Only
+    retained Fulcrum bindings or valid initial action markers affect the ledger.
+    Preserve unrelated hooks and a second instance's handlers on rerun. Remove
+    trust, disable hooks, change a definition, and restart Desktop separately;
+    readiness reports the exact prerequisite. No task or schedule is recreated.
+19. **Context and first-turn identity.** Start a worker before its creator's
+    result arrives. Its initial marker can record identity but cannot grant
+    editing authority. Test registration after a missed prompt callback using
+    its admission-call hook, then test startup, resume, clear, and mid-turn
+    compaction. Current scope/authority/worktree are restored; raw intake is not
+    injected as developer policy. After finish, restored context grants only
+    retained reporting actions. Unrelated prompts and forged/mismatched markers
+    cannot acknowledge another action.
+20. **Native invocation capture.** Run creation, messaging, rename, archive,
+    and schedule mutation through both direct tools and code-mode nested calls.
+    Alter one claimed argument and attempt a second native invocation for the
+    same claim. Verify guard decisions and correlated native results. Drop the
+    pre-hook response after it commits a deny decision: the ledger cannot call
+    that definitive rejection without native evidence. Drop the post-hook,
+    kill it before/after persistence, and race its result with the agent report;
+    one normalized effect is accepted, with no duplicate binding or dispatch.
+21. **Exit correction and interruption.** Omit finish, omit an action result,
+    block on human input, pause Fulcrum, and end an idle Marshal in separate
+    trials. Only a correctable worker report receives one continuation. A new
+    native turn, compaction, duplicate callback, or lost correction response
+    cannot reset that obligation's allowance. Another hook that continues the
+    task cannot trick cleanup into treating Stop as completion. Interrupt during
+    a native effect and with Beads unavailable; the handler stays within its
+    deadline, never restarts the turn, and leaves effect recovery intact.
+22. **Hook ordering and freshness.** Deliver a late result after ownership
+    transfer, an old interruption after a newer turn, and duplicate callback
+    inputs after historical projection. Retain old evidence without modifying
+    current authority. Commit a handler policy change while a hook operation
+    runs: the next invocation uses local master with no reinstall/re-trust;
+    the older operation keeps its source. A broken required handler produces a
+    visible prerequisite while reports and read-only recovery remain usable.
