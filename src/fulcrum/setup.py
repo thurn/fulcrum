@@ -99,6 +99,14 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
         request_id=request.request_id,
         timeout=request.timeout,
     )
+    # The command launcher is a bootstrap and repair primitive, just like the
+    # recovery launcher. Provision it before consulting or stopping the resident
+    # so a damaged retained runtime cannot leave an otherwise discoverable
+    # installation without its operator entry point.
+    install_command_link(
+        instance.instance_root,
+        production=not instance.explicit_selection,
+    )
     created: list[str] = []
     capabilities: dict[str, Any] = {}
     prior_services = load_installed_services(instance.instance_root)
