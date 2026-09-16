@@ -186,18 +186,49 @@ automation to compensate for a missing capability.
 | Read output and accounting | Native summaries are scoped evidence and may be truncated. Preserve task/workflow token usage and API-equivalent cost reports through the hook-supplied transcript collector below; missing evidence stays explicitly partial or unknown. |
 | Wake a dormant Marshal | Agent-originated handoffs may send one authorized native message and end. Background changes require the separately verified event-triggered wake mechanism; hourly recovery cannot substitute for it. |
 
-All new work enters through `$weaver`. Internal CLI commands still perform
-registration, persistence, reconciliation, and delivery; direct terminal intake
-is removed from the supported product workflow. Watchers may update existing
-work but may not create new assignments. Vizier may resolve policy or activate
-previously authored work under its existing authority; that transition returns
-the same attention instructions as Weaver's handoff.
+New requests enter through `$weaver`, with one exception: `$bead` files small,
+understood incidental follow-ups through `report` without changing the reporting
+task's role or assignment. Preserve `fulcrum report` and expose the same operation
+through MCP for managed workers. Retain the problem, evidence, required change,
+acceptance checks, dependencies, and origin; deduplicate exact retries by
+`report_key`, rejecting changed input under the same key. Filing returns the bead
+ID and recorded state and commits attention for Marshal; it neither approves nor
+dispatches work, binds/renames the reporting task, nor requires it to execute a
+native handoff. Larger or unclear requests still use Weaver. Other direct
+terminal intake is removed. Watchers may update existing work but may not create
+new assignments. Vizier may resolve policy or activate previously authored work
+under its existing authority, returning the same attention as Weaver's handoff.
 
 The normal Executor-to-Warden-to-delivery path must work autonomously after
 setup. Optional lifecycle controls can report unavailable without preventing
 that path. If required workspace access, coordination tools, hooks, or outcome
 evidence are unavailable, bootstrap reports the affected capability and leaves
 admission closed. It never silently enables an experimental runtime.
+
+### Deliberate product simplifications
+
+These choices supersede the corresponding existing contracts:
+
+- Remove automatic brain/ledger and configuration publication, including the
+  five-minute cadence, startup/shutdown flushes, and autonomous publication
+  retries. Retain explicit `ledger sync`, `ledger status`, and `config sync`;
+  pending remote changes remain visible until explicitly published. Required
+  project source synchronization and explicitly requested plan publication keep
+  their existing delivery/approval semantics.
+- Remove curated memory commands, memory records, context injection, and memory
+  export. Current assignment context and approved plans still come from Beads;
+  startup/compaction restoration does not depend on curated memory.
+- Make plan review prompt-level work: before finalizing a substantial plan,
+  instruct Weaver to run a subagent to review it, provide the draft and relevant
+  requirements, and address the findings. Remove dedicated `plan review`
+  commands, review-task registration, perspective-specific receipts, and review
+  waiver gates. Human/Vizier scope approval remains; it no longer requires those
+  review records. Subagents use native delegation, not Fulcrum worker dispatch
+  or separate Fulcrum capacity reservations. Their usage follows the accounting
+  contract without double-counting native totals.
+- Remove `fleet replace` and its drain/interrupt replacement machinery. Retain
+  the explicit standing-Marshal recovery described below and normal same-task
+  repair; an unusable worker task remains an operator blocker.
 
 ### Task names are part of workflow usability
 
@@ -805,6 +836,7 @@ and action envelope; managed workers use MCP for reports.
 | `pause` / `resume` | Human/Vizier-authorized CLI/MCP transitions with stable request IDs and a reason. Pause returns the retained boundary hold plus active assignments/in-flight effects; resume revalidates held work without clearing independent fences. |
 | `register_worker` | Bind the native task/host ID to the exact creation or authorized continuation action and assignment before substantive work. A post-finish repair reuses the retained role task with a fresh assignment token; pre-finish CI repair retains its current assignment. |
 | `report_progress` | Persist meaningful progress and renew the assignment's reporting deadline. |
+| `report` | File one incidental follow-up with stable `report_key`, evidence, acceptance, dependencies, and origin; return its bead ID/state without changing the caller's assignment or granting dispatch. Also available through the `$bead` CLI path. |
 | `submit_candidate` | Warden only, before finish: retain exact reviewed source and local-check evidence, then submit or recover its provider candidate idempotently without transferring assignment ownership or granting promotion. |
 | `wait_for_ci_results` | Warden only, before finish: validate the exact submitted candidate and current assignment, register one pending MCP response, and return terminal CI evidence or an explicit blocker. No periodic `pending` responses. |
 | `finish` | Accept a role outcome, commit the transition, and return exact authorized follow-ups. Warden success requires passing CI for the exact reviewed source; blocked/failed outcomes retain unresolved delivery. |
@@ -815,9 +847,12 @@ and action envelope; managed workers use MCP for reports.
 | `hook handle` (CLI only) | Validate a native hook event, route it to the shared transition/context handlers, and return event-specific hook JSON. It does not expose an agent-callable hook-identity override. |
 
 Every mutating request includes a stable request ID, actor task ID, and relevant
-assignment/leadership token. The MCP instance derives caller identity from its
-Desktop-provided session context where available; otherwise it requires the
-explicit native ID and checks it against registration. Tokens prevent accidental
+assignment/leadership token. Incidental `report` filing also works from an
+unmanaged task and requires no managed binding or ownership token; its report key
+is the retry identity, and its caller identity is attribution, not work authority.
+The MCP instance derives caller identity from Desktop-provided session context
+where available; otherwise it requires the explicit native ID. Managed operations
+check that identity against registration. Tokens prevent accidental
 stale operations in the cooperative model; they are not a security boundary
 against another process controlled by the same local user.
 
@@ -1482,7 +1517,8 @@ agent instructions, with stale operations rejected by Fulcrum.
 Marshal judgment remains limited to ownership, priority, capacity, dependencies,
 overlap, deferral, policy application, recorded blockers, and usable outcomes.
 It may not invent worker settings, implementation instructions, or new policy.
-Vizier/human policy authority and existing plan-approval requirements remain.
+Vizier/human policy authority and plan scope approval remain, with prompt-level
+subagent review replacing the dedicated review workflow described above.
 Downstream prompts use the exact approved Weaver scope, never raw intake that
 could accidentally invoke Weaver again. Sage, Mason, and Justiciar receive their
 existing bounded roles; recovery does not silently relabel an agent human.
@@ -1914,6 +1950,9 @@ Implement in dependency order, with each step's checks passing before the next:
    Cover boundary pause, capacity retained during CI, release after final
    completion, pre-finish and post-finish same-task repair with their
    failed-cycle allowance, deferred archival, and the Vizier decision inbox.
+   Preserve incidental reporting and token/cost accounting, apply the deliberate
+   product simplifications above, and update role prompts and command contracts
+   together so removed features cannot remain as implicit prerequisites.
 5. Assemble bootstrap and run the full disposable scenarios below, including
    five-minute CI failure, enforced exit, restart recovery, and actual heartbeat
    delivery. Prepare and verify the destructive reset procedure. Under explicit
