@@ -4,6 +4,29 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 python_command=${FULCRUM_PYTHON:-python3.12}
 
+for argument in "$@"; do
+  case "$argument" in
+    -h|--help)
+      cat <<'EOF'
+usage: scripts/setup [SETUP OPTIONS]
+
+Provision dependencies, then run `fulcrum setup` from the retained checkout.
+
+Common options:
+  --input FILE          JSON setup input, or - for standard input
+  --instance PATH       absolute instance path
+  --config PATH         absolute authoritative configuration path
+  --non-interactive     fail instead of prompting for missing values
+  --request-id UUID     reuse the exact mutation request
+  --timeout SECONDS     bounded client wait (default: 30)
+  --json                emit a stable JSON result envelope
+  -h, --help            show this help without provisioning dependencies
+EOF
+      exit 0
+      ;;
+  esac
+done
+
 if ! command -v "$python_command" >/dev/null 2>&1; then
   echo "fulcrum setup: supported Python 3.12 is unavailable" >&2
   exit 2

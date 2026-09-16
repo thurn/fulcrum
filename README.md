@@ -126,7 +126,8 @@ an exact preview followed by explicit human confirmation:
 
 ```sh
 fulcrum recover inspect --instance INSTANCE --scope instance --json
-fulcrum reset --hard --yes --instance INSTANCE --json
+fulcrum service stop --instance INSTANCE --json
+fulcrum reset --hard --yes --actor human --instance INSTANCE --json
 scripts/setup --input setup.json --non-interactive --json
 fulcrum service status --instance INSTANCE --json
 ```
@@ -134,7 +135,8 @@ fulcrum service status --instance INSTANCE --json
 Hard reset removes enumerated Fulcrum-owned workflow resources and replaces the
 dedicated remote ledger history. It preserves ordinary brain Git documents/history,
 configuration, unrelated native tasks/projects/services, and provider resources not
-proven owned. It makes no claim about a hosting provider's physical retention.
+proven owned. It then bootstraps clean leadership and services; reset is replacement,
+not instance disposal. It makes no claim about a hosting provider's physical retention.
 Never run production reset from documentation alone; it requires a separate,
 explicit cutover instruction.
 

@@ -102,7 +102,8 @@ separate explicit human instruction, preserve the `recover inspect` inventory, t
 
 ```sh
 fulcrum recover inspect --instance INSTANCE --scope instance --json
-fulcrum reset --hard --yes --instance INSTANCE --json
+fulcrum service stop --instance INSTANCE --json
+fulcrum reset --hard --yes --actor human --instance INSTANCE --json
 scripts/setup --input setup.json --non-interactive --json
 fulcrum service status --instance INSTANCE --json
 fulcrum doctor --instance INSTANCE --json
@@ -113,4 +114,5 @@ registrations/workspaces, services, ledger state, and obsolete installation
 artifacts. It replaces dedicated remote ledger history and verifies fresh-clone
 absence while preserving ordinary brain Git history/documents/configuration and
 unrelated external resources. Hosting-provider physical retention is outside the
-claim boundary.
+claim boundary. Reset immediately bootstraps clean leadership and services; it is
+not a command for permanently disposing of an instance.

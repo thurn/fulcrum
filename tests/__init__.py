@@ -14,11 +14,7 @@ def _audit(event, args):
         if _python.get() is not None and args[1] == _python.get():
             return
         allowed = _launcher.get()
-        if (
-            allowed is not None
-            and args[0] == allowed
-            and args[1] == [allowed, "--json"]
-        ):
+        if allowed is not None and args[0] == allowed[0] and args[1] == allowed[1]:
             return
         raise AssertionError(f"Tests must mock external processes: {args[0]}")
     if event in {"os.system", "os.posix_spawn", "os.exec", "os.fork", "os.forkpty"}:
@@ -29,9 +25,10 @@ sys.addaudithook(_audit)
 
 
 @contextmanager
-def local_launcher_stub(script: Path):
+def local_launcher_stub(script: Path, arguments=None):
     """Allow precisely one copied launcher invoking its temporary shell stub."""
-    token = _launcher.set(str(script))
+    path = str(script)
+    token = _launcher.set((path, [path, *(arguments or ["--json"])]))
     try:
         yield
     finally:

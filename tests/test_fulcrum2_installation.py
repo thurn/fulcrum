@@ -390,6 +390,19 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertEqual(launched.returncode, 0, launched.stderr)
         self.assertEqual(launched.stdout, "<runtime>\n<launch-desktop>\n<--json>\n")
 
+    def test_setup_help_does_not_provision_dependencies(self) -> None:
+        script = Path(__file__).parents[1] / "scripts" / "setup"
+        with local_launcher_stub(script, ["--help"]):
+            result = subprocess.run(
+                [str(script), "--help"],
+                env={**os.environ, "FULCRUM_PYTHON": "/usr/bin/false"},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("without provisioning dependencies", result.stdout)
+
     def test_occupied_port_is_reported_without_killing_or_starting(self) -> None:
         service = InstalledService("dolt", "dev.fulcrum.test.dolt", self.root / "x")
         observation = ServiceObservation(
