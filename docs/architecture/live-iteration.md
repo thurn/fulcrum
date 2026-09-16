@@ -4,6 +4,27 @@ Fulcrum is developed using Fulcrum. Published master must become available to th
 next operation without interrupting the work that produced it. This is an
 architectural constraint, not an optional development optimization.
 
+## Master-only source invariant
+
+Fulcrum is not installable. `~/fulcrum` on master is the sole authoritative source
+of Fulcrum application behavior, role instructions, and skills. There is no
+post-change installation, packaging, deployment, copying, activation, or restart
+step that makes Fulcrum changes live. Dependency environments and service
+definitions are support infrastructure only and must not contain an independently
+authoritative copy of Fulcrum.
+
+All `~/.codex/skills/fulcrum-*` entries are direct absolute symlinks into
+`~/fulcrum/skills`. They never follow an instance-owned pointer, selected source,
+packaged data directory, or deployment snapshot. `skills-current` is forbidden.
+Because those links target master directly, skill edits are visible without any
+reconciliation after the link has first been created.
+
+The immutable source selected for one already-running operation is only a
+consistency lease over published master. It is not an installation or release and
+must not become a user-visible source location. New work observes the next
+published master automatically, while the resident preserves connection
+continuity.
+
 ## Boundaries
 
 The stable launcher selects one immutable source directory and interpreter before
@@ -75,9 +96,10 @@ and observed commits, rejected/pending activation, active operation sources,
 resident health, and stage timings. `service update --retry` retries a rejected
 candidate after repairing its environment.
 
-Normal activation must never install dependencies, restart the connection owner,
-interrupt an agent, or discard a pending approval. Dependency changes provision a
-separate environment; no running interpreter's environment is modified.
+Normal activation must never install Fulcrum or dependencies, restart the
+connection owner, interrupt an agent, or discard a pending approval. Dependency
+changes provision a separate environment; no running interpreter's environment is
+modified.
 
 ## Exceptional maintenance
 

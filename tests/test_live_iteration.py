@@ -330,14 +330,18 @@ class TransportAcrossActivationTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(0.001)
                     self.assertIn("77", resident.transport.pending_server_requests)
                     socket = resident.transport.websocket
-                    select_candidate(
-                        root,
-                        {
-                            "source": "new source",
-                            "python": sys.executable,
-                            "commit": "new",
-                        },
-                    )
+                    with patch(
+                        "fulcrum.install.master_source_root",
+                        return_value=Path(__file__).parents[1],
+                    ):
+                        select_candidate(
+                            root,
+                            {
+                                "source": "new source",
+                                "python": sys.executable,
+                                "commit": "new",
+                            },
+                        )
                     await ResidentTransport(root / "resident.sock").close()
                     await exchange(
                         root / "resident.sock",
@@ -389,25 +393,37 @@ class MaintenanceBoundaryTests(unittest.TestCase):
 
 
 class AssetSelectionTests(unittest.TestCase):
-    def test_user_skills_follow_selection_without_pinning_old_source(self):
+    def test_user_skills_always_link_directly_to_master(self):
         from fulcrum.install import HUMAN_SKILLS
         from fulcrum.activation import select_candidate
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            master = root / "fulcrum"
+            (master / "skills").mkdir(parents=True)
+            (master / "pyproject.toml").write_text("[project]\nname='fulcrum'\n")
+            for skill in HUMAN_SKILLS:
+                asset = master / "skills" / skill
+                (asset / "agents").mkdir(parents=True)
+                (asset / "SKILL.md").write_text("master")
+                (asset / "agents/openai.yaml").write_text("interface: {}")
+            legacy = root / "skills-current"
+            legacy.symlink_to(root / "sources/old", target_is_directory=True)
             for name in ("old", "new"):
                 source = root / "sources" / name
-                for skill in HUMAN_SKILLS:
-                    asset = source / "skills" / skill
-                    (asset / "agents").mkdir(parents=True)
-                    (asset / "SKILL.md").write_text(name)
-                    (asset / "agents/openai.yaml").write_text("interface: {}")
-                select_candidate(
-                    root,
-                    {"source": str(source), "python": sys.executable, "commit": name},
-                )
+                source.mkdir(parents=True)
+                with patch("fulcrum.install.master_source_root", return_value=master):
+                    select_candidate(
+                        root,
+                        {
+                            "source": str(source),
+                            "python": sys.executable,
+                            "commit": name,
+                        },
+                    )
             cleanup_sources(root, {"source": str(root / "sources/new")})
             for skill in HUMAN_SKILLS:
                 link = root / "codex/skills" / skill
-                self.assertEqual((link / "SKILL.md").read_text(), "new")
-                self.assertEqual(link.readlink(), root / "skills-current" / skill)
+                self.assertEqual((link / "SKILL.md").read_text(), "master")
+                self.assertEqual(link.readlink(), master / "skills" / skill)
+            self.assertFalse(legacy.is_symlink())

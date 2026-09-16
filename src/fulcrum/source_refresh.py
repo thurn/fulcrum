@@ -21,7 +21,6 @@ from fulcrum.install import (
     _package_contents,
     fulcrum2_service_definitions,
     install_fulcrum2_service_definitions,
-    installation_source_root,
     inspect_service,
 )
 from fulcrum.installation_service import (

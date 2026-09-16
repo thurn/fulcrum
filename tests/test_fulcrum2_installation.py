@@ -118,12 +118,23 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self,
     ) -> None:
         root = self.root / "skills"
-        executable = self.instance / "runtime" / "current" / "bin" / "fulcrum"
+        checkout = self.root / "fulcrum"
+        checkout.mkdir()
+        (checkout / "pyproject.toml").write_text("[project]\nname='fulcrum'\n")
+        for name in HUMAN_SKILLS:
+            skill = checkout / "skills" / name
+            (skill / "agents").mkdir(parents=True)
+            (skill / "SKILL.md").write_text(name)
+            (skill / "agents/openai.yaml").write_text("interface: {}")
+        executable = checkout / ".venv" / "bin" / "fulcrum"
         executable.parent.mkdir(parents=True)
         executable.write_text("#!/bin/sh\n", encoding="utf-8")
         executable.chmod(0o700)
         result = reconcile_fulcrum2_skills(
-            self.instance, production=False, skills_root=root
+            self.instance,
+            production=False,
+            skills_root=root,
+            source_root=checkout,
         )
         self.assertEqual(len(HUMAN_SKILLS), 9)
         self.assertEqual(len(result["installed"]), 9)
@@ -135,14 +146,22 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         broken.unlink()
         broken.symlink_to(self.root / "missing")
         repaired = reconcile_fulcrum2_skills(
-            self.instance, production=False, skills_root=root
+            self.instance,
+            production=False,
+            skills_root=root,
+            source_root=checkout,
         )
         self.assertIn(str(broken), repaired["installed"])
         conflict = root / HUMAN_SKILLS[-1]
         conflict.unlink()
         conflict.mkdir()
         with self.assertRaisesRegex(InstallationError, "real user skill directory"):
-            reconcile_fulcrum2_skills(self.instance, production=False, skills_root=root)
+            reconcile_fulcrum2_skills(
+                self.instance,
+                production=False,
+                skills_root=root,
+                source_root=checkout,
+            )
 
     def test_existing_setup_without_patch_preserves_yaml_bytes(self) -> None:
         self.config_path.write_text(

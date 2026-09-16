@@ -80,27 +80,15 @@ class InstalledService:
     definition: Path
 
 
-def package_root() -> Path:
-    return Path(__file__).resolve().parent
+def master_source_root() -> Path:
+    """Return the one authoritative Fulcrum source checkout."""
 
-
-def installation_source_root() -> Path:
-    """Return the retained source when present, otherwise the installed package."""
-
-    package = package_root()
-    candidate = package.parents[1]
-    if (candidate / "pyproject.toml").is_file() and (candidate / "skills").is_dir():
-        return candidate
-    return package
-
-
-def owned_skills_source() -> Path:
-    source = installation_source_root()
-    checkout_skills = source / "skills"
-    if checkout_skills.is_dir():
-        return checkout_skills
-    packaged = Path(sys.prefix) / "share" / "fulcrum" / "skills"
-    return packaged if packaged.is_dir() else package_root() / "skills"
+    source = Path.home() / "fulcrum"
+    if not (source / "pyproject.toml").is_file() or not (source / "skills").is_dir():
+        raise InstallationError(
+            f"canonical Fulcrum master checkout is unavailable at {source}"
+        )
+    return source
 
 
 def _replace_owned_link(source: Path, target: Path) -> None:
@@ -185,12 +173,12 @@ def reconcile_fulcrum2_skills(
     *,
     production: bool,
     skills_root: Path | None = None,
+    source_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Repair owned role links and the read-only compaction hook."""
+    """Link owned roles directly to the canonical master checkout."""
 
-    source = instance_root / "skills-current"
-    if not source.is_dir():
-        source = owned_skills_source().resolve(strict=True)
+    checkout = (source_root or master_source_root()).absolute()
+    source = checkout / "skills"
     root = (
         skills_root
         or (
@@ -228,7 +216,13 @@ def reconcile_fulcrum2_skills(
             target.unlink()
             removed.append(str(target))
 
-    executable = instance_root / "runtime" / "current" / "bin" / "fulcrum"
+    legacy_source = instance_root / "skills-current"
+    legacy_removed = False
+    if legacy_source.is_symlink():
+        legacy_source.unlink()
+        legacy_removed = True
+
+    executable = checkout / ".venv" / "bin" / "fulcrum"
     hook_config = root.parent / "hooks.json"
     hook_command: str | None = None
     if executable.is_file() and os.access(executable, os.X_OK):
@@ -245,6 +239,8 @@ def reconcile_fulcrum2_skills(
         "installed": installed,
         "unchanged": unchanged,
         "removed": removed,
+        "source": str(source),
+        "legacy_source_removed": legacy_removed,
         "hook": {
             "config": str(hook_config),
             "command": hook_command,

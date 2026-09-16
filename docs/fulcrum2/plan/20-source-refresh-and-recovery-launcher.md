@@ -2,6 +2,13 @@
 
 Status: implemented and validated.
 
+> **Normative override:** Fulcrum has no installed source or package to refresh.
+> `~/fulcrum` on master is the only behavior and skill source. Any “installation,”
+> “deployment,” or “installed pointer” language below is historical and cannot be
+> used to justify a copied Fulcrum artifact or a post-change installation step. See
+> the
+> [master-only source invariant](../../architecture/live-iteration.md#master-only-source-invariant).
+
 Dependencies: [17](17-recovery-and-human-resolution.md), [19](19-installation-and-service.md)
 
 Normative reading: [installed refresh](../design.md#implementation-boundaries), [recovery launcher](../contracts.md#installation-recovery-and-continuity-commands). Also follow the [index conventions](README.md#worker-contract) and [completed interface contracts](../contracts.md#10-complete-workflow-and-operator-interfaces).

@@ -164,6 +164,15 @@ accept `--limit N` (default 20, `0` means all) and `--cursor CURSOR` and return
 
 ### Installation, projects, and service
 
+“Installation” is retained below only as a legacy command-family label. Fulcrum
+itself is never installed: `~/fulcrum` on master is the sole behavior and skill
+source, and no command may create or select an independently authoritative copy.
+Setup may provision dependencies and service supervision, but an application,
+role, or skill change never requires setup, install, build, copy, deployment,
+activation, or restart. The
+[master-only source invariant](../architecture/live-iteration.md#master-only-source-invariant)
+overrides any historical wording elsewhere in this contract or its plans.
+
 | Command | Purpose and required input |
 | --- | --- |
 | `setup --input FILE` | Install/bootstrap from the configuration object below; no UI wizard required |

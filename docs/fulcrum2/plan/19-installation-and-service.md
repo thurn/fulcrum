@@ -2,6 +2,13 @@
 
 Status: implemented and validated.
 
+> **Normative override:** “installation” in this historical plan means external
+> dependency/service bootstrap only. Fulcrum code and skills are never installed,
+> copied, packaged, or deployed. They always come directly from `~/fulcrum` on
+> master. The
+> [master-only source invariant](../../architecture/live-iteration.md#master-only-source-invariant)
+> overrides any contrary implementation language below.
+
 Dependencies: [03](03-configuration-and-projects.md), [06](06-codex-runtime-adapter.md), [07](07-role-context-and-entry.md), [08](08-controller-supervision.md), [09](09-leadership-and-admission.md), [17](17-recovery-and-human-resolution.md)
 
 Normative reading: [installation](../design.md#8-installation-reset-and-implementation-sequence), [continuity commands](../contracts.md#installation-recovery-and-continuity-commands). Also follow the [index conventions](README.md#worker-contract) and [completed interface contracts](../contracts.md#10-complete-workflow-and-operator-interfaces).

@@ -28,7 +28,7 @@ from fulcrum.install import (
     _package_contents,
     fulcrum2_service_definitions,
     install_fulcrum2_service_definitions,
-    installation_source_root,
+    master_source_root,
     reconcile_fulcrum2_skills,
 )
 from fulcrum.installation_service import (
@@ -174,7 +174,7 @@ def _run_setup(request: ParsedRequest) -> CommandResult:
             return _setup_operation_result(operation)
         recovery = ensure_recovery_environment(
             instance.instance_root,
-            installation_source_root(),
+            master_source_root(),
             operation.id,
             config_path=target,
             production=not instance.explicit_selection,
@@ -352,9 +352,7 @@ def _prepare_configuration(
     config = default_config(brain_root)
     _merge(config, supplied)
     if "source" not in supplied:
-        config["source"]["repository"] = str(
-            installation_source_root().resolve(strict=True)
-        )
+        config["source"]["repository"] = str(master_source_root().resolve(strict=True))
     _resolve_missing_executables(config)
     missing = _missing_required(config)
     if missing and not non_interactive:
@@ -501,7 +499,7 @@ def _install_discovery_link(instance_root: Path, target: Path) -> None:
 
 
 def _install_controller_environment(instance_root: Path) -> tuple[Path, bool]:
-    source = installation_source_root().resolve(strict=True)
+    source = master_source_root().resolve(strict=True)
     root = instance_root / "runtime"
     current = root / "current"
     source_package = source / "src" / "fulcrum" if (source / "src").is_dir() else source

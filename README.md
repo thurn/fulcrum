@@ -39,7 +39,14 @@ resident host preserves native connections and pending requests. Read the
 [live-iteration architecture](docs/architecture/live-iteration.md) before changing
 these boundaries.
 
-## Install
+**Fulcrum is never installed.** The master checkout at `~/fulcrum` is the sole
+authoritative source of application behavior, role instructions, and skills. No
+copied package, deployment directory, release artifact, or activation pointer may
+become another source of Fulcrum behavior. In particular, every
+`~/.codex/skills/fulcrum-*` link points directly into `~/fulcrum/skills`; it must
+never point through `skills-current` or any instance directory.
+
+## Bootstrap
 
 Requirements are macOS, Python 3.12, Codex Desktop/CLI, Git, `bd`, `dolt`, and the
 configured delivery provider (`tg` for Tollgate). From the retained checkout:
@@ -48,13 +55,15 @@ configured delivery provider (`tg` for Tollgate). From the retained checkout:
 scripts/setup --input setup.json --non-interactive --json
 ```
 
-Setup installs locked dependencies and this package into `.venv`, writes the
-authoritative YAML configuration beside the brain, builds an independent installed
-controller and recovery environment, initializes the Beads/Dolt ledger, installs
-uniquely owned services, reconciles the nine human-invoked skills and read-only
-compaction hook, validates provider identities, and creates the standing Vizier and
-Marshal without model turns. Rerunning the same input repairs owned artifacts and
-does not duplicate leaders, providers, or services.
+Setup provisions locked dependencies and an editable `.venv`, writes the
+authoritative YAML configuration beside the brain, initializes the Beads/Dolt
+ledger, writes uniquely owned service definitions, reconciles the nine
+human-invoked skill links and read-only compaction hook, validates provider
+identities, and creates the standing Vizier and Marshal without model turns.
+This is bootstrap, not installation: executable entry points import Fulcrum from
+`~/fulcrum`, and a source or skill edit never requires a build, install, copy,
+deployment, activation, or restart step. Rerunning the same input repairs owned
+operational artifacts and does not duplicate leaders, providers, or services.
 
 The configuration file is authoritative. Humans may change any allowed field;
 Vizier may change policy/model/memory-owned fields. Other roles cannot rewrite
@@ -63,7 +72,7 @@ publication, and FD soft limit 4096 for an owned shared runtime. Project enrollm
 records exact Codex and delivery-provider IDs; source synchronization is opt-in and
 requires a configured remote.
 
-Use `fulcrum --help` and `fulcrum COMMAND --help` for the complete installed command
+Use `fulcrum --help` and `fulcrum COMMAND --help` for the complete command
 surface. All commands accept `--json`; mutating retries use the same `--request-id`
 and exact input. Commands run selected source directly. Ledger-only operations do not require
 the resident host; native runtime operations share its persistent connection.
