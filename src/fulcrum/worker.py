@@ -54,9 +54,15 @@ def main() -> int:
         )
         if kind == "background":
             assert request.instance.brain_root is not None
-            with ProcessLock(
-                request.instance.brain_root / ".fulcrum-locks" / "reconcile",
-                blocking=False,
+            with (
+                ProcessLock(
+                    request.instance.brain_root / ".fulcrum-locks" / "maintenance",
+                    shared=True,
+                ),
+                ProcessLock(
+                    request.instance.brain_root / ".fulcrum-locks" / "reconcile",
+                    blocking=False,
+                ),
             ):
                 asyncio.run(background(request))
             return 0

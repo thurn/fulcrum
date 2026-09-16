@@ -196,30 +196,25 @@ def activate(
                     if not (old / name).exists()
                     or (old / name).read_bytes() != (root / name).read_bytes()
                 ]
-                if changed:
+                migration = root / "src/fulcrum/state_upgrade.py"
+                old_migration = old / "src/fulcrum/state_upgrade.py"
+                migrate = migration.exists() and (
+                    not old_migration.exists()
+                    or migration.read_bytes() != old_migration.read_bytes()
+                )
+                if changed or migrate:
                     status.update(
                         state="maintenance_required",
-                        reason="resident machinery changed",
+                        reason="resident handoff or explicit state migration required",
                         changed=changed,
                     )
                     if maintenance:
-                        perform_handoff(instance, config, candidate)
-                        status.update(state="activated", selected=candidate)
-                    write_json(status_path, status)
-                    return status
-                migration = root / "src/fulcrum/state_upgrade.py"
-                old_migration = old / "src/fulcrum/state_upgrade.py"
-                if migration.exists() and (
-                    not old_migration.exists()
-                    or migration.read_bytes() != old_migration.read_bytes()
-                ):
-                    status.update(
-                        state="maintenance_required",
-                        reason="explicit state migration required",
-                    )
-                    if maintenance:
-                        perform_migration(instance, config, candidate)
-                        select_candidate(instance, candidate)
+                        if changed:
+                            perform_handoff(
+                                instance, config, candidate, migrate=migrate
+                            )
+                        else:
+                            perform_migration(instance, config, candidate)
                         status.update(state="activated", selected=candidate)
                     write_json(status_path, status)
                     return status
@@ -301,7 +296,9 @@ def perform_migration(instance: Path, config: Path, candidate: dict[str, Any]) -
         fence.unlink()
 
 
-def perform_handoff(instance: Path, config: Path, candidate: dict[str, Any]) -> None:
+def perform_handoff(
+    instance: Path, config: Path, candidate: dict[str, Any], *, migrate: bool = False
+) -> None:
     """Explicit resident maintenance; refusal leaves the original host running."""
     from fulcrum.bootstrap import launch_arguments
     from fulcrum.contracts import ActorContext, ParsedRequest
@@ -320,7 +317,10 @@ def perform_handoff(instance: Path, config: Path, candidate: dict[str, Any]) -> 
     stopped = ServiceService().stop(request)
     if not stopped.ok:
         raise RuntimeError("resident did not reach a safe handoff boundary")
-    select_candidate(instance, candidate)
+    if migrate:
+        perform_migration(instance, config, candidate)
+    else:
+        select_candidate(instance, candidate)
     command = launch_arguments(
         candidate,
         "fulcrum.cli",

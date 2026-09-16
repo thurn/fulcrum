@@ -38,7 +38,11 @@ class ProcessLock:
         self.shared = shared
         self.key = str(self.path)
         with _guard:
-            self.mutex: threading.RLock = _locks.setdefault(self.key, threading.RLock())
+            self.mutex: threading.RLock = (
+                threading.RLock()
+                if shared
+                else _locks.setdefault(self.key, threading.RLock())
+            )
 
     def __enter__(self) -> ProcessLock:
         if not self.mutex.acquire(blocking=self.blocking):

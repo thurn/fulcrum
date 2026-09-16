@@ -319,3 +319,27 @@ class PreparationIsolationTests(unittest.TestCase):
             root = Path(directory)
             with ProcessLock(root / "update.lock"):
                 self.assertEqual(pinned_selection(root), (None, None))
+
+
+class MaintenanceBoundaryTests(unittest.TestCase):
+    def test_shared_gate_allows_worker_threads_and_excludes_maintenance(self):
+        import concurrent.futures
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "maintenance"
+
+            def shared():
+                with ProcessLock(path, shared=True, blocking=False):
+                    return True
+
+            def exclusive():
+                with ProcessLock(path, blocking=False):
+                    return True
+
+            with (
+                ProcessLock(path, shared=True),
+                concurrent.futures.ThreadPoolExecutor() as pool,
+            ):
+                self.assertTrue(pool.submit(shared).result(timeout=1))
+                with self.assertRaises(FulcrumError):
+                    pool.submit(exclusive).result(timeout=1)
