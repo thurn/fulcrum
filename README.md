@@ -78,7 +78,7 @@ fulcrum backlog list --json
 fulcrum work create --input work.json --json
 fulcrum dispatch --bead WORK_ID --authorize --json
 fulcrum task wait TASK_ID --until terminal --json
-fulcrum trace WORK_ID --json
+fulcrum trace --bead WORK_ID --json
 ```
 
 Humans can enter a role directly with a literal request:
