@@ -20,9 +20,11 @@ needs no API to wake an ended task. If Steward stops, scheduled Marshal checks
 provide an independent recovery path. This is supervised agent execution, not a
 claim that an agent is deterministic or that Desktop guarantees bounded token use.
 
-This document specifies future behavior. It neither implements the runtime nor
-authorizes a production reset. Cutover replaces the old instance destructively,
-without migration, a compatibility layer, or a transport selector. Ordinary
+This document specifies the implementation; editing it does not execute a reset.
+The operator has stopped all work and permits cutover at any implementation
+stage. Keep admission stopped until the replacement is ready. Cutover replaces
+the old instance destructively, without migration, a compatibility layer, or a
+transport selector. Ordinary
 editing still follows [live iteration](live-iteration.md): commit to local master,
 and the next operation uses that source without installation, manual activation,
 remote-publication waits, or restarting existing operations and connections.
@@ -98,8 +100,10 @@ in 300.002 seconds. It produced no additional model responses or generated token
 during the wait, and no wrapper wait/resume calls. Its whole turn used 175 output
 tokens, with input/cache overhead separately recorded in the experiment. This
 establishes that configured five-minute path, not an unlimited wait or zero total
-cost. The repeated Steward loop, compaction, long idle periods, concurrent
-notifications, and restart recovery still need live acceptance tests.
+cost. Implement the specified loop and recovery behavior directly; no additional
+exploratory probe phase is required. Validate the completed implementation through
+the focused acceptance checks below, recording real gaps without reopening the
+architecture as an investigation task.
 
 Bootstrap requires callable `create_thread`, `send_message_to_thread`,
 `list_projects`, `list_threads`, `read_thread`, `set_thread_title`,
@@ -383,13 +387,18 @@ no repeated model generation attributable to an unchanged idle interval. Each
 action, tool discovery, context processing, and result report still has overhead;
 measure it for Luna rather than describing the relay as free or deterministic.
 
-Configure and measure real MCP and code-mode wrapper lifetimes. The five-minute
-CI test does not prove a permanently open instruction call. Use a supported
-finite timeout and test intended long idle periods, compaction, cancellation,
-and lost connections. Transport renewal is acceptable only when demonstrated
-without a short model polling loop or replayed action. If the call cannot remain
-healthy, end through the failure path and let Marshal recover; report the actual
-availability/latency limit rather than inventing infinite-wait support.
+Use a 3,600-second instruction idle deadline and a 1,800-second CI deadline,
+configured in YAML. Set the MCP tool timeout to 3,900 seconds and request a
+wrapper lifetime beyond the applicable application deadline by at least 60
+seconds. These are implementation defaults, not measured Desktop guarantees.
+An instruction idle expiry returns `stop` with reason `idle_deadline`; Steward
+ends without a failure alert and the next scheduled Marshal check may resume it.
+Recovery targets the next 15-minute check; actual delay depends on Desktop and
+machine availability as described below.
+An earlier transport failure follows the diagnostic failure path. Preserve the
+pending obligation in either case; never renew through a short model polling
+loop. Unsupported lifetimes are explicit runtime blockers, not permission to
+silently shorten the budget or add a new transport.
 
 A long wait is not a missed-progress failure for Steward. Health includes a
 registered pending call, its connection state, and no unresolved protocol error,
@@ -681,7 +690,7 @@ Before source handoff, capacity release, or cleanup, require accepted outcome
 settled ownership/continuation obligations. Source/process ownership remains a
 separate check. If the target installation cannot establish these facts through
 the specified observation path and scoped tools, block the affected operation
-and fail its readiness probe. Do not claim the five-minute CI test proves this
+and fail its acceptance check. Do not claim the five-minute CI test proves this
 collector. The cooperative model does not promise exclusion against arbitrary
 new user-directed edits outside Fulcrum's ownership protocol.
 
@@ -755,10 +764,8 @@ If repair is blocked, paused, or exhausted, Warden reports the retained blocker
 and ends rather than waiting for human input. A failed CI result is not an
 instruction to wake Marshal until deterministic repair cannot proceed.
 
-Configure finite MCP/provider and wrapper budgets for measured supported wait
-lengths. The experiment used `tool_timeout_sec=420` and code-mode
-`yield_time_ms=360000` for a 300-second result; default MCP timeout was 60 seconds.
-It proves neither infinite waits nor all real-provider durations. Deadline expiry
+Use the finite budgets specified for the instruction loop; measure the CI
+deadline from candidate submission so reconnect cannot replenish it. Expiry
 returns an explicit blocked/unknown disposition, not `pending` and an agent
 short-timeout retry loop. Preserve the exact candidate and wait through
 cancellation/disconnect; reconcile before resuming, resubmitting, or sending a
@@ -800,7 +807,7 @@ Inspection on 2026-09-16 found `token_usage_record` entries containing native
 task/turn/response IDs, per-response input, cached-input, cache-write, output,
 and reasoning counters, plus cumulative turn/task totals. This is local evidence,
 not a guarantee of the target stock format. Verify the fields and their semantics
-before cutover; maintain the parser as an explicitly unstable-format dependency.
+before opening admission; maintain the parser as an unstable-format dependency.
 
 Hooks initiate collection; broker file observation catches delayed writes. Fresh
 CLI collectors persist normalized evidence and progress in Beads, tolerate partial
@@ -862,6 +869,18 @@ hook definitions. Stable MCP schemas and saved prompts describe the protocol;
 current policy comes from fresh CLI results/context, without recreating standing
 tasks or editing the schedule after ordinary formula/policy changes.
 
+| Change | Visibility and maintenance boundary |
+| --- | --- |
+| CLI/MCP business handlers, hook handlers, transcript parsers, formulas, prompt compilation, and assets | Next fresh operation uses local master; no installation, reconnect, re-trust, or restart. Running operations retain their source. |
+| YAML policy, model/capacity settings, and timer intervals | Next operation reads current configuration; fresh policy returns updated timer deadlines to the broker. An issued action or existing wait retains its recorded arguments/deadline. |
+| Skills and standing-role context | Next skill read sees the checkout; next context/protocol response supplies current role instructions. Already-delivered instructions remain part of the current turn. |
+| Broker/MCP connection machinery, exposed tool schemas, or trusted hook definitions | Exceptional safe handoff/reconnect or native trust flow after affected calls settle. Keep these surfaces small and stable; do not put routine behavior here. |
+| Dependencies or durable-state layout | Exceptional maintenance from live iteration; never require reinstalling dependencies for ordinary edits. |
+
+This is operation-boundary hot reload, not replacement of executing code. Keep
+parsing, policy, diagnostics formatting, and timer decisions outside resident
+processes so normal development stays entirely in the first three rows.
+
 For example, Steward may already be waiting when a completion-policy change is
 committed. The next worker finish and the operation resolving Steward's response
 use the new commit, while an older running operation keeps consistent imports
@@ -873,8 +892,9 @@ Retain detached mutation processes and temporary result locators on client
 timeout; do not kill a potentially successful write. Beads-only inspection and
 repair remain available with the broker stopped. The local p95 target stays below
 one second with unchanged dependencies/state contracts. The recorded 0.890-second
-launcher baseline is not a measurement of this MCP/hook path; verify CLI, MCP,
-and hook overhead separately with the existing minimal source/asset probe.
+launcher baseline is not a measurement of this MCP/hook path; measure CLI, MCP,
+and hook overhead with production diagnostics enabled, concurrent clients, and
+retained logs. Separate preparation, lock wait, Beads, and logging time.
 
 ## Shared CLI and MCP interfaces
 
@@ -911,6 +931,46 @@ changed requests need new authorization rather than an invented new retry ID.
 Keep pagination and byte bounds for inspection, with omitted counts/continuations.
 Never turn a partial summary or a successful inspection into a completed-work
 claim. `status` separates ownership, capacity, delivery, source sync, and cleanup.
+
+### Minimal durable protocol
+
+Use the existing CLI result envelope and request UUIDs, with these authoritative
+fields. IDs are opaque identities, not hashes or schema versions. Omit unrelated
+fields from compact responses; retain complete accepted input in Beads.
+
+| Record | Required fields and authority |
+| --- | --- |
+| Assignment on owning work bead | `assignment_token`, actor task/host, role, workspace/source, scope, capacity class, state, and accepted finish. Only registration changes a reserved assignment to active. |
+| Action on owning work/control record | `action_id`, executor, tool, exact arguments, assignment reference, state, and attempts `{attempt_id, native_tool_use_id, outcome, evidence}`. Claim changes pending to issuing before invocation. |
+| Request transition on owning record | `request_id`, accepted input/actor, source/operation identity, state, saved result, and projection locator. Equal input replays; changed input conflicts. |
+| Instruction wait on `fc-system`; CI wait on work bead | `request_id`, actor task/host/turn, loop or assignment reference, candidate if applicable, deadline, state, and saved response. States are waiting, resolved, cancelled, or expired; disconnect alone does not erase a wait. |
+| Admission handshake on the owning record | Request ID, session/turn/tool-use identity, exact input, and consumed disposition from the trusted pre-hook. Never accept actor identity solely from caller-supplied labels. |
+
+Instruction responses are `action` (exact action and reporting arguments), `stop`
+(reason and retained obligation), or `blocked` (reason and recovery reference).
+CI responses are `passed`, `failed`, or `blocked`, with exact candidate/source and
+evidence. Waiting is internal transport state, never an interim model response.
+Uncertain results retain their attempt; they cannot transition back to pending
+until definite rejection or reconciled absence authorizes a new attempt.
+
+For instruction grants, first retain the wait/loop intent on `fc-system`. Commit
+the action, reservation, and originating wait/loop IDs together on the action's
+owning record; this is the authoritative grant. Then resolve the system wait and
+deliver its saved response. Before selecting again, recover any grant for that
+wait/loop across owning records, including closed records. A crash between these
+writes repairs the response reference, never selects a second action. A new wait
+requires the previous grant's result/disposition to be recorded; older uncertain
+attempts may remain reserved as specified above.
+
+After verified projection, replay resolves the request's deterministic operation
+ID in Beads and compares its retained full input/result; these replay records
+outlive removal of completed entries from the work bead. Missing or conflicting
+evidence is a storage blocker, never a fresh request. Registration consumes the
+matching pre-hook handshake under the writer lock, checking session identity and
+creation/assignment marker. A worker may register before the creator's result;
+the later result must agree with that binding. Direct CLI managed mutations use
+the same observed invocation binding; operator recovery retains its separately
+authorized scope. Post-hooks and agent reports settle the same native attempt.
 
 ## Pause and operator control
 
@@ -960,7 +1020,7 @@ asking repeatedly. A ready socket alone is not successful setup.
    idempotent, inspected filesystem/service operations, not a second journal.
 2. Once Beads is available, retain one setup operation before native effects.
    Provision source-following launchers, broker, and thin MCP definitions. Set
-   measured instruction/CI wait budgets. Preserve unrelated configuration; an
+   the specified instruction/CI wait budgets. Preserve unrelated configuration; an
    initial MCP reconnect is exceptional setup, never an ordinary editing step.
 3. Install/trust the six scoped command hooks and verify actual callback paths
    for projectless standing tasks and saved-project workers. Check native task
@@ -977,7 +1037,7 @@ asking repeatedly. A ready socket alone is not successful setup.
    heartbeat on Steward. Persist the automation ID and its intended/observed
    state. Configure notifications for meaningful failures/decisions, not routine
    healthy status on every run.
-6. Exercise the disposable readiness scenarios, then enable admission and the
+6. Complete focused implementation acceptance, then enable admission and the
    verified schedule for the new instance. Pending ready work can resolve
    Steward's instruction call independently of a Marshal decision. Expose task
    links, exact schedule, capability gaps, and any required operator action.
@@ -987,7 +1047,8 @@ Justiciar creation and the extra recovery slot, safe same-Steward resumption by
 Marshal/assigned Justiciar, notification-only recovery alerts, scoped hooks and
 transcript reads, provider operations, and the scheduled checks. It does not
 expand filesystem permissions, auto-answer native approvals, grant arbitrary
-recovery scope, or authorize destructive reset merely by editing this document.
+recovery scope. Initial cutover timing is already authorized as recorded below;
+bootstrap does not authorize unrelated deletion or later resets.
 Explain the prompt-supervision limits and the Stop-versus-pause behavior.
 
 The bootstrap skill's short entrypoint should call deterministic setup with the
@@ -1034,13 +1095,18 @@ creation. Unrelated work may continue only where its authority is unaffected.
 
 ## Destructive cutover and ongoing maintenance
 
-Pass disposable capability tests before touching production state. The initial
-cutover discards the previous instance's workflow records, bindings, and schedules;
-it is not a migration. Retain the required business workflow and local-master
-mechanism, not an old runtime hidden behind a selector. Missing capabilities
-leave the old instance untouched and prevent claiming readiness.
+The operator has stopped all work and authorized initial cutover whenever useful
+during implementation. There is no requirement to keep the old instance runnable
+through intermediate commits or to complete a separate probe phase first. Before
+the first incompatible commit, retain the maintenance fence and disable remaining
+old schedules/revival paths; verify no residual writer or issued effect remains
+before deleting its resources. This verifies the stopped state, not another
+request for cutover permission. Keep admission closed until replacement acceptance
+passes; partial implementation must not restart old work.
 
-After explicit reset authorization:
+The initial cutover discards old workflow records, bindings, and schedules without
+migration, compatibility code, or a transport selector. Commit directly to local
+master. Implementation and cutover may interleave using these retained steps:
 
 1. Inventory exact owned ledger, service, schedule, native-task, hook/MCP, cache,
    log, and workspace/provider resources. Preserve unrelated repositories,
@@ -1076,47 +1142,63 @@ source-editing step.
 
 ## Implementation handoff
 
-Implement and validate in this order:
+Implement this design directly; no discovery/probe milestone precedes coding.
+Give Luna bounded slices with an observable outcome, relevant checks, diagnostic
+events, and a landing boundary. Establish causal logging with the first protocol
+slice, not as a final instrumentation pass. Work in this order:
 
-1. Prove the repeated Steward instruction/action loop on disposable native tasks,
-   including useful idle duration, model overhead, compaction, timeout, and
-   native result shapes. Validate transcript lifecycle/accounting and busy
-   Marshal schedule/alert behavior. Do not make unlimited waits or guaranteed
-   runtime termination prerequisites by assumption.
-2. Adapt the shared ledger transitions, current-backlog selection, reservations,
-   native claims/results, and Marshal targeted updates. Remove mandatory
+1. Fence the stopped old instance as described above. Adapt ledger transitions,
+   current-backlog selection, reservations, native claims/results, and Marshal
+   targeted updates. Remove mandatory
    per-bead Marshal approval for ready ordinary work. Cover equal retries,
    changed inputs, stale decisions, lost results, and lock inheritance.
-3. Implement thin pending-response transport and fresh event computations for
+2. Implement thin pending-response transport and fresh event computations for
    Steward instructions and Warden CI. Add scoped hook/transcript collection,
    standing registration, and exact native action ownership. Preserve source
    freshness through long waits and independently progressing clients.
-4. Add 15-minute Marshal health/curation, coalesced escalations, direct Justiciar
+3. Add 15-minute Marshal health/curation, coalesced escalations, direct Justiciar
    creation, the additional recovery slot, the one-intervention limit, safe
    same-Steward resumption, and Vizier decisions. Implement the narrow no-ledger
    diagnostic exception without an unrecorded dispatch path.
-5. Preserve incidental reporting, plan lifecycle with prompt-level subagent
+4. Preserve incidental reporting, plan lifecycle with prompt-level subagent
    review, worker/delivery invariants, naming, and accounting. Remove automatic
    publication, curated memory, fleet replacement, old review receipts/gates,
    forced coordinator exit, and pre-injection notification requirements. Update
    command contracts, prompts, bootstrap skill, and operator docs together.
-6. Assemble bootstrap and run the manual acceptance scenarios. Only after the
-   required evidence and explicit reset authorization, perform cutover and
-   verify the fresh instance. No implementation shortcut may erase unresolved
-   native effects or claim capabilities absent from the target installation.
+5. Assemble bootstrap and finish the implementation acceptance checks. Complete
+   any remaining cutover steps and verify the fresh instance before reopening
+   admission. Fix concrete capability failures without inventing native success
+   or turning implementation into an open-ended architecture investigation.
 
 ## Acceptance and operational evidence
 
-Normal repository checks remain provider-independent. Live capability evidence
-is separate and must use disposable native tasks, ledger, and provider resources.
-Record exact observations, identities, timings, and gaps. Component tests or
-schemas cannot stand in for real lifecycle behavior. The following are required:
+Preserve the fast [repository check](../validation.md): formatting, full types,
+and relevant regression coverage without dependency installation, provider/model
+calls, real CI waits, or scheduled delays. The audit baseline on 2026-09-16 was
+176 tests and 5.10 seconds for the complete check. Target that scale; retain the
+30-second normal budget and 55-second hard deadline. Use narrow production-boundary
+tests with fake clocks/events and recorded adapter results. Do not revive the
+retired integration harness or add tests that merely mirror implementation.
+
+The cases below specify coverage, not 18 mandatory live experiments. Exercise
+crash/race/timeout paths locally; retain actual native payloads as small parser
+fixtures during implementation. Focused end-to-end acceptance checks establish
+real task actions, hook/identity/lifecycle collection, CI delivery, and schedule
+targeting on disposable resources. Record observations and gaps honestly; unit
+results do not prove native behavior. No additional exploratory probe series is
+required, and no long-duration model run belongs in the normal check.
+
+Establish acceptance once for the replacement; repeat affected native checks only
+when their boundary changes or a failure invalidates the evidence. Ordinary edits
+use focused checks during development and the complete repository check before
+commit. Neither bootstrap nor each commit reruns the full live matrix. Test and
+logging overhead are part of the development-speed budget. Required coverage:
 
 1. **Repeated Steward loop and idle cost.** Process several create/send/archive
-   actions in one Steward turn, with current-state selection between them. Keep
-   a healthy instruction call pending through an extended idle interval and
-   measure interval usage separately from action/discovery overhead. Test actual
-   timeout/wrapper limits and compaction; no short empty-status polling loop.
+   actions in one Steward turn, with current-state selection between them. Verify
+   a pending idle call and separate idle usage from action/discovery overhead.
+   Exercise deadline handling with controlled clocks and retained timeout evidence;
+   cover compaction and reject short empty-status polling loops.
 2. **Dispatch without Marshal.** Leave Marshal idle while Weaver and incidental
    reports produce ready work. Steward fills eligible capacity and performs
    Executor/Warden handoffs without per-bead approval or routine Marshal wakes.
@@ -1190,9 +1272,9 @@ schemas cannot stand in for real lifecycle behavior. The following are required:
 16. **Source freshness.** Commit ordinary policy/assets with Steward and Warden
     calls pending and an older operation running. Subsequent CLI, MCP event, and
     hook operations use local master without install/restart/remote access;
-    older operations/actions retain their source/arguments. Repeat 20 minimal
-    probes per entry path for the local p95 target, including visible preparation
-    failure instead of stale fallback.
+    older operations/actions retain their source/arguments. Measure each entry
+    path against the local p95 target with production logging enabled; report
+    sample count and conditions. Preparation failure is visible; no stale fallback.
 17. **Product scope and human interaction.** File `$bead` from an unmanaged and an
     active worker task without role/name changes; retry exact and conflicting
     keys. Review plans through a native subagent without old review gates; verify
@@ -1202,16 +1284,62 @@ schemas cannot stand in for real lifecycle behavior. The following are required:
     native approvals, and an unavailable inbox without duplicate tasks.
 18. **Bootstrap and destructive reset.** Verify all three titles/identities,
     project/worktree access, hook trust/isolation, and one 15-minute schedule.
-    Lose every creation/setup reply and rerun from exact evidence. On a disposable
-    old instance, fail each gate before reset and verify nothing is deleted.
+    Lose creation/setup replies and rerun from exact evidence. On disposable
+    resources, verify stopped writers and exact ownership before deletion.
     Interrupt each authorized reset/replacement boundary; fences and unrelated
     resources survive. A fresh instance adopts no old workflow bindings and
     never treats archival as native deletion.
 
-Diagnostics expose source commit, Beads calls/duration, pending instruction/CI
-requests, native actions and uncertainty, Steward connection/loop health, last
-Marshal check/current decision, ordinary/recovery capacity, incident age and
-allowances, provider state, completion gaps, and accounting coverage. Separate
-service/socket liveness from actual workflow progress. Logs are bounded evidence,
-not a replay store; do not log unrelated prompts/transcripts or arbitrary output.
-No healthy model status chatter or automatic publication is added for monitoring.
+## Causal diagnostics without slowing development
+
+Structured logging is on by default across hooks, MCP, broker, CLI, Beads, native
+actions, and provider operations. Every meaningful boundary records start and
+completion/failure with UTC time, monotonic duration, component/process identity,
+source commit, and applicable instance/bead/request/operation/action/attempt,
+task/host/turn/tool-use, wait, and candidate IDs. Carry a causal predecessor ID
+across processes and callbacks; preserve native IDs rather than inventing hashes.
+Record assignment identity without exposing authorization tokens. Missing
+correlation is an explicit gap, never an inferred success or invented link.
+
+Log eligibility/hold decisions and the relevant facts, reservation and release,
+instruction commit/delivery, claim, observed invocation/result, acknowledgment,
+wait registration/resolution/expiry, hook rejection, transcript cursor movement,
+recovery decisions, and source preparation. Include queue/lock wait, Beads, native
+call, provider, and logging durations separately. Unexpected failures retain
+exception type, message, stack and cause chain plus bounded relevant adapter
+input/output or an exact evidence locator. A start without an outcome exposes
+the last confirmed boundary after a crash. Coalesce unchanged observations and
+empty checks with counts/time ranges; do not sample away transitions or errors.
+
+`trace` joins Beads evidence and logs into a causal timeline: why work was selected
+or held, whether an instruction was committed/delivered/claimed/invoked/observed,
+and where time accumulated. Support lookup by bead, operation, action, task, or
+wait ID, including standing-agent work with no bead. Show uncertain ordering,
+pruning, truncation, missing callbacks, and dropped records as gaps. `status` and
+`doctor` distinguish socket liveness from progress and expose pending waits,
+action age/uncertainty, Marshal decisions, capacity, incidents/allowances, provider
+state, accounting coverage, and logging health. Local logs and their bounded
+reader work without Beads, MCP, or native messaging; no debug rerun is needed.
+
+Keep diagnostics outside the Beads critical section and off the shared workflow
+lock. Append/flush critical starts, transitions, and failures promptly; synchronize
+them to disk before an external invocation and at operation completion/failure.
+Routine timing/detail may buffer for at most one second and flush on process exit;
+only that window may be lost on a crash. Rotate by size and prune periodically,
+not on every event. Preserve existing 14-day/1-GiB defaults and bounded payloads;
+emit retention/drop summaries and preserve incident evidence references in Beads.
+Measure latency with these production settings and concurrent writers enabled.
+
+Log-write failure must surface through stderr/result diagnostics and component
+health (including broker health when available), with dropped-event counts when
+observable. Never silently discard it, block forever, or turn a committed workflow
+effect into a reported failure that invites retry. Logs remain diagnostic evidence,
+not another workflow journal. Redact credentials, omit unrelated conversations,
+and keep critical correlation fields even when payloads are truncated. Logging
+adds no model turns or automatic publication.
+
+As a focused acceptance check, reconstruct a lost native reply, a rejected hook,
+and a delayed CI result from retained evidence alone. Identify the last confirmed
+boundary, cause or explicit unknown, source commit, and recovery disposition
+without rerunning the failed operation. Exercise log loss/rotation locally and
+verify visible gaps; include logging cost in the ordinary startup latency budget.
