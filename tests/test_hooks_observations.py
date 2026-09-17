@@ -33,6 +33,18 @@ class HookTests(unittest.TestCase):
     def test_pre_tool_rejects_unclaimed_native_effect(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)
+        action = desktop.queue_action(
+            replace(
+                request(("action", "queue")),
+                input={
+                    "executor": "bootstrap",
+                    "tool": "create_thread",
+                    "arguments": {"prompt": "register steward"},
+                    "purpose": "bootstrap_steward",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        ).result["action"]
         desktop.register_standing(
             replace(
                 request(("register", "standing")),
@@ -40,6 +52,7 @@ class HookTests(unittest.TestCase):
                     "role": "steward",
                     "task_id": "steward-1",
                     "session_id": "session-1",
+                    "action_id": action["action_id"],
                 },
                 request_id=str(uuid.uuid4()),
             )
@@ -57,7 +70,6 @@ class HookTests(unittest.TestCase):
             request_id=str(uuid.uuid4()),
         )
         result = HookService(ledger).handle(hook_request)
-        self.assertFalse(result.result["continue"])
         self.assertEqual(
             result.result["hookSpecificOutput"]["permissionDecision"], "deny"
         )

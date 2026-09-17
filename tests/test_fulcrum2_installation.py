@@ -109,13 +109,16 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             production=True,
         )
         self.assertEqual(first, second)
-        self.assertEqual(first["runtime"]["SoftResourceLimits"]["NumberOfFiles"], 4096)
+        self.assertEqual(
+            first["broker"]["ProgramArguments"][0], "/usr/bin/fulcrum-broker"
+        )
+        self.assertNotIn("runtime", first)
         self.assertNotIn("updater", first)
         installed, changed = install_fulcrum2_service_definitions(first, self.instance)
         repeated, repeated_changed = install_fulcrum2_service_definitions(
             second, self.instance
         )
-        self.assertEqual(set(installed), {"runtime", "dolt", "controller"})
+        self.assertEqual(set(installed), {"dolt", "broker"})
         self.assertEqual(set(repeated), set(installed))
         self.assertEqual(set(changed), set(installed))
         self.assertEqual(repeated_changed, [])
@@ -304,7 +307,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
             },
         )
         self.assertFalse(models["available"])
-        self.assertEqual(len(models["invalid"]), 8)
+        self.assertEqual(len(models["invalid"]), 9)
 
     def test_setup_reads_current_tollgate_repository_identity(self) -> None:
         self.assertEqual(
@@ -519,7 +522,7 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         ):
             result = service_status_result(self.request())
         self.assertFalse(result["socket"]["exists"])
-        self.assertEqual(set(result["services"]), {"dolt", "controller"})
+        self.assertEqual(set(result["services"]), {"dolt", "broker"})
         self.assertTrue(all(row["running"] for row in result["services"].values()))
         self.assertTrue(result["responsive"])
         self.assertTrue(result["revisions"]["skew"])

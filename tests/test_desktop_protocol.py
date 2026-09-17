@@ -27,10 +27,26 @@ def registered_service(*work):
     service = DesktopProtocolService(
         ledger, now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc)
     )
+    action = service.queue_action(
+        mutation(
+            ("action", "queue"),
+            payload={
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register steward"},
+                "purpose": "bootstrap_steward",
+            },
+        )
+    ).result["action"]
     service.register_standing(
         mutation(
             ("register", "standing"),
-            payload={"role": "steward", "task_id": "steward-1", "session_id": "s1"},
+            payload={
+                "role": "steward",
+                "task_id": "steward-1",
+                "session_id": "s1",
+                "action_id": action["action_id"],
+            },
         )
     )
     return service, ledger

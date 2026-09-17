@@ -34,10 +34,26 @@ class LeadershipTests(unittest.TestCase):
         self.ledger = MemoryLedger(self.work)
         self.service = DesktopLeadershipService(self.ledger)
         for role, task in (("steward", "steward-1"), ("marshal", "marshal-1")):
+            action = self.service.queue_action(
+                call(
+                    ("action", "queue"),
+                    payload={
+                        "executor": "bootstrap",
+                        "tool": "create_thread",
+                        "arguments": {"prompt": f"register {role}"},
+                        "purpose": f"bootstrap_{role}",
+                    },
+                )
+            ).result["action"]
             self.service.register_standing(
                 call(
                     ("register", "standing"),
-                    payload={"role": role, "task_id": task, "session_id": task},
+                    payload={
+                        "role": role,
+                        "task_id": task,
+                        "session_id": task,
+                        "action_id": action["action_id"],
+                    },
                 )
             )
 

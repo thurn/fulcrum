@@ -122,7 +122,7 @@ class CommandDefinition:
 
 
 COMMANDS = (
-    CommandDefinition(("setup",), "install or repair a Fulcrum instance"),
+    CommandDefinition(("bootstrap",), "prepare the stock Desktop instance"),
     CommandDefinition(("config", "show"), "show authoritative configuration"),
     CommandDefinition(("config", "validate"), "validate authoritative configuration"),
     CommandDefinition(("config", "set"), "update authorized configuration fields"),
@@ -353,7 +353,7 @@ def _add_command_options(
         group = parser.add_mutually_exclusive_group()
         group.add_argument("--bead", default=argparse.SUPPRESS)
         group.add_argument("--operation", default=argparse.SUPPRESS)
-    elif path == ("setup",):
+    elif path == ("bootstrap",):
         _option(parser, "--non-interactive", action="store_true")
     elif path in {("service", "stop"), ("service", "restart")}:
         _option(parser, "--interrupt", action="store_true")
@@ -603,6 +603,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
+    ("bootstrap",): {
+        "codex_root",
+        "native_tools",
+        "model_support",
+        "steward_thinking",
+        "marshal_thinking",
+        "vizier_thinking",
+        "acceptance_passed",
+    },
     ("register", "standing"): {
         "role",
         "task_id",
@@ -1222,9 +1231,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         request = _build_request(namespace)
         result = _execute(request)
         if request.command in {("hook", "context"), ("hook", "handle")}:
+            hook_result = result.get("result")
             print(
                 json.dumps(
-                    result.get("result") or {"continue": True},
+                    hook_result if hook_result is not None else {},
                     separators=(",", ":"),
                     ensure_ascii=False,
                 )

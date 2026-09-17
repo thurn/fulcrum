@@ -337,46 +337,25 @@ def fulcrum2_service_definitions(
             "StandardErrorPath": str(logs / "dolt-error.log"),
             "EnvironmentVariables": environment,
         },
-        "controller": {
-            "Label": f"{prefix}.controller",
+        "broker": {
+            "Label": f"{prefix}.broker",
             "ProgramArguments": [
-                str(controller_executable.resolve(strict=True)),
-                "serve",
+                str(
+                    controller_executable.resolve(strict=True).with_name(
+                        "fulcrum-broker"
+                    )
+                ),
                 "--instance",
                 str(instance_root.resolve(strict=False)),
-                "--config",
-                str(config_path.resolve(strict=False)),
             ],
             "WorkingDirectory": str(instance_root),
             "RunAtLoad": True,
             "KeepAlive": True,
-            "StandardOutPath": str(logs / "controller.log"),
-            "StandardErrorPath": str(logs / "controller-error.log"),
+            "StandardOutPath": str(logs / "broker.log"),
+            "StandardErrorPath": str(logs / "broker-error.log"),
             "EnvironmentVariables": environment,
         },
     }
-    runtime = dict(config["runtime"])
-    if production and runtime["kind"] == "codex":
-        executable = runtime.get("executable")
-        if not isinstance(executable, str) or not executable:
-            raise InstallationError("runtime.executable is required for production")
-        definitions["runtime"] = {
-            "Label": f"{prefix}.runtime",
-            "ProgramArguments": [
-                str(Path(executable).resolve(strict=True)),
-                "app-server",
-                "--listen",
-                str(runtime["endpoint"]),
-            ],
-            "RunAtLoad": True,
-            "KeepAlive": True,
-            "StandardOutPath": str(logs / "runtime.log"),
-            "StandardErrorPath": str(logs / "runtime-error.log"),
-            "EnvironmentVariables": environment,
-            "SoftResourceLimits": {
-                "NumberOfFiles": int(config["resources"]["fd_soft_limit"])
-            },
-        }
     return definitions
 
 

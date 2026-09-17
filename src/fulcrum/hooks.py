@@ -79,7 +79,9 @@ class HookService:
         marker = _parse_marker(request.input)
         if bound is None and marker is not None:
             bound = _prospective_binding(ledger, request, marker)
-        response: dict[str, Any] = {"continue": True}
+        response: dict[str, Any] = (
+            {} if event_name == "PreToolUse" else {"continue": True}
+        )
         if event_name == "SessionStart" and bound is not None:
             response["hookSpecificOutput"] = {
                 "hookEventName": "SessionStart",
@@ -142,7 +144,7 @@ class HookService:
         bound: tuple[LedgerRecord, str] | None,
     ) -> dict[str, Any]:
         if bound is None:
-            return {"continue": True}
+            return {}
         record, _ = bound
         protocol = _protocol(record.fc or {})
         action, attempt = _issuing_action(protocol, request.input)
@@ -157,13 +159,7 @@ class HookService:
         attempt["pre_hook_event_id"] = _event_id(request.input)
         _replace_attempt(protocol, str(action["action_id"]), attempt)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-        return {
-            "continue": True,
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-            },
-        }
+        return {}
 
     def _post_tool(
         self,
@@ -425,8 +421,6 @@ def _replace_attempt(
 
 def _deny(reason: str) -> dict[str, Any]:
     return {
-        "continue": False,
-        "stopReason": reason,
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",

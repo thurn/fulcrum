@@ -186,6 +186,11 @@ class McpServer:
             result: Mapping[str, Any] = {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
+                "instructions": (
+                    "Fulcrum tools enforce durable workflow authority. Execute only exact "
+                    "returned actions: claim once, invoke once, report the actual result. "
+                    "Never poll pending Steward or Warden waits or retry uncertain effects."
+                ),
                 "serverInfo": {
                     "name": "fulcrum",
                     "title": "Fulcrum",

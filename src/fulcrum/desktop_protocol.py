@@ -44,6 +44,16 @@ def _opaque(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4()}"
 
 
+def _native_identifier(value: Any, *fields: str) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    for field in fields:
+        candidate = value.get(field)
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
 def action_marker(
     instance: str, record_id: str, action_id: str, assignment_token: str | None = None
 ) -> str:
@@ -267,9 +277,42 @@ class DesktopProtocolService:
         task_id = str(request.input.get("task_id") or request.thread_id or "")
         host_id = str(request.input.get("host_id") or "")
         session_id = str(request.input.get("session_id") or "")
+        action_id = str(request.input.get("action_id") or "")
         if not task_id or not session_id:
             raise FulcrumError.invalid(
                 "IDENTITY_REQUIRED", "task_id and session_id are required"
+            )
+        actions = dict(protocol.get("actions") or {})
+        action = actions.get(action_id)
+        expected_purpose = f"bootstrap_{role}"
+        if not isinstance(action, Mapping) or action.get("purpose") != expected_purpose:
+            raise FulcrumError(
+                "REGISTRATION_NOT_AUTHORIZED",
+                f"{role} registration requires its retained creation or recovery action",
+                exit_code=5,
+            )
+        if action.get("tool") != "create_thread" or action.get("state") not in {
+            "pending",
+            "issuing",
+            "succeeded",
+            "uncertain",
+        }:
+            raise FulcrumError(
+                "REGISTRATION_NOT_AUTHORIZED",
+                "the retained action cannot authorize this registration",
+                exit_code=5,
+            )
+        native_result = action.get("native_result")
+        observed_task = (
+            native_result.get("threadId")
+            if isinstance(native_result, Mapping)
+            else None
+        )
+        if observed_task and observed_task != task_id:
+            raise FulcrumError(
+                "IDENTITY_CONFLICT",
+                "the native creation result identifies another task",
+                exit_code=5,
             )
         standing = dict(protocol.get("standing") or {})
         current = standing.get(role)
@@ -285,6 +328,7 @@ class DesktopProtocolService:
             "host_id": host_id or None,
             "session_id": session_id,
             "turn_id": request.input.get("turn_id"),
+            "action_id": action_id,
             "state": "registered",
             "registered_at": _utc_now(),
         }
@@ -308,7 +352,11 @@ class DesktopProtocolService:
 
         ledger = self._ledger(request)
         record_id = str(request.input.get("record_id") or "fc-system")
-        record = self._record(ledger, record_id)
+        record = (
+            self._system(ledger)
+            if record_id == "fc-system"
+            else self._record(ledger, record_id)
+        )
         protocol = _protocol(record.fc or {})
         saved = _saved_request(protocol, request)
         if saved:
@@ -339,6 +387,7 @@ class DesktopProtocolService:
             "state": "pending",
             "attempts": [],
             "created_at": _utc_now(),
+            "purpose": request.input.get("purpose"),
         }
         actions[action_id] = action
         protocol["actions"] = actions
@@ -535,9 +584,26 @@ class DesktopProtocolService:
         action["attempts"] = attempts
         action["state"] = outcome
         action["completed_at"] = _utc_now()
+        action["native_result"] = copy.deepcopy(request.input.get("native_result"))
         actions = dict(protocol.get("actions") or {})
         actions[action_id] = action
         protocol["actions"] = actions
+        if action.get("purpose") == "bootstrap_marshal_schedule":
+            schedule = dict(protocol.get("marshal_schedule") or {})
+            schedule.update(
+                {
+                    "action_id": action_id,
+                    "state": outcome,
+                    "automation_id": _native_identifier(
+                        request.input.get("native_result"),
+                        "automationId",
+                        "automation_id",
+                        "id",
+                    ),
+                    "observed_at": _utc_now(),
+                }
+            )
+            protocol["marshal_schedule"] = schedule
         value = {
             "action_id": action_id,
             "attempt_id": attempt_id,

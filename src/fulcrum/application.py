@@ -19,6 +19,7 @@ from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
 from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.desktop_leadership import DesktopLeadershipService
+from fulcrum.desktop_setup import DesktopSetupService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -35,7 +36,6 @@ from fulcrum.recovery_service import HumanService, RecoveryService
 from fulcrum.reset import ResetService
 from fulcrum.installation_service import ServiceService, SkillsService
 from fulcrum.runtime_service import RuntimeService, TaskService
-from fulcrum.setup import run_setup
 from fulcrum.source_refresh import SourceRefreshService
 from fulcrum.reviews import ReviewService
 from fulcrum.roles import RoleService
@@ -55,7 +55,7 @@ class Application:
         self.register(("logs", "prune"), diagnostics.prune)
         self.register(("trace",), diagnostics.trace)
         self.register(("wait",), diagnostics.wait)
-        self.register(("setup",), run_setup)
+        self.register(("bootstrap",), DesktopSetupService().bootstrap)
         services = ServiceService()
         self.register(("service", "start"), services.start)
         self.register(("service", "stop"), services.stop)

@@ -24,6 +24,7 @@ from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_vie
 from fulcrum.tollgate import Tollgate, TollgateError, TollgateUncertainError
 
 ROLES: tuple[str, ...] = (
+    "steward",
     "vizier",
     "marshal",
     "weaver",
@@ -62,6 +63,7 @@ def default_config(brain_root: Path) -> dict[str, Any]:
     model_defaults = {
         role: {"model": "gpt-5.6-sol", "effort": "high"} for role in ROLES
     }
+    model_defaults["steward"] = {"model": "gpt-5.6-luna", "effort": "high"}
     return {
         "runtime": {
             "kind": "codex",
@@ -99,6 +101,10 @@ def default_config(brain_root: Path) -> dict[str, Any]:
         },
         "source": {"repository": None, "remote": "origin", "branch": "master"},
         "timing": {
+            "instruction_idle_seconds": 3600,
+            "ci_deadline_seconds": 1800,
+            "mcp_tool_timeout_seconds": 3900,
+            "marshal_interval_seconds": 900,
             "intake_busy_seconds": 2,
             "intake_idle_seconds": 10,
             "reconcile_seconds": 15,
