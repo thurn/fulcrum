@@ -26,6 +26,15 @@ from fulcrum.bootstrap import selection
 from fulcrum.coordination import ProcessLock
 
 CONNECTION_OWNER_INPUTS = ("src/fulcrum/broker.py",)
+BROKER_HANDOFF_REASON = "broker handoff is required for connection-owner changes"
+
+
+def broker_handoff_required(instance: Path) -> bool:
+    """Return whether an installed or reachable connection owner may retain code."""
+
+    return (instance / "services" / "broker.plist").is_file() or (
+        instance / "broker.sock"
+    ).exists()
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -164,11 +173,16 @@ def activate(
                 write_json(status_path, status)
                 return status
             cached = json.loads(status_path.read_text()) if status_path.exists() else {}
+            cached_broker_handoff = bool(
+                cached.get("reason") == BROKER_HANDOFF_REASON
+                or cached.get("broker_maintenance")
+            )
             if (
                 cached.get("observed_commit") == commit
                 and cached.get("state") in {"maintenance_required", "rejected"}
                 and not maintenance
                 and not retry
+                and (not cached_broker_handoff or broker_handoff_required(instance))
             ):
                 raise RuntimeError(
                     cached.get("reason", "local master requires maintenance")
@@ -192,15 +206,22 @@ def activate(
                     if not (old / name).exists()
                     or (old / name).read_bytes() != (root / name).read_bytes()
                 ]
-                if changed:
+                handoff_required = bool(changed) and broker_handoff_required(instance)
+                if handoff_required:
                     status["broker_maintenance"] = {
                         "changed": changed,
                         "reason": "connection owner retains its running code until safe handoff",
                     }
-                if changed:
+                elif changed:
+                    # A prepared snapshot alone is not a connection owner. Initial
+                    # setup and interrupted uninstall may retain selected.json after
+                    # the owned service and socket are gone; selecting fresh code is
+                    # then safe and must not require an impossible handoff.
+                    status["broker_maintenance"] = None
+                if handoff_required:
                     status.update(
                         state="maintenance_required",
-                        reason="broker handoff is required for connection-owner changes",
+                        reason=BROKER_HANDOFF_REASON,
                         changed=changed,
                     )
                     if maintenance:

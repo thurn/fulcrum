@@ -247,7 +247,30 @@ def main(
                 )
                 selected, fd = retained, retained_fd
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f"Fulcrum source unavailable: {error}", file=sys.stderr)
+        message = f"Fulcrum source unavailable: {error}"
+        if "--json" in args:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "state": "failed",
+                        "operation_id": None,
+                        "request_id": _option(args, "--request-id"),
+                        "result": None,
+                        "warnings": [],
+                        "error": {
+                            "code": "SOURCE_UNAVAILABLE",
+                            "message": message,
+                            "retryable": True,
+                            "next_command": None,
+                            "details": {},
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        else:
+            print(message, file=sys.stderr)
         return 1
     # Retaining the descriptor across exec protects this snapshot until exit.
     env = dict(
@@ -262,6 +285,15 @@ def main(
     argv = launch_arguments(selected, module, args)
     os.execve(argv[0], argv, env)
     return 1
+
+
+def _option(args: list[str], name: str) -> str | None:
+    for index, argument in enumerate(args):
+        if argument == name and index + 1 < len(args):
+            return args[index + 1]
+        if argument.startswith(f"{name}="):
+            return argument.split("=", 1)[1]
+    return None
 
 
 def _invalid_path(args: list[str], field: str) -> int:
