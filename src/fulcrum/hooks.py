@@ -396,6 +396,12 @@ class HookService:
         current = transcripts.get(task_id)
         cursor = int(current.get("cursor", 0)) if isinstance(current, Mapping) else 0
         page = read_transcript(Path(transcript), cursor)
+        retained_gaps = (
+            list(current.get("gaps") or []) if isinstance(current, Mapping) else []
+        )
+        page_gaps = [dict(item) for item in page.gaps][-20:]
+        if page.cursor == cursor and page_gaps == retained_gaps:
+            return
         observations = dict(protocol.get("observations") or {})
         lifecycle = dict(observations.get("lifecycle") or {})
         usage = dict(observations.get("usage") or {})
@@ -434,7 +440,7 @@ class HookService:
         transcripts[task_id] = {
             "path": transcript,
             "cursor": page.cursor,
-            "gaps": [dict(item) for item in page.gaps][-20:],
+            "gaps": page_gaps,
         }
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))

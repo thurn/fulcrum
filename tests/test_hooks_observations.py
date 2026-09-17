@@ -289,8 +289,12 @@ class HookTests(unittest.TestCase):
                     + "\n"
                 )
             watched = hook.collect_registered(request())
+            writes_after_change = len(ledger.writes)
+            watched_again = hook.collect_registered(request())
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertEqual(watched, [str(path)])
+        self.assertEqual(watched_again, [str(path)])
+        self.assertEqual(len(ledger.writes), writes_after_change)
         self.assertIn("response-delayed", protocol["observations"]["usage"])
 
     def test_standing_tasks_keep_independent_transcript_cursors(self):
