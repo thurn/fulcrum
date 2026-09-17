@@ -8,12 +8,12 @@
 3. Open `~/fulcrum` as a project in Codex Desktop.
 4. Invoke `$fulcrum-bootstrap` in that project.
 
-The repository exposes this one bootstrap skill through `.agents/skills`, so it is
-available immediately from a fresh clone. The skill discovers the selected
-instance, Codex root, native task tools, supported models, and saved projects. It
-runs `~/fulcrum/scripts/setup` for first-use dependency provisioning and then
-resumes deterministic bootstrap receipts until every prerequisite or native
-result is settled.
+The repository exposes bootstrap and uninstall skills through `.agents/skills`,
+so both are available immediately from a fresh clone. The bootstrap skill
+discovers the selected instance, Codex root, native task tools, supported models,
+and saved projects. It runs `~/fulcrum/scripts/setup` for first-use dependency
+provisioning and then resumes deterministic bootstrap receipts until every
+prerequisite or native result is settled.
 
 Do not pre-create `~/brain`, edit Codex configuration, link skills, or run a
 separate package installer. Setup creates `.venv`, installs an editable launcher at
@@ -100,3 +100,20 @@ packaging maintenance, not the ordinary editing workflow.
 If broker transport code changes, use `fulcrum service update --maintenance` after
 pending responses settle. That explicit handoff is not part of ordinary policy or
 skill iteration.
+
+## Complete uninstall
+
+Invoke `$fulcrum-uninstall` for a complete removal. It uses Codex native tools to
+delete the Marshal heartbeat and archive only the three Fulcrum role tasks, then
+runs `~/fulcrum/scripts/uninstall`. The script previews by default and requires
+`--yes` before changing anything. A full uninstall also passes `--remove-source`;
+omit that flag only when retaining the clone for a clean reinstall.
+
+The script stops the owned broker and Dolt launch jobs and any Fulcrum MCP
+processes. It removes the instance, brain, incidents, logs, caches, temporary
+state, virtual environment, source-following launchers, owned skill links, and
+legacy Fulcrum paths. It removes only Fulcrum's marked MCP block, source-project
+trust entry, and hook handlers from Codex configuration, preserving unrelated
+settings and hooks. Foreign real files at owned link names are reported and left
+untouched. A running Desktop may require a later restart to forget the removed MCP
+server, but uninstall never restarts Desktop itself.

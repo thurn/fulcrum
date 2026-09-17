@@ -22,6 +22,7 @@ class InstallationError(RuntimeError):
 
 HUMAN_SKILLS = (
     "fulcrum-bootstrap",
+    "fulcrum-uninstall",
     "fulcrum-vizier",
     "fulcrum-marshal",
     "weaver",
