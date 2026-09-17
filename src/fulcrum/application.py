@@ -17,6 +17,7 @@ from fulcrum.continuity import ContinuityService
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
+from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -175,6 +176,17 @@ class Application:
         self.register(("operation", "cancel"), self._operation_cancel)
         self.register(("operation", "reconcile"), self._operation_reconcile)
         self.register(("reconcile",), ReconciliationService(self).reconcile)
+        desktop = DesktopProtocolService()
+        self.register(("register", "standing"), desktop.register_standing)
+        self.register(("action", "queue"), desktop.queue_action)
+        self.register(("action", "claim"), desktop.claim_action)
+        self.register(("action", "result"), desktop.report_action_result)
+        self.register(("instruction", "wait"), desktop.wait_for_instructions)
+        self.register(("worker", "register"), desktop.register_worker)
+        self.register(("candidate", "submit"), desktop.submit_candidate)
+        self.register(("ci", "wait"), desktop.wait_for_ci_results)
+        self.register(("pause",), desktop.pause)
+        self.register(("resume",), desktop.resume)
 
     def register(self, command: tuple[str, ...], handler: Handler) -> None:
         if command in self._handlers:
@@ -288,8 +300,8 @@ class Application:
         }
         try:
             DiagnosticLog.from_request(request).append(event)
-        except (OSError, FulcrumError):
-            pass
+        except (OSError, FulcrumError) as log_error:
+            DiagnosticLog.report_failure(request.instance.instance_root, log_error)
 
     @staticmethod
     def _operations(request: ParsedRequest) -> OperationService:

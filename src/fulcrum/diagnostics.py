@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
 import re
+import sys
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -126,13 +128,56 @@ class DiagnosticLog:
             encoded = (
                 json.dumps(retained, separators=(",", ":"), ensure_ascii=False) + "\n"
             ).encode("utf-8")
-        path = self._active_path(len(encoded))
-        with path.open("ab") as stream:
-            stream.write(encoded)
-            stream.flush()
-            os.fsync(stream.fileno())
-        self.prune()
+        lock_path = self.root / ".append.lock"
+        with lock_path.open("ab") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            path = self._active_path(len(encoded))
+            with path.open("ab") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Rotation is checked at most once a minute, never at every event.
+            prune_stamp = self.root / ".last-prune"
+            try:
+                stale = time.time() - prune_stamp.stat().st_mtime >= 60
+            except FileNotFoundError:
+                stale = True
+            if stale:
+                self.prune()
+                prune_stamp.touch()
         return retained
+
+    @staticmethod
+    def report_failure(instance_root: Path, error: BaseException) -> None:
+        """Make a diagnostic sink failure visible without inviting effect retry."""
+
+        message = f"fulcrum diagnostic log failure: {type(error).__name__}: {error}"
+        print(message, file=sys.stderr)
+        health = instance_root / "diagnostic-health.json"
+        current: dict[str, Any] = {}
+        try:
+            loaded = json.loads(health.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                current = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+        current.update(
+            {
+                "state": "degraded",
+                "last_error": message,
+                "last_error_at": utc_now(),
+                "dropped_events": int(current.get("dropped_events", 0)) + 1,
+            }
+        )
+        try:
+            health.parent.mkdir(parents=True, exist_ok=True)
+            temporary = health.with_name(f".{health.name}.{os.getpid()}")
+            temporary.write_text(
+                json.dumps(current, separators=(",", ":")) + "\n", encoding="utf-8"
+            )
+            os.replace(temporary, health)
+        except OSError:
+            print("fulcrum could not persist diagnostic health", file=sys.stderr)
 
     def _active_path(self, incoming: int) -> Path:
         day = datetime.now(timezone.utc).strftime("%Y%m%d")

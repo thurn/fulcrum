@@ -248,6 +248,16 @@ COMMANDS = (
     CommandDefinition(("rates", "add"), "add an immutable documented rate card"),
     CommandDefinition(("fleet", "replace"), "replace a scoped managed task fleet"),
     CommandDefinition(("reset",), "perform an explicitly authorized hard reset"),
+    CommandDefinition(("register", "standing"), "register a standing native task"),
+    CommandDefinition(("action", "queue"), "queue one exact native action"),
+    CommandDefinition(("action", "claim"), "claim one exact native invocation"),
+    CommandDefinition(("action", "result"), "record one native invocation result"),
+    CommandDefinition(("instruction", "wait"), "wait for Steward instructions"),
+    CommandDefinition(("worker", "register"), "register an assigned worker"),
+    CommandDefinition(("candidate", "submit"), "submit an exact Warden candidate"),
+    CommandDefinition(("ci", "wait"), "wait for exact candidate CI"),
+    CommandDefinition(("pause",), "pause new Fulcrum effects"),
+    CommandDefinition(("resume",), "resume eligible Fulcrum effects"),
 )
 
 
@@ -532,6 +542,15 @@ def _add_command_options(
     elif path == ("reset",):
         _option(parser, "--hard", action="store_true", required=True)
         _option(parser, "--yes", action="store_true", required=True)
+    elif path in {("action", "claim"), ("action", "result")}:
+        _option(parser, "--record-id", required=True)
+        _option(parser, "--action-id", required=True)
+    elif path in {
+        ("worker", "register"),
+        ("candidate", "submit"),
+        ("ci", "wait"),
+    }:
+        _option(parser, "--bead", required=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -573,6 +592,57 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
+    ("register", "standing"): {
+        "role",
+        "task_id",
+        "host_id",
+        "session_id",
+        "turn_id",
+        "action_id",
+    },
+    ("action", "queue"): {
+        "record_id",
+        "executor",
+        "tool",
+        "arguments",
+        "expected_result",
+        "reporting",
+        "assignment_token",
+        "purpose",
+    },
+    ("action", "claim"): {"record_id", "action_id", "attempt_id", "native_tool_use_id"},
+    ("action", "result"): {
+        "record_id",
+        "action_id",
+        "attempt_id",
+        "outcome",
+        "evidence",
+        "native_result",
+    },
+    ("instruction", "wait"): {"turn_id", "loop_id", "idle_seconds"},
+    ("worker", "register"): {
+        "bead",
+        "assignment_token",
+        "workspace",
+        "host_id",
+        "turn_id",
+        "session_id",
+        "git_root",
+        "branch",
+        "source",
+    },
+    ("candidate", "submit"): {
+        "bead",
+        "candidate_id",
+        "source",
+        "provider_run_id",
+        "state",
+        "deadline_seconds",
+        "evidence",
+    },
+    ("ci", "wait"): {"bead", "candidate_id", "assignment_token", "turn_id"},
+    ("pause",): {"reason"},
+    ("resume",): {"reason"},
     ("reset",): {"expected_remote_ref", "legacy_state_root", "legacy_database"},
     ("hook", "context"): {
         "hook_event_name",
