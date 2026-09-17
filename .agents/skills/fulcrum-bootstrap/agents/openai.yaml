@@ -1,0 +1,5 @@
+interface:
+  display_name: "Fulcrum Bootstrap"
+  short_description: "Bootstrap Fulcrum in Codex Desktop"
+policy:
+  allow_implicit_invocation: false
