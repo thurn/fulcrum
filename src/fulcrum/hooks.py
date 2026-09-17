@@ -17,6 +17,7 @@ from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.coordination import coordinated
 from fulcrum.desktop_protocol import (
     DesktopProtocolService,
+    _positive_native_completion,
     _protocol,
     _utc_now,
     _validated_action_outcome,
@@ -60,14 +61,10 @@ class HookService:
             raise FulcrumError(
                 "LEDGER_UNAVAILABLE", "hook handling requires Beads", exit_code=4
             )
-        executable: str | None = None
-        try:
-            manager = ConfigurationManager(request.instance.config_path)
-            document, _ = manager.load()
-            configured = manager.effective(document)["beads"].get("executable")
-            executable = str(configured) if configured else None
-        except FulcrumError:
-            pass
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        configured = manager.effective(document)["beads"].get("executable")
+        executable = str(configured) if configured else None
         return Ledger(
             request.instance.brain_root,
             executable=executable,
@@ -128,6 +125,19 @@ class HookService:
     ) -> None:
         record, role = bound
         if role in {"steward", "marshal", "vizier"}:
+            protocol = _protocol(record.fc or {})
+            standing = dict(protocol.get("standing") or {})
+            binding = standing.get(role)
+            if isinstance(binding, Mapping):
+                standing[role] = {
+                    **dict(binding),
+                    "state": "registered",
+                    "session_id": request.input.get("session_id"),
+                    "turn_id": request.input.get("turn_id"),
+                    "last_prompt_at": _utc_now(),
+                }
+                protocol["standing"] = standing
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
             return
         task_id = str(
             request.input.get("thread_id")
@@ -291,7 +301,12 @@ class HookService:
             if isinstance(binding, Mapping):
                 standing[role] = {
                     **dict(binding),
-                    "state": "stopped" if event_name == "Stop" else "interrupted",
+                    "state": (
+                        "stop_observed"
+                        if event_name == "Stop"
+                        else "interrupt_observed"
+                    ),
+                    "turn_id": event.get("turn_id") or binding.get("turn_id"),
                     "last_lifecycle_event": event,
                 }
                 protocol["standing"] = standing
@@ -433,6 +448,19 @@ class HookService:
         }
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        if role in {"steward", "marshal", "vizier"}:
+            standing = dict(protocol.get("standing") or {})
+            binding = standing.get(role)
+            if isinstance(binding, Mapping) and _positive_native_completion(
+                protocol, binding
+            ):
+                standing[role] = {
+                    **dict(binding),
+                    "state": "stopped",
+                    "positively_completed_at": _utc_now(),
+                }
+                protocol["standing"] = standing
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         task_usage = [
             value
             for value in usage.values()

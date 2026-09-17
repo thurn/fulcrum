@@ -52,7 +52,9 @@ class CompletionService:
         ledger, work = _owned_work(request, ledger)
         outcome = request.input.get("outcome") or request.arguments.get("outcome")
         role = str((work.fc or {}).get("role") or "")
-        if outcome == "blocked":
+        if role == "justiciar" and outcome == "blocked":
+            result = self._justiciar_blocked(request, ledger, work)
+        elif outcome == "blocked":
             result = self._blocked(request, ledger, work)
         elif role == "justiciar" and outcome == "repaired":
             result = self._justiciar_repaired(request, ledger, work)
@@ -369,7 +371,46 @@ class CompletionService:
         if source_oid is not None:
             if not isinstance(source_oid, str) or not source_oid:
                 raise FulcrumError.invalid("INVALID_INPUT", "source_oid is invalid")
-            source_evidence = _verify_repair_source(work, source_oid)
+            work = _reload_work(ledger, work.id)
+            current_fence = (work.fc or {}).get("recovery_fence")
+            if (
+                not isinstance(current_fence, Mapping)
+                or current_fence.get("operation_id") != fence.get("operation_id")
+                or current_fence.get("state") not in {"active", "repairing"}
+            ):
+                raise FulcrumError(
+                    "RECOVERY_CONFLICT",
+                    "recovery authority changed before delivery evidence was sealed",
+                    exit_code=5,
+                    retryable=True,
+                )
+            current_assignment = (
+                ((work.fc or {}).get("desktop") or {}).get("assignment")
+                if isinstance((work.fc or {}).get("desktop"), Mapping)
+                else None
+            )
+            if (
+                not isinstance(current_assignment, Mapping)
+                or current_assignment.get("assignment_token")
+                != request.ownership_operation
+                or current_assignment.get("task_id")
+                != (request.actor.task_id or request.thread_id)
+            ):
+                raise FulcrumError(
+                    "AUTHORITY_MISMATCH",
+                    "recovery assignment changed while source evidence was inspected",
+                    exit_code=5,
+                )
+            fence = current_fence
+            delivery = _settled_delivery_for_source(work, source_oid)
+            if delivery is None:
+                raise FulcrumError(
+                    "DELIVERY_NOT_SETTLED",
+                    "changed recovery source must complete exact-source validation, review, promotion, synchronization, and cleanup before repair can finish",
+                    exit_code=5,
+                    details={"bead_id": work.id, "source_oid": source_oid},
+                )
+            source_evidence = {"delivery": dict(delivery)}
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
@@ -405,6 +446,54 @@ class CompletionService:
         recovery = dict(fc.get("recovery") or {})
         recovery["result"] = fc["disposition"]
         fc["recovery"] = recovery
+        from fulcrum.desktop_protocol import (
+            DesktopProtocolService,
+            _protocol,
+            _with_protocol,
+        )
+
+        protocol = _protocol(fc)
+        incidents = dict(protocol.get("incidents") or {})
+        incident_key = str(fence.get("incident_key") or "")
+        incident = incidents.get(incident_key)
+        if isinstance(incident, Mapping):
+            incidents[incident_key] = {
+                **dict(incident),
+                "state": "resolved",
+                "resolved_at": utc_now(),
+                "repair_operation": operation.id,
+            }
+            protocol["incidents"] = incidents
+        resume_action = None
+        scope = str(fence.get("scope") or "").lower()
+        if "steward" in scope:
+            system = ledger.show("fc-system")
+            standing = (
+                (_protocol(system.fc or {}).get("standing") or {})
+                if system is not None
+                else {}
+            )
+            steward = standing.get("steward")
+            if isinstance(steward, Mapping) and steward.get("state") == "stopped":
+                resume_action = DesktopProtocolService(ledger)._append_action(
+                    protocol,
+                    record_id=work.id,
+                    executor="justiciar",
+                    tool="send_message_to_thread",
+                    arguments={
+                        "threadId": steward.get("task_id"),
+                        "prompt": (
+                            "Resume as the existing Steward. Re-read durable Fulcrum "
+                            "state, reconcile retained actions and waits, then call "
+                            "wait_for_instructions."
+                        ),
+                    },
+                    purpose=f"resume_repaired_steward:{operation.id}",
+                    expected_result={"thread_id": steward.get("task_id")},
+                    reporting={"kind": "same_steward_resumption"},
+                    assignment_token=request.ownership_operation,
+                )
+        fc = _with_protocol(fc, protocol)
         fc["last_transition"] = operation.id
         fc["next_action"] = (
             "Release the retained takeover after scoped facts are reconciled."
@@ -425,9 +514,161 @@ class CompletionService:
                 "disposition": fc["disposition"],
                 "completion_cost": completion_cost,
                 "takeover_still_active": True,
+                "resume_action": resume_action,
                 "report_reminder": _report_reminder(work.id),
             },
             next_action=fc["next_action"],
+        )
+        return _operation_result(operation)
+
+    def _justiciar_blocked(
+        self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
+    ) -> CommandResult:
+        summary = request.input.get("summary")
+        blocker = request.input.get("blocker")
+        attempts = request.input.get("attempts")
+        required = request.input.get("required_action")
+        if not all(
+            isinstance(item, str) and item.strip()
+            for item in (summary, blocker, required)
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT",
+                "blocked requires nonempty summary, blocker, and required_action",
+            )
+        if not isinstance(attempts, list) or not all(
+            isinstance(item, str) and item.strip() for item in attempts
+        ):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "blocked attempts must be an array of strings"
+            )
+        fence = (work.fc or {}).get("recovery_fence")
+        if not isinstance(fence, Mapping) or fence.get("state") not in {
+            "active",
+            "repairing",
+        }:
+            raise FulcrumError(
+                "RECOVERY_AUTHORITY_REQUIRED",
+                "Justiciar blocked requires an active scoped takeover",
+                exit_code=5,
+            )
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "summary": summary,
+                "blocker": blocker,
+                "attempts": list(attempts),
+                "required_action": required,
+                "takeover_operation": fence.get("operation_id"),
+            },
+            next_action="Retain the failed intervention and escalate to Vizier for human direction.",
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        _record_task_finish(ledger, work, operation.id)
+        from fulcrum.desktop_protocol import (
+            DesktopProtocolService,
+            _opaque,
+            _protocol,
+            _with_protocol,
+        )
+
+        current = _reload_work(ledger, work.id)
+        fc = dict(current.fc or {})
+        protocol = _protocol(fc)
+        incidents = dict(protocol.get("incidents") or {})
+        incident_key = str(fence.get("incident_key") or "justiciar-intervention")
+        retained = incidents.get(incident_key)
+        incident = {
+            **(dict(retained) if isinstance(retained, Mapping) else {}),
+            "incident_id": (
+                retained.get("incident_id")
+                if isinstance(retained, Mapping)
+                else _opaque("incident")
+            ),
+            "incident_key": incident_key,
+            "state": "open",
+            "scope": fence.get("scope"),
+            "required_decision": str(required),
+            "evidence": {
+                "summary": summary,
+                "blocker": blocker,
+                "attempts": list(attempts),
+                "operation_id": operation.id,
+            },
+            "justiciar_interventions": max(
+                1, int((retained or {}).get("justiciar_interventions", 0))
+            ),
+            "repair_hold": True,
+            "updated_at": utc_now(),
+        }
+        incidents[incident_key] = incident
+        protocol["incidents"] = incidents
+        decisions = dict(protocol.get("human_decisions") or {})
+        decision_id = _opaque("human-decision")
+        decision = {
+            "decision_id": decision_id,
+            "incident_id": incident["incident_id"],
+            "state": "open",
+            "question": str(required),
+            "scope": fence.get("scope"),
+            "evidence": incident["evidence"],
+            "created_at": utc_now(),
+        }
+        decisions[decision_id] = decision
+        protocol["human_decisions"] = decisions
+        system = ledger.show("fc-system")
+        standing = (
+            (_protocol(system.fc or {}).get("standing") or {})
+            if system is not None
+            else {}
+        )
+        vizier = standing.get("vizier")
+        notice = None
+        if isinstance(vizier, Mapping) and vizier.get("state") == "registered":
+            notice = DesktopProtocolService(ledger)._append_action(
+                protocol,
+                record_id=work.id,
+                executor="justiciar",
+                tool="send_message_to_thread",
+                arguments={
+                    "threadId": vizier.get("task_id"),
+                    "prompt": (
+                        f"Human decision {decision_id} is required for {work.id} "
+                        f"after the scoped Justiciar intervention failed: {required}"
+                    ),
+                },
+                purpose=f"human_decision:{decision_id}",
+                expected_result={"thread_id": vizier.get("task_id")},
+                reporting={"kind": "recorded_notification", "target": "vizier"},
+                assignment_token=request.ownership_operation,
+            )
+            decision["notice"] = dict(notice)
+            decisions[decision_id] = decision
+            protocol["human_decisions"] = decisions
+        failed_fence = {**dict(fence), "state": "failed", "failed_at": utc_now()}
+        fc["recovery_fence"] = failed_fence
+        fc["phase"] = "human"
+        fc["owner"] = "HUMAN"
+        fc["role"] = "justiciar"
+        fc["next_action"] = str(required)
+        fc["last_transition"] = operation.id
+        ledger.update_fc(
+            work.id, _with_protocol(fc, protocol), assignee="HUMAN", status="blocked"
+        )
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step="justiciar_failure_escalated",
+            result={
+                "bead_id": work.id,
+                "blocked": True,
+                "incident": incident,
+                "decision": decision,
+                "notice": notice,
+            },
+            next_action=str(required),
         )
         return _operation_result(operation)
 
@@ -1356,32 +1597,6 @@ def _waiting_reasons(value: Any) -> list[dict[str, Any]]:
     )
 
 
-def _verify_repair_source(work: LedgerRecord, source_oid: str) -> dict[str, Any]:
-    workspace = (work.fc or {}).get("worktree")
-    path = workspace.get("path") if isinstance(workspace, Mapping) else None
-    if not isinstance(path, str):
-        raise FulcrumError(
-            "SOURCE_NOT_OBSERVED",
-            "repaired source_oid requires a retained managed worktree",
-            exit_code=5,
-        )
-    result = subprocess.run(
-        ["git", "-C", path, "cat-file", "-e", f"{source_oid}^{{commit}}"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=20,
-    )
-    if result.returncode != 0:
-        raise FulcrumError(
-            "SOURCE_NOT_OBSERVED",
-            "source_oid is not an observed commit in the retained worktree",
-            exit_code=5,
-            details={"source_oid": source_oid, "path": path},
-        )
-    return {"source_oid": source_oid, "path": path, "observed": True}
-
-
 def _weaver_payload(
     request: ParsedRequest, *, evidence_required: bool
 ) -> tuple[str, list[str]]:
@@ -1642,9 +1857,11 @@ def _release_desktop_assignment(
     desktop["assignment_history"] = history[-20:]
     fc["desktop"] = desktop
     if assignment.get("capacity_class") == "recovery":
-        fence = fc.pop("recovery_fence", None)
+        fence = fc.get("recovery_fence")
         recovery_history = list(fc.get("recovery_history") or [])
-        if isinstance(fence, Mapping):
+        accepted = current.status == "closed" and fc.get("phase") == "done"
+        if isinstance(fence, Mapping) and accepted:
+            fc.pop("recovery_fence", None)
             recovery_history.append(
                 {
                     **dict(fence),
@@ -1654,7 +1871,24 @@ def _release_desktop_assignment(
                 }
             )
             fc["recovery_history"] = recovery_history[-20:]
-    owner = "SYSTEM" if current.status == "closed" else "STEWARD"
+        elif isinstance(fence, Mapping):
+            fc["recovery_fence"] = {
+                **dict(fence),
+                "state": "failed",
+                "assignment_released_at": utc_now(),
+                "release_reason": "failed intervention retained for human direction",
+            }
+    retained_fence = fc.get("recovery_fence")
+    owner = (
+        "SYSTEM"
+        if current.status == "closed"
+        else (
+            "HUMAN"
+            if isinstance(retained_fence, Mapping)
+            and retained_fence.get("state") == "failed"
+            else "STEWARD"
+        )
+    )
     fc["owner"] = owner
     fc["role"] = None
     fc["ownership_operation"] = None
@@ -1705,6 +1939,15 @@ def settle_native_completion(
     from fulcrum.desktop_protocol import _positive_native_completion
 
     if not _positive_native_completion(desktop, assignment):
+        return False
+    actions = desktop.get("actions")
+    if isinstance(actions, Mapping) and any(
+        isinstance(action, Mapping)
+        and action.get("executor") == assignment.get("role")
+        and action.get("assignment_token") == assignment.get("assignment_token")
+        and action.get("state") in {"pending", "issuing", "uncertain"}
+        for action in actions.values()
+    ):
         return False
     finish_operation = str(assignment["finish_operation"])
     delivery_finish = fc.get("delivery_finish")

@@ -23,7 +23,13 @@ from fulcrum.contracts import (
     FulcrumError,
     ParsedRequest,
 )
-from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_view
+from fulcrum.ledger import (
+    Ledger,
+    LedgerFailure,
+    LedgerRecord,
+    OperationRecord,
+    operation_view,
+)
 from fulcrum.work import work_view
 
 DEFAULT_LIMIT = 20
@@ -37,6 +43,16 @@ _BEARER: re.Pattern[str] = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
 def _diagnostic_health(instance_root: Path) -> dict[str, Any]:
@@ -445,7 +461,118 @@ class DiagnosticService:
                             and value.get("state") == "waiting"
                         ],
                     }
-            capacity = _capacity(request, ledger)
+            all_records = ledger.list_records(limit=0)
+            pending_actions: list[dict[str, Any]] = []
+            incidents: list[dict[str, Any]] = []
+            provider_jobs: list[dict[str, Any]] = []
+            accounting_coverage: list[dict[str, Any]] = []
+            observed_now = datetime.now(timezone.utc)
+            for retained in all_records:
+                retained_fc = retained.fc or {}
+                retained_desktop = retained_fc.get("desktop")
+                if isinstance(retained_desktop, Mapping):
+                    for action in (retained_desktop.get("actions") or {}).values():
+                        if not isinstance(action, Mapping) or action.get(
+                            "state"
+                        ) not in {
+                            "pending",
+                            "issuing",
+                            "uncertain",
+                        }:
+                            continue
+                        created = _parse_time(action.get("created_at"))
+                        pending_actions.append(
+                            {
+                                "record_id": retained.id,
+                                "action_id": action.get("action_id"),
+                                "tool": action.get("tool"),
+                                "executor": action.get("executor"),
+                                "state": action.get("state"),
+                                "age_seconds": (
+                                    max(
+                                        0, int((observed_now - created).total_seconds())
+                                    )
+                                    if created is not None
+                                    else None
+                                ),
+                            }
+                        )
+                    for incident in (retained_desktop.get("incidents") or {}).values():
+                        if (
+                            not isinstance(incident, Mapping)
+                            or incident.get("state") == "resolved"
+                        ):
+                            continue
+                        incidents.append(
+                            {
+                                "record_id": retained.id,
+                                **dict(incident),
+                                "ordinary_repair_allowance": 3
+                                + int(incident.get("additional_repair_cycles") or 0),
+                                "ordinary_repairs_used": int(
+                                    incident.get("repair_cycles") or 0
+                                ),
+                                "justiciar_allowance": 1,
+                                "justiciar_interventions_used": int(
+                                    incident.get("justiciar_interventions") or 0
+                                ),
+                            }
+                        )
+                    candidate = retained_desktop.get("candidate")
+                    if isinstance(candidate, Mapping):
+                        provider_jobs.append(
+                            {"record_id": retained.id, **dict(candidate)}
+                        )
+                if retained.kind == "analytics":
+                    accounting_coverage.append(
+                        {
+                            "record_id": retained.id,
+                            "thread_id": retained_fc.get("thread_id"),
+                            "role": retained_fc.get("role"),
+                            "missing_reasons": retained_fc.get("missing_reasons") or [],
+                        }
+                    )
+            desktop = dict(desktop or {})
+            pending_actions.sort(
+                key=lambda value: (
+                    str(value.get("record_id")),
+                    str(value.get("action_id")),
+                )
+            )
+            incidents.sort(
+                key=lambda value: (
+                    str(value.get("record_id")),
+                    str(value.get("incident_id")),
+                )
+            )
+            provider_jobs.sort(
+                key=lambda value: (
+                    str(value.get("record_id")),
+                    str(value.get("candidate_id")),
+                )
+            )
+            accounting_coverage.sort(key=lambda value: str(value.get("record_id")))
+            desktop["actions"] = pending_actions[:100]
+            desktop["incidents"] = incidents[:100]
+            desktop["provider_jobs"] = provider_jobs[:100]
+            desktop["accounting_coverage"] = accounting_coverage[:100]
+            desktop["omitted"] = {
+                "actions": max(0, len(pending_actions) - 100),
+                "incidents": max(0, len(incidents) - 100),
+                "provider_jobs": max(0, len(provider_jobs) - 100),
+                "accounting_coverage": max(0, len(accounting_coverage) - 100),
+            }
+            try:
+                capacity = _capacity(request, ledger)
+            except FulcrumError as error:
+                gaps.append(
+                    {
+                        "component": "config",
+                        "projection": "capacity",
+                        "availability": "unavailable",
+                        "reason": error.message,
+                    }
+                )
         except LedgerFailure as error:
             gaps.append(
                 {
@@ -556,6 +683,7 @@ class DiagnosticService:
             )
         )
         components.append(_broker_component(request))
+        components.append(_desktop_protocol_component(request, now))
         loops = _loop_health(request, config, now)
         return _doctor_result(components, loops)
 
@@ -588,9 +716,121 @@ class DiagnosticService:
 
     def trace(self, request: ParsedRequest) -> CommandResult:
         bead_id = request.arguments.get("bead")
-        if not isinstance(bead_id, str) or not bead_id:
-            raise FulcrumError.invalid("INVALID_INPUT", "trace requires --bead")
         ledger = _ledger(request)
+        selectors = {
+            name: request.arguments.get(name)
+            for name in ("operation", "action", "task", "wait")
+            if request.arguments.get(name)
+        }
+        if not isinstance(bead_id, str) or not bead_id:
+            if len(selectors) != 1:
+                raise FulcrumError.invalid(
+                    "INVALID_INPUT",
+                    "trace requires exactly one of --bead, --operation, --action, --task, or --wait",
+                )
+            selector_name, selector_value = next(iter(selectors.items()))
+            matched: LedgerRecord | None = None
+            if selector_name == "operation":
+                operation_record = ledger.show(str(selector_value))
+                operation_fc = (
+                    operation_record.fc or {} if operation_record is not None else {}
+                )
+                operation = operation_fc.get("operation")
+                candidate = (
+                    operation.get("bead_id") if isinstance(operation, Mapping) else None
+                )
+                matched = ledger.show(str(candidate)) if candidate else operation_record
+            else:
+                for candidate in ledger.list_records(limit=0):
+                    desktop = (candidate.fc or {}).get("desktop")
+                    if not isinstance(desktop, Mapping):
+                        continue
+                    if selector_name == "action" and str(selector_value) in (
+                        desktop.get("actions") or {}
+                    ):
+                        matched = candidate
+                        break
+                    if selector_name == "wait" and any(
+                        str(selector_value) in (desktop.get(name) or {})
+                        for name in ("instruction_waits", "ci_waits")
+                    ):
+                        matched = candidate
+                        break
+                    if selector_name == "task":
+                        assignment = desktop.get("assignment")
+                        history = desktop.get("assignment_history") or []
+                        standing = desktop.get("standing") or {}
+                        task_ids = {
+                            str(value.get("task_id"))
+                            for value in [assignment, *history, *standing.values()]
+                            if isinstance(value, Mapping) and value.get("task_id")
+                        }
+                        if str(selector_value) in task_ids:
+                            matched = candidate
+                            break
+            if matched is None:
+                raise FulcrumError.invalid(
+                    "NOT_FOUND", f"unknown {selector_name} {selector_value}"
+                )
+            if matched.kind != "work":
+                desktop = (matched.fc or {}).get("desktop") or {}
+                evidence: Any = {}
+                if selector_name == "operation":
+                    evidence = (matched.fc or {}).get("operation") or {}
+                elif selector_name == "action":
+                    evidence = (desktop.get("actions") or {}).get(
+                        str(selector_value), {}
+                    )
+                elif selector_name == "wait":
+                    evidence = next(
+                        (
+                            collection[str(selector_value)]
+                            for collection in (
+                                desktop.get("instruction_waits") or {},
+                                desktop.get("ci_waits") or {},
+                            )
+                            if str(selector_value) in collection
+                        ),
+                        {},
+                    )
+                elif selector_name == "task":
+                    evidence = next(
+                        (
+                            value
+                            for value in (desktop.get("standing") or {}).values()
+                            if isinstance(value, Mapping)
+                            and value.get("task_id") == selector_value
+                        ),
+                        {},
+                    )
+                return CommandResult.query(
+                    {
+                        "items": [
+                            {
+                                "time": matched.native.get("updated_at")
+                                or matched.native.get("created_at"),
+                                "id": f"{matched.id}:{selector_name}:{selector_value}",
+                                "bead_id": None,
+                                "operation_id": (
+                                    selector_value
+                                    if selector_name == "operation"
+                                    else None
+                                ),
+                                "task_id": (
+                                    selector_value if selector_name == "task" else None
+                                ),
+                                "transition": "durable_control_observation",
+                                "effect": selector_name,
+                                "outcome": matched.status,
+                                "evidence": evidence,
+                            }
+                        ],
+                        "next_cursor": None,
+                        "gaps": [],
+                        "source_oids": [],
+                    }
+                )
+            bead_id = matched.id
         record = ledger.show(bead_id)
         if record is None or record.kind != "work":
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
@@ -1161,6 +1401,74 @@ def _doctor_result(
             details={"issues": issues},
         ),
     )
+
+
+def _desktop_protocol_component(
+    request: ParsedRequest, now: datetime
+) -> dict[str, Any]:
+    try:
+        ledger = _ledger(request)
+        pending = 0
+        uncertain = 0
+        stale = 0
+        incidents = 0
+        provider_jobs = 0
+        accounting_gaps = 0
+        for record in ledger.list_records(limit=0):
+            fc = record.fc or {}
+            desktop = fc.get("desktop")
+            if isinstance(desktop, Mapping):
+                for action in (desktop.get("actions") or {}).values():
+                    if not isinstance(action, Mapping) or action.get("state") not in {
+                        "pending",
+                        "issuing",
+                        "uncertain",
+                    }:
+                        continue
+                    pending += 1
+                    uncertain += int(action.get("state") == "uncertain")
+                    created = _parse_time(action.get("created_at"))
+                    stale += int(
+                        created is not None and now - created >= timedelta(minutes=30)
+                    )
+                incidents += sum(
+                    1
+                    for value in (desktop.get("incidents") or {}).values()
+                    if isinstance(value, Mapping) and value.get("state") != "resolved"
+                )
+                candidate = desktop.get("candidate")
+                provider_jobs += int(
+                    isinstance(candidate, Mapping)
+                    and candidate.get("state") in {"pending", "running", "queued"}
+                )
+            if record.kind == "analytics" and fc.get("missing_reasons"):
+                accounting_gaps += 1
+        state = "degraded" if uncertain or stale or accounting_gaps else "healthy"
+        return _health(
+            "desktop_protocol",
+            state,
+            evidence={
+                "pending_actions": pending,
+                "uncertain_actions": uncertain,
+                "actions_older_than_30m": stale,
+                "open_incidents": incidents,
+                "active_provider_jobs": provider_jobs,
+                "accounting_gaps": accounting_gaps,
+            },
+            affected_commands=(
+                ["native action dispatch", "recovery"] if state != "healthy" else []
+            ),
+            next_commands=(
+                [["fulcrum", "status", "--json"]] if state != "healthy" else []
+            ),
+        )
+    except (FulcrumError, LedgerFailure) as error:
+        return _health(
+            "desktop_protocol",
+            "unknown",
+            evidence={"error": str(error)},
+            affected_commands=["native action dispatch", "recovery"],
+        )
 
 
 def _loop_health(

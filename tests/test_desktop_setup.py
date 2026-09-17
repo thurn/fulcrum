@@ -76,6 +76,37 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             )
 
         second = service.bootstrap(bootstrap_request(root, **supplied))
+        diagnostic = next(
+            row
+            for row in second.result["pending_actions"]
+            if row["reporting"].get("purpose") == "diagnostic_escape_hatch"
+        )
+        service.claim_action(
+            replace(
+                bootstrap_request(root),
+                command=("action", "claim"),
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": diagnostic["action_id"],
+                },
+                input={"attempt_id": "diagnostic-attempt"},
+            )
+        )
+        service.report_action_result(
+            replace(
+                bootstrap_request(root),
+                command=("action", "result"),
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": diagnostic["action_id"],
+                },
+                input={
+                    "attempt_id": "diagnostic-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {"threadId": "steward-task"},
+                },
+            )
+        )
         schedule = next(
             row
             for row in second.result["pending_actions"]
@@ -104,7 +135,11 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                 input={
                     "attempt_id": "schedule-attempt",
                     "outcome": "succeeded",
-                    "native_result": {"automationId": "automation-1"},
+                    "native_result": {
+                        "automationId": "automation-1",
+                        "status": "PAUSED",
+                        "targetThreadId": "marshal-task",
+                    },
                 },
             )
         )
@@ -143,7 +178,11 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                 input={
                     "attempt_id": "activation-attempt",
                     "outcome": "succeeded",
-                    "native_result": {"automationId": "automation-1"},
+                    "native_result": {
+                        "automationId": "automation-1",
+                        "status": "ACTIVE",
+                        "targetThreadId": "marshal-task",
+                    },
                 },
             )
         )

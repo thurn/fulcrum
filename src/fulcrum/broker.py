@@ -83,8 +83,28 @@ class PendingBroker:
         self.started_monotonic: float = time.monotonic()
         self.completed: int = 0
         self.failures: int = 0
+        self._durable: dict[str, dict[str, Any]] = {}
+        self._watch_paths: tuple[Path, ...] = ()
 
     def signal(self) -> None:
+        self._wake.set()
+
+    def reconstruct(self, snapshot: Mapping[str, Any]) -> None:
+        payload = snapshot.get("result")
+        if snapshot.get("ok") is not True or not isinstance(payload, Mapping):
+            raise RuntimeError("fresh transport reconstruction did not succeed")
+        waits = payload.get("waits") if isinstance(payload, Mapping) else None
+        paths = payload.get("watch_paths") if isinstance(payload, Mapping) else None
+        self._durable = {
+            str(value["wait_id"]): dict(value)
+            for value in (waits or [])
+            if isinstance(value, Mapping) and value.get("wait_id")
+        }
+        self._watch_paths = tuple(
+            Path(value)
+            for value in (paths or [])
+            if isinstance(value, str) and Path(value).is_absolute()
+        )
         self._wake.set()
 
     async def wait(self, evaluation: Evaluation) -> Mapping[str, Any]:
@@ -205,6 +225,8 @@ class PendingBroker:
                 }
                 for value in self._active.values()
             ],
+            "durable_waits": list(self._durable.values()),
+            "watch_paths": [str(path) for path in self._watch_paths],
             "completed": self.completed,
             "failures": self.failures,
         }
@@ -246,10 +268,17 @@ async def _wait_for_files(paths: tuple[Path, ...]) -> None:
 
 
 class BrokerServer:
-    def __init__(self, socket_path: Path, broker: PendingBroker | None = None) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        broker: PendingBroker | None = None,
+        *,
+        snapshot_argv: Sequence[str] | None = None,
+    ) -> None:
         self.socket_path: Path = socket_path.resolve(strict=False)
         self.broker: PendingBroker = broker or PendingBroker()
         self._server: asyncio.AbstractServer | None = None
+        self.snapshot_argv: tuple[str, ...] = tuple(snapshot_argv or ())
 
     async def serve(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -268,11 +297,51 @@ class BrokerServer:
             self._server = server
             os.chmod(self.socket_path, 0o600)
             _log("broker_started", socket=str(self.socket_path))
-            async with server:
-                await server.serve_forever()
+            reconciliation = (
+                asyncio.create_task(self._reconstruct_loop())
+                if self.snapshot_argv
+                else None
+            )
+            try:
+                async with server:
+                    await server.serve_forever()
+            finally:
+                if reconciliation is not None:
+                    reconciliation.cancel()
+                    await asyncio.gather(reconciliation, return_exceptions=True)
         finally:
             self.socket_path.unlink(missing_ok=True)
             lock.close()
+
+    async def _reconstruct_loop(self) -> None:
+        """Continuously recover durable indexes through fresh policy processes."""
+
+        while True:
+            try:
+                snapshot = await self.broker.runner(
+                    (*self.snapshot_argv, "--request-id", str(uuid.uuid4())), "{}"
+                )
+                self.broker.reconstruct(snapshot)
+                _log(
+                    "broker_index_reconstructed",
+                    durable_waits=len(self.broker._durable),
+                    watch_paths=len(self.broker._watch_paths),
+                )
+                if self.broker._watch_paths:
+                    try:
+                        await asyncio.wait_for(
+                            _wait_for_files(self.broker._watch_paths), timeout=15.0
+                        )
+                        self.broker.signal()
+                    except TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(15.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                _log("broker_index_reconstruction_failed", error=str(error))
+                await asyncio.sleep(15.0)
 
     async def _client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -354,15 +423,29 @@ async def broker_request(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fulcrum-broker")
     parser.add_argument("--instance", required=True)
+    parser.add_argument("--fulcrum", required=True)
+    parser.add_argument("--config", required=True)
     args = parser.parse_args(argv)
     instance = Path(args.instance).expanduser()
     if not instance.is_absolute():
         parser.error("--instance must be absolute")
     socket_path: Path = instance / "broker.sock"
+    snapshot_argv: tuple[str, ...] = (
+        str(Path(args.fulcrum).expanduser().resolve(strict=False)),
+        "transport",
+        "snapshot",
+        "--instance",
+        str(instance),
+        "--config",
+        str(Path(args.config).expanduser().resolve(strict=False)),
+        "--json",
+    )
 
     async def run() -> None:
         loop = asyncio.get_running_loop()
-        task = asyncio.create_task(BrokerServer(socket_path).serve())
+        task = asyncio.create_task(
+            BrokerServer(socket_path, snapshot_argv=snapshot_argv).serve()
+        )
         for name in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(name, lambda: task.cancel())
         try:

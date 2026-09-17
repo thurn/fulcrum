@@ -12,7 +12,11 @@ from typing import Any
 
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
-from fulcrum.desktop_protocol import _protocol
+from fulcrum.desktop_protocol import (
+    _native_field,
+    _protocol,
+    _validated_action_outcome,
+)
 from fulcrum.desktop_services import _services, _start, _stop
 from fulcrum.install import inspect_service
 from fulcrum.instance import WriterLock
@@ -154,7 +158,9 @@ def _inventory(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
             "marshal_schedule": (
                 {
                     "automation_id": schedule.get("automation_id"),
-                    "reason": "stock task tools expose no destructive task or automation deletion",
+                    "target_task_id": schedule.get("target_task_id"),
+                    "status": schedule.get("status"),
+                    "reason": "the old heartbeat must be paused before destructive reset",
                 }
                 if schedule
                 else None
@@ -287,6 +293,31 @@ class ResetService:
                 request_id=request.request_id,
                 result=dict(fence),
             )
+        if fence and fence.get("state") == "native_cleanup_required":
+            result = request.input.get("schedule_disable_result")
+            expected = fence.get("schedule_disable_action")
+            expected_id = (
+                expected.get("arguments", {}).get("id")
+                if isinstance(expected, Mapping)
+                else None
+            )
+            observed_id = _native_field(result, "automationId", "automation_id", "id")
+            observed_status = _native_field(result, "status")
+            if isinstance(expected, Mapping):
+                _validated_action_outcome(expected, result, "succeeded")
+            if observed_id != expected_id or observed_status != "PAUSED":
+                raise FulcrumError(
+                    "RESET_NATIVE_CLEANUP_REQUIRED",
+                    "the retained Marshal schedule must be positively observed PAUSED before old state is removed",
+                    exit_code=5,
+                    details={"action": expected},
+                )
+            fence.update(
+                state="deleting_old_state",
+                schedule_disable_result=result,
+                updated_at=_now(),
+            )
+            _write(fence_path, fence)
         if fence and fence.get("state") in {
             "deleting_old_state",
             "old_state_removed",
@@ -355,6 +386,55 @@ class ResetService:
             "admission": "paused",
         }
         _write(fence_path, active_fence)
+        retained_schedule = inventory.get("native_retention_exceptions", {}).get(
+            "marshal_schedule"
+        )
+        automation_id = (
+            retained_schedule.get("automation_id")
+            if isinstance(retained_schedule, Mapping)
+            else None
+        )
+        if automation_id:
+            target_task_id = retained_schedule.get("target_task_id") or (
+                inventory.get("native_retention_exceptions", {})
+                .get("standing_tasks", {})
+                .get("marshal", {})
+                .get("task_id")
+            )
+            disable_action = {
+                "tool": "automation_update",
+                "arguments": {
+                    "mode": "update",
+                    "id": automation_id,
+                    "kind": "heartbeat",
+                    "name": "Fulcrum Marshal check",
+                    "prompt": "Call marshal_check, settle the bounded brief, and end quietly when no action is required.",
+                    "rrule": "FREQ=MINUTELY;INTERVAL=15",
+                    "status": "PAUSED",
+                    "notificationPolicy": "failed_runs_only",
+                    "targetThreadId": target_task_id,
+                    "destination": "thread",
+                },
+                "expected_result": {
+                    "automation_id": automation_id,
+                    "status": "PAUSED",
+                },
+            }
+            active_fence.update(
+                state="native_cleanup_required",
+                schedule_disable_action=disable_action,
+                updated_at=_now(),
+            )
+            _write(fence_path, active_fence)
+            return CommandResult(
+                ok=True,
+                state=CommandState.RUNNING,
+                request_id=request.request_id,
+                result=active_fence,
+                warnings=(
+                    "Pause the retained Marshal heartbeat with the exact returned action, then rerun reset with its native result.",
+                ),
+            )
         with WriterLock(request.instance.lock_path):
             active_fence.update(state="deleting_old_state", updated_at=_now())
             _write(fence_path, active_fence)
@@ -384,6 +464,6 @@ class ResetService:
             request_id=request.request_id,
             result=active_fence,
             warnings=(
-                "Native task and schedule deletion is unsupported; retained IDs are recorded in the maintenance fence.",
+                "Native task deletion is unsupported; the old Marshal heartbeat was positively paused and retained native IDs are recorded in the maintenance fence.",
             ),
         )

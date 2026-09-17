@@ -341,12 +341,40 @@ class DesktopLeadershipService(DesktopProtocolService):
                     }
                 )
                 continue
-            updated = {**fc, **copy.deepcopy(dict(changes))}
+            dependency_change = changes.get("dependencies")
+            if dependency_change is not None:
+                if not isinstance(dependency_change, list) or not all(
+                    isinstance(value, str) and value for value in dependency_change
+                ):
+                    stale.append({"bead": bead, "reason": "invalid_dependencies"})
+                    continue
+                from fulcrum.work import _reconcile_dependencies, _reject_cycle
+
+                dependency_ids = sorted(set(dependency_change))
+                if bead in dependency_ids or any(
+                    ledger.show(value) is None for value in dependency_ids
+                ):
+                    stale.append({"bead": bead, "reason": "invalid_dependencies"})
+                    continue
+                _reject_cycle(ledger, bead, set(dependency_ids))
+                _reconcile_dependencies(ledger, bead, dependency_ids)
+            retained_changes = {
+                key: value for key, value in changes.items() if key != "dependencies"
+            }
+            updated = {**fc, **copy.deepcopy(retained_changes)}
             ledger.update_fc(
                 bead,
                 updated,
-                assignee=str(changes["owner"]) if "owner" in changes else None,
-                priority=int(changes["priority"]) if "priority" in changes else None,
+                assignee=(
+                    str(retained_changes["owner"])
+                    if "owner" in retained_changes
+                    else None
+                ),
+                priority=(
+                    int(retained_changes["priority"])
+                    if "priority" in retained_changes
+                    else None
+                ),
             )
             accepted.append({"bead": bead, "changes": dict(changes)})
         completed = {

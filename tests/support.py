@@ -110,6 +110,12 @@ class MemoryLedger(Ledger):
     def run(self, arguments, *, mutating=False):
         # Receipt finalization calls this one storage operation. Everything else
         # must be stubbed explicitly by its individual adapter test.
+        if arguments[:2] == ("dep", "add") and mutating:
+            self.edges.setdefault(arguments[2], []).append(arguments[3])
+            return CommandObservation(None, 0, "", "", False)
+        if arguments[:2] == ("dep", "remove") and mutating:
+            self.edges.setdefault(arguments[2], []).remove(arguments[3])
+            return CommandObservation(None, 0, "", "", False)
         if arguments[0] != "close" or not mutating:
             raise AssertionError(f"unexpected ledger command: {arguments}")
         row = self.rows[arguments[1]]

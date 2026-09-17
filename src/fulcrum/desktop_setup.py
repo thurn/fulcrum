@@ -371,6 +371,23 @@ class DesktopSetupService(DesktopProtocolService):
             role = str(replacement.get("role") or "")
             reason = replacement.get("reason")
             current = standing.get(role)
+            termination = replacement.get("termination_evidence")
+            old_task_id = (
+                current.get("task_id") if isinstance(current, Mapping) else None
+            )
+            positively_terminated = (
+                isinstance(current, Mapping) and current.get("state") == "stopped"
+            ) or (
+                isinstance(termination, Mapping)
+                and (
+                    termination.get("threadId")
+                    or termination.get("thread_id")
+                    or termination.get("id")
+                )
+                == old_task_id
+                and str(termination.get("status") or termination.get("state"))
+                in {"archived", "completed", "failed", "not_found"}
+            )
             if (
                 role not in STANDING
                 or not isinstance(reason, str)
@@ -378,11 +395,38 @@ class DesktopSetupService(DesktopProtocolService):
                 or replacement.get("confirmed_lost") is not True
                 or not isinstance(current, Mapping)
                 or replacement.get("old_task_id") != current.get("task_id")
+                or not positively_terminated
             ):
                 raise FulcrumError(
                     "REPLACEMENT_NOT_AUTHORIZED",
-                    "standing replacement requires role, reason, confirmed_lost, and the exact old task ID",
+                    "standing replacement requires the exact old task and positive terminal or loss evidence",
                     exit_code=5,
+                )
+            unresolved = []
+            for candidate in ledger.list_records(limit=0):
+                candidate_protocol = _protocol(candidate.fc or {})
+                for action in (candidate_protocol.get("actions") or {}).values():
+                    if (
+                        isinstance(action, Mapping)
+                        and action.get("claimed_by") == old_task_id
+                        and action.get("state") in {"issuing", "uncertain"}
+                    ):
+                        unresolved.append(action.get("action_id"))
+                for wait in (
+                    candidate_protocol.get("instruction_waits") or {}
+                ).values():
+                    if (
+                        isinstance(wait, Mapping)
+                        and wait.get("task_id") == old_task_id
+                        and wait.get("state") == "waiting"
+                    ):
+                        unresolved.append(wait.get("wait_id"))
+            if unresolved:
+                raise FulcrumError(
+                    "REPLACEMENT_EFFECTS_UNSETTLED",
+                    "standing replacement is fenced until the old task's waits and native effects settle",
+                    exit_code=5,
+                    details={"unresolved": unresolved},
                 )
             existing_recovery = next(
                 (
@@ -462,6 +506,44 @@ class DesktopSetupService(DesktopProtocolService):
             and standing[role].get("state") == "registered"
             for role in STANDING
         )
+        diagnostic_action = next(
+            (
+                action
+                for action in actions.values()
+                if isinstance(action, Mapping)
+                and action.get("purpose") == "bootstrap_diagnostic_target"
+                and action.get("state") not in {"rejected", "superseded"}
+            ),
+            None,
+        )
+        if standing_ready and not isinstance(diagnostic_action, Mapping):
+            steward = standing["steward"]
+            marshal = standing["marshal"]
+            action_id = _opaque("action")
+            diagnostic_action = {
+                "action_id": action_id,
+                "record_id": system.id,
+                "executor": "bootstrap",
+                "tool": "send_message_to_thread",
+                "arguments": {
+                    "threadId": steward.get("task_id"),
+                    "prompt": (
+                        "Retain this exact diagnostic escape hatch: if Fulcrum MCP/CLI "
+                        "or Beads is unavailable, you may send exactly one best-effort "
+                        f"diagnostic message directly to Marshal task {marshal.get('task_id')} "
+                        "and then stop. This grants no work creation, retry, policy, or "
+                        "ownership authority. Do not loop if delivery fails."
+                    ),
+                },
+                "expected_result": {"thread_id": steward.get("task_id")},
+                "reporting": {"purpose": "diagnostic_escape_hatch"},
+                "state": "pending",
+                "attempts": [],
+                "created_at": _utc_now(),
+                "purpose": "bootstrap_diagnostic_target",
+            }
+            actions[action_id] = diagnostic_action
+            protocol["actions"] = actions
         schedule = protocol.get("marshal_schedule")
         if standing_ready and not isinstance(schedule, Mapping):
             marshal = standing["marshal"]
@@ -609,6 +691,8 @@ class DesktopSetupService(DesktopProtocolService):
             and schedule_action.get("state") == "succeeded"
             and isinstance(activation_action, Mapping)
             and activation_action.get("state") == "succeeded"
+            and isinstance(diagnostic_action, Mapping)
+            and diagnostic_action.get("state") == "succeeded"
             and (
                 retarget_action is None
                 or (
@@ -640,6 +724,15 @@ class DesktopSetupService(DesktopProtocolService):
             },
             "standing": copy_mapping(standing),
             "schedule": copy_mapping(schedule),
+            "diagnostic_escape_hatch": (
+                {
+                    "state": diagnostic_action.get("state"),
+                    "action_id": diagnostic_action.get("action_id"),
+                    "target_task_id": standing.get("marshal", {}).get("task_id"),
+                }
+                if isinstance(diagnostic_action, Mapping)
+                else None
+            ),
             "pending_actions": pending_actions,
             "prerequisites": {
                 "native_tools": missing_tools,

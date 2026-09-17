@@ -8,11 +8,56 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fulcrum.broker import Evaluation, PendingBroker
+from fulcrum.broker import BrokerServer, Evaluation, PendingBroker
 from fulcrum.mcp_server import FreshCli, McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconstruction_loop_does_not_spin_after_snapshot(self):
+        calls = 0
+
+        async def runner(argv, stdin):
+            nonlocal calls
+            calls += 1
+            return {
+                "ok": True,
+                "result": {"waits": [], "watch_paths": []},
+            }
+
+        broker = PendingBroker(runner)
+        server = BrokerServer(
+            Path("/tmp/fulcrum-test-broker.sock"),
+            broker,
+            snapshot_argv=("fulcrum", "transport", "snapshot"),
+        )
+        task = asyncio.create_task(server._reconstruct_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(calls, 1)
+
+    async def test_reconstructed_durable_waits_are_visible_after_restart(self):
+        broker = PendingBroker()
+        broker.reconstruct(
+            {
+                "ok": True,
+                "result": {
+                    "waits": [
+                        {
+                            "record_id": "fc-a",
+                            "wait_id": "wait-durable",
+                            "kind": "ci",
+                            "deadline": "2026-09-17T08:00:00Z",
+                        }
+                    ],
+                    "watch_paths": ["/tmp/transcript.jsonl"],
+                },
+            }
+        )
+        health = broker.health()
+        self.assertEqual(health["durable_waits"][0]["wait_id"], "wait-durable")
+        self.assertEqual(health["watch_paths"], ["/tmp/transcript.jsonl"])
+
     async def test_mcp_wait_uses_policy_deadline_plus_wrapper_margin(self):
         captured = {}
 

@@ -43,7 +43,16 @@ TOOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
     "pause": (("pause",), {}),
     "resume": (("resume",), {}),
     "status": (("status",), {}),
-    "trace": (("trace",), {"bead": "--bead"}),
+    "trace": (
+        ("trace",),
+        {
+            "bead": "--bead",
+            "operation": "--operation",
+            "action": "--action",
+            "task": "--task",
+            "wait": "--wait-id",
+        },
+    ),
 }
 
 WAIT_TOOLS = {"wait_for_instructions", "wait_for_ci_results"}
@@ -131,7 +140,6 @@ def _schema(name: str) -> dict[str, Any]:
         "submit_candidate",
         "wait_for_ci_results",
         "finish",
-        "trace",
         "report_incident",
         "record_repair",
         "recovery_prepare",
@@ -139,6 +147,9 @@ def _schema(name: str) -> dict[str, Any]:
     }:
         properties["bead"] = {"type": "string"}
         required.append("bead")
+    if name == "trace":
+        for selector in ("bead", "operation", "action", "task", "wait"):
+            properties[selector] = {"type": "string"}
     if name in {
         "register_worker",
         "report_progress",
@@ -164,12 +175,18 @@ def _schema(name: str) -> dict[str, Any]:
             "finish": ["outcome", "summary"],
         }.get(name, [])
     )
-    return {
+    schema = {
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": False,
     }
+    if name == "trace":
+        schema["oneOf"] = [
+            {"required": [selector]}
+            for selector in ("bead", "operation", "action", "task", "wait")
+        ]
+    return schema
 
 
 def tool_descriptions() -> list[dict[str, Any]]:
@@ -271,6 +288,8 @@ class FreshCli:
         for field, flag in options.items():
             value = payload.pop(field, None)
             if value is None:
+                if name == "trace":
+                    continue
                 raise ValueError(f"{field} is required")
             argv.extend((flag, str(value)))
         return argv, json.dumps(payload, separators=(",", ":"))

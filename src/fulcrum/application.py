@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -54,6 +55,9 @@ class Application:
         self.register(("service", "update"), services.update)
         self.register(("service", "status"), services.status)
         self.register(("reset",), ResetService().hard_reset)
+        self.register(
+            ("transport", "snapshot"), DesktopProtocolService().transport_snapshot
+        )
         self.register(("skills", "reconcile"), SkillsService().reconcile)
         configuration = ConfigurationService()
         self.register(("config", "show"), configuration.show)
@@ -150,6 +154,7 @@ class Application:
     @timed("application.dispatch")
     def dispatch(self, request: ParsedRequest) -> CommandResult:
         started = time.monotonic()
+        self._log_started(request)
         handler = self._handlers.get(request.command)
         if handler is None:
             error = FulcrumError(
@@ -194,6 +199,28 @@ class Application:
         return result
 
     @staticmethod
+    def _log_started(request: ParsedRequest) -> None:
+        try:
+            DiagnosticLog.from_request(request).append(
+                {
+                    "event": "command_started",
+                    "component": "application",
+                    "process_id": os.getpid(),
+                    "source_commit": os.environ.get("FULCRUM_COMMIT"),
+                    "command": request.command_name,
+                    "request_id": request.request_id,
+                    "bead_id": request.arguments.get("id")
+                    or request.arguments.get("bead")
+                    or request.input.get("bead"),
+                    "task_id": request.thread_id,
+                    "role": request.arguments.get("role"),
+                    "outcome": "started",
+                }
+            )
+        except (OSError, FulcrumError) as log_error:
+            DiagnosticLog.report_failure(request.instance.instance_root, log_error)
+
+    @staticmethod
     @timed("application.diagnostic_log")
     def _log(
         request: ParsedRequest,
@@ -206,6 +233,9 @@ class Application:
         public_error = error if isinstance(error, FulcrumError) else None
         event = {
             "event": "command_completed",
+            "component": "application",
+            "process_id": os.getpid(),
+            "source_commit": os.environ.get("FULCRUM_COMMIT"),
             "command": request.command_name,
             "request_id": request.request_id,
             "operation_id": (

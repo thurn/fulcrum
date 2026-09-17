@@ -92,6 +92,87 @@ def test_equal_action_claim_replays_without_authorizing_second_invocation():
         raise AssertionError("changed request input was accepted")
 
 
+def test_message_success_requires_matching_target_identity():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "send_message_to_thread",
+            "arguments": {"threadId": "worker-1", "prompt": "continue"},
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "message-attempt"},
+        )
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.report_action_result(
+            mutation(
+                ("action", "result"),
+                actor="task:steward-1",
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": action["action_id"],
+                },
+                payload={
+                    "attempt_id": "message-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {"threadId": "different-worker"},
+                },
+            )
+        )
+    assert raised.exception.code == "RESULT_CONFLICT"
+
+
+def test_claim_revalidates_dependency_after_reservation():
+    work = record(
+        "fc-a",
+        phase="ready",
+        project="toy",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-1",
+                "state": "reserved",
+                "role": "executor",
+            }
+        },
+    )
+    dependency = record("fc-dependency", phase="backlog")
+    service, ledger = registered_service(work, dependency)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    ledger.edges["fc-a"] = ["fc-dependency"]
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-a",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "implement"},
+            "assignment_token": "assignment-1",
+            "purpose": "routine_dispatch",
+        },
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.claim_action(
+            mutation(
+                ("action", "claim"),
+                actor="task:steward-1",
+                arguments={"record_id": "fc-a", "action_id": action["action_id"]},
+                payload={"attempt_id": "dependency-attempt"},
+            )
+        )
+    assert raised.exception.code == "ACTION_SUPERSEDED"
+    retained = (ledger.show("fc-a").fc or {})["desktop"]["actions"]
+    assert retained[action["action_id"]]["state"] == "superseded"
+
+
 def test_registration_requires_and_consumes_trusted_prompt_handshake():
     ledger = MemoryLedger()
     service = DesktopProtocolService(ledger)
@@ -811,3 +892,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_claim_revalidates_pause(self):
         test_claim_supersedes_dispatch_when_admission_is_paused()
+
+    def test_message_result_validates_target(self):
+        test_message_success_requires_matching_target_identity()
+
+    def test_claim_revalidates_dependencies(self):
+        test_claim_revalidates_dependency_after_reservation()

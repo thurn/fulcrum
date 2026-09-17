@@ -19,8 +19,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fulcrum.configuration import ConfigurationManager
-from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
-from fulcrum.coordination import coordinated
+from fulcrum.contracts import (
+    ActorContext,
+    CommandResult,
+    CommandState,
+    FulcrumError,
+    ParsedRequest,
+)
+from fulcrum.coordination import coordinated, external_effect
 from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.ledger import Ledger, LedgerRecord
 
@@ -86,10 +92,20 @@ def _native_identifier(value: Any, *fields: str) -> str | None:
     normalized = _native_result_mapping(value)
     if not isinstance(normalized, Mapping):
         return None
-    for field in fields:
-        candidate = normalized.get(field)
-        if isinstance(candidate, str) and candidate:
-            return candidate
+    pending: list[Mapping[str, Any]] = [normalized]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for field in fields:
+            candidate = current.get(field)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        for child in current.values():
+            if isinstance(child, Mapping):
+                pending.append(child)
     return None
 
 
@@ -114,6 +130,28 @@ def _native_result_mapping(value: Any) -> Mapping[str, Any] | None:
             if isinstance(decoded, Mapping):
                 return decoded
     return value
+
+
+def _native_field(value: Any, *fields: str) -> Any:
+    """Find one native result field without trusting an unrelated text blob."""
+
+    normalized = _native_result_mapping(value)
+    if not isinstance(normalized, Mapping):
+        return None
+    pending: list[Mapping[str, Any]] = [normalized]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for field in fields:
+            if field in current:
+                return current[field]
+        for child in current.values():
+            if isinstance(child, Mapping):
+                pending.append(child)
+    return None
 
 
 def _validated_action_outcome(
@@ -152,24 +190,65 @@ def _validated_action_outcome(
             exit_code=5,
         )
     if tool == "set_thread_title":
-        if normalized.get("title") != expected_arguments.get("title"):
+        if _native_field(normalized, "threadId", "thread_id") != expected_arguments.get(
+            "threadId"
+        ) or _native_field(normalized, "title") != expected_arguments.get("title"):
             raise FulcrumError(
                 "RESULT_CONFLICT",
-                "title result does not match the claimed action",
+                "title result target or value does not match the claimed action",
                 exit_code=5,
             )
     elif tool == "set_thread_archived":
-        if normalized.get("archived") is not expected_arguments.get("archived"):
+        if _native_field(normalized, "threadId", "thread_id") != expected_arguments.get(
+            "threadId"
+        ) or _native_field(normalized, "archived") is not expected_arguments.get(
+            "archived"
+        ):
             raise FulcrumError(
                 "RESULT_CONFLICT",
-                "archive result does not match the claimed action",
+                "archive result target or value does not match the claimed action",
                 exit_code=5,
             )
     elif tool == "automation_update":
-        if not _native_identifier(normalized, "automationId", "automation_id", "id"):
+        if not _native_field(normalized, "automationId", "automation_id", "id"):
             raise FulcrumError(
                 "RESULT_EVIDENCE_REQUIRED",
                 "automation result requires its native identity",
+                exit_code=5,
+            )
+        expected_status = expected_arguments.get("status")
+        observed_status = _native_field(normalized, "status")
+        if expected_status is not None and observed_status != expected_status:
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "automation status does not match the claimed action",
+                exit_code=5,
+            )
+        expected_target = expected_arguments.get("targetThreadId")
+        observed_target = _native_field(
+            normalized, "targetThreadId", "target_thread_id"
+        )
+        if expected_target is not None and observed_target != expected_target:
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "automation target does not match the claimed action",
+                exit_code=5,
+            )
+    elif tool == "send_message_to_thread":
+        expected_target = expected_arguments.get("threadId")
+        observed_target = _native_field(
+            normalized, "threadId", "thread_id", "targetThreadId", "target_thread_id"
+        )
+        if not observed_target:
+            raise FulcrumError(
+                "RESULT_EVIDENCE_REQUIRED",
+                "send_message_to_thread success requires its target thread identity",
+                exit_code=5,
+            )
+        if observed_target != expected_target:
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "message result target does not match the claimed action",
                 exit_code=5,
             )
     elif tool in {"read_thread", "list_threads", "list_projects"} and not normalized:
@@ -487,18 +566,115 @@ class DesktopProtocolService:
             raise FulcrumError(
                 "LEDGER_UNAVAILABLE", "a valid brain root is required", exit_code=4
             )
-        executable: str | None = None
-        try:
-            manager = ConfigurationManager(request.instance.config_path)
-            document, _ = manager.load()
-            configured = manager.effective(document)["beads"].get("executable")
-            executable = str(configured) if configured else None
-        except FulcrumError:
-            pass
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        configured = manager.effective(document)["beads"].get("executable")
+        executable = str(configured) if configured else None
         return Ledger(
             request.instance.brain_root,
             executable=executable,
             timeout=request.timeout,
+        )
+
+    @coordinated
+    def transport_snapshot(self, request: ParsedRequest) -> CommandResult:
+        """Rebuild the broker's policy-free durable wait/file index from Beads."""
+
+        ledger = self._ledger(request)
+        from fulcrum.hooks import HookService
+
+        collected_paths = HookService(ledger).collect_registered(request)
+        waits: list[dict[str, Any]] = []
+        watch_paths: set[str] = set(collected_paths)
+        reconciliation_errors: list[dict[str, str]] = []
+        for record in ledger.list_records(limit=0):
+            protocol = _protocol(record.fc or {})
+            transcripts = protocol.get("transcripts")
+            if isinstance(transcripts, Mapping):
+                for retained in transcripts.values():
+                    path = (
+                        retained.get("path") if isinstance(retained, Mapping) else None
+                    )
+                    if isinstance(path, str) and os.path.isabs(path):
+                        watch_paths.add(path)
+            for collection, kind in (
+                (protocol.get("instruction_waits"), "instruction"),
+                (protocol.get("ci_waits"), "ci"),
+            ):
+                if not isinstance(collection, Mapping):
+                    continue
+                for value in collection.values():
+                    if (
+                        not isinstance(value, Mapping)
+                        or value.get("state") != "waiting"
+                    ):
+                        continue
+                    waits.append(
+                        {
+                            "record_id": record.id,
+                            "wait_id": value.get("wait_id"),
+                            "kind": kind,
+                            "deadline": value.get("deadline"),
+                        }
+                    )
+                    if kind != "ci":
+                        continue
+                    accepted = value.get("accepted_input")
+                    if not isinstance(accepted, Mapping):
+                        continue
+                    actor = accepted.get("actor")
+                    task_id = (
+                        actor.get("task_id")
+                        if isinstance(actor, Mapping)
+                        else value.get("task_id")
+                    )
+                    if not isinstance(task_id, str) or not task_id:
+                        continue
+                    try:
+                        DesktopProtocolService(ledger).wait_for_ci_results(
+                            replace(
+                                request,
+                                command=("ci", "wait"),
+                                arguments=dict(accepted.get("arguments") or {}),
+                                input=dict(accepted.get("input") or {}),
+                                actor=ActorContext.parse(f"task:{task_id}"),
+                                thread_id=task_id,
+                                project=accepted.get("project"),
+                                ownership_operation=accepted.get("ownership_operation"),
+                                request_id=str(value.get("request_id")),
+                            )
+                        )
+                        refreshed = ledger.show(record.id)
+                        refreshed_waits = (
+                            _protocol(refreshed.fc or {}).get("ci_waits")
+                            if refreshed is not None
+                            else None
+                        )
+                        refreshed_wait = (
+                            refreshed_waits.get(str(value.get("wait_id")))
+                            if isinstance(refreshed_waits, Mapping)
+                            else None
+                        )
+                        if (
+                            not isinstance(refreshed_wait, Mapping)
+                            or refreshed_wait.get("state") != "waiting"
+                        ):
+                            waits.pop()
+                    except FulcrumError as error:
+                        reconciliation_errors.append(
+                            {
+                                "record_id": record.id,
+                                "wait_id": str(value.get("wait_id")),
+                                "code": error.code,
+                            }
+                        )
+        waits.sort(key=lambda value: (str(value["kind"]), str(value["wait_id"])))
+        return CommandResult.query(
+            {
+                "waits": waits,
+                "watch_paths": sorted(watch_paths),
+                "reconciliation_errors": reconciliation_errors,
+            }
         )
 
     def _timing_seconds(self, request: ParsedRequest, name: str, default: int) -> int:
@@ -508,7 +684,13 @@ class DesktopProtocolService:
             value = manager.effective(document)["timing"][name]
             return max(1, int(value))
         except (FulcrumError, KeyError, TypeError, ValueError):
-            return default
+            if self._ledger_override is not None:
+                return default
+            raise FulcrumError(
+                "CONFIGURATION_INVALID",
+                f"timing.{name} must be present and valid",
+                exit_code=4,
+            )
 
     @staticmethod
     def _candidate_repair_cycle(protocol: Mapping[str, Any], source: str) -> int:
@@ -728,28 +910,29 @@ class DesktopProtocolService:
     def _write_event(self, request: ParsedRequest, event: str, **fields: Any) -> None:
         if self._ledger_override is not None:
             return
-        try:
-            DiagnosticLog.from_request(request).append(
-                {
-                    "event": event,
-                    "component": "desktop_protocol",
-                    "process_id": os.getpid(),
-                    "source_commit": os.environ.get("FULCRUM_COMMIT"),
-                    "request_id": request.request_id,
-                    **fields,
-                }
-            )
-        except OSError as error:
-            DiagnosticLog.report_failure(request.instance.instance_root, error)
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                client.settimeout(0.05)
-                client.connect(str(request.instance.instance_root / "broker.sock"))
-                client.sendall(b'{"type":"signal"}\n')
-        except OSError:
-            # The durable transition is authoritative; a lost hint is recovered
-            # by the broker's bounded reevaluation timer.
-            pass
+        with external_effect():
+            try:
+                DiagnosticLog.from_request(request).append(
+                    {
+                        "event": event,
+                        "component": "desktop_protocol",
+                        "process_id": os.getpid(),
+                        "source_commit": os.environ.get("FULCRUM_COMMIT"),
+                        "request_id": request.request_id,
+                        **fields,
+                    }
+                )
+            except OSError as error:
+                DiagnosticLog.report_failure(request.instance.instance_root, error)
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.settimeout(0.05)
+                    client.connect(str(request.instance.instance_root / "broker.sock"))
+                    client.sendall(b'{"type":"signal"}\n')
+            except OSError:
+                # The durable transition is authoritative; a lost hint is recovered
+                # by the broker's bounded reevaluation timer.
+                pass
 
     @coordinated
     def register_standing(self, request: ParsedRequest) -> CommandResult:
@@ -953,7 +1136,11 @@ class DesktopProtocolService:
         return record, protocol, value
 
     def _authorize_executor(
-        self, ledger: Ledger, request: ParsedRequest, action: Mapping[str, Any]
+        self,
+        ledger: Ledger,
+        request: ParsedRequest,
+        action: Mapping[str, Any],
+        record: LedgerRecord | None = None,
     ) -> None:
         executor = str(action.get("executor"))
         if executor == "bootstrap":
@@ -964,7 +1151,26 @@ class DesktopProtocolService:
                     exit_code=5,
                 )
             return
-        self._standing_actor(ledger, executor, request)
+        if executor in STANDING_ROLES:
+            self._standing_actor(ledger, executor, request)
+            return
+        if executor in WORKER_ROLES and record is not None:
+            assignment = self._authorize_work_actor(ledger, record, request)
+            if (
+                not isinstance(assignment, Mapping)
+                or assignment.get("role") != executor
+            ):
+                raise FulcrumError(
+                    "AUTHORITY_MISMATCH",
+                    f"only the active {executor} assignment may execute this action",
+                    exit_code=5,
+                )
+            return
+        raise FulcrumError(
+            "AUTHORITY_MISMATCH",
+            f"unsupported native action executor {executor!r}",
+            exit_code=5,
+        )
 
     @coordinated
     def claim_action(self, request: ParsedRequest) -> CommandResult:
@@ -984,7 +1190,7 @@ class DesktopProtocolService:
         saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
-        self._authorize_executor(ledger, request, action)
+        self._authorize_executor(ledger, request, action, record)
         system_protocol = _protocol(self._system(ledger).fc or {})
         if (
             action.get("executor") != "bootstrap"
@@ -1082,21 +1288,73 @@ class DesktopProtocolService:
             return "work is held or blocked"
         if str(fc.get("phase")) not in {"ready", "implementation_ready", "backlog"}:
             return "work is no longer ready"
+        manager = ConfigurationManager(request.instance.config_path)
         try:
-            manager = ConfigurationManager(request.instance.config_path)
             document, _ = manager.load()
-            project = manager.effective(document)["projects"].get(
-                str(fc.get("project"))
-            )
+            config = manager.effective(document)
         except FulcrumError:
-            project = None
+            if self._ledger_override is None:
+                raise
+            config = {
+                "policy": {
+                    "automatic_capacity": 4,
+                    "default_project_capacity": 4,
+                    "project_capacity": {},
+                    "paused_projects": [],
+                },
+                "projects": {},
+            }
+        policy = config["policy"]
+        projects = config["projects"]
+        project_name = str(fc.get("project") or "")
+        project = projects.get(project_name)
         if isinstance(project, Mapping) and project.get("enabled") is False:
             return "project is disabled"
+        if project_name in {
+            str(value) for value in policy.get("paused_projects") or []
+        }:
+            return "project is paused"
+        dependencies = ledger.dependencies(record.id)
+        if any(
+            (dependency := ledger.show(identifier)) is None
+            or dependency.status != "closed"
+            for identifier in dependencies
+        ):
+            return "dependencies are no longer satisfied"
         assignment = _protocol(fc).get("assignment")
         if not isinstance(assignment, Mapping) or assignment.get(
             "assignment_token"
         ) != action.get("assignment_token"):
             return "assignment reservation changed"
+        capacity_states = {"reserved", "issuing", "active", "uncertain"}
+        active = 0
+        active_in_project = 0
+        candidate_tags = {str(value) for value in fc.get("overlap_tags") or []}
+        for other in ledger.list_records(limit=0):
+            other_assignment = _protocol(other.fc or {}).get("assignment")
+            if (
+                not isinstance(other_assignment, Mapping)
+                or other_assignment.get("state") not in capacity_states
+            ):
+                continue
+            if other_assignment.get("capacity_class") == "recovery":
+                continue
+            active += 1
+            if str((other.fc or {}).get("project") or "") == project_name:
+                active_in_project += 1
+            if other.id != record.id and candidate_tags.intersection(
+                {str(value) for value in (other.fc or {}).get("overlap_tags") or []}
+            ):
+                return "overlap exclusion changed"
+        if active > int(policy["automatic_capacity"]):
+            return "automatic capacity changed"
+        project_cap = int(
+            dict(policy.get("project_capacity") or {}).get(
+                project_name, policy["default_project_capacity"]
+            )
+        )
+        if active_in_project > project_cap:
+            return "project capacity changed"
         return None
 
     @coordinated
@@ -1119,7 +1377,7 @@ class DesktopProtocolService:
         saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
-        self._authorize_executor(ledger, request, action)
+        self._authorize_executor(ledger, request, action, record)
         attempts = list(action.get("attempts") or [])
         if not attempts or attempts[-1].get("attempt_id") != attempt_id:
             raise FulcrumError(
@@ -1359,8 +1617,8 @@ class DesktopProtocolService:
             protocol["marshal_schedule"] = schedule
         if (
             action.get("purpose") == "recover_steward_loop"
-            and normalized_outcome == "succeeded"
-        ):
+            or str(action.get("purpose") or "").startswith("resume_repaired_steward:")
+        ) and normalized_outcome == "succeeded":
             standing = dict(protocol.get("standing") or {})
             steward = standing.get("steward")
             if isinstance(steward, Mapping):
@@ -1703,7 +1961,8 @@ class DesktopProtocolService:
             models = config["models"]
             projects = config["projects"]
         except FulcrumError:
-            pass
+            if self._ledger_override is None:
+                raise
         records = ledger.list_records(limit=0)
         active = 0
         active_by_project: dict[str, int] = {}

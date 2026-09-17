@@ -40,6 +40,50 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_stop_callback_is_not_positive_terminal_evidence(self):
+        ledger = MemoryLedger()
+        desktop = DesktopProtocolService(ledger)
+        action = seed_action(
+            ledger,
+            {
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register steward"},
+                "purpose": "bootstrap_steward",
+            },
+        )
+        observe_action_prompt(
+            ledger, action, task_id="steward-1", session_id="session-1"
+        )
+        desktop.register_standing(
+            replace(
+                request(("register", "standing")),
+                input={
+                    "role": "steward",
+                    "task_id": "steward-1",
+                    "session_id": "session-1",
+                    "action_id": action["action_id"],
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        HookService(ledger).handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-1",
+                    "turn_id": "turn-1",
+                    "session_id": "session-1",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        binding = (ledger.show("fc-system").fc or {})["desktop"]["standing"]["steward"]
+        self.assertEqual(binding["state"], "stop_observed")
+
     def test_steward_hook_claim_is_resolved_on_owning_work_record(self):
         ledger = MemoryLedger(record("fc-work"))
         desktop = DesktopProtocolService(ledger)
@@ -126,7 +170,11 @@ class HookTests(unittest.TestCase):
                 input={
                     "hook_event_name": "PostToolUse",
                     **common,
-                    "tool_response": {"isError": False, "messageId": "message-1"},
+                    "tool_response": {
+                        "isError": False,
+                        "messageId": "message-1",
+                        "threadId": "worker-1",
+                    },
                 },
                 request_id=str(uuid.uuid4()),
             )

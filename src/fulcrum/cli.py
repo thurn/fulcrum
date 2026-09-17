@@ -162,6 +162,7 @@ COMMANDS = (
     CommandDefinition(("rates", "show"), "show a retained rate card"),
     CommandDefinition(("rates", "add"), "add an immutable documented rate card"),
     CommandDefinition(("reset",), "perform an explicitly authorized hard reset"),
+    CommandDefinition(("transport", "snapshot"), "inspect durable broker inputs"),
     CommandDefinition(("register", "standing"), "register a standing native task"),
     CommandDefinition(("action", "claim"), "claim one exact native invocation"),
     CommandDefinition(("action", "result"), "record one native invocation result"),
@@ -296,8 +297,14 @@ def _add_command_options(
         ("source", "sync"),
     }:
         _option(parser, "--bead", required=True)
-    elif path in {("status",), ("trace",)}:
+    elif path == ("status",):
         _option(parser, "--bead")
+        _option(parser, "--limit", type=int)
+        _option(parser, "--cursor")
+    elif path == ("trace",):
+        for name in ("bead", "operation", "action", "task"):
+            _option(parser, f"--{name}")
+        _option(parser, "--wait-id", dest="wait")
         _option(parser, "--limit", type=int)
         _option(parser, "--cursor")
     elif path == ("logs",):
@@ -469,7 +476,12 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "answer",
         "additional_repair_cycles",
     },
-    ("reset",): {"expected_remote_ref", "legacy_state_root", "legacy_database"},
+    ("reset",): {
+        "expected_remote_ref",
+        "legacy_state_root",
+        "legacy_database",
+        "schedule_disable_result",
+    },
     ("config", "set"): {
         "brain",
         "beads",

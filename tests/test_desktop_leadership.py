@@ -107,6 +107,36 @@ class LeadershipTests(unittest.TestCase):
         self.assertEqual(result.result["stale"][0]["reason"], "stale")
         self.assertEqual(self.ledger.show("fc-a").fc["priority"], 1)
 
+    def test_marshal_dependency_decision_updates_native_dependency_edges(self):
+        self.ledger.rows["fc-dependency"] = record("fc-dependency", phase="backlog")
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "turn-dependencies"},
+            )
+        )
+        result = self.service.marshal_decide(
+            call(
+                ("marshal", "apply"),
+                actor="task:marshal-1",
+                payload={
+                    "decision_id": checked.result["decision"]["decision_id"],
+                    "turn_id": "turn-dependencies",
+                    "decisions": [
+                        {
+                            "bead": "fc-a",
+                            "expected": {"priority": 1},
+                            "changes": {"dependencies": ["fc-dependency"]},
+                        }
+                    ],
+                },
+            )
+        )
+        self.assertEqual(result.result["stale"], [])
+        self.assertEqual(self.ledger.dependencies("fc-a"), ["fc-dependency"])
+        self.assertNotIn("dependencies", self.ledger.show("fc-a").fc)
+
     def test_three_repairs_allow_one_recovery_slot(self):
         self.service.report_incident(
             call(
