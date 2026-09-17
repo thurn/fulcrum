@@ -135,8 +135,11 @@ Marshal turn can defer the heartbeat it is intended to observe. The first genuin
 heartbeat calls `marshal_check` with `input.trigger` set to `heartbeat`; Fulcrum
 records that delivery. `fulcrum doctor` reports the loop as `initializing` until
 the first delivery, `healthy` after a recent delivery, and `degraded` after its
-bounded deadline. Report a degraded loop as a scheduler incident without
-reopening bootstrap or retrying an uncertain automation mutation.
+bounded deadline. A single missed documented deadline is sufficient evidence of
+a scheduler incident: stop immediately rather than waiting through another
+interval or testing alternate creation-, activation-, or completion-time anchors.
+Report that incident without reopening bootstrap or retrying an uncertain
+automation mutation.
 
 Explain that Desktop Stop does not durably pause Fulcrum. The initial MCP
 configuration change requires the one fresh continuation task described above;
