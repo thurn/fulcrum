@@ -71,8 +71,8 @@ class UninstallResult:
             "changed": self.changed,
             "skipped": self.skipped,
             "errors": self.errors,
-            "codex_restart_may_be_required": True,
-            "native_cleanup_required": [
+            "existing_tasks_may_retain_stale_tool_catalog": True,
+            "native_cleanup_checklist": [
                 "archive only Fulcrum role tasks",
                 "delete the Fulcrum Marshal heartbeat",
             ],

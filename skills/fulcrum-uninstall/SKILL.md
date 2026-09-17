@@ -8,10 +8,18 @@ complete clean-install reset. The request authorizes Fulcrum-owned removal, not
 unrelated Codex tasks, configuration, skills, projects, or user files.
 
 First use Codex native tools while the retained installation evidence is still
-available. Delete the automation named `Fulcrum Marshal check`, using its exact
-installed automation ID when available. Archive only Fulcrum role tasks with the
-exact titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and `🔮 VIZIER 🔮`, including
-retained replacements. Do not archive ordinary tasks in the Fulcrum project.
+available. Resolve the Codex root from `CODEX_HOME`, falling back to `~/.codex`.
+Inspect its `automations/*/automation.toml` files and delete only an automation
+whose name is exactly `Fulcrum Marshal check`, using the installed automation ID.
+If none exists, do nothing. List active tasks with a maximum limit of 50 and page
+through archived tasks with `nextCursor`. Archive only active Fulcrum role tasks
+with the exact titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and `🔮 VIZIER 🔮`,
+including retained replacements. Already archived role tasks need no action. Do
+not archive ordinary tasks in the Fulcrum project or unrelated historical tasks.
+
+Before including `--remove-source`, verify that the source checkout has no
+uncommitted changes and no commits ahead of its configured upstream. Stop rather
+than discard local work unless the human explicitly authorizes that loss.
 
 Run the deterministic preview and inspect every target:
 
@@ -33,8 +41,16 @@ temporary state. Pass explicit `--instance`, `--config`, `--brain`, or
 
 Stop if the preview reports an unsafe path, malformed Codex configuration, or a
 foreign real file at an owned link location. The script preserves such foreign
-files rather than guessing ownership. After application, verify that the result
-has `ok: true`, no `dev.fulcrum` launch jobs or Fulcrum MCP processes remain, the
-owned paths are absent, and unrelated Codex configuration remains. A Desktop
-restart may be needed to make the already-running UI forget its removed MCP
-configuration; never restart Desktop without the human requesting it.
+files rather than guessing ownership. Its `native_cleanup_checklist` is a
+reminder to perform the checks above, not evidence that matching tasks or an
+automation exist.
+
+When `--remove-source` is used, change to a stable directory such as the home
+directory before post-removal checks because the original working directory no
+longer exists. Verify that the result has `ok: true`, no `dev.fulcrum` launch jobs
+or Fulcrum MCP processes remain, the owned paths are absent, Codex configuration
+still parses, and unrelated Codex configuration remains. Identify processes from
+their executable and arguments; do not rely on a bare `pgrep -f` whose search can
+match the verifier itself. Existing tasks may retain their original MCP tool
+catalog, but fresh tasks read the updated configuration. Do not restart, quit, or
+toggle Codex Desktop as part of uninstall.

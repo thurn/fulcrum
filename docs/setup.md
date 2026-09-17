@@ -121,5 +121,6 @@ state, virtual environment, source-following launchers, owned skill links, and
 legacy Fulcrum paths. It removes only Fulcrum's marked MCP block, source-project
 trust entry, and hook handlers from Codex configuration, preserving unrelated
 settings and hooks. Foreign real files at owned link names are reported and left
-untouched. A running Desktop may require a later restart to forget the removed MCP
-server, but uninstall never restarts Desktop itself.
+untouched. Existing tasks may retain the tool catalog they started with; fresh
+tasks read the updated MCP configuration. Uninstall does not restart, quit, or
+toggle Codex Desktop.

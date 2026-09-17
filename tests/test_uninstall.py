@@ -84,6 +84,15 @@ class UninstallTests(unittest.TestCase):
                 paths, apply=False, remove_source=False, external_actions=False
             )
             self.assertEqual(preview.errors, [])
+            payload = preview.as_dict()
+            self.assertNotIn("codex_restart_may_be_required", payload)
+            self.assertEqual(
+                payload["native_cleanup_checklist"],
+                [
+                    "archive only Fulcrum role tasks",
+                    "delete the Fulcrum Marshal heartbeat",
+                ],
+            )
             self.assertTrue(instance.exists())
             self.assertTrue(launcher.is_symlink())
 
