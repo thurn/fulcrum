@@ -56,7 +56,8 @@ STANDING = {
         "title": "🧰 STEWARD 🧰",
         "model": "gpt-5.6-luna",
         "prompt": (
-            "Register as the existing Steward and recover any outstanding instruction/result. "
+            "First call register_standing with role `steward` and the action_id from "
+            "the Fulcrum-Action marker. Then recover any outstanding instruction/result. "
             "Call wait_for_instructions. Execute only its exact authorized native action: "
             "claim it, invoke it once, and report the actual result. Then wait again. Do not "
             "choose priorities, invent prompts, retry uncertain effects, or poll tasks. On an "
@@ -68,7 +69,8 @@ STANDING = {
         "title": "🧭 MARSHAL 🧭",
         "model": "gpt-5.6-sol",
         "prompt": (
-            "Register as Marshal for this Fulcrum instance. On scheduled prompts call "
+            "First call register_standing with role `marshal` and the action_id from "
+            "the Fulcrum-Action marker. On scheduled prompts call "
             "marshal_check, settle only the returned bounded curation or recovery scope, and "
             "end quietly when there is no action."
         ),
@@ -77,7 +79,8 @@ STANDING = {
         "title": "🔮 VIZIER 🔮",
         "model": "gpt-5.6-sol",
         "prompt": (
-            "Register as Vizier for this Fulcrum instance. Present exact retained human "
+            "First call register_standing with role `vizier` and the action_id from "
+            "the Fulcrum-Action marker. Present exact retained human "
             "decisions and record only the authority the human explicitly grants."
         ),
     },

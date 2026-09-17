@@ -60,6 +60,14 @@ CHECK_SCHEMA = {
 }
 
 TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
+    "register_standing": {
+        "role": {
+            "type": "string",
+            "enum": ["steward", "marshal", "vizier"],
+        },
+        "action_id": {"type": "string"},
+        "session_id": {"type": "string"},
+    },
     "register_worker": {
         "workspace": {"type": "string"},
         "git_root": {"type": "string"},
@@ -143,6 +151,7 @@ def _schema(name: str) -> dict[str, Any]:
     properties.update(TOOL_INPUT_PROPERTIES.get(name, {}))
     required.extend(
         {
+            "register_standing": ["role", "action_id"],
             "report_progress": ["kind", "summary", "evidence"],
             "submit_candidate": ["source"],
             "wait_for_ci_results": ["candidate_id"],
@@ -159,6 +168,11 @@ def _schema(name: str) -> dict[str, Any]:
 
 def tool_descriptions() -> list[dict[str, Any]]:
     descriptions = {
+        "register_standing": (
+            "Bind this standing task using its lowercase role and the action_id "
+            "from the Fulcrum-Action marker. Task and session identity are observed "
+            "from the current Codex environment."
+        ),
         "wait_for_instructions": "Steward only: wait for one exact recorded native action.",
         "wait_for_ci_results": "Warden only: wait for terminal evidence for the exact candidate.",
         "claim_action": "Claim one native invocation before executing it.",
@@ -212,6 +226,10 @@ class FreshCli:
         if not isinstance(payload, Mapping):
             raise ValueError("input must be an object")
         payload = {**dict(payload), **arguments}
+        if name == "register_standing":
+            session_id = os.environ.get("CODEX_SESSION_ID") or task_id
+            if session_id:
+                payload.setdefault("session_id", session_id)
         assignment_token = payload.get("assignment_token")
         if host_id is not None:
             payload.setdefault("host_id", host_id)

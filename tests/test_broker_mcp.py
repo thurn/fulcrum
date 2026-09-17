@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from fulcrum.broker import Evaluation, PendingBroker
-from fulcrum.mcp_server import McpServer, tool_descriptions
+from fulcrum.mcp_server import FreshCli, McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
@@ -89,6 +91,9 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wait_for_instructions", names)
         self.assertIn("wait_for_ci_results", names)
         self.assertIn("claim_action", names)
+        registration = tools["register_standing"]["inputSchema"]
+        self.assertIn("role", registration["required"])
+        self.assertIn("action_id", registration["required"])
         finish = tools["finish"]["inputSchema"]
         self.assertIn("outcome", finish["required"])
         self.assertEqual(
@@ -109,3 +114,24 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response["id"], 1)
         self.assertGreater(len(response["result"]["tools"]), 5)
+
+    async def test_standing_registration_observes_current_session_identity(self):
+        cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
+        with patch.dict(
+            "os.environ",
+            {
+                "CODEX_THREAD_ID": "thread-1",
+                "CODEX_SESSION_ID": "session-1",
+            },
+        ):
+            argv, stdin = cli.invocation(
+                "register_standing",
+                {
+                    "request_id": "89170642-a734-4735-a272-7b0d41e006d8",
+                    "role": "steward",
+                    "action_id": "action-1",
+                },
+            )
+
+        self.assertIn("task:thread-1", argv)
+        self.assertEqual(json.loads(stdin)["session_id"], "session-1")
