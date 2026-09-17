@@ -87,7 +87,7 @@ class HookTests(unittest.TestCase):
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertIn("marshal-1", protocol["transcripts"])
 
-    def test_stop_callback_is_not_positive_terminal_evidence(self):
+    def test_stop_callback_keeps_standing_identity_registered(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)
         action = seed_action(
@@ -129,7 +129,8 @@ class HookTests(unittest.TestCase):
             )
         )
         binding = (ledger.show("fc-system").fc or {})["desktop"]["standing"]["steward"]
-        self.assertEqual(binding["state"], "stop_observed")
+        self.assertEqual(binding["state"], "registered")
+        self.assertEqual(binding["last_lifecycle_event"]["event"], "Stop")
 
     def test_steward_hook_claim_is_resolved_on_owning_work_record(self):
         ledger = MemoryLedger(record("fc-work"))
@@ -367,6 +368,8 @@ class HookTests(unittest.TestCase):
                 )
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertEqual(set(protocol["transcripts"]), {"steward-1", "marshal-1"})
+        self.assertEqual(protocol["standing"]["steward"]["state"], "registered")
+        self.assertEqual(protocol["standing"]["marshal"]["state"], "registered")
         observed_roles = {}
         for analytics in ledger.list_records(kind="analytics", limit=0):
             observed_roles[(analytics.fc or {})["thread_id"]] = (analytics.fc or {})[

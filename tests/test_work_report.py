@@ -26,7 +26,10 @@ def report_request(report_key: str, **changes):
 
 def test_report_key_replays_equal_input_and_rejects_changed_input():
     ledger = MemoryLedger()
-    with patch("fulcrum.work._ledger", return_value=ledger):
+    with (
+        patch("fulcrum.work._ledger", return_value=ledger),
+        patch("fulcrum.work._project_from_request", return_value="toy"),
+    ):
         first = WorkService().report(report_request("finding-1"))
         replay = WorkService().report(report_request("finding-1"))
         assert first.result["bead_id"] == replay.result["bead_id"]
@@ -38,4 +41,4 @@ def test_report_key_replays_equal_input_and_rejects_changed_input():
             WorkService().report(
                 report_request("finding-1", required_change="Different change")
             )
-        assert raised.value.code == "REQUEST_CONFLICT"
+        assert raised.exception.code == "REQUEST_CONFLICT"

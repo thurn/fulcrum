@@ -137,11 +137,16 @@ def observe_action_prompt(
     from fulcrum.desktop_protocol import action_marker
     from fulcrum.hooks import HookService
 
+    hook_request = request(("hook", "handle"))
     HookService(ledger).handle(
         replace(
-            request(("hook", "handle")),
+            hook_request,
             actor=ActorContext.parse(f"task:{task_id}"),
             thread_id=task_id,
+            instance=replace(
+                hook_request.instance,
+                instance_root=Path(instance).resolve(strict=False),
+            ),
             input={
                 "hook_event_name": "UserPromptSubmit",
                 "event_id": str(uuid.uuid4()),
@@ -149,7 +154,7 @@ def observe_action_prompt(
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "prompt": action_marker(
-                    str(instance),
+                    str(Path(instance).resolve(strict=False)),
                     str(action["record_id"]),
                     str(action["action_id"]),
                     action.get("assignment_token"),

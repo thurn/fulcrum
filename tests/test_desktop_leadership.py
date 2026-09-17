@@ -78,6 +78,38 @@ class LeadershipTests(unittest.TestCase):
         assignment = self.ledger.show("fc-a").fc["desktop"]["assignment"]
         self.assertEqual(assignment["state"], "reserved")
 
+    def test_scheduled_marshal_delivery_revives_identity_and_records_health(self):
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        standing = dict(desktop["standing"])
+        standing["marshal"] = {**standing["marshal"], "state": "stopped"}
+        desktop["standing"] = standing
+        desktop["marshal_schedule"] = {
+            "state": "succeeded",
+            "status": "ACTIVE",
+            "automation_id": "marshal-check",
+            "target_task_id": "marshal-1",
+            "activated_at": "2026-09-17T00:00:00Z",
+        }
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "heartbeat-turn", "trigger": "heartbeat"},
+            )
+        )
+
+        retained = self.ledger.show("fc-system").fc["desktop"]
+        self.assertEqual(retained["standing"]["marshal"]["state"], "registered")
+        self.assertEqual(retained["marshal_schedule"]["delivery_count"], 1)
+        self.assertEqual(
+            retained["marshal_schedule"]["last_delivery_turn_id"],
+            "heartbeat-turn",
+        )
+        self.assertEqual(checked.result["decision"]["turn_id"], "heartbeat-turn")
+
     def test_stale_marshal_row_does_not_overwrite_current_fact(self):
         checked = self.service.marshal_check(
             call(

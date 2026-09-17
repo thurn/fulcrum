@@ -17,7 +17,6 @@ from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.coordination import coordinated
 from fulcrum.desktop_protocol import (
     DesktopProtocolService,
-    _positive_native_completion,
     _protocol,
     _utc_now,
     _validated_action_outcome,
@@ -302,13 +301,9 @@ class HookService:
             if isinstance(binding, Mapping):
                 standing[role] = {
                     **dict(binding),
-                    "state": (
-                        "stop_observed"
-                        if event_name == "Stop"
-                        else "interrupt_observed"
-                    ),
                     "turn_id": event.get("turn_id") or binding.get("turn_id"),
                     "last_lifecycle_event": event,
+                    "last_turn_ended_at": _utc_now(),
                 }
                 protocol["standing"] = standing
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
@@ -443,19 +438,6 @@ class HookService:
         }
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-        if role in {"steward", "marshal", "vizier"}:
-            standing = dict(protocol.get("standing") or {})
-            binding = standing.get(role)
-            if isinstance(binding, Mapping) and _positive_native_completion(
-                protocol, binding
-            ):
-                standing[role] = {
-                    **dict(binding),
-                    "state": "stopped",
-                    "positively_completed_at": _utc_now(),
-                }
-                protocol["standing"] = standing
-                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         task_usage = [
             value
             for value in usage.values()
@@ -711,8 +693,8 @@ def _issuing_action_for_actor(
 
 
 def _arguments_match(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
-    # Prompts/text include the immutable marker in the issued action; compare all
-    # other fields exactly and require the retained prompt as the suffix.
+    # One-shot task/message prompts include the immutable marker in the issued
+    # action. Persistent automation prompts do not, so exact equality also passes.
     for key, value in expected.items():
         observed = actual.get(key)
         if key in {"prompt", "text"} and isinstance(value, str):

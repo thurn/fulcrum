@@ -61,6 +61,35 @@ class DesktopLeadershipService(DesktopProtocolService):
             from fulcrum.desktop_protocol import _replay
 
             return _replay(saved, request)
+        if request.input.get("trigger") == "heartbeat":
+            schedule = protocol.get("marshal_schedule")
+            if (
+                not isinstance(schedule, Mapping)
+                or schedule.get("state") != "succeeded"
+                or schedule.get("status") != "ACTIVE"
+                or schedule.get("target_task_id") != binding.get("task_id")
+            ):
+                raise FulcrumError(
+                    "HEARTBEAT_SCHEDULE_MISMATCH",
+                    "scheduled Marshal delivery does not match the active retained heartbeat",
+                    exit_code=5,
+                )
+            delivered_at = _utc_now()
+            deliveries = list(schedule.get("deliveries") or [])
+            deliveries.append(
+                {
+                    "delivered_at": delivered_at,
+                    "task_id": binding.get("task_id"),
+                    "turn_id": request.input.get("turn_id"),
+                }
+            )
+            protocol["marshal_schedule"] = {
+                **dict(schedule),
+                "last_delivery_at": delivered_at,
+                "last_delivery_turn_id": request.input.get("turn_id"),
+                "delivery_count": int(schedule.get("delivery_count") or 0) + 1,
+                "deliveries": deliveries[-20:],
+            }
         current = protocol.get("marshal_decision")
         if isinstance(current, Mapping) and current.get("state") == "active":
             same_turn = request.input.get("turn_id") == current.get("turn_id")

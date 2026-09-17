@@ -219,6 +219,53 @@ def test_automation_success_accepts_native_result_without_target_but_rejects_con
     assert raised.exception.code == "RESULT_CONFLICT"
 
 
+def test_automation_update_rejects_a_different_native_identity():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "automation_update",
+            "arguments": {
+                "id": "marshal-check",
+                "mode": "update",
+                "status": "ACTIVE",
+                "targetThreadId": "marshal-1",
+            },
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "identity-attempt"},
+        )
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.report_action_result(
+            mutation(
+                ("action", "result"),
+                actor="task:steward-1",
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": action["action_id"],
+                },
+                payload={
+                    "attempt_id": "identity-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {
+                        "automationId": "different-check",
+                        "status": "ACTIVE",
+                    },
+                },
+            )
+        )
+    assert raised.exception.code == "RESULT_CONFLICT"
+
+
 def test_claim_revalidates_dependency_after_reservation():
     work = record(
         "fc-a",

@@ -121,11 +121,29 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                 },
             )
         )
+        assert not any(
+            row["tool"] == "automation_update"
+            for row in second.result["pending_actions"]
+        )
+        (root / "instance" / "broker.sock").touch()
+        pre_activation = {name: True for name in PRE_ACTIVATION_ACCEPTANCE}
+        activating = service.bootstrap(
+            bootstrap_request(
+                root,
+                acceptance=pre_activation,
+                **supplied,
+            )
+        )
+        assert activating.result["admission"] == "paused"
+        assert activating.result["prerequisites"]["acceptance"] is None
         schedule = next(
             row
-            for row in second.result["pending_actions"]
+            for row in activating.result["pending_actions"]
             if row["tool"] == "automation_update"
         )
+        assert schedule["arguments"]["status"] == "ACTIVE"
+        assert "scheduled Fulcrum heartbeat" in schedule["arguments"]["prompt"]
+        assert not schedule["arguments"]["prompt"].startswith("Fulcrum-Action:")
         claim = service.claim_action(
             replace(
                 bootstrap_request(root),
@@ -151,64 +169,12 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                     "outcome": "succeeded",
                     "native_result": {
                         "automationId": "automation-1",
-                        "status": "PAUSED",
-                        "targetThreadId": "marshal-task",
-                    },
-                },
-            )
-        )
-        (root / "instance" / "broker.sock").touch()
-        pre_activation = {name: True for name in PRE_ACTIVATION_ACCEPTANCE}
-        activating = service.bootstrap(
-            bootstrap_request(
-                root,
-                acceptance=pre_activation,
-                **supplied,
-            )
-        )
-        assert activating.result["admission"] == "paused"
-        assert activating.result["prerequisites"]["acceptance"] == ["schedule_overlap"]
-        activation = next(
-            row
-            for row in activating.result["pending_actions"]
-            if row["reporting"].get("purpose") == "marshal_schedule_activation"
-        )
-        service.claim_action(
-            replace(
-                bootstrap_request(root),
-                command=("action", "claim"),
-                arguments={
-                    "record_id": "fc-system",
-                    "action_id": activation["action_id"],
-                },
-                input={"attempt_id": "activation-attempt"},
-            )
-        )
-        service.report_action_result(
-            replace(
-                bootstrap_request(root),
-                command=("action", "result"),
-                arguments={
-                    "record_id": "fc-system",
-                    "action_id": activation["action_id"],
-                },
-                input={
-                    "attempt_id": "activation-attempt",
-                    "outcome": "succeeded",
-                    "native_result": {
-                        "automationId": "automation-1",
                         "status": "ACTIVE",
                         "targetThreadId": "marshal-task",
                     },
                 },
             )
         )
-        still_paused = service.bootstrap(
-            bootstrap_request(root, acceptance=pre_activation, **supplied)
-        )
-        assert still_paused.result["admission"] == "paused"
-        assert still_paused.result["schedule"]["status"] == "ACTIVE"
-        assert still_paused.result["pending_actions"] == []
         ready = service.bootstrap(
             bootstrap_request(
                 root,
@@ -221,6 +187,31 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert ready.result["schedule"]["automation_id"] == "automation-1"
         assert ready.result["schedule"]["status"] == "ACTIVE"
         assert len(ready.result["standing"]) == 3
+
+        system = service._ledger_override.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["marshal_schedule"] = {
+            **desktop["marshal_schedule"],
+            "prompt": "legacy recurring prompt",
+        }
+        service._ledger_override.update_fc(
+            "fc-system", {**system.fc, "desktop": desktop}
+        )
+        repairing = service.bootstrap(
+            bootstrap_request(
+                root,
+                acceptance={name: True for name in REQUIRED_ACCEPTANCE},
+                **supplied,
+            )
+        )
+        repair = next(
+            row
+            for row in repairing.result["pending_actions"]
+            if row["reporting"].get("purpose") == "marshal_schedule_retarget"
+        )
+        assert repair["arguments"]["id"] == "automation-1"
+        assert "scheduled Fulcrum heartbeat" in repair["arguments"]["prompt"]
+        assert not repair["arguments"]["prompt"].startswith("Fulcrum-Action:")
 
 
 def test_bootstrap_preserves_unrelated_codex_configuration():
@@ -236,7 +227,10 @@ def test_bootstrap_preserves_unrelated_codex_configuration():
         assert "tool_timeout_sec = 3900" in retained
         assert str(root / "brain" / "fulcrum.yaml") in retained
         hooks = (root / "codex" / "hooks.json").read_text(encoding="utf-8")
-        assert f"--config {root / 'brain' / 'fulcrum.yaml'}" in hooks
+        assert (
+            f"--config {(root / 'brain' / 'fulcrum.yaml').resolve(strict=False)}"
+            in hooks
+        )
 
 
 def _verify_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task():

@@ -49,9 +49,13 @@ REQUIRED_ACCEPTANCE = {
     "transcript_lifecycle",
     "usage_accounting",
     "task_targeting",
-    "schedule_overlap",
 }
-PRE_ACTIVATION_ACCEPTANCE: set[str] = REQUIRED_ACCEPTANCE - {"schedule_overlap"}
+PRE_ACTIVATION_ACCEPTANCE: set[str] = set(REQUIRED_ACCEPTANCE)
+MARSHAL_HEARTBEAT_PROMPT = (
+    "This is the scheduled Fulcrum heartbeat. Call marshal_check with input "
+    '`{"trigger":"heartbeat"}`, settle the bounded brief, and end quietly when '
+    "no action is required."
+)
 STANDING = {
     "steward": {
         "title": "🧰 STEWARD 🧰",
@@ -549,46 +553,6 @@ class DesktopSetupService(DesktopProtocolService):
             }
             actions[action_id] = diagnostic_action
             protocol["actions"] = actions
-        schedule = protocol.get("marshal_schedule")
-        if standing_ready and not isinstance(schedule, Mapping):
-            marshal = standing["marshal"]
-            action_id = _opaque("action")
-            actions[action_id] = {
-                "action_id": action_id,
-                "record_id": system.id,
-                "executor": "bootstrap",
-                "tool": "automation_update",
-                "arguments": {
-                    "mode": "create",
-                    "kind": "heartbeat",
-                    "name": "Fulcrum Marshal check",
-                    "prompt": "Call marshal_check, settle the bounded brief, and end quietly when no action is required.",
-                    "rrule": "FREQ=MINUTELY;INTERVAL=15",
-                    "status": "PAUSED",
-                    "notificationPolicy": "failed_runs_only",
-                    "targetThreadId": marshal.get("task_id"),
-                    "destination": "thread",
-                },
-                "expected_result": {"automation_id": "bound Marshal heartbeat"},
-                "reporting": {"purpose": "marshal_schedule"},
-                "state": "pending",
-                "attempts": [],
-                "created_at": _utc_now(),
-                "purpose": "bootstrap_marshal_schedule",
-            }
-            schedule = {
-                "action_id": action_id,
-                "state": "pending",
-                "interval_minutes": 15,
-                "target_task_id": marshal.get("task_id"),
-            }
-            protocol["marshal_schedule"] = schedule
-        broker_ready = (instance / "broker.sock").exists()
-        schedule_action = (
-            actions.get(schedule.get("action_id"))
-            if isinstance(schedule, Mapping)
-            else None
-        )
         acceptance = request.input.get("acceptance")
         acceptance_evidence = (
             {str(key): bool(value) for key, value in acceptance.items()}
@@ -603,12 +567,75 @@ class DesktopSetupService(DesktopProtocolService):
             for name in PRE_ACTIVATION_ACCEPTANCE
             if not acceptance_evidence.get(name)
         )
+        schedule = protocol.get("marshal_schedule")
+        if (
+            standing_ready
+            and not missing_pre_activation
+            and not isinstance(schedule, Mapping)
+        ):
+            marshal = standing["marshal"]
+            action_id = _opaque("action")
+            actions[action_id] = {
+                "action_id": action_id,
+                "record_id": system.id,
+                "executor": "bootstrap",
+                "tool": "automation_update",
+                "arguments": {
+                    "mode": "create",
+                    "kind": "heartbeat",
+                    "name": "Fulcrum Marshal check",
+                    "prompt": MARSHAL_HEARTBEAT_PROMPT,
+                    "rrule": "FREQ=MINUTELY;INTERVAL=15",
+                    "status": "ACTIVE",
+                    "notificationPolicy": "failed_runs_only",
+                    "targetThreadId": marshal.get("task_id"),
+                    "destination": "thread",
+                },
+                "expected_result": {
+                    "automation_id": "bound Marshal heartbeat",
+                    "status": "ACTIVE",
+                },
+                "reporting": {"purpose": "marshal_schedule"},
+                "state": "pending",
+                "attempts": [],
+                "created_at": _utc_now(),
+                "purpose": "bootstrap_marshal_schedule",
+            }
+            schedule = {
+                "action_id": action_id,
+                "state": "pending",
+                "interval_minutes": 15,
+                "target_task_id": marshal.get("task_id"),
+                "prompt": MARSHAL_HEARTBEAT_PROMPT,
+                "rrule": "FREQ=MINUTELY;INTERVAL=15",
+                "status": "ACTIVE",
+            }
+            protocol["marshal_schedule"] = schedule
+        broker_ready = (instance / "broker.sock").exists()
+        schedule_action = (
+            actions.get(schedule.get("action_id"))
+            if isinstance(schedule, Mapping)
+            else None
+        )
+        retained_retarget_action = (
+            actions.get(schedule.get("retarget_action_id"))
+            if isinstance(schedule, Mapping) and schedule.get("retarget_action_id")
+            else None
+        )
         if (
             standing_ready
             and isinstance(schedule, Mapping)
             and schedule.get("automation_id")
-            and schedule.get("target_task_id") != standing["marshal"].get("task_id")
-            and not schedule.get("retarget_action_id")
+            and (
+                schedule.get("target_task_id") != standing["marshal"].get("task_id")
+                or schedule.get("prompt") != MARSHAL_HEARTBEAT_PROMPT
+                or schedule.get("rrule") != "FREQ=MINUTELY;INTERVAL=15"
+                or schedule.get("status") != "ACTIVE"
+            )
+            and (
+                not isinstance(retained_retarget_action, Mapping)
+                or retained_retarget_action.get("state") in {"succeeded", "superseded"}
+            )
         ):
             retarget_action_id = _opaque("action")
             actions[retarget_action_id] = {
@@ -621,7 +648,7 @@ class DesktopSetupService(DesktopProtocolService):
                     "id": schedule["automation_id"],
                     "kind": "heartbeat",
                     "name": "Fulcrum Marshal check",
-                    "prompt": "Call marshal_check, settle the bounded brief, and end quietly when no action is required.",
+                    "prompt": MARSHAL_HEARTBEAT_PROMPT,
                     "rrule": "FREQ=MINUTELY;INTERVAL=15",
                     "status": "ACTIVE",
                     "notificationPolicy": "failed_runs_only",
@@ -642,54 +669,6 @@ class DesktopSetupService(DesktopProtocolService):
             }
             protocol["marshal_schedule"] = schedule
             protocol["actions"] = actions
-        if (
-            standing_ready
-            and isinstance(schedule, Mapping)
-            and schedule.get("state") == "succeeded"
-            and schedule.get("automation_id")
-            and not missing_pre_activation
-            and not schedule.get("activation_action_id")
-        ):
-            activation_action_id = _opaque("action")
-            actions[activation_action_id] = {
-                "action_id": activation_action_id,
-                "record_id": system.id,
-                "executor": "bootstrap",
-                "tool": "automation_update",
-                "arguments": {
-                    "mode": "update",
-                    "id": schedule["automation_id"],
-                    "kind": "heartbeat",
-                    "name": "Fulcrum Marshal check",
-                    "prompt": "Call marshal_check, settle the bounded brief, and end quietly when no action is required.",
-                    "rrule": "FREQ=MINUTELY;INTERVAL=15",
-                    "status": "ACTIVE",
-                    "notificationPolicy": "failed_runs_only",
-                    "targetThreadId": standing["marshal"].get("task_id"),
-                    "destination": "thread",
-                },
-                "expected_result": {
-                    "automation_id": schedule["automation_id"],
-                    "status": "ACTIVE",
-                },
-                "reporting": {"purpose": "marshal_schedule_activation"},
-                "state": "pending",
-                "attempts": [],
-                "created_at": _utc_now(),
-                "purpose": "bootstrap_marshal_schedule_activation",
-            }
-            schedule = {
-                **dict(schedule),
-                "activation_action_id": activation_action_id,
-                "activation_state": "pending",
-            }
-            protocol["marshal_schedule"] = schedule
-            protocol["actions"] = actions
-        activation_action = (
-            actions.get(schedule.get("activation_action_id"))
-            if isinstance(schedule, Mapping)
-            else None
-        )
         retarget_action = (
             actions.get(schedule.get("retarget_action_id"))
             if isinstance(schedule, Mapping) and schedule.get("retarget_action_id")
@@ -711,8 +690,7 @@ class DesktopSetupService(DesktopProtocolService):
             standing_ready
             and isinstance(schedule_action, Mapping)
             and schedule_action.get("state") == "succeeded"
-            and isinstance(activation_action, Mapping)
-            and activation_action.get("state") == "succeeded"
+            and schedule.get("status") == "ACTIVE"
             and isinstance(diagnostic_action, Mapping)
             and diagnostic_action.get("state") == "succeeded"
             and (

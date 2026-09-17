@@ -210,10 +210,23 @@ def _validated_action_outcome(
                 exit_code=5,
             )
     elif tool == "automation_update":
-        if not _native_field(normalized, "automationId", "automation_id", "id"):
+        observed_automation_id = _native_field(
+            normalized, "automationId", "automation_id", "id"
+        )
+        if not observed_automation_id:
             raise FulcrumError(
                 "RESULT_EVIDENCE_REQUIRED",
                 "automation result requires its native identity",
+                exit_code=5,
+            )
+        expected_automation_id = expected_arguments.get("id")
+        if (
+            expected_automation_id is not None
+            and observed_automation_id != expected_automation_id
+        ):
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "automation identity does not match the claimed action",
                 exit_code=5,
             )
         expected_status = expected_arguments.get("status")
@@ -242,6 +255,19 @@ def _validated_action_outcome(
                 "automation target does not match the claimed action",
                 exit_code=5,
             )
+        for field, *aliases in (
+            ("kind",),
+            ("rrule",),
+            ("notificationPolicy", "notification_policy"),
+        ):
+            expected = expected_arguments.get(field)
+            observed = _native_field(normalized, field, *aliases)
+            if expected is not None and observed is not None and observed != expected:
+                raise FulcrumError(
+                    "RESULT_CONFLICT",
+                    f"automation {field} does not match the claimed action",
+                    exit_code=5,
+                )
     elif tool == "send_message_to_thread":
         expected_target = expected_arguments.get("threadId")
         observed_target = _native_field(
@@ -887,9 +913,10 @@ class DesktopProtocolService:
         self, ledger: Ledger, role: str, request: ParsedRequest
     ) -> Mapping[str, Any]:
         system = self._system(ledger)
-        standing = _protocol(system.fc or {}).get("standing")
+        protocol = _protocol(system.fc or {})
+        standing = protocol.get("standing")
         binding = standing.get(role) if isinstance(standing, Mapping) else None
-        if not isinstance(binding, Mapping) or binding.get("state") != "registered":
+        if not isinstance(binding, Mapping):
             raise FulcrumError(
                 "STANDING_NOT_REGISTERED",
                 f"{role} is not registered",
@@ -900,6 +927,27 @@ class DesktopProtocolService:
             raise FulcrumError(
                 "AUTHORITY_MISMATCH",
                 f"only the registered {role} may perform this operation",
+                exit_code=5,
+            )
+        if binding.get("state") in {
+            "stopped",
+            "stop_observed",
+            "interrupt_observed",
+        }:
+            revived = {
+                **dict(binding),
+                "state": "registered",
+                "last_activity_at": _utc_now(),
+            }
+            updated = dict(standing)
+            updated[role] = revived
+            protocol["standing"] = updated
+            ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
+            binding = revived
+        elif binding.get("state") != "registered":
+            raise FulcrumError(
+                "STANDING_NOT_REGISTERED",
+                f"{role} is not registered",
                 exit_code=5,
             )
         return binding
@@ -1143,10 +1191,11 @@ class DesktopProtocolService:
                 else None
             ),
         )
-        for field in ("prompt", "text"):
-            if isinstance(arguments.get(field), str):
-                arguments[field] = marker + "\n" + arguments[field]
-                break
+        if action.get("tool") in {"create_thread", "send_message_to_thread"}:
+            for field in ("prompt", "text"):
+                if isinstance(arguments.get(field), str):
+                    arguments[field] = marker + "\n" + arguments[field]
+                    break
         return {
             "action_id": action["action_id"],
             "record_id": action["record_id"],
@@ -1620,6 +1669,11 @@ class DesktopProtocolService:
         }:
             schedule = dict(protocol.get("marshal_schedule") or {})
             if action.get("purpose") == "bootstrap_marshal_schedule":
+                arguments = action.get("arguments") or {}
+                active = (
+                    normalized_outcome == "succeeded"
+                    and arguments.get("status") == "ACTIVE"
+                )
                 schedule.update(
                     {
                         "action_id": action_id,
@@ -1630,6 +1684,11 @@ class DesktopProtocolService:
                             "automation_id",
                             "id",
                         ),
+                        "status": "ACTIVE" if active else None,
+                        "activated_at": _utc_now() if active else None,
+                        "target_task_id": arguments.get("targetThreadId"),
+                        "prompt": arguments.get("prompt"),
+                        "rrule": arguments.get("rrule"),
                         "observed_at": _utc_now(),
                     }
                 )
@@ -1647,7 +1706,12 @@ class DesktopProtocolService:
             protocol["marshal_schedule"] = schedule
         if action.get("purpose") == "recover_marshal_schedule":
             schedule = dict(protocol.get("marshal_schedule") or {})
-            target = (action.get("arguments") or {}).get("targetThreadId")
+            arguments = action.get("arguments") or {}
+            target = arguments.get("targetThreadId")
+            active = (
+                normalized_outcome == "succeeded"
+                and arguments.get("status") == "ACTIVE"
+            )
             schedule.update(
                 {
                     "retarget_action_id": action_id,
@@ -1656,6 +1720,20 @@ class DesktopProtocolService:
                         target
                         if normalized_outcome == "succeeded"
                         else schedule.get("target_task_id")
+                    ),
+                    "status": "ACTIVE" if active else schedule.get("status"),
+                    "activated_at": (
+                        _utc_now() if active else schedule.get("activated_at")
+                    ),
+                    "prompt": (
+                        arguments.get("prompt")
+                        if normalized_outcome == "succeeded"
+                        else schedule.get("prompt")
+                    ),
+                    "rrule": (
+                        arguments.get("rrule")
+                        if normalized_outcome == "succeeded"
+                        else schedule.get("rrule")
                     ),
                     "observed_at": _utc_now(),
                 }

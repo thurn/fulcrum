@@ -1,5 +1,7 @@
 """Discover the whole suite and report timings without external services."""
 
+import importlib
+import inspect
 from pathlib import Path
 import sys
 import time
@@ -25,9 +27,16 @@ class TimedResult(unittest.TextTestResult):
 
 
 def main() -> int:
-    suite = unittest.defaultTestLoader.discover(
+    class_suite = unittest.defaultTestLoader.discover(
         str(ROOT / "tests"), top_level_dir=str(ROOT)
     )
+    function_suite = unittest.TestSuite()
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        module = importlib.import_module(f"tests.{path.stem}")
+        for name, function in inspect.getmembers(module, inspect.isfunction):
+            if name.startswith("test_") and function.__module__ == module.__name__:
+                function_suite.addTest(unittest.FunctionTestCase(function))
+    suite = unittest.TestSuite((class_suite, function_suite))
     result = unittest.TextTestRunner(resultclass=TimedResult).run(suite)
     print("\nSlowest tests:")
     for seconds, name in sorted(result.timings, reverse=True)[:5]:

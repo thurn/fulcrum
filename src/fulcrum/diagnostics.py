@@ -1494,19 +1494,39 @@ def _loop_health(
             and schedule.get("state") == "succeeded"
             and schedule_status in {None, "PAUSED"}
         )
-        state = (
-            "healthy"
-            if isinstance(schedule, Mapping)
-            and schedule.get("state") == "succeeded"
-            and (schedule_status == "ACTIVE" or intentionally_paused)
-            else "unavailable"
+        activated_at = _parse_health_time(
+            schedule.get("activated_at") if isinstance(schedule, Mapping) else None
         )
+        last_delivery_at = _parse_health_time(
+            schedule.get("last_delivery_at") if isinstance(schedule, Mapping) else None
+        )
+        interval = timedelta(minutes=15)
+        first_delivery_grace = timedelta(minutes=20)
+        stale_after = timedelta(minutes=35)
+        if intentionally_paused:
+            state = "paused"
+        elif not (
+            isinstance(schedule, Mapping)
+            and schedule.get("state") == "succeeded"
+            and schedule_status == "ACTIVE"
+        ):
+            state = "unavailable"
+        elif last_delivery_at is not None:
+            state = "healthy" if now - last_delivery_at <= stale_after else "degraded"
+        elif activated_at is not None and now - activated_at <= first_delivery_grace:
+            state = "initializing"
+        else:
+            state = "degraded"
         return [
             _health(
                 "marshal_heartbeat",
                 state,
                 evidence={
-                    "interval_seconds": 900,
+                    "interval_seconds": int(interval.total_seconds()),
+                    "first_delivery_grace_seconds": int(
+                        first_delivery_grace.total_seconds()
+                    ),
+                    "stale_after_seconds": int(stale_after.total_seconds()),
                     "schedule": schedule,
                     "run_control": run_control,
                     "intentionally_paused": intentionally_paused,
@@ -1514,6 +1534,11 @@ def _loop_health(
                 affected_commands=[] if state == "healthy" else ["scheduled recovery"],
                 next_commands=(
                     [] if state == "healthy" else [["fulcrum", "bootstrap", "--json"]]
+                ),
+                last_success_at=(
+                    last_delivery_at.isoformat().replace("+00:00", "Z")
+                    if last_delivery_at is not None
+                    else None
                 ),
             )
         ]
@@ -1526,6 +1551,16 @@ def _loop_health(
                 affected_commands=["scheduled recovery"],
             )
         ]
+
+
+def _parse_health_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _capacity(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:

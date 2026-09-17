@@ -107,7 +107,8 @@ native action.
 
 Setup is complete only when all three identities, the source-following MCP server,
 six trusted hooks, broker socket, supported models/tools, transcript and
-accounting checks, exact Marshal heartbeat, and focused acceptance are recorded.
+accounting checks, an active Marshal heartbeat targeted at the retained Marshal,
+and focused acceptance are recorded.
 Record acceptance only from direct evidence:
 
 - `workspace_access`: each retained standing task has its reported workspace and
@@ -119,17 +120,23 @@ Record acceptance only from direct evidence:
 - `usage_accounting`: exercised managed turns have attributed token/cost rows or
   an explicit supported zero-cost observation, with no missing reason;
 - `task_targeting`: exact titles and retained task IDs match creation, diagnostic,
-  and schedule targets;
-- `schedule_overlap`: after activation, one real heartbeat overlaps a controlled
-  Marshal prompt without duplicate effects, lost targeting, or silent failure.
+  and schedule targets.
 
-First pass true values for the five checks other than `schedule_overlap` after
-they actually succeed. Bootstrap then returns the distinct action that activates
-the already-paused heartbeat while admission remains paused. After the real
-overlap check succeeds, rerun bootstrap with all six true values; only then may
-admission open. Never activate the schedule directly, infer acceptance from unit
-tests, or mark an unexercised check true. Keep admission paused and report exact
-gaps otherwise.
+Pass true values for those five checks only after they actually succeed.
+Bootstrap then returns one action that creates the heartbeat already active. Claim
+and invoke that exact action once, report its actual result, and rerun bootstrap
+with a new request UUID. A returned automation identity and `ACTIVE` status prove
+configuration, not delivery; they are sufficient to finish bootstrap because
+scheduled delivery is monitored asynchronously.
+
+Do not wait for a heartbeat, keep Marshal busy across a guessed schedule boundary,
+or manufacture an overlap test. Native task turns are serialized, so a controlled
+Marshal turn can defer the heartbeat it is intended to observe. The first genuine
+heartbeat calls `marshal_check` with `input.trigger` set to `heartbeat`; Fulcrum
+records that delivery. `fulcrum doctor` reports the loop as `initializing` until
+the first delivery, `healthy` after a recent delivery, and `degraded` after its
+bounded deadline. Report a degraded loop as a scheduler incident without
+reopening bootstrap or retrying an uncertain automation mutation.
 
 Explain that Desktop Stop does not durably pause Fulcrum. The initial MCP
 configuration change requires the one fresh continuation task described above;
