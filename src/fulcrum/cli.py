@@ -258,6 +258,7 @@ COMMANDS = (
     CommandDefinition(("ci", "wait"), "wait for exact candidate CI"),
     CommandDefinition(("pause",), "pause new Fulcrum effects"),
     CommandDefinition(("resume",), "resume eligible Fulcrum effects"),
+    CommandDefinition(("hook", "handle"), "handle one trusted native hook event"),
 )
 
 
@@ -872,6 +873,8 @@ def _payload(namespace: argparse.Namespace, command: tuple[str, ...]) -> dict[st
             details={"fields": duplicates},
         )
     merged = {**supplied, **direct}
+    if command == ("hook", "handle"):
+        return merged
     allowed = INPUT_FIELDS.get(command, set()).union(
         DIRECT_INPUTS.get(command, {}).values()
     )
@@ -1191,7 +1194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         namespace = parser.parse_args(argv)
         request = _build_request(namespace)
         result = _execute(request)
-        if request.command == ("hook", "context"):
+        if request.command in {("hook", "context"), ("hook", "handle")}:
             print(
                 json.dumps(
                     result.get("result") or {"continue": True},
@@ -1206,10 +1209,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit(result, json_output=bool(getattr(namespace, "json", False)))
         return _exit_code(result)
     except FulcrumError as error:
-        if namespace is not None and tuple(getattr(namespace, "_command_path", ())) == (
-            "hook",
-            "context",
-        ):
+        if namespace is not None and tuple(getattr(namespace, "_command_path", ())) in {
+            ("hook", "context"),
+            ("hook", "handle"),
+        }:
             print('{"continue":true}')
             return 0
         result = error.to_result().to_dict()

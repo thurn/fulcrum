@@ -107,7 +107,7 @@ def _replace_owned_link(source: Path, target: Path) -> None:
 
 
 def install_hook_config(path: Path, command: str) -> None:
-    """Preserve unrelated hooks and install one read-only compact handler."""
+    """Preserve unrelated hooks and install the six scoped command hooks."""
 
     existing: Any = (
         json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -144,21 +144,25 @@ def install_hook_config(path: Path, command: str) -> None:
             hooks[event] = retained
         else:
             hooks.pop(event, None)
-    hooks["SessionStart"] = [
-        *hooks.get("SessionStart", []),
-        {
-            "matcher": "^compact$",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": command,
-                    "timeout": 2,
-                    "additionalContextLimit": 5000,
-                    "statusMessage": "Fulcrum: restoring current work context",
-                }
-            ],
-        },
-    ]
+    for event in (
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "Interrupt",
+    ):
+        handler = {
+            "type": "command",
+            "command": command,
+            "timeout": 3 if event == "Interrupt" else 10,
+            "additionalContextLimit": 2000,
+            "statusMessage": f"Fulcrum: recording {event}",
+        }
+        group: dict[str, Any] = {"hooks": [handler]}
+        if event == "SessionStart":
+            group["matcher"] = "^(startup|resume|clear|compact)$"
+        hooks[event] = [*hooks.get(event, []), group]
     existing["hooks"] = hooks
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(f".{path.name}.{os.getpid()}")
@@ -231,7 +235,7 @@ def reconcile_fulcrum2_skills(
         hook_command = " ".join(
             (
                 shlex.quote(str(executable.resolve(strict=True))),
-                "hook context --input - --instance",
+                "hook handle --input - --instance",
                 shlex.quote(str(instance_root.resolve(strict=False))),
             )
         )

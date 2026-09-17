@@ -27,6 +27,7 @@ from fulcrum.ledger import (
 )
 from fulcrum.leadership import LeadershipService
 from fulcrum.knowledge import KnowledgeService, MemoryService
+from fulcrum.hooks import HookService
 from fulcrum.plans import PlanService
 from fulcrum.publication import LedgerPublicationService
 from fulcrum.recovery_service import HumanService, RecoveryService
@@ -187,6 +188,7 @@ class Application:
         self.register(("ci", "wait"), desktop.wait_for_ci_results)
         self.register(("pause",), desktop.pause)
         self.register(("resume",), desktop.resume)
+        self.register(("hook", "handle"), HookService().handle)
 
     def register(self, command: tuple[str, ...], handler: Handler) -> None:
         if command in self._handlers:

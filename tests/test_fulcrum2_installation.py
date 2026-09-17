@@ -157,7 +157,16 @@ class Fulcrum2InstallationTest(unittest.TestCase):
         self.assertFalse(owned_legacy.is_symlink())
         self.assertTrue(result["hook"]["installed"])
         hooks = (root.parent / "hooks.json").read_text(encoding="utf-8")
-        self.assertIn("hook context --input - --instance", hooks)
+        self.assertIn("hook handle --input - --instance", hooks)
+        for event in (
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "Stop",
+            "Interrupt",
+        ):
+            self.assertIn(f'"{event}"', hooks)
         self.assertNotIn("fulcrum.hook", hooks)
         broken = root / HUMAN_SKILLS[0]
         broken.unlink()
