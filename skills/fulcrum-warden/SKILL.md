@@ -9,5 +9,9 @@ in the retained Tollgate workspace. Fix only bounded review findings, invalidate
 stale evidence when source changes, submit the exact candidate through
 `submit_candidate`, and call `wait_for_ci_results` once. The call remains pending
 until terminal evidence; do not poll. On passing exact-source CI, complete the
-retained promotion/synchronization obligations and call `finish`. A failed result
-uses the same task and repair allowance.
+retained promotion/synchronization obligations and call `finish` with
+`summary`, the full lowercase `source_oid`, `checks` objects containing exactly
+`name`, `status`, and `evidence`, and an array of evidence references. A failed
+result uses the same task and repair allowance. Never edit Fulcrum itself, an
+activation snapshot, or another workspace to recover a protocol/runtime failure;
+report the exact error and stop so the owning Fulcrum operation can reconcile it.

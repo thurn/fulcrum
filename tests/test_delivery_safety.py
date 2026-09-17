@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from fulcrum.contracts import FulcrumError
+from fulcrum.completion import _settled_delivery_for_source
 from fulcrum.delivery import (
     DeliveryFacts,
     DeliveryProviderError,
@@ -207,3 +208,24 @@ class DeliverySafetyTests(unittest.TestCase):
             ):
                 adapter._cleanup(self.ref)
         tollgate.remove_worktree.assert_not_called()
+
+    def test_terminal_delivery_can_finish_after_provider_cleanup(self):
+        delivery = {
+            **self.delivery,
+            "promotion": {
+                "state": "observed",
+                "integration_oid": "integration",
+            },
+            "synchronization": {
+                "state": "observed",
+                "integration_oid": "integration",
+            },
+            "cleanup": {"state": "observed"},
+        }
+        self.assertEqual(
+            _settled_delivery_for_source(record(delivery=delivery), "current-source"),
+            delivery,
+        )
+        self.assertIsNone(
+            _settled_delivery_for_source(record(delivery=delivery), "stale-source")
+        )

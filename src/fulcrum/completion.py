@@ -751,6 +751,31 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
+        settled_delivery = _settled_delivery_for_source(work, payload["source_oid"])
+        if settled_delivery is not None:
+            children = {
+                "reconciliation": {
+                    "state": "completed",
+                    "ok": True,
+                    "result": {
+                        "delivery": "already_settled",
+                        "source_oid": payload["source_oid"],
+                    },
+                }
+            }
+            return _accept_warden_finish(
+                ledger,
+                work,
+                operation,
+                payload,
+                children,
+                {
+                    "exists": False,
+                    "state": "provider_cleaned",
+                    "source_oid": payload["source_oid"],
+                },
+                settled_delivery["validation"],
+            )
         if workspace is None:
             workspace = _inspect_clean_source(request, payload["source_oid"])
         topology = _single_task_commit_topology(workspace, payload["source_oid"])
@@ -955,44 +980,95 @@ class CompletionService:
                 "source_sync",
                 synchronization,
             )
-        work = _reload_work(ledger, work.id)
-        fc = dict(work.fc or {})
-        fc["phase"] = "awaiting_native_completion"
-        fc["delivery_finish"] = {
-            "operation_id": operation.id,
+        return _accept_warden_finish(
+            ledger,
+            work,
+            operation,
+            payload,
+            children,
+            workspace,
+            validation,
+        )
+
+
+def _settled_delivery_for_source(
+    work: LedgerRecord, source_oid: str
+) -> Mapping[str, Any] | None:
+    """Return exact terminal delivery evidence after provider-owned cleanup."""
+
+    delivery = (work.fc or {}).get("delivery")
+    if not isinstance(delivery, Mapping) or delivery.get("source_oid") != source_oid:
+        return None
+    validation = delivery.get("validation")
+    approved = delivery.get("approved_source")
+    promotion = delivery.get("promotion")
+    synchronization = delivery.get("synchronization")
+    cleanup = delivery.get("cleanup")
+    if not (
+        isinstance(validation, Mapping)
+        and validation.get("state") == "passed"
+        and isinstance(approved, Mapping)
+        and approved.get("oid") == source_oid
+        and isinstance(promotion, Mapping)
+        and promotion.get("state") == "observed"
+        and isinstance(promotion.get("integration_oid"), str)
+        and isinstance(synchronization, Mapping)
+        and synchronization.get("state") == "observed"
+        and synchronization.get("integration_oid") == promotion.get("integration_oid")
+        and isinstance(cleanup, Mapping)
+        and cleanup.get("state") == "observed"
+    ):
+        return None
+    return delivery
+
+
+def _accept_warden_finish(
+    ledger: Ledger,
+    work: LedgerRecord,
+    operation: OperationRecord,
+    payload: Mapping[str, Any],
+    children: Mapping[str, Any],
+    workspace: Mapping[str, Any],
+    validation: Mapping[str, Any],
+) -> CommandResult:
+    work = _reload_work(ledger, work.id)
+    fc = dict(work.fc or {})
+    fc["phase"] = "awaiting_native_completion"
+    fc["delivery_finish"] = {
+        "operation_id": operation.id,
+        "source_oid": payload["source_oid"],
+        "summary": payload["summary"],
+        "checks": payload["checks"],
+        "evidence": payload["evidence"],
+        "state": "awaiting_native_completion",
+        "accepted_at": utc_now(),
+    }
+    fc["next_action"] = (
+        "End the Warden turn; transcript-confirmed native completion authorizes "
+        "workspace cleanup and assignment release."
+    )
+    fc["last_transition"] = operation.id
+    awaiting = ledger.update_fc(work.id, fc, status="in_progress")
+    _record_task_finish(ledger, work, operation.id)
+    operation = ledger.update_operation(
+        operation.id,
+        state="completed",
+        step="warden_finish_accepted",
+        planned={"finish": dict(payload), "children": dict(children)},
+        result={
+            "bead_id": work.id,
+            "accepted": True,
             "source_oid": payload["source_oid"],
-            "summary": payload["summary"],
-            "checks": payload["checks"],
-            "evidence": payload["evidence"],
-            "state": "awaiting_native_completion",
-            "accepted_at": utc_now(),
-        }
-        fc["next_action"] = (
-            "End the Warden turn; transcript-confirmed native completion authorizes "
-            "workspace cleanup and assignment release."
-        )
-        fc["last_transition"] = operation.id
-        awaiting = ledger.update_fc(work.id, fc, status="in_progress")
-        _record_task_finish(ledger, work, operation.id)
-        operation = ledger.update_operation(
-            operation.id,
-            state="completed",
-            step="warden_finish_accepted",
-            planned={"finish": payload, "children": children},
-            result={
-                "bead_id": work.id,
-                "accepted": True,
-                "source_oid": payload["source_oid"],
-                "validation": validation,
-                "children": children,
-                "workspace": workspace,
-                "delivery": (awaiting.fc or {}).get("delivery"),
-                "native_completion_required": True,
-                "report_reminder": _report_reminder(work.id),
-            },
-            next_action=fc["next_action"],
-        )
-        return _operation_result(operation)
+            "validation": dict(validation),
+            "children": dict(children),
+            "workspace": dict(workspace),
+            "delivery": (awaiting.fc or {}).get("delivery"),
+            "native_completion_required": True,
+            "report_reminder": _report_reminder(work.id),
+        },
+        next_action=fc["next_action"],
+    )
+    return _operation_result(operation)
 
 
 def _finish_child_unresolved(
@@ -1592,30 +1668,41 @@ def settle_native_completion(
         and isinstance(delivery_finish, Mapping)
         and delivery_finish.get("state") == "awaiting_native_completion"
     ):
-        cleanup_request = replace(
-            request,
-            command=("worktree", "cleanup"),
-            arguments={"bead": bead_id},
-            input={},
-            actor=replace(request.actor, kind="system", task_id=None),
-            request_id=str(
-                uuid.uuid5(FINISH_CHILD_NAMESPACE, f"{finish_operation}:cleanup")
-            ),
-            thread_id=None,
-            ownership_operation=None,
+        delivery = fc.get("delivery")
+        retained_cleanup = (
+            delivery.get("cleanup") if isinstance(delivery, Mapping) else None
         )
-        try:
-            cleanup = DeliveryService().worktree_cleanup(cleanup_request)
-        except FulcrumError as error:
-            cleanup = CommandResult(
-                ok=False,
-                state=error.state,
-                result={"error": error.to_result().to_dict()["error"]},
-                request_id=cleanup_request.request_id,
+        cleanup_completed = (
+            isinstance(retained_cleanup, Mapping)
+            and retained_cleanup.get("state") == "observed"
+        )
+        cleanup: CommandResult | None = None
+        if not cleanup_completed:
+            cleanup_request = replace(
+                request,
+                command=("worktree", "cleanup"),
+                arguments={"bead": bead_id},
+                input={},
+                actor=replace(request.actor, kind="system", task_id=None),
+                request_id=str(
+                    uuid.uuid5(FINISH_CHILD_NAMESPACE, f"{finish_operation}:cleanup")
+                ),
+                thread_id=None,
+                ownership_operation=None,
             )
+            try:
+                cleanup = DeliveryService().worktree_cleanup(cleanup_request)
+            except FulcrumError as error:
+                cleanup = CommandResult(
+                    ok=False,
+                    state=error.state,
+                    result={"error": error.to_result().to_dict()["error"]},
+                    request_id=cleanup_request.request_id,
+                )
+            cleanup_completed = cleanup.state is CommandState.COMPLETED
         current = _reload_work(ledger, bead_id)
         fc = dict(current.fc or {})
-        if cleanup.state is CommandState.COMPLETED:
+        if cleanup_completed:
             completed_at = utc_now()
             fc["phase"] = "done"
             fc["delivery_finish"] = {
@@ -1634,6 +1721,7 @@ def settle_native_completion(
             if fc.get("workflow_root") == bead_id:
                 AnalyticsService().finalize_root(ledger, closed, finish_operation)
         else:
+            assert cleanup is not None
             fc["phase"] = "cleanup_pending"
             fc["cleanup_obligation"] = {
                 "finish_operation": finish_operation,
