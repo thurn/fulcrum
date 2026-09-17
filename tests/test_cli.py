@@ -63,7 +63,7 @@ class CliTests(unittest.TestCase):
         ):
             parsed = _build_request(parser.parse_args(["bootstrap"]))
         self.assertEqual(parsed.actor.kind, "human")
-        self.assertIsNone(parsed.thread_id)
+        self.assertEqual(parsed.thread_id, "native-task")
 
     def test_bootstrap_initializes_missing_authoritative_configuration(self):
         with tempfile.TemporaryDirectory() as directory:

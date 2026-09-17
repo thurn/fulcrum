@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import tempfile
+import unittest
 import uuid
 
-from fulcrum.contracts import InstanceContext
+from fulcrum.contracts import ActorContext, FulcrumError, InstanceContext
 from fulcrum.desktop_setup import (
     DesktopSetupService,
     REQUIRED_ACCEPTANCE,
@@ -214,3 +215,63 @@ def test_bootstrap_preserves_unrelated_codex_configuration():
         assert str(root / "brain" / "fulcrum.yaml") in retained
         hooks = (root / "codex" / "hooks.json").read_text(encoding="utf-8")
         assert f"--config {root / 'brain' / 'fulcrum.yaml'}" in hooks
+
+
+def _verify_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        service = DesktopSetupService(MemoryLedger())
+        first = service.bootstrap(
+            replace(bootstrap_request(root), thread_id="first-bootstrap-task")
+        )
+        action_id = first.result["pending_actions"][0]["action_id"]
+
+        second = service.bootstrap(
+            replace(bootstrap_request(root), thread_id="resumed-bootstrap-task")
+        )
+        assert any(
+            action["action_id"] == action_id
+            for action in second.result["pending_actions"]
+        )
+
+        def claim(task_id: str, attempt_id: str):
+            return service.claim_action(
+                replace(
+                    bootstrap_request(root),
+                    command=("action", "claim"),
+                    arguments={"record_id": "fc-system", "action_id": action_id},
+                    input={"attempt_id": attempt_id},
+                    actor=ActorContext.parse(f"task:{task_id}"),
+                    thread_id=task_id,
+                )
+            )
+
+        try:
+            claim("first-bootstrap-task", "stale-attempt")
+        except FulcrumError as error:
+            assert error.code == "AUTHORITY_MISMATCH"
+        else:
+            raise AssertionError("stale bootstrap task retained action authority")
+
+        retained = claim("resumed-bootstrap-task", "authorized-attempt")
+        assert retained.result["invoke"] is True
+        completed = service.report_action_result(
+            replace(
+                bootstrap_request(root),
+                command=("action", "result"),
+                arguments={"record_id": "fc-system", "action_id": action_id},
+                input={
+                    "attempt_id": "authorized-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {"threadId": "created-standing-task"},
+                },
+                actor=ActorContext.parse("task:resumed-bootstrap-task"),
+                thread_id="resumed-bootstrap-task",
+            )
+        )
+        assert completed.result["state"] == "succeeded"
+
+
+class DesktopSetupAuthorizationTests(unittest.TestCase):
+    def test_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task(self):
+        _verify_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task()

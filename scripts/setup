@@ -3,9 +3,13 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 python_command=${FULCRUM_PYTHON:-python3.12}
+json_output=false
 
 for argument in "$@"; do
   case "$argument" in
+    --json)
+      json_output=true
+      ;;
     -h|--help)
       cat <<'EOF'
 usage: scripts/setup [SETUP OPTIONS]
@@ -49,14 +53,22 @@ if [ -n "$missing_commands" ]; then
   exit 2
 fi
 
+run_provisioning() {
+  if [ "$json_output" = true ]; then
+    "$@" >&2
+  else
+    "$@"
+  fi
+}
+
 if [ ! -x "$repo_root/.venv/bin/python" ]; then
-  "$python_command" -m venv "$repo_root/.venv"
+  run_provisioning "$python_command" -m venv "$repo_root/.venv"
 fi
 
-"$repo_root/.venv/bin/python" -m pip install --disable-pip-version-check \
-  --requirement "$repo_root/requirements-dev.lock"
-"$repo_root/.venv/bin/python" -m pip install --disable-pip-version-check \
-  --no-deps --editable "$repo_root"
+run_provisioning "$repo_root/.venv/bin/python" -m pip install \
+  --disable-pip-version-check --requirement "$repo_root/requirements-dev.lock"
+run_provisioning "$repo_root/.venv/bin/python" -m pip install \
+  --disable-pip-version-check --no-deps --editable "$repo_root"
 
 launcher_root=$HOME/.local/bin
 launcher=$launcher_root/fulcrum

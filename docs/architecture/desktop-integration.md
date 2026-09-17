@@ -1026,7 +1026,9 @@ asking repeatedly. A ready socket alone is not successful setup.
 2. Once Beads is available, retain one setup operation before native effects.
    Provision source-following launchers, broker, and thin MCP definitions. Set
    the specified instruction/CI wait budgets. Preserve unrelated configuration; an
-   initial MCP reconnect is exceptional setup, never an ordinary editing step.
+   initial in-app MCP Restart is exceptional setup, never an ordinary editing
+   step. A fresh bootstrap call after that restart rebinds pending setup actions
+   to the new native task.
 3. Install/trust the six scoped command hooks and verify actual callback paths
    for projectless standing tasks and saved-project workers. Check native task
    tools, model/effort support, workspace access, transcript observation, and

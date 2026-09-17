@@ -18,8 +18,13 @@ After the first invocation, use `fulcrum bootstrap` directly. Reuse a request UU
 only to resume the exact same command after a client timeout. Use a new request UUID
 after returned actions or prerequisites settle so bootstrap can observe the new
 postconditions. Preserve any existing authoritative configuration. If the initial
-MCP block changed, explain that one Desktop reconnect may be required; do not treat
-that exceptional reconnect as an ordinary source-update step.
+MCP block changed, stop before native actions and tell the user to open Desktop
+Settings, select MCP servers, and select Restart, as required by the
+[official Codex MCP setup](https://developers.openai.com/codex/mcp). Then have them
+invoke this skill again; the fresh bootstrap call rebinds its retained pending
+actions to the new task. Do not require a full macOS app quit when the in-app
+Restart control is available, and do not treat this exceptional initial restart
+as an ordinary source-update step.
 
 For every returned action, call `action claim` before invoking the exact named
 native tool once, then call `action result` with the actual result. Do not edit its
@@ -38,6 +43,6 @@ Pass an `acceptance` object with true values for `workspace_access`,
 the heartbeat paused, then returns a distinct activation action after acceptance;
 admission opens only after that activation result succeeds. Keep
 admission paused and report exact gaps otherwise. Explain that Desktop Stop does
-not durably pause Fulcrum and that an initial MCP configuration change can require
-one exceptional Desktop reconnect; ordinary source edits never require restart,
-activation, installation, or remote publication.
+not durably pause Fulcrum and that an initial MCP configuration change requires
+the one in-app MCP Restart described above; ordinary source edits never require
+restart, activation, installation, or remote publication.

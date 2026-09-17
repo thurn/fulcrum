@@ -685,6 +685,18 @@ class DesktopSetupService(DesktopProtocolService):
             if isinstance(schedule, Mapping) and schedule.get("retarget_action_id")
             else None
         )
+        if request.thread_id:
+            for action_id, action in list(actions.items()):
+                if (
+                    isinstance(action, Mapping)
+                    and action.get("executor") == "bootstrap"
+                    and action.get("state") == "pending"
+                ):
+                    actions[action_id] = {
+                        **dict(action),
+                        "authorized_task_id": request.thread_id,
+                    }
+            protocol["actions"] = actions
         ready = (
             standing_ready
             and isinstance(schedule_action, Mapping)

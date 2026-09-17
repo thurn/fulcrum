@@ -762,11 +762,12 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
         thread_id = environment_task
         actor_text = f"task:{environment_task}"
     else:
-        thread_id = values.get("thread_id") or (
-            None
-            if explicit_actor == "human" or bootstrap_authority
-            else environment_task
-        )
+        if bootstrap_authority:
+            thread_id = values.get("thread_id") or environment_task
+        else:
+            thread_id = values.get("thread_id") or (
+                None if explicit_actor == "human" else environment_task
+            )
         actor_text = values.get("actor") or (
             "human"
             if bootstrap_authority

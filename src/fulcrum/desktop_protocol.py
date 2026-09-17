@@ -1144,13 +1144,20 @@ class DesktopProtocolService:
     ) -> None:
         executor = str(action.get("executor"))
         if executor == "bootstrap":
-            if request.actor.kind != "human":
-                raise FulcrumError(
-                    "AUTHORITY_MISMATCH",
-                    "bootstrap action requires the authorized caller",
-                    exit_code=5,
-                )
-            return
+            if request.actor.kind == "human":
+                return
+            task_id = request.actor.task_id or request.thread_id
+            if (
+                request.actor.kind == "task"
+                and task_id
+                and task_id == action.get("authorized_task_id")
+            ):
+                return
+            raise FulcrumError(
+                "AUTHORITY_MISMATCH",
+                "bootstrap action requires the authorized bootstrap task",
+                exit_code=5,
+            )
         if executor in STANDING_ROLES:
             self._standing_actor(ledger, executor, request)
             return
