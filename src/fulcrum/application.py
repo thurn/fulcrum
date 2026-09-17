@@ -18,6 +18,7 @@ from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedR
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
 from fulcrum.desktop_protocol import DesktopProtocolService
+from fulcrum.desktop_leadership import DesktopLeadershipService
 from fulcrum.ledger import (
     Ledger,
     LedgerFailure,
@@ -189,6 +190,13 @@ class Application:
         self.register(("pause",), desktop.pause)
         self.register(("resume",), desktop.resume)
         self.register(("hook", "handle"), HookService().handle)
+        stock_leadership = DesktopLeadershipService()
+        self.register(("marshal", "check"), stock_leadership.marshal_check)
+        self.register(("marshal", "apply"), stock_leadership.marshal_decide)
+        self.register(("incident", "report"), stock_leadership.report_incident)
+        self.register(("repair", "record"), stock_leadership.record_repair)
+        self.register(("recovery", "prepare"), stock_leadership.recovery_prepare)
+        self.register(("decision", "respond"), stock_leadership.decision_respond)
 
     def register(self, command: tuple[str, ...], handler: Handler) -> None:
         if command in self._handlers:

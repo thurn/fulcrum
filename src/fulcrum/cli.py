@@ -259,6 +259,12 @@ COMMANDS = (
     CommandDefinition(("pause",), "pause new Fulcrum effects"),
     CommandDefinition(("resume",), "resume eligible Fulcrum effects"),
     CommandDefinition(("hook", "handle"), "handle one trusted native hook event"),
+    CommandDefinition(("marshal", "check"), "run one scheduled Marshal check"),
+    CommandDefinition(("marshal", "apply"), "apply targeted Marshal decisions"),
+    CommandDefinition(("incident", "report"), "record or update one incident"),
+    CommandDefinition(("repair", "record"), "record one repair-cycle outcome"),
+    CommandDefinition(("recovery", "prepare"), "prepare one Justiciar intervention"),
+    CommandDefinition(("decision", "respond"), "record one exact human decision"),
 )
 
 
@@ -550,6 +556,10 @@ def _add_command_options(
         ("worker", "register"),
         ("candidate", "submit"),
         ("ci", "wait"),
+        ("incident", "report"),
+        ("repair", "record"),
+        ("recovery", "prepare"),
+        ("decision", "respond"),
     }:
         _option(parser, "--bead", required=True)
 
@@ -644,6 +654,23 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     ("ci", "wait"): {"bead", "candidate_id", "assignment_token", "turn_id"},
     ("pause",): {"reason"},
     ("resume",): {"reason"},
+    ("marshal", "check"): {"turn_id", "trigger", "schedule_id"},
+    ("marshal", "apply"): {"decision_id", "decisions"},
+    ("incident", "report"): {
+        "bead",
+        "incident_key",
+        "scope",
+        "required_decision",
+        "evidence",
+    },
+    ("repair", "record"): {"bead", "incident_key", "outcome", "evidence"},
+    ("recovery", "prepare"): {"bead", "incident_key", "scope", "target"},
+    ("decision", "respond"): {
+        "bead",
+        "decision_id",
+        "answer",
+        "additional_repair_cycles",
+    },
     ("reset",): {"expected_remote_ref", "legacy_state_root", "legacy_database"},
     ("hook", "context"): {
         "hook_event_name",

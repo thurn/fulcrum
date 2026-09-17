@@ -604,6 +604,200 @@ class DesktopProtocolService:
         )
         return candidates
 
+    def _compile_ready_assignment(
+        self, ledger: Ledger, request: ParsedRequest
+    ) -> tuple[LedgerRecord, dict[str, Any]] | None:
+        """Reserve one ready work item and its creation action in one bead update."""
+
+        capacity = 4
+        project_capacity: dict[str, int] = {}
+        paused_projects: set[str] = set()
+        models: Mapping[str, Any] = {}
+        projects: Mapping[str, Any] = {}
+        try:
+            manager = ConfigurationManager(request.instance.config_path)
+            document, _ = manager.load()
+            config = manager.effective(document)
+            policy = config["policy"]
+            capacity = int(policy["automatic_capacity"])
+            project_capacity = {
+                str(key): int(value)
+                for key, value in dict(policy.get("project_capacity") or {}).items()
+            }
+            paused_projects = {
+                str(value) for value in policy.get("paused_projects") or []
+            }
+            models = config["models"]
+            projects = config["projects"]
+        except FulcrumError:
+            pass
+        records = ledger.list_records(limit=0)
+        active = 0
+        active_by_project: dict[str, int] = {}
+        for record in records:
+            assignment = _protocol(record.fc or {}).get("assignment")
+            if not isinstance(assignment, Mapping) or assignment.get("state") not in {
+                "reserved",
+                "issuing",
+                "active",
+                "uncertain",
+            }:
+                continue
+            if assignment.get("capacity_class") == "recovery":
+                continue
+            active += 1
+            project = str((record.fc or {}).get("project") or "")
+            active_by_project[project] = active_by_project.get(project, 0) + 1
+        if active >= capacity:
+            return None
+        candidates: list[LedgerRecord] = []
+        for record in records:
+            fc = record.fc or {}
+            protocol = _protocol(fc)
+            project = str(fc.get("project") or "")
+            default_project_capacity = capacity
+            if project in paused_projects or active_by_project.get(
+                project, 0
+            ) >= project_capacity.get(project, default_project_capacity):
+                continue
+            if record.status == "closed" or str(fc.get("phase")) not in {
+                "ready",
+                "implementation_ready",
+            }:
+                continue
+            if protocol.get("assignment") or fc.get("holds") or fc.get("blocked"):
+                continue
+            dependencies = ledger.dependencies(record.id)
+            if any(
+                (dependency := ledger.show(identifier)) is None
+                or dependency.status != "closed"
+                for identifier in dependencies
+            ):
+                continue
+            workspace = fc.get("workspace") or (
+                fc.get("delivery", {}).get("workspace")
+                if isinstance(fc.get("delivery"), Mapping)
+                else None
+            )
+            project_config = (
+                projects.get(project) if isinstance(projects, Mapping) else None
+            )
+            codex_project = (
+                project_config.get("codex_project_id")
+                if isinstance(project_config, Mapping)
+                else fc.get("codex_project_id")
+            )
+            if not isinstance(workspace, str) or not workspace or not codex_project:
+                continue
+            candidates.append(record)
+        candidates.sort(
+            key=lambda item: (int((item.fc or {}).get("priority", 2)), item.id)
+        )
+        if not candidates:
+            return None
+        record = candidates[0]
+        fc = record.fc or {}
+        protocol = _protocol(fc)
+        assignment_token = _opaque("assignment")
+        action_id = _opaque("action")
+        role = str(fc.get("requested_role") or "executor")
+        if role not in WORKER_ROLES:
+            role = "executor"
+        model_config = models.get(role) if isinstance(models, Mapping) else None
+        model = (
+            model_config.get("model")
+            if isinstance(model_config, Mapping)
+            else fc.get("model")
+        )
+        thinking = (
+            model_config.get("effort")
+            if isinstance(model_config, Mapping)
+            else fc.get("effort")
+        )
+        workspace = str(
+            fc.get("workspace")
+            or (
+                fc.get("delivery", {}).get("workspace")
+                if isinstance(fc.get("delivery"), Mapping)
+                else ""
+            )
+        )
+        project = str(fc.get("project") or "")
+        project_config = (
+            projects.get(project) if isinstance(projects, Mapping) else None
+        )
+        codex_project = (
+            project_config.get("codex_project_id")
+            if isinstance(project_config, Mapping)
+            else fc.get("codex_project_id")
+        )
+        prompt = (
+            f"Register as {role} for {record.id} before editing. Work only in "
+            f"{workspace}. Assignment token: {assignment_token}.\n\n"
+            f"Outcome: {fc.get('outcome') or record.title}\n"
+            f"Acceptance: {fc.get('acceptance') or []}\n"
+            "Report progress and finish through Fulcrum MCP."
+        )
+        arguments: dict[str, Any] = {
+            "prompt": prompt,
+            "title": str(fc.get("task_title") or f"{role.title()} {record.id}"),
+            "target": {
+                "type": "project",
+                "projectId": codex_project,
+                "environment": {"type": "local"},
+            },
+        }
+        if model:
+            arguments["model"] = model
+        if thinking:
+            arguments["thinking"] = thinking
+        assignment = {
+            "assignment_token": assignment_token,
+            "role": role,
+            "workspace": workspace,
+            "source": fc.get("source"),
+            "scope": fc.get("scope") or fc.get("outcome"),
+            "capacity_class": "ordinary",
+            "state": "reserved",
+            "reserved_at": _utc_now(),
+        }
+        action = {
+            "action_id": action_id,
+            "record_id": record.id,
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": arguments,
+            "expected_result": {"threadId": "native task identity"},
+            "reporting": {
+                "command": "report_action_result",
+                "register": "register_worker",
+            },
+            "assignment_token": assignment_token,
+            "state": "pending",
+            "attempts": [],
+            "created_at": _utc_now(),
+            "purpose": "routine_dispatch",
+        }
+        actions = dict(protocol.get("actions") or {})
+        actions[action_id] = action
+        protocol["actions"] = actions
+        protocol["assignment"] = assignment
+        ledger.update_fc(
+            record.id,
+            _with_protocol(fc, protocol),
+            assignee="STEWARD",
+        )
+        self._write_event(
+            request,
+            "work_selected",
+            bead_id=record.id,
+            action_id=action_id,
+            assignment_id=assignment_token,
+            outcome="reserved",
+            eligibility={"phase": fc.get("phase"), "priority": fc.get("priority", 2)},
+        )
+        return self._record(ledger, record.id), action
+
     @coordinated
     def wait_for_instructions(self, request: ParsedRequest) -> CommandResult:
         ledger = self._ledger(request)
@@ -663,6 +857,10 @@ class DesktopProtocolService:
         candidates = self._eligible_actions(
             ledger, paused=protocol.get("run_control", "paused") == "paused"
         )
+        if not candidates and protocol.get("run_control", "paused") != "paused":
+            compiled = self._compile_ready_assignment(ledger, request)
+            if compiled is not None:
+                candidates = [compiled]
         selected = recovered or (candidates[0] if candidates else None)
         if selected is None:
             deadline = datetime.fromisoformat(

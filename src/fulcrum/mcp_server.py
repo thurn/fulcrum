@@ -33,6 +33,12 @@ TOOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
     "submit_candidate": (("candidate", "submit"), {"bead": "--bead"}),
     "wait_for_ci_results": (("ci", "wait"), {"bead": "--bead"}),
     "finish": (("finish",), {"bead": "--bead"}),
+    "marshal_check": (("marshal", "check"), {}),
+    "marshal_decide": (("marshal", "apply"), {}),
+    "report_incident": (("incident", "report"), {"bead": "--bead"}),
+    "record_repair": (("repair", "record"), {"bead": "--bead"}),
+    "recovery_prepare": (("recovery", "prepare"), {"bead": "--bead"}),
+    "decision_respond": (("decision", "respond"), {"bead": "--bead"}),
     "pause": (("pause",), {}),
     "resume": (("resume",), {}),
     "status": (("status",), {}),
@@ -63,6 +69,10 @@ def _schema(name: str) -> dict[str, Any]:
         "wait_for_ci_results",
         "finish",
         "trace",
+        "report_incident",
+        "record_repair",
+        "recovery_prepare",
+        "decision_respond",
     }:
         properties["bead"] = {"type": "string"}
         required.append("bead")
