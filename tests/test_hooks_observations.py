@@ -27,16 +27,22 @@ class ObservationTests(unittest.TestCase):
             path.write_bytes(
                 b'{"type":"turn_context","event_id":"e1","turn_id":"t1","model":"gpt-5.6-luna"}\n'
                 b'{"type":"token_usage_record","response_id":"r1","usage":{"input_tokens":12,"cache_write_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}\n'
+                b'{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}\n'
+                b'{"type":"event_msg","payload":{"type":"turn_future","turn_id":"t2"}}\n'
                 b'{"type":"turn_started"'
             )
             page = read_transcript(path)
         self.assertEqual(page.lifecycle[0]["event_id"], "e1")
         self.assertEqual(page.lifecycle[0]["model"], "gpt-5.6-luna")
+        self.assertEqual(page.lifecycle[1]["type"], "turn_aborted")
+        self.assertEqual(page.lifecycle[1]["reason"], "interrupted")
         self.assertEqual(page.usage[0]["response_id"], "r1")
         self.assertEqual(page.usage[0]["input_tokens"], 12)
         self.assertEqual(page.usage[0]["cache_write_tokens"], 3)
         self.assertEqual(page.usage[0]["reasoning_tokens"], 2)
-        self.assertEqual(page.gaps[0]["kind"], "incomplete_trailing_line")
+        self.assertEqual(page.gaps[0]["kind"], "unrecognized_lifecycle_event")
+        self.assertEqual(page.gaps[0]["event_type"], "turn_future")
+        self.assertEqual(page.gaps[1]["kind"], "incomplete_trailing_line")
 
 
 class HookTests(unittest.TestCase):
@@ -86,6 +92,9 @@ class HookTests(unittest.TestCase):
             )
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertIn("marshal-1", protocol["transcripts"])
+        self.assertEqual(
+            protocol["standing"]["marshal"]["turn_id"], "turn-registration"
+        )
 
     def test_stop_callback_keeps_standing_identity_registered(self):
         ledger = MemoryLedger()
@@ -282,8 +291,12 @@ class HookTests(unittest.TestCase):
                     json.dumps(
                         {
                             "type": "token_usage_record",
-                            "response_id": "response-delayed",
-                            "usage": {"input_tokens": 3, "output_tokens": 1},
+                            "payload": {
+                                "thread_id": "steward-1",
+                                "turn_id": "turn-1",
+                                "response_id": "response-delayed",
+                                "usage": {"input_tokens": 3, "output_tokens": 1},
+                            },
                         }
                     )
                     + "\n"
@@ -296,6 +309,100 @@ class HookTests(unittest.TestCase):
         self.assertEqual(watched_again, [str(path)])
         self.assertEqual(len(ledger.writes), writes_after_change)
         self.assertIn("response-delayed", protocol["observations"]["usage"])
+        analytics = ledger.list_records(kind="analytics", limit=0)[0]
+        self.assertEqual((analytics.fc or {})["coverage"], "in_progress")
+        self.assertNotIn(
+            "terminal_lifecycle_missing", (analytics.fc or {})["missing_reasons"]
+        )
+
+    def test_turn_aborted_cancels_retained_wait_without_interrupt_hook(self):
+        ledger = MemoryLedger()
+        desktop = DesktopProtocolService(ledger)
+        action = seed_action(
+            ledger,
+            {
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register steward"},
+                "purpose": "bootstrap_steward",
+            },
+        )
+        observe_action_prompt(
+            ledger, action, task_id="steward-1", session_id="session-1"
+        )
+        desktop.register_standing(
+            replace(
+                request(("register", "standing")),
+                input={
+                    "role": "steward",
+                    "task_id": "steward-1",
+                    "session_id": "session-1",
+                    "action_id": action["action_id"],
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        wait_request = replace(
+            request(("instruction", "wait")),
+            actor=ActorContext.parse("task:steward-1"),
+            thread_id="steward-1",
+            input={"loop_id": "loop-1", "turn_id": "generated-wait-turn"},
+            request_id=str(uuid.uuid4()),
+        )
+        waiting = desktop.wait_for_instructions(wait_request)
+        self.assertEqual(waiting.state.value, "running")
+        wait_id = waiting.result["transport_wait"]["wait_id"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "type": "turn_context",
+                        "turn_id": "native-turn-1",
+                        "model": "gpt-5.6-luna",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            hook = HookService(ledger)
+            hook.handle(
+                replace(
+                    request(("hook", "handle")),
+                    actor=ActorContext.parse("task:steward-1"),
+                    thread_id="steward-1",
+                    input={
+                        "hook_event_name": "SessionStart",
+                        "session_id": "session-1",
+                        "turn_id": "native-turn-1",
+                        "transcript_path": str(path),
+                    },
+                    request_id=str(uuid.uuid4()),
+                )
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "event_msg",
+                            "timestamp": "2099-01-01T00:00:00Z",
+                            "payload": {
+                                "type": "turn_aborted",
+                                "turn_id": "native-turn-1",
+                                "reason": "interrupted",
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            hook.collect_registered(request())
+        retained = (ledger.show("fc-system").fc or {})["desktop"]["instruction_waits"][
+            wait_id
+        ]
+        self.assertEqual(retained["state"], "cancelled")
+        self.assertEqual(retained["terminal_event"]["type"], "turn_aborted")
+        replayed = desktop.wait_for_instructions(wait_request)
+        self.assertEqual(replayed.result["reason"], "native_turn_interrupted")
 
     def test_standing_tasks_keep_independent_transcript_cursors(self):
         ledger = MemoryLedger()

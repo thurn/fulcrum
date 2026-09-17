@@ -109,14 +109,14 @@ def service_status_result(request: ParsedRequest) -> dict[str, Any]:
         gaps.append("the broker socket did not answer its health probe")
     health_path = request.instance.instance_root / "diagnostic-health.json"
     try:
-        diagnostic_health = json.loads(health_path.read_text(encoding="utf-8"))
+        event_log_health = json.loads(health_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        diagnostic_health = {"state": "healthy", "dropped_events": 0}
+        event_log_health = {"state": "healthy", "dropped_events": 0}
     return {
         "instance": str(request.instance.instance_root),
         "services": rows,
         "broker": broker,
-        "diagnostic_health": diagnostic_health,
+        "event_log_health": event_log_health,
         "responsive": bool(broker["available"]),
         "gaps": gaps,
     }

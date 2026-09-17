@@ -260,7 +260,19 @@ def reconcile_skills(
         "hook": {
             "config": str(hook_config),
             "command": hook_command,
-            "installed": hook_command is not None,
+            "configured": hook_command is not None,
+            "required_events": [
+                "SessionStart",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+            ],
+            "optional_events": ["Interrupt"],
+            "operational_state": (
+                "confirmation_required" if hook_command is not None else "unavailable"
+            ),
+            "operator_confirmation_required": hook_command is not None,
         },
         "implicit_invocation": False,
     }

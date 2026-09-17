@@ -78,11 +78,14 @@ tools become available in new chats.
 
 - Open **Settings**.
 - Select **Hooks**.
-- Click **Trust** for every Fulcrum hook.
-- Click **Enable** for every Fulcrum hook.
+- Click **Trust** for the five required Fulcrum hooks: SessionStart,
+  UserPromptSubmit, PreToolUse, PostToolUse, and Stop.
+- Click **Enable** for those five required hooks.
+- Trust and enable Interrupt when offered, but treat it as optional best-effort
+  evidence because some Desktop builds do not emit it.
 
 Do not report hook setup as complete until the user has approved and enabled all
-six Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
+five required Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
 can observe the new postconditions.
 
 For every returned setup action in the continuation task, call `action claim`
@@ -106,8 +109,9 @@ Preserve the fixed titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and
 native action.
 
 Setup is complete only when all three identities, the source-following MCP server,
-six trusted hooks, broker socket, supported models/tools, transcript and
-accounting checks, exact Marshal heartbeat, and focused acceptance are recorded.
+five trusted required hooks, broker socket, supported models/tools, transcript and
+accounting checks, an active Marshal heartbeat targeted at the retained Marshal,
+and focused acceptance are recorded.
 Record acceptance only from direct evidence:
 
 - `workspace_access`: each retained standing task has its reported workspace and
@@ -119,17 +123,16 @@ Record acceptance only from direct evidence:
 - `usage_accounting`: exercised managed turns have attributed token/cost rows or
   an explicit supported zero-cost observation, with no missing reason;
 - `task_targeting`: exact titles and retained task IDs match creation, diagnostic,
-  and schedule targets;
-- `schedule_overlap`: after activation, one real heartbeat overlaps a controlled
-  Marshal prompt without duplicate effects, lost targeting, or silent failure.
+  and schedule targets.
 
-First pass true values for the five checks other than `schedule_overlap` after
-they actually succeed. Bootstrap then returns the distinct action that activates
-the already-paused heartbeat while admission remains paused. After the real
-overlap check succeeds, rerun bootstrap with all six true values; only then may
-admission open. Never activate the schedule directly, infer acceptance from unit
-tests, or mark an unexercised check true. Keep admission paused and report exact
-gaps otherwise.
+For each check, pass `{"passed": true, "evidence": ["specific retained or native evidence"]}`
+only after it actually succeeds. Bare booleans and empty evidence are rejected.
+Bootstrap then returns the action that creates the heartbeat already active while
+admission remains paused. Claim and invoke that exact action once, report its
+actual result, and rerun bootstrap. Retained active configuration is sufficient
+to finish setup; delivery and overlap health are monitored asynchronously. Never
+activate the schedule directly, infer acceptance from unit tests, or mark an
+unexercised check passed. Keep admission paused and report exact gaps otherwise.
 
 Explain that Desktop Stop does not durably pause Fulcrum. The initial MCP
 configuration change requires the one fresh continuation task described above;

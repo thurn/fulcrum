@@ -80,13 +80,14 @@ heartbeat or hourly recovery task.
 
 Admission opens only after the broker answers, required native tools and model
 efforts are observed, all three tasks register, the schedule result is retained,
-and focused acceptance is explicitly recorded. Acceptance is an evidence map with
-`workspace_access`, `hook_identity`, `transcript_lifecycle`, `usage_accounting`,
-`task_targeting`, and `schedule_overlap`; each value must be true. Bootstrap
-creates the heartbeat paused. Evidence for the other five checks authorizes a
-separate activation action while admission stays paused; the real
-active-heartbeat overlap check then supplies `schedule_overlap`. Admission opens
-only after all six checks succeed. A ready socket alone is not setup.
+and focused acceptance is explicitly recorded. Acceptance contains exactly five
+checks: `workspace_access`, `hook_identity`, `transcript_lifecycle`,
+`usage_accounting`, and `task_targeting`. Each check is an object with `passed` and
+a nonempty `evidence` array; bare booleans are rejected. Once those five checks
+pass, bootstrap creates the Marshal heartbeat active while admission stays paused.
+Admission opens after the exact active schedule result is retained. Subsequent
+delivery health is monitored asynchronously. A ready socket or caller assertion
+alone is not setup.
 An existing task does not acquire MCP tools added after it started. When the
 initial MCP configuration changes, the bootstrap skill creates exactly one new
 task in the saved `~/fulcrum` project, using the retained checkout directly rather

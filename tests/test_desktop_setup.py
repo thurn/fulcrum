@@ -36,6 +36,10 @@ def bootstrap_request(root: Path, **payload):
     )
 
 
+def acceptance(names):
+    return {name: {"passed": True, "evidence": [f"observed {name}"]} for name in names}
+
+
 def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -58,6 +62,11 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert set(actions) == {"steward", "marshal", "vizier"}
         assert (
             "without inventing loop or turn IDs"
+            in actions["steward"]["arguments"]["prompt"]
+        )
+        assert "yield_time_ms" in actions["steward"]["arguments"]["prompt"]
+        assert (
+            "never poll it with functions.wait"
             in actions["steward"]["arguments"]["prompt"]
         )
         assert (
@@ -126,7 +135,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             for row in second.result["pending_actions"]
         )
         (root / "instance" / "broker.sock").touch()
-        pre_activation = {name: True for name in PRE_ACTIVATION_ACCEPTANCE}
+        pre_activation = acceptance(PRE_ACTIVATION_ACCEPTANCE)
         activating = service.bootstrap(
             bootstrap_request(
                 root,
@@ -136,6 +145,8 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert activating.result["admission"] == "paused"
         assert activating.result["prerequisites"]["acceptance"] is None
+        assert activating.result["hooks"]["operational_state"] == "evidence_confirmed"
+        assert activating.result["hooks"]["operator_confirmation_required"] is False
         schedule = next(
             row
             for row in activating.result["pending_actions"]
@@ -178,7 +189,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         ready = service.bootstrap(
             bootstrap_request(
                 root,
-                acceptance={name: True for name in REQUIRED_ACCEPTANCE},
+                acceptance=acceptance(REQUIRED_ACCEPTANCE),
                 **supplied,
             )
         )
@@ -207,7 +218,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         repairing = service.bootstrap(
             bootstrap_request(
                 root,
-                acceptance={name: True for name in REQUIRED_ACCEPTANCE},
+                acceptance=acceptance(REQUIRED_ACCEPTANCE),
                 **supplied,
             )
         )
@@ -240,6 +251,21 @@ def test_bootstrap_preserves_unrelated_codex_configuration():
             f"--config {(root / 'brain' / 'fulcrum.yaml').resolve(strict=False)}"
             in hooks
         )
+
+
+def test_bootstrap_rejects_boolean_acceptance_without_evidence():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        service = DesktopSetupService(MemoryLedger())
+        with unittest.TestCase().assertRaisesRegex(
+            FulcrumError, "must include passed and evidence"
+        ):
+            service.bootstrap(
+                bootstrap_request(
+                    root,
+                    acceptance={"workspace_access": True},
+                )
+            )
 
 
 def _verify_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task():

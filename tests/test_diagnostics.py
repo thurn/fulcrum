@@ -3,8 +3,40 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from fulcrum.diagnostics import _doctor_result, _loop_health
+from fulcrum.diagnostics import DiagnosticService, _doctor_result, _loop_health
 from tests.support import MemoryLedger, record, request
+
+
+def test_status_surfaces_accounting_gaps_in_overall_health():
+    ledger = MemoryLedger(
+        record(
+            "fc-usage",
+            kind="analytics",
+            subtype="turn",
+            thread_id="task-1",
+            turn_id="turn-1",
+            missing_reasons=["terminal_lifecycle_missing"],
+        )
+    )
+    with (
+        patch("fulcrum.diagnostics._ledger", return_value=ledger),
+        patch("fulcrum.diagnostics._capacity", return_value={}),
+    ):
+        result = DiagnosticService().status(
+            request(("status",), arguments={}, project=None)
+        )
+    assert result.result["health"]["state"] == "degraded"
+    assert result.result["event_log_health"]["state"] == "healthy"
+    assert result.result["gaps"] == [
+        {
+            "component": "desktop_protocol",
+            "projection": "accounting",
+            "record_id": "fc-usage",
+            "task_id": "task-1",
+            "turn_id": "turn-1",
+            "missing_reasons": ["terminal_lifecycle_missing"],
+        }
+    ]
 
 
 def test_intentionally_paused_bootstrap_heartbeat_is_reported_paused():

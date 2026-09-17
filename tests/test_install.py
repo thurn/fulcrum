@@ -86,7 +86,7 @@ class InstallTests(unittest.TestCase):
             codex.mkdir()
             (codex / "skills").symlink_to(shared, target_is_directory=True)
 
-            reconcile_skills(
+            result = reconcile_skills(
                 root / "instance",
                 production=False,
                 config_path=root / "brain" / "fulcrum.yaml",
@@ -96,6 +96,20 @@ class InstallTests(unittest.TestCase):
 
             self.assertTrue((codex / "hooks.json").is_file())
             self.assertFalse((shared.parent / "hooks.json").exists())
+            self.assertEqual(
+                result["hook"]["required_events"],
+                [
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PostToolUse",
+                    "Stop",
+                ],
+            )
+            self.assertEqual(result["hook"]["optional_events"], ["Interrupt"])
+            self.assertEqual(
+                result["hook"]["operational_state"], "confirmation_required"
+            )
 
 
 if __name__ == "__main__":

@@ -175,6 +175,14 @@ class PendingBroker:
                     )
                 except TimeoutError:
                     pass
+        except asyncio.CancelledError:
+            _log(
+                "broker_wait_cancelled",
+                wait_id=evaluation.wait_id,
+                kind=evaluation.kind,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
         except BaseException:
             self.failures += 1
             _log(
@@ -365,19 +373,40 @@ class BrokerServer:
                     isinstance(item, str) for item in request_argv
                 ):
                     raise ValueError("wait argv must be a string array")
-                response = await self.broker.wait(
-                    Evaluation(
-                        argv=tuple(request_argv),
-                        stdin=str(value.get("stdin") or "{}"),
-                        interval_seconds=max(
-                            0.05, float(value.get("interval_seconds") or 15)
-                        ),
-                        deadline_monotonic=time.monotonic()
-                        + max(0.05, float(value.get("remaining_seconds") or 3600)),
-                        wait_id=str(value.get("wait_id") or uuid.uuid4()),
-                        kind=str(value.get("kind") or "instruction"),
-                    )
+                evaluation = Evaluation(
+                    argv=tuple(request_argv),
+                    stdin=str(value.get("stdin") or "{}"),
+                    interval_seconds=max(
+                        0.05, float(value.get("interval_seconds") or 15)
+                    ),
+                    deadline_monotonic=time.monotonic()
+                    + max(0.05, float(value.get("remaining_seconds") or 3600)),
+                    wait_id=str(value.get("wait_id") or uuid.uuid4()),
+                    kind=str(value.get("kind") or "instruction"),
                 )
+                wait_task = asyncio.create_task(self.broker.wait(evaluation))
+                disconnected = asyncio.create_task(reader.read(1))
+                done, pending = await asyncio.wait(
+                    {wait_task, disconnected},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if disconnected in done and disconnected.result() == b"":
+                    wait_task.cancel()
+                    await asyncio.gather(wait_task, return_exceptions=True)
+                    _log(
+                        "broker_wait_client_disconnected",
+                        wait_id=evaluation.wait_id,
+                        kind=evaluation.kind,
+                    )
+                    return
+                if disconnected in done:
+                    wait_task.cancel()
+                    await asyncio.gather(wait_task, return_exceptions=True)
+                    raise ValueError("unexpected data after broker wait request")
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                response = await wait_task
             else:
                 raise ValueError("unknown broker request type")
         except BaseException as error:
@@ -409,11 +438,15 @@ async def broker_request(
     socket_path: Path, value: Mapping[str, Any]
 ) -> Mapping[str, Any]:
     reader, writer = await asyncio.open_unix_connection(str(socket_path))
-    writer.write(json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n")
-    await writer.drain()
-    raw = await reader.readline()
-    writer.close()
-    await writer.wait_closed()
+    try:
+        writer.write(json.dumps(value, separators=(",", ":")).encode("utf-8") + b"\n")
+        await writer.drain()
+        raw = await reader.readline()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+    if not raw:
+        raise RuntimeError("broker closed the connection without a response")
     result = json.loads(raw)
     if not isinstance(result, Mapping):
         raise RuntimeError("broker returned a non-object")

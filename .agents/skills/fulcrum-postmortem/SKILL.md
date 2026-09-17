@@ -33,12 +33,15 @@ When a local Fulcrum installation is available, prefer the bundled read-only
 collector:
 
 ```sh
-python .agents/skills/fulcrum-postmortem/scripts/collect_evidence.py \
+.venv/bin/python .agents/skills/fulcrum-postmortem/scripts/collect_evidence.py \
   --bead BEAD_ID \
   --operation OPERATION_ID \
   --repo . \
   --output /tmp/fulcrum-postmortem-evidence.json
 ```
+
+The repository virtual-environment interpreter is the supported invocation; do
+not assume an unqualified `python` command exists on the host.
 
 Add `--operation`, `--task`, and `--git-ref` more than once when needed. Use
 `--since` to bound diagnostic and Git history. The bundle is local investigative

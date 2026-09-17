@@ -78,11 +78,14 @@ tools become available in new chats.
 
 - Open **Settings**.
 - Select **Hooks**.
-- Click **Trust** for every Fulcrum hook.
-- Click **Enable** for every Fulcrum hook.
+- Click **Trust** for the five required Fulcrum hooks: SessionStart,
+  UserPromptSubmit, PreToolUse, PostToolUse, and Stop.
+- Click **Enable** for those five required hooks.
+- Trust and enable Interrupt when the UI offers it, but treat it as optional
+  best-effort evidence because some Desktop builds do not emit that callback.
 
 Do not report hook setup as complete until the user has approved and enabled all
-six Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
+five required Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
 can observe the new postconditions.
 
 For every returned setup action in the continuation task, call `action claim`
@@ -106,7 +109,7 @@ Preserve the fixed titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and
 native action.
 
 Setup is complete only when all three identities, the source-following MCP server,
-six trusted hooks, broker socket, supported models/tools, transcript and
+five trusted required hooks, broker socket, supported models/tools, transcript and
 accounting checks, an active Marshal heartbeat targeted at the retained Marshal,
 and focused acceptance are recorded.
 Record acceptance only from direct evidence:
@@ -122,7 +125,8 @@ Record acceptance only from direct evidence:
 - `task_targeting`: exact titles and retained task IDs match creation, diagnostic,
   and schedule targets.
 
-Pass true values for those five checks only after they actually succeed.
+For each check, pass `{"passed": true, "evidence": ["specific retained or native evidence"]}`
+only after it actually succeeds. Bare booleans and empty evidence are rejected.
 Bootstrap then returns one action that creates the heartbeat already active. Claim
 and invoke that exact action once, report its actual result, and rerun bootstrap
 with a new request UUID. A returned automation identity and `ACTIVE` status prove

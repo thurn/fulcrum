@@ -59,6 +59,48 @@ MARSHAL_HEARTBEAT_PROMPT = (
     "Do not inspect implementation source or invent identifiers. End quietly when "
     "no action is required."
 )
+
+
+def _acceptance_evidence(value: Any) -> dict[str, dict[str, Any]]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise FulcrumError.invalid(
+            "ACCEPTANCE_INVALID",
+            "bootstrap acceptance must be an evidence map",
+        )
+    unknown = sorted(set(str(key) for key in value).difference(REQUIRED_ACCEPTANCE))
+    if unknown:
+        raise FulcrumError.invalid(
+            "ACCEPTANCE_INVALID",
+            "bootstrap acceptance contains unknown checks",
+            details={"unknown": unknown},
+        )
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, supplied in value.items():
+        if not isinstance(supplied, Mapping):
+            raise FulcrumError.invalid(
+                "ACCEPTANCE_EVIDENCE_REQUIRED",
+                f"acceptance.{name} must include passed and evidence",
+            )
+        evidence = supplied.get("evidence")
+        if (
+            not isinstance(supplied.get("passed"), bool)
+            or not isinstance(evidence, list)
+            or not evidence
+            or not all(isinstance(item, str) and item.strip() for item in evidence)
+        ):
+            raise FulcrumError.invalid(
+                "ACCEPTANCE_EVIDENCE_REQUIRED",
+                f"acceptance.{name} requires passed=true|false and nonempty evidence strings",
+            )
+        normalized[str(name)] = {
+            "passed": supplied["passed"],
+            "evidence": [str(item).strip() for item in evidence],
+        }
+    return normalized
+
+
 STANDING = {
     "steward": {
         "title": "🧰 STEWARD 🧰",
@@ -69,7 +111,10 @@ STANDING = {
             "CODEX_SESSION_ID as session_id. Omit request_id for new Fulcrum calls; "
             "the MCP server generates valid UUIDs. Then recover any outstanding "
             "instruction/result. Call wait_for_instructions without inventing loop or "
-            "turn IDs; the MCP server generates them. Execute only its exact authorized native action: "
+            "turn IDs; the MCP server generates them. Run that blocking MCP call in one "
+            'functions.exec cell beginning `// @exec: {"yield_time_ms": 3900000, '
+            '"max_output_tokens": 10000}`, await the MCP result in that cell, and never '
+            "poll it with functions.wait. Execute only its exact authorized native action: "
             "claim it, invoke it once, and report the actual result. Then wait again. Do not "
             "choose priorities, invent prompts, retry uncertain effects, or poll tasks. On an "
             "explicit stop, end. On an unrecoverable connection/protocol failure, attempt the "
@@ -363,11 +408,12 @@ class DesktopSetupService(DesktopProtocolService):
                 }
             )
         setup = dict(protocol.get("setup") or {})
+        hook_status = copy_mapping(skills.get("hook"))
         setup.update(
             {
                 "state": "preparing",
                 "mcp": mcp,
-                "hooks": copy_mapping(skills.get("hook")),
+                "hooks": hook_status,
                 "missing_native_tools": missing_tools,
                 "missing_models": missing_models,
                 "broker_socket": str(instance / "broker.sock"),
@@ -575,19 +621,26 @@ class DesktopSetupService(DesktopProtocolService):
             }
             actions[action_id] = diagnostic_action
             protocol["actions"] = actions
-        acceptance = request.input.get("acceptance")
-        acceptance_evidence = (
-            {str(key): bool(value) for key, value in acceptance.items()}
-            if isinstance(acceptance, Mapping)
-            else {}
-        )
+        acceptance_evidence = _acceptance_evidence(request.input.get("acceptance"))
+        hook_acceptance = acceptance_evidence.get("hook_identity", {})
+        if hook_acceptance.get("passed"):
+            hook_status = {
+                **hook_status,
+                "operational_state": "evidence_confirmed",
+                "operator_confirmation_required": False,
+                "evidence": list(hook_acceptance.get("evidence") or []),
+            }
+            setup["hooks"] = hook_status
+        setup["acceptance"] = acceptance_evidence
         missing_acceptance = sorted(
-            name for name in REQUIRED_ACCEPTANCE if not acceptance_evidence.get(name)
+            name
+            for name in REQUIRED_ACCEPTANCE
+            if not acceptance_evidence.get(name, {}).get("passed")
         )
         missing_pre_activation = sorted(
             name
             for name in PRE_ACTIVATION_ACCEPTANCE
-            if not acceptance_evidence.get(name)
+            if not acceptance_evidence.get(name, {}).get("passed")
         )
         schedule = protocol.get("marshal_schedule")
         if (
@@ -764,7 +817,8 @@ class DesktopSetupService(DesktopProtocolService):
                 "acceptance": missing_acceptance or None,
             },
             "mcp": mcp,
-            "hooks": skills.get("hook"),
+            "hooks": hook_status,
+            "acceptance": acceptance_evidence,
         }
         _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))

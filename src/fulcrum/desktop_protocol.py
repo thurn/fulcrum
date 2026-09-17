@@ -1103,7 +1103,7 @@ class DesktopProtocolService:
             "task_id": task_id,
             "host_id": host_id or None,
             "session_id": session_id,
-            "turn_id": request.input.get("turn_id"),
+            "turn_id": request.input.get("turn_id") or observation.get("turn_id"),
             "action_id": action_id,
             "state": "registered",
             "registered_at": _utc_now(),
@@ -2363,6 +2363,22 @@ class DesktopProtocolService:
         watch_paths = HookService(ledger).collect_registered(request)
         request_id = _request_id(request)
         waits = dict(protocol.get("instruction_waits") or {})
+        retained = next(
+            (
+                value
+                for value in waits.values()
+                if isinstance(value, Mapping)
+                and value.get("request_id") == request_id
+                and value.get("accepted_input") == _request_input(request)
+            ),
+            None,
+        )
+        if (
+            isinstance(retained, Mapping)
+            and retained.get("state") != "waiting"
+            and isinstance(retained.get("response"), Mapping)
+        ):
+            return _result(request, retained["response"])
         outstanding = [
             value
             for value in waits.values()

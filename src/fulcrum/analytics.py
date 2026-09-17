@@ -21,6 +21,7 @@ from fulcrum.ledger import (
     random_record_id,
     utc_now,
 )
+from fulcrum.observations import TERMINAL_LIFECYCLE_TYPES
 
 ANALYTICS_NAMESPACE = uuid.UUID("58518da5-edaf-42ba-b4ba-308ab18452c8")
 MAX_RESPONSE_RECORDS = 64
@@ -127,18 +128,19 @@ def record_desktop_usage(
                 for event in lifecycle_events
                 if event.get("task_id") == task_id
                 and event.get("turn_id") == turn_id
-                and event.get("type")
-                in {
-                    "task_complete",
-                    "task_completed",
-                    "turn_complete",
-                    "turn_completed",
-                    "turn_interrupted",
-                    "interrupted",
-                }
+                and event.get("type") in TERMINAL_LIFECYCLE_TYPES
             ),
             None,
         )
+        task_turns = [
+            str(event["turn_id"])
+            for event in lifecycle_events
+            if event.get("task_id") == task_id
+            and event.get("turn_id")
+            and event.get("type") in {"task_started", "turn_started", "turn_context"}
+        ]
+        latest_turn_id = task_turns[-1] if task_turns else turn_id
+        in_progress = terminal is None and turn_id == latest_turn_id
         work_fc = record.fc or {}
         workflow_root = work_fc.get("workflow_root")
         fc = {
@@ -175,7 +177,7 @@ def record_desktop_usage(
                 "complete"
                 if terminal
                 and all(value.get("coverage") == "complete" for value in priced)
-                else "partial"
+                else "in_progress" if in_progress else "partial"
             ),
             "missing_reasons": sorted(
                 {
@@ -183,7 +185,11 @@ def record_desktop_usage(
                     for value in priced
                     for reason in value.get("missing_reasons", [])
                 }
-                | ({"terminal_lifecycle_missing"} if terminal is None else set())
+                | (
+                    {"terminal_lifecycle_missing"}
+                    if terminal is None and not in_progress
+                    else set()
+                )
                 | (
                     {"only_cumulative_usage_observed"}
                     if raw and not normalized_input

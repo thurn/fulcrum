@@ -196,10 +196,8 @@ def main() -> int:
     else:
         fc("fulcrum.status", ["status"])
         fc("fulcrum.service_status", ["service", "status"])
-        fc("fulcrum.task_list", ["task", "list", "--limit", "0"])
         if args.bead:
             fc("fulcrum.work_show", ["work", "show", args.bead])
-            fc("fulcrum.context", ["context", "--bead", args.bead])
             fc(
                 "fulcrum.trace",
                 ["trace", "--bead", args.bead, "--limit", "0"],
@@ -223,18 +221,9 @@ def main() -> int:
                 ["operation", "show", operation],
             )
         for task in dict.fromkeys(args.task):
-            fc(f"fulcrum.task_show:{task}", ["task", "show", task])
             fc(
-                f"fulcrum.task_output:{task}",
-                [
-                    "task",
-                    "output",
-                    task,
-                    "--limit",
-                    "0",
-                    "--max-bytes",
-                    str(min(args.log_max_bytes, 4 * 1024 * 1024)),
-                ],
+                f"fulcrum.trace_task:{task}",
+                ["trace", "--task", task, "--limit", "0"],
             )
 
     git = shutil.which("git") or "git"

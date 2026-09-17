@@ -264,9 +264,15 @@ def tool_descriptions() -> list[dict[str, Any]]:
         ),
         "wait_for_instructions": (
             "Steward only: wait for one exact recorded native action. Omit loop_id, "
-            "turn_id, and request_id for a new wait; Fulcrum generates stable UUIDs."
+            "turn_id, and request_id for a new wait; Fulcrum generates stable UUIDs. "
+            "When called through functions.exec, use one 3900000ms-yield cell and do "
+            "not poll it with functions.wait."
         ),
-        "wait_for_ci_results": "Warden only: wait for terminal evidence for the exact candidate.",
+        "wait_for_ci_results": (
+            "Warden only: wait for terminal evidence for the exact candidate. When "
+            "called through functions.exec, use one 3900000ms-yield cell and do not "
+            "poll it with functions.wait."
+        ),
         "claim_action": (
             "Claim one native invocation before executing it. Omit attempt_id and "
             "request_id for a new claim; Fulcrum returns the generated attempt_id."

@@ -14,6 +14,43 @@ from fulcrum.mcp_server import FreshCli, McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_disconnect_cancels_broker_wait(self):
+        entered = asyncio.Event()
+
+        async def runner(argv, stdin):
+            entered.set()
+            await asyncio.Future()
+
+        broker = PendingBroker(runner)
+        server = BrokerServer(Path("/tmp/unused.sock"), broker)
+        reader = asyncio.StreamReader()
+        request = {
+            "type": "wait",
+            "argv": ["fulcrum"],
+            "stdin": "{}",
+            "wait_id": "wait-disconnect",
+            "kind": "instruction",
+        }
+        reader.feed_data(json.dumps(request).encode("utf-8") + b"\n")
+        reader.feed_eof()
+
+        class Writer:
+            def write(self, value):
+                raise AssertionError("a disconnected wait must not receive a response")
+
+            async def drain(self):
+                return None
+
+            def close(self):
+                return None
+
+            async def wait_closed(self):
+                return None
+
+        await server._client(reader, Writer())  # type: ignore[arg-type]
+        self.assertFalse(broker.health()["pending"])
+        self.assertEqual(broker.failures, 0)
+
     async def test_reconstruction_loop_does_not_spin_after_snapshot(self):
         calls = 0
 
@@ -221,6 +258,10 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("native_result", result["required"])
         wait = tools["wait_for_instructions"]["inputSchema"]
         self.assertIn("loop_id", wait["properties"])
+        self.assertIn(
+            "do not poll it with functions.wait",
+            tools["wait_for_instructions"]["description"],
+        )
         registration = tools["register_standing"]["inputSchema"]
         self.assertIn("role", registration["required"])
         self.assertIn("action_id", registration["required"])

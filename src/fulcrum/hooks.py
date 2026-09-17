@@ -24,7 +24,7 @@ from fulcrum.desktop_protocol import (
 )
 from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.ledger import Ledger, LedgerRecord
-from fulcrum.observations import read_transcript
+from fulcrum.observations import TERMINAL_LIFECYCLE_TYPES, read_transcript
 
 HOOK_EVENTS = {
     "SessionStart",
@@ -119,7 +119,7 @@ class HookService:
         if bound is not None:
             bound = _binding_for_task(ledger, task_id) or bound
             self._collect_transcript(ledger, request, bound, task_id)
-        self._log(request, event_name, task_id, response)
+        self._log(request, event_name, task_id, bound is not None, response)
         return CommandResult.query(response)
 
     def _record_manual_task_activity(
@@ -307,6 +307,20 @@ class HookService:
                 }
                 protocol["standing"] = standing
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            if event_name == "Interrupt":
+                self._cancel_waits_for_terminal_events(
+                    ledger,
+                    _task_id_for_binding(bound),
+                    (
+                        {
+                            "type": "turn_interrupted",
+                            "task_id": _task_id_for_binding(bound),
+                            "turn_id": event.get("turn_id"),
+                            "reason": event.get("reason"),
+                            "time": _utc_now(),
+                        },
+                    ),
+                )
 
     def _collect_transcript(
         self,
@@ -399,7 +413,15 @@ class HookService:
         retained_gaps = (
             list(current.get("gaps") or []) if isinstance(current, Mapping) else []
         )
-        page_gaps = [dict(item) for item in page.gaps][-20:]
+        page_gaps = [
+            *(
+                dict(item)
+                for item in retained_gaps
+                if isinstance(item, Mapping)
+                and item.get("kind") != "incomplete_trailing_line"
+            ),
+            *(dict(item) for item in page.gaps),
+        ][-20:]
         if page.cursor == cursor and page_gaps == retained_gaps:
             return
         observations = dict(protocol.get("observations") or {})
@@ -444,6 +466,7 @@ class HookService:
         }
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        self._cancel_waits_for_terminal_events(ledger, task_id, page.lifecycle)
         task_usage = [
             value
             for value in usage.values()
@@ -463,11 +486,78 @@ class HookService:
 
         settle_native_completion(request, ledger, record.id)
 
+    def _cancel_waits_for_terminal_events(
+        self,
+        ledger: Ledger,
+        task_id: str,
+        lifecycle_events: tuple[Mapping[str, Any], ...],
+    ) -> None:
+        terminal = next(
+            (
+                event
+                for event in reversed(lifecycle_events)
+                if event.get("type") in TERMINAL_LIFECYCLE_TYPES
+            ),
+            None,
+        )
+        if terminal is None:
+            return
+        interrupted = terminal.get("type") in {
+            "turn_interrupted",
+            "turn_aborted",
+            "interrupted",
+        }
+        for candidate in ledger.list_records(limit=0):
+            protocol = _protocol(candidate.fc or {})
+            changed = False
+            for collection_name in ("instruction_waits", "ci_waits"):
+                collection = dict(protocol.get(collection_name) or {})
+                for wait_id, retained in list(collection.items()):
+                    if (
+                        not isinstance(retained, Mapping)
+                        or retained.get("state") != "waiting"
+                        or retained.get("task_id") != task_id
+                    ):
+                        continue
+                    terminal_time = terminal.get("time")
+                    registered_at = retained.get("registered_at")
+                    if (
+                        isinstance(terminal_time, str)
+                        and isinstance(registered_at, str)
+                        and terminal_time < registered_at
+                    ):
+                        continue
+                    response = {
+                        "kind": "stop",
+                        "reason": (
+                            "native_turn_interrupted"
+                            if interrupted
+                            else "native_turn_ended"
+                        ),
+                        "wait_id": wait_id,
+                        "retained_obligation": True,
+                    }
+                    collection[wait_id] = {
+                        **dict(retained),
+                        "state": "cancelled",
+                        "resolved_at": _utc_now(),
+                        "response": response,
+                        "terminal_event": dict(terminal),
+                    }
+                    changed = True
+                if changed:
+                    protocol[collection_name] = collection
+            if changed:
+                ledger.update_fc(
+                    candidate.id, _with_protocol(candidate.fc or {}, protocol)
+                )
+
     def _log(
         self,
         request: ParsedRequest,
         event_name: str,
         task_id: str,
+        bound: bool,
         response: Mapping[str, Any],
     ) -> None:
         if self._ledger_override is not None:
@@ -481,6 +571,8 @@ class HookService:
                     "source_commit": os.environ.get("FULCRUM_COMMIT"),
                     "hook_event": event_name,
                     "task_id": task_id,
+                    "session_id": request.input.get("session_id"),
+                    "bound": bound,
                     "turn_id": request.input.get("turn_id"),
                     "tool_use_id": request.input.get("tool_use_id"),
                     "outcome": (

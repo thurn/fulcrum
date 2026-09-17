@@ -591,7 +591,10 @@ not permission to create another inbox automatically.
 ## Hooks, context, and observation
 
 Require trusted `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
-`Stop`, and `Interrupt` command hooks on the selected installation. They provide
+and `Stop` command hooks on the selected installation. Configure `Interrupt` as
+best-effort evidence, but do not gate setup on it because some Desktop builds do
+not emit it. Transcript `turn_aborted` evidence and transport disconnects are the
+authoritative interruption fallback. The hooks provide
 context and evidence and help catch protocol mistakes. They are not a security
 boundary against another same-user process or a guarantee that a model stops.
 Known broken configuration closes affected new admission; one missed result hook
@@ -620,7 +623,7 @@ ordinary handler edits require neither reinstall nor re-trust.
 | `PreToolUse` | Correlate admission calls and native invocation IDs. On covered paths, reject unclaimed native effects, changed arguments, or calls outside assigned authority. |
 | `PostToolUse` | Normalize and persist claimed native results through the same validator as agent reports. Capture transcript locators and signal fresh reconciliation. |
 | `Stop` | Record an exit attempt and any missing worker outcome. Do not infer completion or force a healthy Steward to exit after an action. |
-| `Interrupt` | Record interruption of the exact managed turn; preserve uncertain effects. Do not restart that turn or reinterpret it as a durable system pause. |
+| `Interrupt` (optional) | When emitted, record interruption of the exact managed turn; preserve uncertain effects. Do not restart that turn or reinterpret it as a durable system pause. |
 
 Only bound instances/tasks receive role context. Unknown tasks are untouched,
 except for prospective identity evidence tied to an exact retained creation
@@ -653,6 +656,14 @@ investigation by Steward. A registered pending instruction call and Warden's CI
 call are intentional blocking operations, not prohibited monitoring loops.
 Application checks reject duplicate claims, unauthorized transitions, and stale
 assignments even if a prompt or hook is missed.
+
+Steward and Warden long MCP waits run inside one long-yield `functions.exec` cell.
+Its yield duration covers the MCP timeout, and the agent must not poll the cell with
+`functions.wait`; every such poll is another model sample with the full cached
+context. If the native turn is stopped, the closed client connection cancels the
+broker evaluation immediately, while transcript terminal evidence reconciles the
+durable wait. This keeps the broker-held connection model without spending model
+turns merely to keep it parked.
 
 Remove the old universal send-report-end allowance and the requirement to prove
 runtime-enforced termination across every tool, shell, nested call, or hook
@@ -1041,8 +1052,9 @@ asking repeatedly. A ready socket alone is not successful setup.
    initial MCP configuration change creates one bounded continuation task in the
    saved Fulcrum project. Its fresh bootstrap call rebinds pending setup actions
    to the new native task. No Desktop process restart is part of setup.
-3. Install/trust the six scoped command hooks and verify actual callback paths
-   for projectless standing tasks and saved-project workers. Check native task
+3. Install and trust the five required scoped command hooks; configure Interrupt
+   as optional best-effort evidence. Verify actual callback paths for projectless
+   standing tasks and saved-project workers. Check native task
    tools, model/effort support, workspace access, transcript observation, and
    accounting. Unsupported project creation requires the user to add that exact
    saved project; do not invent a second project after an uncertain result.
@@ -1056,11 +1068,11 @@ asking repeatedly. A ready socket alone is not successful setup.
    heartbeat on Steward. Persist the automation ID and its intended/observed
    state. Configure notifications for meaningful failures/decisions, not routine
    healthy status on every run.
-6. Complete the five focused checks that do not require a running schedule, then
-   activate the verified schedule while admission remains paused. Observe one
-   real overlap to establish `schedule_overlap`; only the following receipt with
-   all six checks may enable admission. Pending ready work can resolve Steward's
-   instruction call independently of a Marshal decision. Expose task links,
+6. Complete the five evidence-bearing checks, then create the verified schedule
+   active while admission remains paused. Retaining that exact creation result may
+   enable admission; real delivery and overlap health are monitored afterward.
+   Pending ready work can resolve Steward's instruction call independently of a
+   Marshal decision. Expose task links,
    exact schedule, capability gaps, and any required operator action.
 
 Bootstrap authorization covers ordinary Steward task actions, Marshal's direct

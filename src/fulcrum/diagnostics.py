@@ -472,6 +472,22 @@ class DiagnosticService:
                 retained_fc = retained.fc or {}
                 retained_desktop = retained_fc.get("desktop")
                 if isinstance(retained_desktop, Mapping):
+                    for transcript_task, transcript in (
+                        retained_desktop.get("transcripts") or {}
+                    ).items():
+                        if not isinstance(transcript, Mapping):
+                            continue
+                        for gap in transcript.get("gaps") or []:
+                            if isinstance(gap, Mapping):
+                                gaps.append(
+                                    {
+                                        "component": "desktop_protocol",
+                                        "projection": "transcript",
+                                        "record_id": retained.id,
+                                        "task_id": transcript_task,
+                                        **dict(gap),
+                                    }
+                                )
                     for action in (retained_desktop.get("actions") or {}).values():
                         if not isinstance(action, Mapping) or action.get(
                             "state"
@@ -525,14 +541,26 @@ class DiagnosticService:
                             {"record_id": retained.id, **dict(candidate)}
                         )
                 if retained.kind == "analytics":
+                    missing_reasons = retained_fc.get("missing_reasons") or []
                     accounting_coverage.append(
                         {
                             "record_id": retained.id,
                             "thread_id": retained_fc.get("thread_id"),
                             "role": retained_fc.get("role"),
-                            "missing_reasons": retained_fc.get("missing_reasons") or [],
+                            "missing_reasons": missing_reasons,
                         }
                     )
+                    if missing_reasons:
+                        gaps.append(
+                            {
+                                "component": "desktop_protocol",
+                                "projection": "accounting",
+                                "record_id": retained.id,
+                                "task_id": retained_fc.get("thread_id"),
+                                "turn_id": retained_fc.get("turn_id"),
+                                "missing_reasons": list(missing_reasons),
+                            }
+                        )
             desktop = dict(desktop or {})
             pending_actions.sort(
                 key=lambda value: (
@@ -584,6 +612,12 @@ class DiagnosticService:
                     "category": error.category,
                 }
             )
+        event_log_health = _diagnostic_health(request.instance.instance_root)
+        overall_state = (
+            "degraded"
+            if gaps or event_log_health.get("state") != "healthy"
+            else "healthy"
+        )
         return CommandResult.query(
             {
                 "observed_at": observed_at,
@@ -594,7 +628,12 @@ class DiagnosticService:
                 "capacity": capacity,
                 "publication": publication,
                 "desktop": desktop,
-                "diagnostic_health": _diagnostic_health(request.instance.instance_root),
+                "health": {
+                    "state": overall_state,
+                    "gap_count": len(gaps),
+                    "event_log_state": event_log_health.get("state"),
+                },
+                "event_log_health": event_log_health,
                 "gaps": gaps,
             }
         )

@@ -38,8 +38,19 @@ LIFECYCLE_TYPES = {
     "turn_complete",
     "turn_completed",
     "turn_interrupted",
+    "turn_aborted",
     "interrupted",
     "turn_context",
+}
+
+TERMINAL_LIFECYCLE_TYPES = {
+    "task_complete",
+    "task_completed",
+    "turn_complete",
+    "turn_completed",
+    "turn_interrupted",
+    "turn_aborted",
+    "interrupted",
 }
 
 
@@ -91,6 +102,19 @@ def read_transcript(path: Path, cursor: int = 0) -> TranscriptPage:
         event_type = str(event.get("type") or value.get("type") or "")
         if event_type in LIFECYCLE_TYPES:
             lifecycle.append(_lifecycle(event_type, value, event))
+        elif event_type.startswith(("task_", "turn_")):
+            gaps.append(
+                {
+                    "kind": "unrecognized_lifecycle_event",
+                    "event_type": event_type,
+                    "turn_id": _first(
+                        event.get("turn_id"),
+                        event.get("turnId"),
+                        value.get("turn_id"),
+                    ),
+                    "offset": cursor + consumed - len(raw),
+                }
+            )
         if event_type == "token_usage_record" or "token_usage" in event_type:
             usage.append(_usage(value, event))
     return TranscriptPage(
@@ -118,7 +142,12 @@ def _lifecycle(
 ) -> Mapping[str, Any]:
     return {
         "type": event_type,
-        "event_id": _first(event.get("event_id"), event.get("id"), root.get("id")),
+        "event_id": _first(
+            event.get("event_id"),
+            event.get("id"),
+            root.get("id"),
+            root.get("ordinal"),
+        ),
         "task_id": _first(
             event.get("task_id"), event.get("thread_id"), root.get("thread_id")
         ),
@@ -127,6 +156,7 @@ def _lifecycle(
             event.get("turn_id"), event.get("turnId"), root.get("turn_id")
         ),
         "response_id": _first(event.get("response_id"), event.get("responseId")),
+        "reason": event.get("reason"),
         "model": _first(event.get("model"), root.get("model")),
         "time": _first(
             event.get("time"), event.get("timestamp"), root.get("timestamp")
@@ -138,7 +168,12 @@ def _usage(root: Mapping[str, Any], event: Mapping[str, Any]) -> Mapping[str, An
     counters = event.get("usage")
     values = counters if isinstance(counters, Mapping) else event
     return {
-        "event_id": _first(event.get("event_id"), event.get("id"), root.get("id")),
+        "event_id": _first(
+            event.get("event_id"),
+            event.get("id"),
+            root.get("id"),
+            root.get("ordinal"),
+        ),
         "task_id": _first(
             event.get("task_id"), event.get("thread_id"), root.get("thread_id")
         ),
@@ -148,6 +183,9 @@ def _usage(root: Mapping[str, Any], event: Mapping[str, Any]) -> Mapping[str, An
         "response_id": _first(event.get("response_id"), event.get("responseId")),
         "model": _first(event.get("model"), root.get("model")),
         "service_tier": _first(event.get("service_tier"), root.get("service_tier")),
+        "time": _first(
+            event.get("time"), event.get("timestamp"), root.get("timestamp")
+        ),
         "input_tokens": _counter(values, "input_tokens", "input"),
         "cached_input_tokens": _counter(values, "cached_input_tokens", "cached_input"),
         "cache_write_tokens": _counter(

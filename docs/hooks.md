@@ -1,8 +1,11 @@
 # Codex hooks
 
-Bootstrap installs exactly six Fulcrum-owned command hooks in the Codex profile:
-`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and
-`Interrupt`. Unrelated hook configuration is preserved. Each command reads one JSON
+Bootstrap configures five required Fulcrum command hooks in the Codex profile:
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`. It also
+configures `Interrupt` as best-effort evidence when the host emits it. A missing
+Interrupt callback does not block setup because transcript `turn_aborted` evidence
+and client-disconnect cancellation provide the authoritative fallback. Unrelated
+hook configuration is preserved. Each command reads one JSON
 event from stdin, emits only event-specific hook JSON on stdout, and writes
 diagnostics to stderr. Interrupt has a three-second timeout; other hooks have a
 ten-second timeout and compact added context is capped at 2,000 characters.
@@ -19,10 +22,20 @@ authority. Hooks ignore unrelated tasks and other instances. Session and prompt
 hooks restore current role, assignment, workspace, pause, and outstanding action
 context without curated memory.
 
+The returned hook status reports configuration separately from operational
+confirmation. Bootstrap does not treat writing `hooks.json` as proof that required
+callbacks are trusted, enabled, or observed.
+
 Transcript paths are unstable input. The scoped collector reads only registered
 task transcripts, retains lifecycle/turn/response identities and token records,
 advances a byte cursor, and records delayed, malformed, or incomplete evidence as
-gaps. Stop or final text alone never releases ownership or proves completion.
+gaps. Native `turn_aborted` is terminal interruption evidence and cancels an
+outstanding wait for that exact task. Stop or final text alone never releases
+ownership or proves completion.
+
+Standing Steward waits use one long-yield execution cell and never poll that cell
+with repeated model turns. A stopped client closes the broker connection and
+cancels its active evaluation; transcript evidence then settles the durable wait.
 
 Hook commands resolve the current committed checkout on every invocation. Existing
 agent turns keep already-delivered instructions, while the next hook callback sees

@@ -31,11 +31,11 @@ heartbeat, same-Steward recovery, one Justiciar slot, Desktop/broker restart
 uncertainty, and operation-boundary source freshness. Record unsupported behavior
 and gaps honestly; unit tests do not prove native compatibility.
 
-Bootstrap stages that live acceptance to avoid a circular schedule gate. The five
-non-schedule checks activate the previously paused Marshal heartbeat without
-opening admission. One real active-heartbeat overlap observation then establishes
-`schedule_overlap`; admission opens only on the following bootstrap receipt with
-all six checks recorded.
+Bootstrap records five evidence-bearing checks while admission remains paused:
+workspace access, hook identity, transcript lifecycle, usage accounting, and task
+targeting. Those checks create the Marshal heartbeat already active. Admission
+opens after its exact creation result is retained; real delivery and overlap
+health are then monitored asynchronously instead of being a circular setup gate.
 
 The former deterministic provider, App Server/runtime, continuous-controller,
 plan-review, curated-memory, fleet-replacement, and live role-suite tests were
