@@ -271,6 +271,46 @@ class DesktopProtocolService:
             )
         return binding
 
+    def _authorize_work_actor(
+        self,
+        ledger: Ledger,
+        record: LedgerRecord,
+        request: ParsedRequest,
+        *,
+        standing_roles: set[str] | None = None,
+    ) -> Mapping[str, Any] | None:
+        """Authorize a human, named standing task, or the exact active assignment."""
+
+        if request.actor.kind == "human":
+            return None
+        task_id = request.actor.task_id or request.thread_id
+        system_standing = _protocol(self._system(ledger).fc or {}).get("standing") or {}
+        for role in standing_roles or set():
+            binding = system_standing.get(role)
+            if (
+                isinstance(binding, Mapping)
+                and binding.get("state") == "registered"
+                and request.actor.kind == "task"
+                and task_id == binding.get("task_id")
+            ):
+                return binding
+        assignment = _protocol(record.fc or {}).get("assignment")
+        token = request.input.get("assignment_token") or request.ownership_operation
+        if (
+            request.actor.kind != "task"
+            or not isinstance(assignment, Mapping)
+            or assignment.get("task_id") != task_id
+            or not token
+            or assignment.get("assignment_token") != token
+            or assignment.get("state") not in {"reserved", "issuing", "active", "uncertain"}
+        ):
+            raise FulcrumError(
+                "AUTHORITY_MISMATCH",
+                "the operation requires the exact active assignment or standing role",
+                exit_code=5,
+            )
+        return assignment
+
     def _write_event(self, request: ParsedRequest, event: str, **fields: Any) -> None:
         if self._ledger_override is not None:
             return
@@ -397,6 +437,12 @@ class DesktopProtocolService:
     def queue_action(self, request: ParsedRequest) -> CommandResult:
         """Internal deterministic compiler boundary used by setup/work transitions."""
 
+        if request.actor.kind != "human":
+            raise FulcrumError(
+                "AUTHORITY_MISMATCH",
+                "native actions are compiled by Fulcrum, not queued by managed tasks",
+                exit_code=5,
+            )
         ledger = self._ledger(request)
         record_id = str(request.input.get("record_id") or "fc-system")
         record = (

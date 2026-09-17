@@ -117,7 +117,6 @@ class Application:
         self.register(("operation", "reconcile"), self._operation_reconcile)
         desktop = DesktopProtocolService()
         self.register(("register", "standing"), desktop.register_standing)
-        self.register(("action", "queue"), desktop.queue_action)
         self.register(("action", "claim"), desktop.claim_action)
         self.register(("action", "result"), desktop.report_action_result)
         self.register(("instruction", "wait"), desktop.wait_for_instructions)

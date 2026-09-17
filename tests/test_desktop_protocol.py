@@ -88,6 +88,23 @@ def test_equal_action_claim_replays_without_authorizing_second_invocation():
         raise AssertionError("changed request input was accepted")
 
 
+def test_managed_task_cannot_inject_native_action():
+    service, _ = registered_service()
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.queue_action(
+            mutation(
+                ("action", "queue"),
+                actor="task:steward-1",
+                payload={
+                    "executor": "steward",
+                    "tool": "create_thread",
+                    "arguments": {"prompt": "unauthorized"},
+                },
+            )
+        )
+    assert raised.exception.code == "AUTHORITY_MISMATCH"
+
+
 def test_steward_selects_ready_action_without_marshal_and_pause_holds_it():
     work = record("fc-a", phase="ready", priority=1)
     service, ledger = registered_service(work)

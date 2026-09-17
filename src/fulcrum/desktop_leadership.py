@@ -267,6 +267,9 @@ class DesktopLeadershipService(DesktopProtocolService):
         record = ledger.show(bead)
         if record is None:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead}")
+        self._authorize_work_actor(
+            ledger, record, request, standing_roles={"marshal", "vizier"}
+        )
         protocol = _protocol(record.fc or {})
         saved = _saved_request(protocol, request)
         if saved:
@@ -318,6 +321,9 @@ class DesktopLeadershipService(DesktopProtocolService):
         record = ledger.show(bead)
         if record is None:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead}")
+        self._authorize_work_actor(
+            ledger, record, request, standing_roles={"marshal", "vizier"}
+        )
         protocol = _protocol(record.fc or {})
         saved = _saved_request(protocol, request)
         if saved:

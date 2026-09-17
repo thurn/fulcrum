@@ -134,3 +134,22 @@ class LeadershipTests(unittest.TestCase):
                 )
             )
         self.assertEqual(raised.exception.code, "RECOVERY_CAPACITY")
+
+    def test_unassigned_task_cannot_mutate_incidents_or_repairs(self):
+        for command, payload in (
+            (("incident", "report"), {"incident_key": "ci"}),
+            (("repair", "record"), {"incident_key": "ci", "outcome": "failed"}),
+        ):
+            with self.assertRaises(FulcrumError) as raised:
+                getattr(
+                    self.service,
+                    "report_incident" if command[0] == "incident" else "record_repair",
+                )(
+                    call(
+                        command,
+                        actor="task:intruder",
+                        arguments={"bead": "fc-a"},
+                        payload=payload,
+                    )
+                )
+            self.assertEqual(raised.exception.code, "AUTHORITY_MISMATCH")
