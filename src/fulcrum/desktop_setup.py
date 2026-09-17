@@ -376,6 +376,25 @@ class DesktopSetupService(DesktopProtocolService):
         actions = dict(protocol.get("actions") or {})
         standing = dict(protocol.get("standing") or {})
         replacement = request.input.get("replacement")
+        replacement_role = (
+            str(replacement.get("role") or "")
+            if isinstance(replacement, Mapping)
+            else ""
+        )
+        for role in STANDING:
+            binding = standing.get(role)
+            if (
+                role != replacement_role
+                and isinstance(binding, Mapping)
+                and binding.get("state")
+                in {"stopped", "stop_observed", "interrupt_observed"}
+            ):
+                recovered = dict(binding)
+                recovered["state"] = "registered"
+                recovered["lifecycle_recovered_at"] = _utc_now()
+                recovered.pop("positively_completed_at", None)
+                standing[role] = recovered
+        protocol["standing"] = standing
         if isinstance(replacement, Mapping):
             role = str(replacement.get("role") or "")
             reason = replacement.get("reason")

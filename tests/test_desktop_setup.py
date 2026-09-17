@@ -190,6 +190,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
 
         system = service._ledger_override.show("fc-system")
         desktop = dict(system.fc["desktop"])
+        standing = dict(desktop["standing"])
+        standing["marshal"] = {
+            **standing["marshal"],
+            "state": "stopped",
+            "positively_completed_at": "2026-09-17T00:00:00Z",
+        }
+        desktop["standing"] = standing
         desktop["marshal_schedule"] = {
             **desktop["marshal_schedule"],
             "prompt": "legacy recurring prompt",
@@ -212,6 +219,8 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert repair["arguments"]["id"] == "automation-1"
         assert "scheduled Fulcrum heartbeat" in repair["arguments"]["prompt"]
         assert not repair["arguments"]["prompt"].startswith("Fulcrum-Action:")
+        assert repairing.result["standing"]["marshal"]["state"] == "registered"
+        assert "positively_completed_at" not in repairing.result["standing"]["marshal"]
 
 
 def test_bootstrap_preserves_unrelated_codex_configuration():
