@@ -9,7 +9,6 @@ from fulcrum.coordination import coordinated
 import json
 import subprocess
 import tempfile
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -22,7 +21,6 @@ from fulcrum.ledger import Ledger, LedgerFailure, OperationRecord, operation_vie
 
 MAX_SENDS = 3
 RETRY_DELAYS = (1, 5)
-PUBLICATION_NAMESPACE = uuid.UUID("21dc9f8a-6336-4f14-af34-5aa63d017ed2")
 
 
 class DoltPublicationError(RuntimeError):
@@ -367,145 +365,6 @@ class LedgerPublicationService:
             return self.synchronize(request, ledger, config, adapter, explicit=True)
         except DoltPublicationError as error:
             raise _public_error(error, request) from error
-
-    @coordinated
-    def flush(self, request: ParsedRequest) -> CommandResult:
-        """Flush current work without granting a fresh exhausted retry budget."""
-
-        try:
-            ledger, config, adapter = self._components(request)
-            return self.synchronize(request, ledger, config, adapter, explicit=False)
-        except DoltPublicationError as error:
-            raise _public_error(error, request) from error
-
-    @coordinated
-    def tick(self, request: ParsedRequest) -> dict[str, Any]:
-        ledger, config, adapter = self._components(request)
-        observed = self.inspect(ledger, config, adapter, mark_pending=True)
-        publication = observed["publication"]
-        config_pending = bool(observed["ordinary_git"]["configuration_pending"])
-        operation = observed.get("operation")
-        if isinstance(operation, Mapping) and operation.get("state") in {
-            "accepted",
-            "running",
-            "uncertain",
-        }:
-            due = _parse_optional_time(operation.get("next_retry_at"))
-            if operation.get("state") != "uncertain" and (
-                due is None or self.now() >= due
-            ):
-                automatic = replace(
-                    request,
-                    command=("ledger", "sync"),
-                    arguments={},
-                    input={},
-                    request_id=str(
-                        uuid.uuid5(
-                            PUBLICATION_NAMESPACE,
-                            f"automatic:{publication.get('operation_id')}",
-                        )
-                    ),
-                )
-                result = self.synchronize(
-                    automatic, ledger, config, adapter, explicit=False
-                )
-                return {"action": "retry", "result": result.to_dict()}
-            return {"action": "waiting", "status": observed}
-        if operation and operation.get("exhausted"):
-            remote = observed.get("remote")
-            retained = _publication_operation(ledger, publication)
-            planned = retained.operation.get("planned") if retained else None
-            recovered = (
-                isinstance(remote, Mapping)
-                and remote.get("error") is None
-                and isinstance(planned, Mapping)
-                and planned.get("capability_state") == "failed"
-            )
-            if recovered and retained is not None:
-                retained = self._grant_retry(
-                    ledger, retained, None, "connectivity_recovery"
-                )
-                refreshed = dict(retained.operation.get("planned") or {})
-                refreshed["capability_state"] = "healthy"
-                retained = ledger.update_operation(retained, planned=refreshed)
-                automatic = replace(
-                    request,
-                    command=("ledger", "sync"),
-                    arguments={},
-                    input={},
-                    request_id=str(
-                        uuid.uuid5(
-                            PUBLICATION_NAMESPACE,
-                            f"recovered:{retained.id}:{refreshed.get('grant')}",
-                        )
-                    ),
-                )
-                result = self.synchronize(
-                    automatic, ledger, config, adapter, explicit=False
-                )
-                return {"action": "connectivity_recovery", "result": result.to_dict()}
-            return {"action": "exhausted", "status": observed}
-        pending_since = _parse_optional_time(publication.get("pending_since"))
-        cadence = int(config["brain"]["push_interval_seconds"])
-        if (
-            (observed["pending"] or config_pending)
-            and pending_since is not None
-            and (self.now() >= pending_since + timedelta(seconds=cadence))
-        ):
-            config_result: dict[str, Any] | None = None
-            if config_pending:
-                from fulcrum.knowledge import KnowledgeService
-
-                config_request = replace(
-                    request,
-                    command=("config", "sync"),
-                    arguments={},
-                    input={},
-                    actor=replace(request.actor, kind="system", task_id=None),
-                    request_id=str(
-                        uuid.uuid5(
-                            PUBLICATION_NAMESPACE,
-                            f"config:{publication['pending_since']}",
-                        )
-                    ),
-                )
-                config_result = KnowledgeService().config_sync(config_request).to_dict()
-                ledger, config, adapter = self._components(request)
-                refreshed = self.inspect(ledger, config, adapter)
-                if not refreshed["pending"]:
-                    return {
-                        "action": "flush",
-                        "selected_git": config_result,
-                        "native": config_result["result"]["result"].get(
-                            "ledger_publication"
-                        ),
-                    }
-            automatic = replace(
-                request,
-                command=("ledger", "sync"),
-                arguments={},
-                input={},
-                request_id=str(
-                    uuid.uuid5(
-                        PUBLICATION_NAMESPACE,
-                        f"automatic:{publication['pending_since']}",
-                    )
-                ),
-            )
-            result = self.synchronize(
-                automatic, ledger, config, adapter, explicit=False
-            )
-            return {
-                "action": "flush",
-                "result": result.to_dict(),
-                "selected_git": config_result,
-            }
-        return {
-            "action": (
-                "scheduled" if observed["pending"] or config_pending else "idle"
-            ),
-            "status": observed,
-        }
 
     @coordinated
     def reconcile(

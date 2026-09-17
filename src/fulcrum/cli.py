@@ -189,28 +189,13 @@ POSITIONAL_ID: set[tuple[str, ...]] = {
         ("project", "show"),
         ("project", "enable"),
         ("project", "disable"),
-        ("project", "remove"),
         ("work", "show"),
         ("work", "adopt"),
         ("work", "update"),
-        ("work", "transfer"),
         ("work", "children"),
         ("work", "dependencies"),
         ("work", "close"),
         ("work", "reopen"),
-        ("task", "show"),
-        ("task", "send"),
-        ("task", "output"),
-        ("task", "wait"),
-        ("task", "requests"),
-        ("task", "respond"),
-        ("task", "interrupt"),
-        ("task", "terminals"),
-        ("task", "terminal", "stop"),
-        ("task", "release"),
-        ("task", "archive"),
-        ("task", "unarchive"),
-        ("task", "delete"),
         ("operation", "show"),
         ("operation", "wait"),
         ("operation", "cancel"),
@@ -218,9 +203,7 @@ POSITIONAL_ID: set[tuple[str, ...]] = {
         ("plan", "show"),
         ("plan", "activate"),
         ("plan", "complete"),
-        ("memory", "show"),
         ("rates", "show"),
-        ("human", "resolve"),
     }
 }
 
@@ -258,30 +241,13 @@ def _add_command_options(
         parser.add_argument("id")
     if path == ("project", "disable"):
         _option(parser, "--reason", required=True)
-    elif path == ("project", "remove"):
-        _option(parser, "--remove-owned-registrations", action="store_true")
-    if path == ("serve",):
-        _option(parser, "--once", action="store_true")
-    elif path == ("reconcile",):
-        group = parser.add_mutually_exclusive_group()
-        group.add_argument("--bead", default=argparse.SUPPRESS)
-        group.add_argument("--operation", default=argparse.SUPPRESS)
-    elif path == ("bootstrap",):
+    if path == ("bootstrap",):
         _option(parser, "--non-interactive", action="store_true")
     elif path in {("service", "stop"), ("service", "restart")}:
         _option(parser, "--interrupt", action="store_true")
     elif path == ("service", "update"):
         _option(parser, "--maintenance", action="store_true")
         _option(parser, "--retry", action="store_true")
-    elif path == ("enter",):
-        parser.add_argument("role", choices=ROLES)
-        _option(parser, "--description")
-        _option(parser, "--bead")
-        _option(parser, "--origin", choices=("human", "dispatch"), default="human")
-    elif path == ("context",):
-        group = parser.add_mutually_exclusive_group()
-        group.add_argument("--bead", default=argparse.SUPPRESS)
-        group.add_argument("--role", choices=ROLES, default=argparse.SUPPRESS)
     elif path == ("work", "list"):
         _option(parser, "--role", choices=ROLES)
         _option(parser, "--owner")
@@ -290,10 +256,6 @@ def _add_command_options(
         _option(parser, "--cursor")
     elif path == ("work", "adopt"):
         _option(parser, "--role", choices=ROLES, required=True)
-    elif path == ("work", "transfer"):
-        _option(parser, "--to-thread", required=True)
-        _option(parser, "--role", choices=ROLES, required=True)
-        _option(parser, "--reason", required=True)
     elif path == ("work", "close"):
         _option(parser, "--outcome", required=True)
         _option(parser, "--summary", required=True)
@@ -308,56 +270,6 @@ def _add_command_options(
             _option(parser, "--kind")
             _option(parser, "--summary")
             _option(parser, "--evidence", action="append")
-    elif path[:1] == ("marshal",) and path[-1] in {"brief", "request"}:
-        _option(parser, "--kind", choices=("auto", "groom", "dispatch", "recover"))
-        _option(parser, "--bead")
-    elif path == ("leader", "show"):
-        parser.add_argument("role", choices=("vizier", "marshal"))
-    elif path == ("backlog", "list"):
-        _option(parser, "--ready", action="store_true")
-        _option(parser, "--include-deferred", action="store_true")
-        _option(parser, "--limit", type=int)
-        _option(parser, "--cursor")
-    elif path == ("dispatch",):
-        _option(parser, "--bead", required=True)
-        group = parser.add_mutually_exclusive_group()
-        group.add_argument(
-            "--authorize", action="store_true", default=argparse.SUPPRESS
-        )
-        group.add_argument("--human", action="store_true", default=argparse.SUPPRESS)
-    elif path == ("leader", "replace"):
-        parser.add_argument("role", choices=("vizier", "marshal"))
-        _option(parser, "--reason", required=True)
-    elif path == ("task", "output"):
-        _option(parser, "--turn-id")
-        _option(parser, "--limit", type=int)
-        _option(parser, "--cursor")
-        _option(parser, "--max-bytes", type=int)
-    elif path == ("task", "terminals"):
-        _option(parser, "--limit", type=int)
-        _option(parser, "--cursor")
-    elif path == ("task", "wait"):
-        _option(parser, "--turn-id")
-        _option(parser, "--until", choices=("idle", "terminal"), required=True)
-    elif path == ("task", "start"):
-        _option(parser, "--role", choices=ROLES, required=True)
-        _option(parser, "--bead", required=True)
-    elif path == ("task", "list"):
-        _option(parser, "--limit", type=int)
-        _option(parser, "--cursor")
-    elif path == ("task", "interrupt"):
-        _option(parser, "--turn-id")
-    elif path == ("task", "respond"):
-        _option(parser, "--request", required=True)
-    elif path == ("task", "delete"):
-        _option(parser, "--yes", action="store_true", required=True)
-    elif path == ("task", "terminal", "stop"):
-        group = parser.add_mutually_exclusive_group(required=True)
-        group.add_argument("--terminal", default=argparse.SUPPRESS)
-        group.add_argument(
-            "--all-owned", action="store_true", default=argparse.SUPPRESS
-        )
-        _option(parser, "--reason", required=True)
     elif path in {
         ("worktree", "prepare"),
         ("worktree", "inspect"),
@@ -382,7 +294,6 @@ def _add_command_options(
         ("validation", "show"),
         ("promotion", "show"),
         ("source", "sync"),
-        ("knowledge", "publish"),
     }:
         _option(parser, "--bead", required=True)
     elif path in {("status",), ("trace",)}:
@@ -400,34 +311,14 @@ def _add_command_options(
     elif path == ("wait",):
         _option(parser, "--bead", required=True)
         _option(parser, "--until", required=True)
-    elif path[:1] == ("recover",):
-        _option(parser, "--scope", required=True)
-        if path == ("recover", "takeover"):
-            _option(parser, "--reason", required=True)
-        elif path == ("recover", "release"):
-            _option(parser, "--summary", required=True)
     elif path == ("plan", "draft") or path in {
         ("plan", "approve"),
         ("plan", "publish"),
         ("plan", "refine"),
     }:
         _option(parser, "--bead", required=True)
-    elif path == ("plan", "review", "start"):
-        _option(parser, "--bead", required=True)
-        _option(
-            parser,
-            "--perspective",
-            choices=("cold_reader", "requirements"),
-            required=True,
-        )
-    elif path == ("plan", "review", "finish"):
-        _option(parser, "--task", required=True)
     elif path == ("plan", "activate"):
         _option(parser, "--authorization")
-    elif path == ("memory", "list"):
-        _option(parser, "--scope")
-        _option(parser, "--limit", type=int)
-        _option(parser, "--cursor")
     elif path in {("usage",), ("cost",)}:
         for name in (
             "bead",
@@ -456,9 +347,6 @@ def _add_command_options(
     elif path == ("rates", "list"):
         _option(parser, "--limit", type=int)
         _option(parser, "--cursor")
-    elif path == ("fleet", "replace"):
-        _option(parser, "--mode", choices=("drain", "interrupt"), required=True)
-        _option(parser, "--reason", required=True)
     elif path == ("reset",):
         _option(parser, "--hard", action="store_true", required=True)
         _option(parser, "--yes", action="store_true", required=True)
@@ -583,33 +471,9 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "additional_repair_cycles",
     },
     ("reset",): {"expected_remote_ref", "legacy_state_root", "legacy_database"},
-    ("hook", "context"): {
-        "hook_event_name",
-        "source",
-        "session_id",
-        "cwd",
-        "model",
-        "permission_mode",
-        "transcript_path",
-    },
-    ("setup",): {
-        "brain",
-        "beads",
-        "runtime",
-        "delivery",
-        "models",
-        "projects",
-        "knowledge",
-        "source",
-        "timing",
-        "diagnostics",
-        "resources",
-        "policy",
-    },
     ("config", "set"): {
         "brain",
         "beads",
-        "runtime",
         "delivery",
         "models",
         "projects",
@@ -617,7 +481,6 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "source",
         "timing",
         "diagnostics",
-        "resources",
         "policy",
     },
     ("policy", "set"): {
@@ -711,20 +574,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "implementation_ready",
         "dependencies",
     },
-    ("marshal", "decide"): {"decision_operation", "decisions"},
-    ("human", "resolve"): {"reason_id", "answer", "scope_change", "resume_role"},
-    ("task", "start"): {
-        "instructions",
-        "title",
-        "developer_instructions",
-        "purpose",
-        "associated_beads",
-    },
-    ("task", "send"): {"text"},
-    ("task", "respond"): {"response"},
-    ("recover", "repair"): {"actions"},
     ("plan", "draft"): {"text", "tasks", "summary", "publication", "validation"},
-    ("plan", "review", "finish"): {"review_operation", "findings", "summary"},
     ("plan", "approve"): {"reason", "resolutions", "waivers"},
     ("plan", "publish"): {
         "approval_operation",
@@ -743,7 +593,6 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "dispositions",
         "cosmetic_changes",
     },
-    ("memory", "set"): {"id", "scope", "title", "text", "references"},
     ("rates", "add"): {
         "model",
         "currency",
