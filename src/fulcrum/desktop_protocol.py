@@ -511,9 +511,10 @@ def _result(request: ParsedRequest, value: Mapping[str, Any]) -> CommandResult:
     )
 
 
-def _consume_registration_handshake(
+def _consume_registration_observation(
     protocol: dict[str, Any],
     *,
+    action: Mapping[str, Any],
     action_id: str,
     task_id: str,
     session_id: str,
@@ -529,22 +530,51 @@ def _consume_registration_handshake(
         and value.get("session_id") == session_id
         and not value.get("consumed_at")
     ]
-    if len(matches) != 1:
+    if len(matches) == 1:
+        event_id, retained = matches[0]
+        consumed = {
+            **dict(retained),
+            "consumed_at": _utc_now(),
+            "disposition": "registered",
+        }
+        handshakes[event_id] = consumed
+        protocol["handshakes"] = handshakes
+        return consumed
+    if len(matches) > 1:
         raise FulcrumError(
             "REGISTRATION_OBSERVATION_REQUIRED",
-            "registration requires one matching trusted prompt observation",
+            "registration requires exactly one matching prompt observation",
             exit_code=5,
             details={"action_id": action_id, "matching_observations": len(matches)},
         )
-    event_id, retained = matches[0]
-    consumed = {
-        **dict(retained),
-        "consumed_at": _utc_now(),
-        "disposition": "registered",
-    }
-    handshakes[event_id] = consumed
-    protocol["handshakes"] = handshakes
-    return consumed
+
+    native_result = action.get("native_result")
+    observed_task = _native_identifier(native_result, "threadId", "thread_id", "id")
+    if (
+        action.get("state") == "succeeded"
+        and isinstance(native_result, Mapping)
+        and observed_task == task_id
+    ):
+        return {
+            "kind": "creation_result",
+            "action_id": action_id,
+            "task_id": task_id,
+            "session_id": session_id,
+            "native_result": copy.deepcopy(dict(native_result)),
+            "observed_at": action.get("completed_at"),
+            "consumed_at": _utc_now(),
+            "disposition": "registered",
+        }
+    raise FulcrumError(
+        "REGISTRATION_OBSERVATION_REQUIRED",
+        "registration requires a matching prompt observation or succeeded creation result",
+        exit_code=5,
+        details={
+            "action_id": action_id,
+            "matching_observations": 0,
+            "creation_result_task_id": observed_task,
+        },
+    )
 
 
 class DesktopProtocolService:
@@ -988,8 +1018,9 @@ class DesktopProtocolService:
                 "the native creation result identifies another task",
                 exit_code=5,
             )
-        handshake = _consume_registration_handshake(
+        observation = _consume_registration_observation(
             protocol,
+            action=action,
             action_id=action_id,
             task_id=task_id,
             session_id=session_id,
@@ -1020,7 +1051,7 @@ class DesktopProtocolService:
             "action_id": action_id,
             "state": "registered",
             "registered_at": _utc_now(),
-            "registration_observation": copy.deepcopy(dict(handshake)),
+            "registration_observation": copy.deepcopy(dict(observation)),
             "previous_task_id": current.get("task_id") if replacing else None,
         }
         if action.get("tool") == "create_thread" and action.get("state") in {
@@ -2568,12 +2599,6 @@ class DesktopProtocolService:
                 "worker registration requires its retained creation action",
                 exit_code=5,
             )
-        handshake = _consume_registration_handshake(
-            protocol,
-            action_id=str(creation["action_id"]),
-            task_id=str(task_id),
-            session_id=session_id,
-        )
         native_result = creation.get("native_result")
         observed_task = _native_identifier(native_result, "threadId", "thread_id", "id")
         if observed_task and observed_task != task_id:
@@ -2582,6 +2607,13 @@ class DesktopProtocolService:
                 "worker registration conflicts with the native creation result",
                 exit_code=5,
             )
+        observation = _consume_registration_observation(
+            protocol,
+            action=creation,
+            action_id=str(creation["action_id"]),
+            task_id=str(task_id),
+            session_id=session_id,
+        )
         actions[str(creation["action_id"])] = {
             **creation,
             "state": "succeeded",
@@ -2604,7 +2636,7 @@ class DesktopProtocolService:
             "observed_source": observed_source,
             "state": "active",
             "registered_at": _utc_now(),
-            "registration_observation": copy.deepcopy(dict(handshake)),
+            "registration_observation": copy.deepcopy(dict(observation)),
         }
         protocol["assignment"] = active
         native_tasks = dict(protocol.get("native_tasks") or {})

@@ -304,10 +304,14 @@ report returned `threadId`/`hostId` through the same binding transition. Retain
 required. A new worker may register before the creator receives its reply.
 
 Registration uses supported native identity checked against hook/assignment
-evidence, not a guessed title. Validate exact action, role, project/host, and
-workspace. Only one native task can acquire an assignment. A duplicate claimant
-records a conflict and receives no editing authority. Duplicate native tasks may
-exist after uncertain creation; they must not become duplicate authorized writers.
+evidence, not a guessed title. Prefer the exact prompt-hook observation. When the
+native creation path starts the task without emitting that initial callback, a
+claimed and successfully settled `create_thread` result is equivalent creation
+evidence only when its returned `threadId` matches the registering runtime task.
+Validate exact action, role, project/host, and workspace. Only one native task can
+acquire an assignment. A duplicate claimant records a conflict and receives no
+editing authority. Duplicate native tasks may exist after uncertain creation;
+they must not become duplicate authorized writers.
 
 For lost creation replies, inspect retained results and self-registration first,
 then authorize a bounded inventory/history read for the exact marker/locator.
@@ -967,10 +971,13 @@ ID in Beads and compares its retained full input/result; these replay records
 outlive removal of completed entries from the work bead. Missing or conflicting
 evidence is a storage blocker, never a fresh request. Registration consumes the
 matching pre-hook handshake under the writer lock, checking session identity and
-creation/assignment marker. A worker may register before the creator's result;
-the later result must agree with that binding. Direct CLI managed mutations use
-the same observed invocation binding; operator recovery retains its separately
-authorized scope. Post-hooks and agent reports settle the same native attempt.
+creation/assignment marker. If the native initial prompt produced no callback,
+registration instead requires the settled claimed creation result's exact task
+identity. A worker may register before the creator's result when the hook evidence
+exists; the later result must agree with that binding. Direct CLI managed
+mutations use the same observed invocation binding; operator recovery retains its
+separately authorized scope. Post-hooks and agent reports settle the same native
+attempt.
 
 ## Pause and operator control
 
@@ -1005,10 +1012,11 @@ loop is part of the design.
 ## Bootstrap, naming, and standing-task recovery
 
 The checkout exposes `$fulcrum-bootstrap` through `.agents/skills` before global
-installation. The skill discovers the retained checkout and existing
-configuration, initializes stock configuration when it is absent, then drives
-deterministic CLI setup and exact returned native actions. It does not reconstruct
-workflow policy in prose. Missing
+installation. The MCP-refresh continuation prompt also names the canonical
+`~/fulcrum/skills/fulcrum-bootstrap/SKILL.md` source path explicitly. The skill
+discovers the retained checkout and existing configuration, initializes stock
+configuration when it is absent, then drives deterministic CLI setup and exact
+returned native actions. It does not reconstruct workflow policy in prose. Missing
 executables, credentials, saved projects, model choices, or native trust are
 specific prerequisites. Complete work already authorized by setup without
 asking repeatedly. A ready socket alone is not successful setup.

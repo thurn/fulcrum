@@ -52,6 +52,8 @@ must never create another; it stops and reports the missing tools instead.
 
   ```text
   $fulcrum-bootstrap
+  Read and follow `~/fulcrum/skills/fulcrum-bootstrap/SKILL.md` from the retained
+  local-master checkout.
   Resume the retained initial bootstrap with a new request UUID. This is the sole
   MCP-refresh continuation task. Do not create another continuation task. If
   Fulcrum MCP tools are unavailable here, report that exact failure and leave
@@ -74,6 +76,9 @@ before invoking the exact named native tool once, then call `action result` with
 the actual result. Do not edit its arguments, invent a retry ID, or retry an
 uncertain native effect. A newly created standing task must call
 `register_standing` with its retained action marker before other activity.
+Report a successful `create_thread` result immediately; when the native creation
+path does not emit an initial prompt callback, the matching settled `threadId`
+provides the registration evidence instead.
 Preserve the fixed titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and
 `🔮 VIZIER 🔮`; correct a normalized title only through a separately retained
 native action.

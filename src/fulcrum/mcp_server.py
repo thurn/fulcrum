@@ -125,10 +125,18 @@ def _schema(name: str) -> dict[str, Any]:
         "request_id": {"type": "string", "format": "uuid"},
         "task_id": {"type": "string"},
         "host_id": {"type": "string"},
-        "turn_id": {"type": "string"},
         "assignment_token": {"type": "string"},
         "input": {"type": "object", "additionalProperties": True},
     }
+    if name in {
+        "register_standing",
+        "wait_for_instructions",
+        "register_worker",
+        "wait_for_ci_results",
+        "marshal_check",
+        "marshal_decide",
+    }:
+        properties["turn_id"] = {"type": "string"}
     if name in {"claim_action", "report_action_result"}:
         properties.update(
             {"record_id": {"type": "string"}, "action_id": {"type": "string"}}

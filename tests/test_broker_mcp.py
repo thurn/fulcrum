@@ -210,11 +210,14 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wait_for_instructions", names)
         self.assertIn("wait_for_ci_results", names)
         self.assertIn("claim_action", names)
+        claim = tools["claim_action"]["inputSchema"]
+        self.assertNotIn("turn_id", claim["properties"])
         registration = tools["register_standing"]["inputSchema"]
         self.assertIn("role", registration["required"])
         self.assertIn("action_id", registration["required"])
         self.assertIn("task_id", registration["required"])
         self.assertIn("session_id", registration["required"])
+        self.assertIn("turn_id", registration["properties"])
         finish = tools["finish"]["inputSchema"]
         self.assertIn("outcome", finish["required"])
         self.assertEqual(

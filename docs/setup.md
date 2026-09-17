@@ -83,11 +83,12 @@ evidence is supplied. A ready socket alone is not setup.
 An existing task does not acquire MCP tools added after it started. When the
 initial MCP configuration changes, the bootstrap skill creates exactly one new
 task in the saved `~/fulcrum` project, using the retained checkout directly rather
-than a worktree. That continuation invokes `$fulcrum-bootstrap` with a new request
-ID, receives the current MCP tool catalog, and rebinds retained pending actions to
-itself. The current Desktop UI lists servers under Settings > Plugins > MCPs and
-does not expose the former Restart control; do not toggle the server or quit the
-app. Retained action IDs and registered task identities make the continuation
+than a worktree. That continuation invokes `$fulcrum-bootstrap`, explicitly names
+`~/fulcrum/skills/fulcrum-bootstrap/SKILL.md`, uses a new request ID, receives the
+current MCP tool catalog, and rebinds retained pending actions to itself. The
+current Desktop UI lists servers under Settings > Plugins > MCPs and does not
+expose the former Restart control; do not toggle the server or quit the app.
+Retained action IDs and registered task identities make the continuation
 resumable rather than duplicative. Ordinary committed edits never require a new
 task or restart.
 

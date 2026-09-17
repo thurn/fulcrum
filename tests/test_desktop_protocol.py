@@ -211,6 +211,55 @@ def test_registration_requires_and_consumes_trusted_prompt_handshake():
     assert handshake["consumed_at"]
 
 
+def test_registration_accepts_matching_succeeded_creation_result():
+    ledger = MemoryLedger()
+    service = DesktopProtocolService(ledger)
+    action = seed_action(
+        ledger,
+        {
+            "executor": "bootstrap",
+            "tool": "create_thread",
+            "arguments": {"prompt": "register steward"},
+            "purpose": "bootstrap_steward",
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "create-standing"},
+        )
+    )
+    service.report_action_result(
+        mutation(
+            ("action", "result"),
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "create-standing",
+                "outcome": "succeeded",
+                "native_result": {"threadId": "steward-1", "hostId": "local"},
+            },
+        )
+    )
+
+    result = service.register_standing(
+        mutation(
+            ("register", "standing"),
+            actor="task:steward-1",
+            payload={
+                "role": "steward",
+                "task_id": "steward-1",
+                "session_id": "session-1",
+                "action_id": action["action_id"],
+            },
+        )
+    )
+
+    observation = result.result["standing"]["registration_observation"]
+    assert observation["kind"] == "creation_result"
+    assert observation["native_result"]["threadId"] == "steward-1"
+
+
 def test_production_service_has_no_action_injection_api():
     service, _ = registered_service()
     assert not hasattr(service, "queue_action")
@@ -835,6 +884,9 @@ def test_claim_supersedes_dispatch_when_admission_is_paused():
 class DesktopProtocolTests(unittest.TestCase):
     def test_registration_requires_trusted_handshake(self):
         test_registration_requires_and_consumes_trusted_prompt_handshake()
+
+    def test_registration_accepts_matching_creation_result(self):
+        test_registration_accepts_matching_succeeded_creation_result()
 
     def test_managed_task_cannot_inject_action(self):
         test_production_service_has_no_action_injection_api()
