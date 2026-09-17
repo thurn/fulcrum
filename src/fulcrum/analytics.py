@@ -129,6 +129,8 @@ def record_desktop_usage(
                 and event.get("turn_id") == turn_id
                 and event.get("type")
                 in {
+                    "task_complete",
+                    "task_completed",
                     "turn_complete",
                     "turn_completed",
                     "turn_interrupted",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,6 +34,83 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_standing_tasks_keep_independent_transcript_cursors(self):
+        ledger = MemoryLedger()
+        desktop = DesktopProtocolService(ledger)
+        bindings = {}
+        for role in ("steward", "marshal"):
+            action = desktop.queue_action(
+                replace(
+                    request(("action", "queue")),
+                    input={
+                        "executor": "bootstrap",
+                        "tool": "create_thread",
+                        "arguments": {"prompt": f"register {role}"},
+                        "purpose": f"bootstrap_{role}",
+                    },
+                    request_id=str(uuid.uuid4()),
+                )
+            ).result["action"]
+            task_id = f"{role}-1"
+            desktop.register_standing(
+                replace(
+                    request(("register", "standing")),
+                    input={
+                        "role": role,
+                        "task_id": task_id,
+                        "session_id": f"session-{role}",
+                        "action_id": action["action_id"],
+                    },
+                    request_id=str(uuid.uuid4()),
+                )
+            )
+            bindings[role] = task_id
+        with tempfile.TemporaryDirectory() as directory:
+            for role, task_id in bindings.items():
+                turn_id = f"turn-{role}"
+                path = Path(directory) / f"{role}.jsonl"
+                rows = [
+                    {
+                        "type": "turn_context",
+                        "turn_id": turn_id,
+                        "model": "gpt-5.6-luna",
+                    },
+                    {
+                        "type": "token_usage_record",
+                        "payload": {
+                            "thread_id": task_id,
+                            "turn_id": turn_id,
+                            "response_id": f"response-{role}",
+                            "usage": {"input_tokens": 10, "output_tokens": 2},
+                        },
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete", "turn_id": turn_id},
+                    },
+                ]
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                HookService(ledger).handle(
+                    replace(
+                        request(("hook", "handle")),
+                        actor=ActorContext.parse(f"task:{task_id}"),
+                        thread_id=task_id,
+                        input={
+                            "hook_event_name": "SessionStart",
+                            "thread_id": task_id,
+                            "turn_id": turn_id,
+                            "transcript_path": str(path),
+                        },
+                        request_id=str(uuid.uuid4()),
+                    )
+                )
+        protocol = (ledger.show("fc-system").fc or {})["desktop"]
+        self.assertEqual(set(protocol["transcripts"]), {"steward-1", "marshal-1"})
+        for analytics in ledger.list_records(kind="analytics", limit=0):
+            self.assertNotIn(
+                "terminal_lifecycle_missing", (analytics.fc or {})["missing_reasons"]
+            )
+
     def test_pre_tool_rejects_unclaimed_native_effect(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)

@@ -238,7 +238,8 @@ class HookService:
             or ""
         )
         protocol = _protocol(record.fc or {})
-        current = protocol.get("transcript")
+        transcripts = dict(protocol.get("transcripts") or {})
+        current = transcripts.get(task_id)
         cursor = int(current.get("cursor", 0)) if isinstance(current, Mapping) else 0
         page = read_transcript(Path(transcript), cursor)
         observations = dict(protocol.get("observations") or {})
@@ -280,11 +281,12 @@ class HookService:
         observations["lifecycle"] = lifecycle
         observations["usage"] = usage
         protocol["observations"] = observations
-        protocol["transcript"] = {
+        transcripts[task_id] = {
             "path": transcript,
             "cursor": page.cursor,
             "gaps": [dict(item) for item in page.gaps][-20:],
         }
+        protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         if usage:
             from fulcrum.analytics import record_desktop_usage
