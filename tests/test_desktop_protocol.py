@@ -114,7 +114,7 @@ def test_successful_creation_compiles_exact_title_normalization():
                 "executor": "steward",
                 "tool": "create_thread",
                 "arguments": {"prompt": "work", "title": "EXECUTOR fc-a"},
-                "purpose": "routine_dispatch",
+                "purpose": "test_creation",
             },
         )
     ).result["action"]
@@ -522,6 +522,107 @@ def test_transition_limit_fences_new_mutation():
     assert raised.exception.code == "TRANSITION_STORAGE_BLOCKED"
 
 
+def test_dispatch_blocks_overlapping_active_work():
+    active = record(
+        "fc-active",
+        project="toy",
+        overlap_tags=["repository"],
+        desktop={
+            "assignment": {
+                "assignment_token": "active-token",
+                "state": "active",
+                "capacity_class": "ordinary",
+            }
+        },
+    )
+    candidate = record(
+        "fc-candidate",
+        phase="ready",
+        requested_role="executor",
+        project="toy",
+        overlap_tags=["repository"],
+        workspace="/tmp/worktree",
+        codex_project_id="project-1",
+    )
+    service, _ = registered_service(active, candidate)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(("instruction", "wait"), actor="task:steward-1")
+    )
+    assert result.state.value == "running"
+    assert result.result["transport_wait"]["kind"] == "instruction"
+
+
+def test_dispatch_blocks_disabled_project():
+    candidate = record(
+        "fc-candidate",
+        phase="ready",
+        requested_role="executor",
+        project="toy",
+        workspace="/tmp/worktree",
+        codex_project_id="project-1",
+    )
+    service, _ = registered_service(candidate)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    config = {
+        "policy": {
+            "automatic_capacity": 4,
+            "default_project_capacity": 4,
+            "project_capacity": {},
+            "paused_projects": [],
+        },
+        "models": {},
+        "projects": {"toy": {"enabled": False}},
+    }
+    with patch("fulcrum.desktop_protocol.ConfigurationManager") as manager:
+        manager.return_value.load.return_value = ({}, None)
+        manager.return_value.effective.return_value = config
+        result = service.wait_for_instructions(
+            mutation(("instruction", "wait"), actor="task:steward-1")
+        )
+    assert result.state.value == "running"
+
+
+def test_claim_supersedes_dispatch_when_admission_is_paused():
+    work = record(
+        "fc-a",
+        phase="ready",
+        project="toy",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-1",
+                "state": "reserved",
+            }
+        },
+    )
+    service, ledger = registered_service(work)
+    action = service.queue_action(
+        mutation(
+            ("action", "queue"),
+            payload={
+                "record_id": "fc-a",
+                "executor": "steward",
+                "tool": "create_thread",
+                "arguments": {"prompt": "work"},
+                "assignment_token": "assignment-1",
+                "purpose": "routine_dispatch",
+            },
+        )
+    ).result["action"]
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.claim_action(
+            mutation(
+                ("action", "claim"),
+                actor="task:steward-1",
+                arguments={"record_id": "fc-a", "action_id": action["action_id"]},
+                payload={"attempt_id": "attempt-1"},
+            )
+        )
+    assert raised.exception.code == "ACTION_SUPERSEDED"
+    retained = (ledger.show("fc-a").fc or {})["desktop"]["actions"]
+    assert retained[action["action_id"]]["state"] == "superseded"
+
+
 class DesktopProtocolTests(unittest.TestCase):
     def test_managed_task_cannot_inject_action(self):
         test_managed_task_cannot_inject_native_action()
@@ -561,3 +662,12 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_transition_limit_blocks_new_mutation(self):
         test_transition_limit_fences_new_mutation()
+
+    def test_dispatch_blocks_overlapping_work(self):
+        test_dispatch_blocks_overlapping_active_work()
+
+    def test_dispatch_blocks_disabled_project(self):
+        test_dispatch_blocks_disabled_project()
+
+    def test_claim_revalidates_pause(self):
+        test_claim_supersedes_dispatch_when_admission_is_paused()

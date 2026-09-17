@@ -739,7 +739,7 @@ class LedgerPublicationService:
                 if overall_pending and pending_since is not None
                 else None
             ),
-            "cadence_seconds": int(config["brain"]["push_interval_seconds"]),
+            "mode": "explicit",
             "operation": operation_view_value,
             "ordinary_git": configuration,
         }
@@ -872,7 +872,7 @@ class LedgerPublicationService:
             "remote_data_ref": remote_ref,
             "remote_contains_target": True,
             "pending_after_boundary": later_pending,
-            "cadence_seconds": int(config["brain"]["push_interval_seconds"]),
+            "mode": "explicit",
         }
         completed_planned = dict(planned)
         completed_planned["capability_state"] = "healthy"

@@ -627,6 +627,20 @@ class DesktopProtocolService:
         if saved:
             return _replay(saved, request)
         self._authorize_executor(ledger, request, action)
+        obsolete = self._obsolete_unissued_action(ledger, record, action, request)
+        if obsolete:
+            action["state"] = "superseded"
+            action["superseded_at"] = _utc_now()
+            action["superseded_reason"] = obsolete
+            actions = dict(protocol.get("actions") or {})
+            actions[action_id] = action
+            protocol["actions"] = actions
+            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            raise FulcrumError(
+                "ACTION_SUPERSEDED",
+                f"the native action is no longer eligible: {obsolete}",
+                exit_code=5,
+            )
         attempts = list(action.get("attempts") or [])
         if action["state"] == "issuing":
             current = attempts[-1] if attempts else {}
@@ -679,6 +693,40 @@ class DesktopProtocolService:
             invoke=value["invoke"],
         )
         return _result(request, value)
+
+    def _obsolete_unissued_action(
+        self,
+        ledger: Ledger,
+        record: LedgerRecord,
+        action: Mapping[str, Any],
+        request: ParsedRequest,
+    ) -> str | None:
+        if action.get("purpose") != "routine_dispatch":
+            return None
+        system = self._system(ledger)
+        if _protocol(system.fc or {}).get("run_control", "paused") == "paused":
+            return "admission is paused"
+        fc = record.fc or {}
+        if fc.get("holds") or fc.get("blocked"):
+            return "work is held or blocked"
+        if str(fc.get("phase")) not in {"ready", "implementation_ready", "backlog"}:
+            return "work is no longer ready"
+        try:
+            manager = ConfigurationManager(request.instance.config_path)
+            document, _ = manager.load()
+            project = manager.effective(document)["projects"].get(
+                str(fc.get("project"))
+            )
+        except FulcrumError:
+            project = None
+        if isinstance(project, Mapping) and project.get("enabled") is False:
+            return "project is disabled"
+        assignment = _protocol(fc).get("assignment")
+        if not isinstance(assignment, Mapping) or assignment.get(
+            "assignment_token"
+        ) != action.get("assignment_token"):
+            return "assignment reservation changed"
+        return None
 
     @coordinated
     def report_action_result(self, request: ParsedRequest) -> CommandResult:
@@ -1061,6 +1109,7 @@ class DesktopProtocolService:
         """Reserve one ready work item and its creation action in one bead update."""
 
         capacity = 4
+        default_project_capacity = 4
         project_capacity: dict[str, int] = {}
         paused_projects: set[str] = set()
         models: Mapping[str, Any] = {}
@@ -1071,6 +1120,7 @@ class DesktopProtocolService:
             config = manager.effective(document)
             policy = config["policy"]
             capacity = int(policy["automatic_capacity"])
+            default_project_capacity = int(policy["default_project_capacity"])
             project_capacity = {
                 str(key): int(value)
                 for key, value in dict(policy.get("project_capacity") or {}).items()
@@ -1085,6 +1135,7 @@ class DesktopProtocolService:
         records = ledger.list_records(limit=0)
         active = 0
         active_by_project: dict[str, int] = {}
+        active_overlap_tags: set[str] = set()
         for record in records:
             assignment = _protocol(record.fc or {}).get("assignment")
             if not isinstance(assignment, Mapping) or assignment.get("state") not in {
@@ -1099,6 +1150,9 @@ class DesktopProtocolService:
             active += 1
             project = str((record.fc or {}).get("project") or "")
             active_by_project[project] = active_by_project.get(project, 0) + 1
+            active_overlap_tags.update(
+                str(value) for value in (record.fc or {}).get("overlap_tags") or []
+            )
         if active >= capacity:
             return None
         candidates: list[LedgerRecord] = []
@@ -1106,7 +1160,6 @@ class DesktopProtocolService:
             fc = record.fc or {}
             protocol = _protocol(fc)
             project = str(fc.get("project") or "")
-            default_project_capacity = capacity
             if project in paused_projects or active_by_project.get(
                 project, 0
             ) >= project_capacity.get(project, default_project_capacity):
@@ -1154,6 +1207,16 @@ class DesktopProtocolService:
             project_config = (
                 projects.get(project) if isinstance(projects, Mapping) else None
             )
+            if (
+                isinstance(project_config, Mapping)
+                and project_config.get("enabled", True) is False
+            ):
+                continue
+            overlap_tags = {
+                str(value) for value in fc.get("overlap_tags") or [] if value
+            }
+            if overlap_tags.intersection(active_overlap_tags):
+                continue
             if (
                 not workspace
                 and requested_role == "weaver"
