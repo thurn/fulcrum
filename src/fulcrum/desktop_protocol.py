@@ -1395,9 +1395,56 @@ class DesktopProtocolService:
             raise FulcrumError(
                 "ASSIGNMENT_MISMATCH", "CI wait token does not match", exit_code=5
             )
-        if not isinstance(candidate, Mapping) or candidate.get(
-            "candidate_id"
-        ) != request.input.get("candidate_id"):
+        supplied_candidate = request.input.get("candidate_id")
+        if (
+            not isinstance(candidate, Mapping)
+            or candidate.get("candidate_id") != supplied_candidate
+        ):
+            delivery = (record.fc or {}).get("delivery")
+            provider_handle = (
+                delivery.get("provider_handle")
+                if isinstance(delivery, Mapping)
+                else None
+            )
+            validation = (
+                delivery.get("validation") if isinstance(delivery, Mapping) else None
+            )
+            source = (
+                delivery.get("source_oid") if isinstance(delivery, Mapping) else None
+            )
+            if (
+                isinstance(provider_handle, str)
+                and provider_handle == supplied_candidate
+                and isinstance(source, str)
+                and isinstance(validation, Mapping)
+            ):
+                candidate = {
+                    "candidate_id": provider_handle,
+                    "source": source,
+                    "provider_run_id": provider_handle,
+                    "state": str(validation.get("state") or "pending"),
+                    "submitted_at": _utc_now(),
+                    "deadline": (self.now() + timedelta(seconds=1800))
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                    "evidence": copy.deepcopy(validation.get("facts") or {}),
+                    "recovered_from_delivery": True,
+                }
+                protocol["candidate"] = candidate
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            else:
+                expected = (
+                    candidate.get("candidate_id")
+                    if isinstance(candidate, Mapping)
+                    else provider_handle
+                )
+                raise FulcrumError(
+                    "CANDIDATE_MISMATCH",
+                    "CI wait candidate does not match",
+                    exit_code=5,
+                    details={"expected_candidate_id": expected},
+                )
+        if not isinstance(candidate, Mapping):
             raise FulcrumError(
                 "CANDIDATE_MISMATCH", "CI wait candidate does not match", exit_code=5
             )

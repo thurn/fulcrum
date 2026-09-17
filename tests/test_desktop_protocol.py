@@ -160,6 +160,48 @@ def test_ci_wait_is_transport_state_and_keeps_assignment_active():
     assert waiting.result["transport_wait"]["kind"] == "ci"
 
 
+def test_ci_wait_recovers_candidate_created_by_finish_validation():
+    work = record(
+        "fc-a",
+        delivery={
+            "source_oid": "abc",
+            "provider_handle": "provider-1",
+            "validation": {"state": "pending", "facts": {"handle": "provider-1"}},
+        },
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-1",
+                "task_id": "warden-1",
+                "role": "warden",
+                "state": "active",
+            }
+        },
+    )
+    ledger = MemoryLedger(work)
+    service = DesktopProtocolService(
+        ledger, now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc)
+    )
+    with patch(
+        "fulcrum.delivery_service.DeliveryService.validation_show",
+        return_value=CommandResult.query({"state": "passed"}),
+    ):
+        completed = service.wait_for_ci_results(
+            mutation(
+                ("ci", "wait"),
+                actor="task:warden-1",
+                arguments={"bead": "fc-a"},
+                payload={
+                    "candidate_id": "provider-1",
+                    "assignment_token": "assignment-1",
+                },
+            )
+        )
+    assert completed.result["status"] == "passed"
+    candidate = (ledger.show("fc-a").fc or {})["desktop"]["candidate"]
+    assert candidate["candidate_id"] == "provider-1"
+    assert candidate["recovered_from_delivery"] is True
+
+
 def test_steward_dispatches_executor_from_retained_worktree_path():
     work = record(
         "fc-a",
@@ -230,6 +272,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_ci_wait_is_transport_state(self):
         test_ci_wait_is_transport_state_and_keeps_assignment_active()
+
+    def test_ci_wait_recovers_finish_candidate(self):
+        test_ci_wait_recovers_candidate_created_by_finish_validation()
 
     def test_dispatch_uses_retained_worktree(self):
         test_steward_dispatches_executor_from_retained_worktree_path()
