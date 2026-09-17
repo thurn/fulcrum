@@ -552,15 +552,15 @@ class DeliveryService:
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "source_sync")
         if facts.synchronization == "complete":
-            from fulcrum.resident_client import exchange
+            from fulcrum.broker import broker_request
             from fulcrum.coordination import external_effect
 
             try:
                 with external_effect():
                     asyncio.run(
-                        exchange(
-                            request.instance.instance_root / "resident.sock",
-                            {"action": "wake", "update": True},
+                        broker_request(
+                            request.instance.instance_root / "broker.sock",
+                            {"type": "signal"},
                         )
                     )
             except Exception:

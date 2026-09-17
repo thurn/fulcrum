@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -148,6 +149,7 @@ class FreshCli:
         return argv, json.dumps(payload, separators=(",", ":"))
 
     async def run(self, name: str, supplied: Mapping[str, Any]) -> Mapping[str, Any]:
+        started = time.monotonic()
         argv, stdin = self.invocation(name, supplied)
         from fulcrum.broker import run_fresh
 
@@ -157,9 +159,10 @@ class FreshCli:
             payload.get("transport_wait") if isinstance(payload, Mapping) else None
         )
         if name not in WAIT_TOOLS or not isinstance(waiting, Mapping):
+            _log(name, started, first)
             return first
         is_ci = waiting.get("kind") == "ci"
-        return await broker_request(
+        result = await broker_request(
             self.instance / "broker.sock",
             {
                 "type": "wait",
@@ -171,6 +174,27 @@ class FreshCli:
                 "remaining_seconds": 1800 if is_ci else 3600,
             },
         )
+        _log(name, started, result)
+        return result
+
+
+def _log(name: str, started: float, result: Mapping[str, Any]) -> None:
+    print(
+        json.dumps(
+            {
+                "event": "mcp_tool_completed",
+                "component": "mcp",
+                "tool": name,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "outcome": result.get("state"),
+                "request_id": result.get("request_id"),
+                "operation_id": result.get("operation_id"),
+            },
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class McpServer:

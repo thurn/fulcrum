@@ -7,6 +7,7 @@ from fulcrum.coordination import coordinated
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -21,7 +22,24 @@ from fulcrum.ledger import (
     random_record_id,
     utc_now,
 )
-from fulcrum.runtime import TaskFacts
+
+
+@dataclass(frozen=True)
+class TaskFacts:
+    id: str
+    title: str | None
+    cwd: str | None
+    project_id: str | None
+    workspace_roots: tuple[str, ...]
+    archived: bool
+    exists: bool
+    loaded: bool
+    runtime_status: str | None
+    active_turn: str | None
+    last_turn: Mapping[str, Any] | None
+    pending_requests: tuple[Mapping[str, Any], ...]
+    observed_at: str
+
 
 ANALYTICS_NAMESPACE = uuid.UUID("58518da5-edaf-42ba-b4ba-308ab18452c8")
 MAX_RESPONSE_RECORDS = 64
@@ -222,18 +240,6 @@ class AnalyticsService:
         roots: set[str] = set()
         for task in tasks:
             facts = _retained_task_facts(task)
-            if facts is None and request.runtime_submit is not None:
-                try:
-                    from fulcrum.runtime_service import _runtime_call
-
-                    facts = _runtime_call(
-                        request,
-                        lambda runtime, thread=_thread_id(task): runtime.inspect_task(
-                            thread
-                        ),
-                    )
-                except Exception as error:
-                    gaps.append({"thread_id": _thread_id(task), "reason": str(error)})
             if facts is None:
                 if not any(item.get("thread_id") == _thread_id(task) for item in gaps):
                     gaps.append(
@@ -282,7 +288,7 @@ class AnalyticsService:
         return _operation_result(operation)
 
     def observe_task(
-        self, ledger: Ledger, task: LedgerRecord, facts: TaskFacts
+        self, ledger: Ledger, task: LedgerRecord, facts: Any
     ) -> LedgerRecord | None:
         if facts.active_turn is not None or facts.last_turn is None:
             return None

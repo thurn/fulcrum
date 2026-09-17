@@ -39,6 +39,17 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _diagnostic_health(instance_root: Path) -> dict[str, Any]:
+    path = instance_root / "diagnostic-health.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            return value
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"state": "healthy", "dropped_events": 0}
+
+
 def _duration_ms(start: Any, finish: Any) -> float | None:
     if not isinstance(start, str) or not isinstance(finish, str):
         return None
@@ -50,34 +61,39 @@ def _duration_ms(start: Any, finish: Any) -> float | None:
     return round((finish_at - start_at).total_seconds() * 1000, 3)
 
 
-def _runtime_component(request: ParsedRequest) -> dict[str, Any]:
-    from fulcrum.runtime_service import RuntimeService
+def _broker_component(request: ParsedRequest) -> dict[str, Any]:
+    import asyncio
+    from fulcrum.broker import broker_request
 
     try:
-        result = RuntimeService().capabilities(request).result
-        facts = dict(result) if isinstance(result, Mapping) else {}
-        available = bool(facts.get("available"))
-        models = facts.get("models")
+        facts = dict(
+            asyncio.run(
+                asyncio.wait_for(
+                    broker_request(request.instance.socket_path, {"type": "health"}),
+                    timeout=1,
+                )
+            )
+        )
+        available = facts.get("state") == "healthy"
         evidence = {
-            "endpoint": facts.get("endpoint"),
+            "socket": str(request.instance.socket_path),
             "available": available,
-            "methods": list(facts.get("methods") or []),
-            "models": sorted(models) if isinstance(models, Mapping) else [],
-            "gaps": list(facts.get("gaps") or []),
+            "pid": facts.get("pid"),
+            "pending": list(facts.get("pending") or []),
+            "completed": facts.get("completed"),
+            "failures": facts.get("failures"),
         }
         state = "healthy" if available else "unavailable"
-    except FulcrumError as error:
-        state = "unsupported" if error.code == "RUNTIME_UNSUPPORTED" else "unavailable"
-        evidence = {"error": error.message}
+    except Exception as error:
+        state = "unavailable"
+        evidence = {"socket": str(request.instance.socket_path), "error": str(error)}
     healthy = state == "healthy"
     return _health(
-        "runtime",
+        "broker",
         state,
         evidence=evidence,
-        affected_commands=[] if healthy else ["enter", "task", "dispatch"],
-        next_commands=(
-            [] if healthy else [["fulcrum", "runtime", "capabilities", "--json"]]
-        ),
+        affected_commands=[] if healthy else ["instruction wait", "ci wait"],
+        next_commands=([] if healthy else [["fulcrum", "service", "status", "--json"]]),
     )
 
 
@@ -310,6 +326,7 @@ class DiagnosticService:
         gaps: list[dict[str, Any]] = []
         capacity: dict[str, Any] | None = None
         publication: dict[str, Any] | None = None
+        desktop: dict[str, Any] | None = None
         work_next_cursor: str | None = None
         start = 0
         all_work_count = 0
@@ -401,6 +418,34 @@ class DiagnosticService:
                     if isinstance(publication_value, Mapping)
                     else None
                 )
+                retained_desktop = control.fc.get("desktop")
+                if isinstance(retained_desktop, Mapping):
+                    actions = retained_desktop.get("actions") or {}
+                    waits = retained_desktop.get("instruction_waits") or {}
+                    desktop = {
+                        "run_control": retained_desktop.get("run_control"),
+                        "setup": retained_desktop.get("setup"),
+                        "standing": retained_desktop.get("standing"),
+                        "marshal_schedule": retained_desktop.get("marshal_schedule"),
+                        "actions": [
+                            {
+                                "action_id": value.get("action_id"),
+                                "tool": value.get("tool"),
+                                "executor": value.get("executor"),
+                                "state": value.get("state"),
+                            }
+                            for value in actions.values()
+                            if isinstance(value, Mapping)
+                            and value.get("state")
+                            in {"pending", "issuing", "uncertain"}
+                        ],
+                        "waits": [
+                            dict(value)
+                            for value in waits.values()
+                            if isinstance(value, Mapping)
+                            and value.get("state") == "waiting"
+                        ],
+                    }
             capacity = _capacity(request, ledger)
         except LedgerFailure as error:
             gaps.append(
@@ -421,6 +466,8 @@ class DiagnosticService:
                 "operations": operations,
                 "capacity": capacity,
                 "publication": publication,
+                "desktop": desktop,
+                "diagnostic_health": _diagnostic_health(request.instance.instance_root),
                 "gaps": gaps,
             }
         )
@@ -509,7 +556,7 @@ class DiagnosticService:
                 next_commands=[["fulcrum", "config", "show", "--json"]],
             )
         )
-        components.append(_runtime_component(request))
+        components.append(_broker_component(request))
         loops = _loop_health(request, config, now)
         return _doctor_result(components, loops)
 
@@ -1136,105 +1183,64 @@ def _doctor_result(
 def _loop_health(
     request: ParsedRequest, config: Mapping[str, Any] | None, now: datetime
 ) -> list[dict[str, Any]]:
-    health_path = request.instance.instance_root / "service-health.json"
-    retained: Mapping[str, Any] = {}
     try:
-        value = json.loads(health_path.read_text(encoding="utf-8"))
-        if isinstance(value, Mapping):
-            retained = value
-    except (OSError, json.JSONDecodeError):
-        pass
-    timing = config.get("timing", {}) if config else {}
-    reconcile = (
-        float(timing.get("reconcile_seconds", 15))
-        if isinstance(timing, Mapping)
-        else 15
-    )
-    external = (
-        float(timing.get("external_timeout_seconds", 30))
-        if isinstance(timing, Mapping)
-        else 30
-    )
-    deadlines = {
-        "intake": (
-            float(timing.get("intake_idle_seconds", 10)) * 2 + external
-            if isinstance(timing, Mapping)
-            else 50
-        ),
-        "event": (
-            float(timing.get("event_silence_seconds", 120))
-            if isinstance(timing, Mapping)
-            else 120
-        ),
-        "reconciliation": reconcile * 2 + external,
-        "runner": reconcile * 2 + external,
-    }
-    result: list[dict[str, Any]] = []
-    for name, deadline in deadlines.items():
-        value = retained.get(name)
-        last = value.get("last_success_at") if isinstance(value, Mapping) else None
-        retained_state = value.get("state") if isinstance(value, Mapping) else None
-        failures = (
-            int(value.get("consecutive_failures", 0))
-            if isinstance(value, Mapping)
-            else 0
+        system = _ledger(request).show("fc-system")
+        desktop = (system.fc or {}).get("desktop") if system else None
+        schedule = (
+            desktop.get("marshal_schedule") if isinstance(desktop, Mapping) else None
         )
-        age: float | None = None
-        if isinstance(last, str):
-            try:
-                age = (
-                    now - datetime.fromisoformat(last.replace("Z", "+00:00"))
-                ).total_seconds()
-            except ValueError:
-                age = None
-        if retained_state == "unavailable" and failures:
-            state = "unavailable"
-        else:
-            state = (
-                "unknown" if age is None else ("stale" if age > deadline else "healthy")
-            )
-        result.append(
+        state = (
+            "healthy"
+            if isinstance(schedule, Mapping) and schedule.get("state") == "succeeded"
+            else "unavailable"
+        )
+        return [
             _health(
-                name,
+                "marshal_heartbeat",
                 state,
-                evidence={
-                    "expected_interval_seconds": (
-                        reconcile if name in {"reconciliation", "runner"} else None
-                    ),
-                    "deadline_seconds": deadline,
-                    "age_seconds": age,
-                    "path": str(health_path),
-                    "consecutive_failures": failures,
-                    "error": (
-                        value.get("error") if isinstance(value, Mapping) else None
-                    ),
-                    "failure_episode": (
-                        value.get("failure_episode")
-                        if isinstance(value, Mapping)
-                        else None
-                    ),
-                    "last_failure_episode": (
-                        value.get("last_failure_episode")
-                        if isinstance(value, Mapping)
-                        else None
-                    ),
-                },
-                affected_commands=(
-                    ["automatic workflow progress"] if state != "healthy" else []
-                ),
+                evidence={"interval_seconds": 900, "schedule": schedule},
+                affected_commands=[] if state == "healthy" else ["scheduled recovery"],
                 next_commands=(
-                    [["fulcrum", "reconcile", "--json"]] if state == "stale" else []
+                    [] if state == "healthy" else [["fulcrum", "bootstrap", "--json"]]
                 ),
-                last_success_at=last if isinstance(last, str) else None,
             )
-        )
-    return result
+        ]
+    except (FulcrumError, LedgerFailure) as error:
+        return [
+            _health(
+                "marshal_heartbeat",
+                "unknown",
+                evidence={"error": str(error)},
+                affected_commands=["scheduled recovery"],
+            )
+        ]
 
 
 def _capacity(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
-    from fulcrum.leadership import capacity_snapshot
-
     manager = ConfigurationManager(request.instance.config_path)
     document, _ = manager.load()
     config = manager.effective(document)
-    return capacity_snapshot(ledger, config)
+    limit = int(config["policy"]["automatic_capacity"])
+    active: list[dict[str, Any]] = []
+    recovery: list[dict[str, Any]] = []
+    for record in ledger.list_records(limit=0):
+        desktop = (record.fc or {}).get("desktop")
+        assignment = desktop.get("assignment") if isinstance(desktop, Mapping) else None
+        if not isinstance(assignment, Mapping) or assignment.get("state") not in {
+            "reserved",
+            "issuing",
+            "active",
+            "uncertain",
+        }:
+            continue
+        row = {"bead": record.id, **dict(assignment)}
+        (recovery if assignment.get("capacity_class") == "recovery" else active).append(
+            row
+        )
+    return {
+        "limit": limit,
+        "used": len(active),
+        "available": max(0, limit - len(active)),
+        "active": active,
+        "recovery_slots": {"limit": 1, "used": len(recovery), "active": recovery},
+    }

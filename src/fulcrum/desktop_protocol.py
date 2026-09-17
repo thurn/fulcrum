@@ -9,7 +9,9 @@ record under the process-shared state lock supplied by :mod:`fulcrum.coordinatio
 from __future__ import annotations
 
 import copy
+import json
 import os
+import socket
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
@@ -57,8 +59,6 @@ def _native_identifier(value: Any, *fields: str) -> str | None:
 def action_marker(
     instance: str, record_id: str, action_id: str, assignment_token: str | None = None
 ) -> str:
-    import json
-
     value: dict[str, str] = {
         "instance": instance,
         "record_id": record_id,
@@ -262,6 +262,15 @@ class DesktopProtocolService:
             )
         except OSError as error:
             DiagnosticLog.report_failure(request.instance.instance_root, error)
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(0.05)
+                client.connect(str(request.instance.instance_root / "broker.sock"))
+                client.sendall(b'{"type":"signal"}\n')
+        except OSError:
+            # The durable transition is authoritative; a lost hint is recovered
+            # by the broker's bounded reevaluation timer.
+            pass
 
     @coordinated
     def register_standing(self, request: ParsedRequest) -> CommandResult:

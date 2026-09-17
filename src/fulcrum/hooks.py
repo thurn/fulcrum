@@ -265,7 +265,13 @@ class HookService:
                     "turn_id": request.input.get("turn_id"),
                     "tool_use_id": request.input.get("tool_use_id"),
                     "outcome": (
-                        "allowed" if response.get("continue", True) else "rejected"
+                        "rejected"
+                        if (
+                            isinstance(response.get("hookSpecificOutput"), Mapping)
+                            and response["hookSpecificOutput"].get("permissionDecision")
+                            == "deny"
+                        )
+                        else "allowed"
                     ),
                 }
             )

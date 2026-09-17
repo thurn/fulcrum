@@ -899,6 +899,9 @@ class WorkService:
                 "discovered_from",
                 "context",
                 "intake",
+                "report_key",
+                "implementation_ready",
+                "dependencies",
             },
         )
         for field in ("title", "problem", "observed_evidence", "required_change"):
@@ -909,8 +912,60 @@ class WorkService:
             isinstance(item, str) and item.strip() for item in acceptance
         ):
             raise _invalid("acceptance_checks", "must be an array of nonempty strings")
+        report_key = payload.get("report_key")
+        if not isinstance(report_key, str) or not report_key.strip():
+            raise _invalid("report_key", "is required")
+        dependencies = payload.get("dependencies", [])
+        if not isinstance(dependencies, list) or not all(
+            isinstance(item, str) and item for item in dependencies
+        ):
+            raise _invalid("dependencies", "must be an array of bead IDs")
         project = _project_from_request(request, payload)
         ledger = _ledger(request)
+        missing_dependencies = sorted(
+            identifier for identifier in dependencies if ledger.show(identifier) is None
+        )
+        if missing_dependencies:
+            raise _invalid(
+                "dependencies",
+                f"unknown dependency targets: {', '.join(missing_dependencies)}",
+            )
+        accepted = {
+            "title": payload["title"],
+            "problem": payload["problem"],
+            "observed_evidence": payload["observed_evidence"],
+            "required_change": payload["required_change"],
+            "acceptance_checks": acceptance,
+            "project": project,
+            "discovered_from": payload.get("discovered_from"),
+            "context": payload.get("context", []),
+            "intake": payload.get("intake"),
+            "implementation_ready": bool(payload.get("implementation_ready")),
+            "dependencies": dependencies,
+        }
+        for existing in ledger.list_records(kind="work", limit=0):
+            report = (existing.fc or {}).get("report")
+            if (
+                not isinstance(report, Mapping)
+                or report.get("report_key") != report_key
+            ):
+                continue
+            if report.get("accepted_input") != accepted:
+                raise FulcrumError(
+                    "REQUEST_CONFLICT",
+                    "report_key was already used with different input",
+                    exit_code=5,
+                )
+            return CommandResult(
+                ok=True,
+                state=CommandState.COMPLETED,
+                request_id=request.request_id,
+                result={
+                    "bead_id": existing.id,
+                    "filing_state": "replayed",
+                    "work": work_view(ledger, existing),
+                },
+            )
         root_id = _unique_id(ledger)
         operation, reused = ledger.create_operation(
             request,
@@ -933,7 +988,9 @@ class WorkService:
                 "title": payload["title"],
                 "outcome": payload["required_change"],
                 "acceptance": acceptance,
-                "requested_role": "weaver",
+                "requested_role": (
+                    "executor" if payload.get("implementation_ready") else "weaver"
+                ),
                 "priority": 2,
                 "context": payload.get("context", []),
                 "intake": payload.get("intake"),
@@ -957,10 +1014,16 @@ class WorkService:
         fc = dict(record.fc or {})
         fc["caused_by"] = payload.get("discovered_from")
         fc["report"] = {
+            "report_key": report_key,
+            "accepted_input": accepted,
             "problem": payload["problem"],
             "observed_evidence": payload["observed_evidence"],
             "reporter_task": request.thread_id,
         }
+        if payload.get("implementation_ready"):
+            fc["phase"] = "ready"
+        if dependencies:
+            _reconcile_dependencies(ledger, root_id, dependencies)
         record = ledger.update_fc(root_id, fc)
         operation = ledger.update_operation(
             operation,
@@ -971,7 +1034,11 @@ class WorkService:
                 "filing_state": "accepted",
                 "work": work_view(ledger, record),
             },
-            next_action="The report is independently queued for Marshal grooming.",
+            next_action=(
+                "Steward may select this implementation-ready report."
+                if payload.get("implementation_ready")
+                else "Weaver preparation is required before implementation."
+            ),
         )
         return _operation_result(operation)
 

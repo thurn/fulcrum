@@ -36,7 +36,6 @@ from fulcrum.work import (
 TERMINAL_OPERATION_STATES = {"completed", "failed", "uncertain", "cancelled"}
 SUCCESSFUL_CHILD_OUTCOMES = {"answered", "delivered", "findings"}
 ACTIVE_CHILD_PHASES = {"working", "reviewing", "handoff", "delivering", "recovering"}
-REQUIRED_REVIEW_PERSPECTIVES = ("cold_reader", "requirements")
 
 
 class PlanService:
@@ -62,24 +61,11 @@ class PlanService:
         fc = dict(current.fc)
         plan = dict(fc.get("plan") or {})
         previous = plan.get("draft")
-        reviews = dict(plan.get("reviews") or {})
-        stale_reviews: list[str] = []
         if previous != draft:
-            for perspective, value in tuple(reviews.items()):
-                if not isinstance(value, Mapping):
-                    continue
-                row = dict(value)
-                if row.get("reviewed_draft") != draft:
-                    row["state"] = "stale"
-                    row["stale_at"] = utc_now()
-                    row["stale_by"] = operation.id
-                    reviews[perspective] = row
-                    stale_reviews.append(str(perspective))
             plan["approval_operation"] = None
             plan["approved_scope"] = None
         plan["draft"] = draft
         plan["validation"] = draft["validation"]
-        plan["reviews"] = reviews
         plan.setdefault("children_by_key", {})
         plan.setdefault("approved_keys", [])
         plan.setdefault("published_scope", None)
@@ -101,7 +87,6 @@ class PlanService:
             result={
                 "bead_id": root.id,
                 "draft": draft,
-                "stale_reviews": stale_reviews,
                 "graph_changed": False,
                 "publication_changed": False,
             },
@@ -125,31 +110,23 @@ class PlanService:
         reason = request.input.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise _invalid("reason", "plan approval requires a nonempty reason")
-        resolutions = _string_mapping(
-            request.input.get("resolutions", {}), "resolutions"
-        )
-        waivers = _waivers(request.input.get("waivers", []), approved_by)
-        reviews = _approval_reviews(root, draft, resolutions, waivers)
         approved_scope = {
             "draft": draft,
-            "reviews": reviews,
-            "resolutions": resolutions,
-            "waivers": waivers,
+            "subagent_review": request.input.get("subagent_review"),
         }
         operation, reused = ledger.create_operation(
             request,
             bead_id=root.id,
             owner=approved_by,
             planned={"approved_scope": approved_scope, "approved_by": approved_by},
-            next_action="Retain approval against the exact current draft and review evidence.",
+            next_action="Retain approval against the exact current draft.",
         )
         if reused and operation.operation.get("state") in TERMINAL_OPERATION_STATES:
             return _operation_result(operation)
         approval_evidence = {
             "operation_id": operation.id,
             "reason": reason.strip(),
-            "resolutions": resolutions,
-            "waivers": waivers,
+            "subagent_review": request.input.get("subagent_review"),
         }
         current = ledger.show(root.id) or root
         assert current.fc
@@ -1018,7 +995,6 @@ def _verify_publication_input(
         expected.update(
             {
                 "text": draft["text"],
-                "reviews": approved_scope.get("reviews"),
                 "approved_by": plan.get("approved_by"),
                 "approval_evidence": plan.get("approval_evidence"),
             }
@@ -1035,54 +1011,6 @@ def _verify_publication_input(
             exit_code=5,
             details={"conflicts": conflicts},
         )
-
-
-def _approval_reviews(
-    root: LedgerRecord,
-    draft: Mapping[str, Any],
-    resolutions: Mapping[str, str],
-    waivers: Sequence[Mapping[str, str]],
-) -> dict[str, Any]:
-    plan = _plan(root)
-    retained = dict(plan.get("reviews") or {})
-    substantial = (root.fc or {}).get("size") in {"medium", "large"} or len(
-        draft["tasks"]
-    ) > 1
-    required = REQUIRED_REVIEW_PERSPECTIVES if substantial else ()
-    waiver_by_perspective = {str(row["perspective"]): dict(row) for row in waivers}
-    result: dict[str, Any] = {}
-    missing: list[str] = []
-    unresolved: list[str] = []
-    for perspective in REQUIRED_REVIEW_PERSPECTIVES:
-        row = retained.get(perspective)
-        if (
-            isinstance(row, Mapping)
-            and row.get("state") == "completed"
-            and row.get("reviewed_draft") == draft
-        ):
-            findings = (
-                row.get("findings") if isinstance(row.get("findings"), list) else []
-            )
-            review_operation = str(row.get("review_operation") or "")
-            if findings and review_operation not in resolutions:
-                unresolved.append(review_operation or perspective)
-            result[perspective] = dict(row)
-        elif perspective in waiver_by_perspective:
-            result[perspective] = {
-                "state": "waived",
-                "reviewed_draft": draft,
-                "waiver": waiver_by_perspective[perspective],
-            }
-        elif perspective in required:
-            missing.append(perspective)
-    if missing or unresolved:
-        raise FulcrumError(
-            "STALE_REVIEW",
-            "substantial plan approval requires current reviews or explicit waivers and resolved findings",
-            exit_code=5,
-            details={"missing": missing, "unresolved": unresolved},
-        )
-    return result
 
 
 def _changed_keys(
@@ -1364,7 +1292,6 @@ def _plan_view(ledger: Ledger, root: LedgerRecord) -> dict[str, Any]:
         "owner": (root.fc or {}).get("owner"),
         "draft": plan.get("draft"),
         "validation": plan.get("validation"),
-        "reviews": plan.get("reviews", {}),
         "approval_operation": plan.get("approval_operation"),
         "approved_by": plan.get("approved_by"),
         "approval_evidence": plan.get("approval_evidence"),
@@ -1493,43 +1420,6 @@ def _dispositions(value: Any) -> dict[str, dict[str, str]]:
             "reason": str(row["reason"]).strip(),
         }
     return result
-
-
-def _waivers(value: Any, actor: str) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        raise _invalid("waivers", "must be an array")
-    result: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for row in value:
-        if (
-            not isinstance(row, Mapping)
-            or set(row) != {"perspective", "reason"}
-            or row.get("perspective") not in REQUIRED_REVIEW_PERSPECTIVES
-            or not isinstance(row.get("reason"), str)
-            or not str(row["reason"]).strip()
-        ):
-            raise _invalid("waivers", "entries require perspective and nonempty reason")
-        perspective = str(row["perspective"])
-        if perspective in seen:
-            raise _invalid("waivers", "perspectives must be unique")
-        seen.add(perspective)
-        result.append(
-            {
-                "perspective": perspective,
-                "reason": str(row["reason"]).strip(),
-                "actor": actor,
-            }
-        )
-    return result
-
-
-def _string_mapping(value: Any, field: str) -> dict[str, str]:
-    if not isinstance(value, Mapping) or not all(
-        isinstance(key, str) and isinstance(item, str) and item.strip()
-        for key, item in value.items()
-    ):
-        raise _invalid(field, "must map operation IDs to nonempty text")
-    return {str(key): str(item).strip() for key, item in value.items()}
 
 
 def _root(ledger: Ledger, identifier: str) -> LedgerRecord:

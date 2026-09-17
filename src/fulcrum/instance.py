@@ -98,7 +98,7 @@ def resolve_instance(
         instance_root=instance_root,
         config_path=config_path,
         brain_root=brain_root,
-        socket_path=instance_root / "resident.sock",
+        socket_path=instance_root / "broker.sock",
         lock_path=lock_path,
         explicit_selection=explicit,
     )

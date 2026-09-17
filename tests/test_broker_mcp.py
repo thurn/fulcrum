@@ -10,11 +10,13 @@ from fulcrum.mcp_server import McpServer, tool_descriptions
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_wait_returns_only_terminal_result(self):
         calls = 0
+        policy_revision = "old"
 
         async def runner(argv, stdin):
-            nonlocal calls
+            nonlocal calls, policy_revision
             calls += 1
             if calls == 1:
+                policy_revision = "new"
                 return {
                     "ok": True,
                     "state": "running",
@@ -23,7 +25,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             return {
                 "ok": True,
                 "state": "completed",
-                "result": {"kind": "action"},
+                "result": {"kind": "action", "policy_revision": policy_revision},
             }
 
         broker = PendingBroker(runner)
@@ -38,6 +40,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(result["result"]["kind"], "action")
+        self.assertEqual(result["result"]["policy_revision"], "new")
         self.assertEqual(calls, 2)
 
 

@@ -13,6 +13,7 @@ import fcntl
 import json
 import os
 import signal
+import sys
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -21,6 +22,17 @@ from pathlib import Path
 from typing import Any
 
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
+
+
+def _log(event: str, **fields: Any) -> None:
+    print(
+        json.dumps(
+            {"event": event, "component": "broker", "pid": os.getpid(), **fields},
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -77,11 +89,19 @@ class PendingBroker:
         if evaluation.wait_id in self._active:
             raise RuntimeError(f"wait {evaluation.wait_id} already has a connection")
         self._active[evaluation.wait_id] = evaluation
+        started = time.monotonic()
+        _log("broker_wait_started", wait_id=evaluation.wait_id, kind=evaluation.kind)
         try:
             while True:
                 result = await self.runner(evaluation.argv, evaluation.stdin)
                 if not _is_transport_wait(result):
                     self.completed += 1
+                    _log(
+                        "broker_wait_completed",
+                        wait_id=evaluation.wait_id,
+                        kind=evaluation.kind,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
                     return result
                 remaining = evaluation.deadline_monotonic - time.monotonic()
                 if remaining <= 0:
@@ -91,6 +111,13 @@ class PendingBroker:
                             f"fresh policy did not settle expired {evaluation.kind} wait"
                         )
                     self.completed += 1
+                    _log(
+                        "broker_wait_completed",
+                        wait_id=evaluation.wait_id,
+                        kind=evaluation.kind,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                        deadline=True,
+                    )
                     return result
                 try:
                     await asyncio.wait_for(
@@ -102,6 +129,12 @@ class PendingBroker:
                     pass
         except BaseException:
             self.failures += 1
+            _log(
+                "broker_wait_failed",
+                wait_id=evaluation.wait_id,
+                kind=evaluation.kind,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             raise
         finally:
             self._active.pop(evaluation.wait_id, None)
@@ -157,6 +190,7 @@ class BrokerServer:
             )
             self._server = server
             os.chmod(self.socket_path, 0o600)
+            _log("broker_started", socket=str(self.socket_path))
             async with server:
                 await server.serve_forever()
         finally:

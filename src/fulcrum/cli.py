@@ -9,7 +9,6 @@ from __future__ import annotations
 from fulcrum.timing import timed
 
 import argparse
-import asyncio
 import json
 import os
 import sys
@@ -26,20 +25,14 @@ from typing import Any, NoReturn, Sequence
 from fulcrum.application import default_application
 from fulcrum.contracts import (
     ActorContext,
-    CommandResult,
     FulcrumError,
     ParsedRequest,
 )
 from fulcrum.diagnostics import DiagnosticLog
-from fulcrum.instance import WriterLock, resolve_instance
-from fulcrum.ipc import (
-    ControllerTimedOut,
-    ControllerUnavailable,
-    MAX_MESSAGE_BYTES,
-    request_sync,
-)
+from fulcrum.instance import resolve_instance
 from fulcrum.ledger import operation_id
-from fulcrum.supervision import ControllerSupervisor
+
+MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 ROLES = (
     "vizier",
@@ -58,23 +51,9 @@ READ_ONLY_COMMANDS = {
     ("project", "list"),
     ("project", "show"),
     ("service", "status"),
-    ("runtime", "capabilities"),
-    ("runtime", "status"),
-    ("context",),
-    ("hook", "context"),
     ("work", "show"),
     ("work", "list"),
     ("work", "children"),
-    ("leader", "show"),
-    ("marshal", "brief"),
-    ("backlog", "list"),
-    ("human", "list"),
-    ("task", "list"),
-    ("task", "show"),
-    ("task", "output"),
-    ("task", "wait"),
-    ("task", "requests"),
-    ("task", "terminals"),
     ("worktree", "inspect"),
     ("validation", "show"),
     ("promotion", "show"),
@@ -86,10 +65,7 @@ READ_ONLY_COMMANDS = {
     ("logs",),
     ("trace",),
     ("wait",),
-    ("recover", "inspect"),
     ("plan", "show"),
-    ("memory", "list"),
-    ("memory", "show"),
     ("ledger", "status"),
     ("usage",),
     ("cost",),
@@ -97,20 +73,13 @@ READ_ONLY_COMMANDS = {
     ("rates", "show"),
 }
 BROKEN_CONFIG_COMMANDS = {
-    ("runtime", "launch-desktop"),
-    ("setup",),
     ("service", "status"),
-    ("recover", "inspect"),
-    ("recover", "repair"),
 }
 LOCAL_COMMANDS = {
-    ("runtime", "launch-desktop"),
-    ("setup",),
     ("service", "start"),
     ("service", "stop"),
     ("service", "restart"),
     ("service", "status"),
-    ("service", "update"),
     ("reset",),
 }
 
@@ -139,26 +108,12 @@ COMMANDS = (
     CommandDefinition(("service", "stop"), "stop the controller service"),
     CommandDefinition(("service", "restart"), "restart the controller service"),
     CommandDefinition(("service", "status"), "inspect controller service artifacts"),
-    CommandDefinition(("service", "update"), "build and activate installed source"),
-    CommandDefinition(("serve",), "run the foreground controller"),
-    CommandDefinition(("reconcile",), "run one bounded reconciliation pass"),
     CommandDefinition(("skills", "reconcile"), "repair owned role skill links"),
-    CommandDefinition(
-        ("runtime", "launch-desktop"), "launch Desktop on the configured runtime"
-    ),
-    CommandDefinition(
-        ("runtime", "capabilities"), "inspect native runtime capabilities"
-    ),
-    CommandDefinition(("runtime", "status"), "inspect native runtime state"),
-    CommandDefinition(("enter",), "enter one of the eight Fulcrum roles"),
-    CommandDefinition(("context",), "show current work or role context"),
-    CommandDefinition(("hook", "context"), "provide compact managed-task context"),
     CommandDefinition(("work", "create"), "create a work root or graph"),
     CommandDefinition(("work", "show"), "show work"),
     CommandDefinition(("work", "list"), "list work"),
     CommandDefinition(("work", "adopt"), "adopt existing work"),
     CommandDefinition(("work", "update"), "update work scope"),
-    CommandDefinition(("work", "transfer"), "transfer work ownership"),
     CommandDefinition(("work", "children"), "show work children"),
     CommandDefinition(("work", "dependencies"), "change work dependencies"),
     CommandDefinition(("work", "close"), "close work with a disposition"),
@@ -166,34 +121,6 @@ COMMANDS = (
     CommandDefinition(("finish",), "finish the current role responsibility"),
     CommandDefinition(("progress",), "record substantive progress"),
     CommandDefinition(("report",), "file an independently attributed follow-up"),
-    CommandDefinition(("leader", "show"), "show standing leadership"),
-    CommandDefinition(("leader", "replace"), "replace a standing leader"),
-    CommandDefinition(("marshal", "brief"), "preview a decision-focused brief"),
-    CommandDefinition(("marshal", "request"), "request a recorded Marshal decision"),
-    CommandDefinition(("marshal", "decide"), "apply a retained Marshal decision"),
-    CommandDefinition(("backlog", "list"), "list actionable and waiting work"),
-    CommandDefinition(("dispatch",), "authorize or execute admitted work"),
-    CommandDefinition(("human", "list"), "list irreducible human blockers"),
-    CommandDefinition(("human", "resolve"), "resolve one human blocker"),
-    CommandDefinition(("task", "list"), "list managed native tasks"),
-    CommandDefinition(("task", "show"), "show a managed native task"),
-    CommandDefinition(("task", "start"), "create and start a native task"),
-    CommandDefinition(("task", "send"), "send a managed native turn"),
-    CommandDefinition(("task", "output"), "read bounded native output"),
-    CommandDefinition(("task", "wait"), "wait for an observed native condition"),
-    CommandDefinition(("task", "requests"), "list pending native requests"),
-    CommandDefinition(("task", "respond"), "respond to one native request"),
-    CommandDefinition(("task", "interrupt"), "interrupt a native turn"),
-    CommandDefinition(("task", "terminals"), "list a task's owned terminals"),
-    CommandDefinition(
-        ("task", "terminal", "stop"), "stop selected owned terminal resources"
-    ),
-    CommandDefinition(("task", "release"), "release Fulcrum's native subscription"),
-    CommandDefinition(("task", "archive"), "archive a managed native task"),
-    CommandDefinition(
-        ("task", "unarchive"), "unarchive and suppress automatic rearchive"
-    ),
-    CommandDefinition(("task", "delete"), "delete an exact owned native task"),
     CommandDefinition(("worktree", "prepare"), "prepare a managed delivery workspace"),
     CommandDefinition(("worktree", "inspect"), "inspect a managed delivery workspace"),
     CommandDefinition(("worktree", "cleanup"), "clean a settled managed workspace"),
@@ -217,16 +144,8 @@ COMMANDS = (
     CommandDefinition(("logs", "prune"), "prune logs within retention policy"),
     CommandDefinition(("trace",), "trace durable work and operation evidence"),
     CommandDefinition(("wait",), "wait for a work observation"),
-    CommandDefinition(("recover", "inspect"), "inspect an exact repair scope"),
-    CommandDefinition(("recover", "takeover"), "fence and take over a repair scope"),
-    CommandDefinition(("recover", "repair"), "perform typed scoped repair actions"),
-    CommandDefinition(("recover", "release"), "release a settled repair fence"),
     CommandDefinition(("plan", "draft"), "save a complete unpublished plan draft"),
     CommandDefinition(("plan", "show"), "show retained plan facts"),
-    CommandDefinition(("plan", "review", "start"), "start an independent review task"),
-    CommandDefinition(
-        ("plan", "review", "finish"), "submit typed independent findings"
-    ),
     CommandDefinition(("plan", "approve"), "approve retained plan scope"),
     CommandDefinition(("plan", "publish"), "publish approved plan scope"),
     CommandDefinition(("plan", "refine"), "refine approved plan scope"),
@@ -234,10 +153,6 @@ COMMANDS = (
     CommandDefinition(
         ("plan", "complete"), "mechanically inspect and close a plan root"
     ),
-    CommandDefinition(("memory", "list"), "list curated memory"),
-    CommandDefinition(("memory", "show"), "show curated memory"),
-    CommandDefinition(("memory", "set"), "set curated memory"),
-    CommandDefinition(("knowledge", "publish"), "publish selected knowledge documents"),
     CommandDefinition(("ledger", "sync"), "flush native Beads history"),
     CommandDefinition(("ledger", "status"), "show native publication status"),
     CommandDefinition(("usage",), "query unique managed native usage"),
@@ -246,7 +161,6 @@ COMMANDS = (
     CommandDefinition(("rates", "list"), "list retained rate cards"),
     CommandDefinition(("rates", "show"), "show a retained rate card"),
     CommandDefinition(("rates", "add"), "add an immutable documented rate card"),
-    CommandDefinition(("fleet", "replace"), "replace a scoped managed task fleet"),
     CommandDefinition(("reset",), "perform an explicitly authorized hard reset"),
     CommandDefinition(("register", "standing"), "register a standing native task"),
     CommandDefinition(("action", "queue"), "queue one exact native action"),
@@ -945,7 +859,7 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     values = vars(namespace)
     command = tuple(values["_command_path"])
     payload = _payload(namespace, command)
-    mutation = command not in READ_ONLY_COMMANDS and command != ("serve",)
+    mutation = command not in READ_ONLY_COMMANDS
     timeout = float(values.get("timeout", 30.0))
     if timeout <= 0:
         raise FulcrumError.invalid("INVALID_TIMEOUT", "timeout must be positive")
@@ -1015,40 +929,8 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     )
 
 
-def _serve(request: ParsedRequest) -> CommandResult:
-    if request.arguments.get("once"):
-        return default_application().dispatch(replace(request, command=("reconcile",)))
-    from fulcrum.configuration import ConfigurationManager
-    from fulcrum.activation import write_json
-
-    manager = ConfigurationManager(request.instance.config_path)
-    document, _ = manager.load()
-    config = manager.effective(document)
-    write_json(
-        request.instance.instance_root / "resident.json",
-        {
-            "endpoint": config["runtime"]["endpoint"],
-            "config": str(request.instance.config_path),
-            "source": dict(config["source"]),
-            "reconcile_seconds": float(config["timing"]["reconcile_seconds"]),
-        },
-    )
-    # Exec discards all imported business logic from the resident's interpreter.
-    from fulcrum.bootstrap import launch_arguments
-
-    arguments = launch_arguments(
-        {"python": sys.executable, "source": str(Path(__file__).resolve().parents[2])},
-        "fulcrum.resident",
-        [str(request.instance.instance_root)],
-    )
-    os.execv(sys.executable, arguments)
-    raise AssertionError("exec returned")
-
-
 @timed("cli._execute")
 def _execute(request: ParsedRequest) -> dict[str, Any]:
-    if request.command == ("serve",):
-        return _serve(request).to_dict()
     if request.command in READ_ONLY_COMMANDS or request.command in LOCAL_COMMANDS:
         return default_application().dispatch(request).to_dict()
     environment = dict(os.environ)

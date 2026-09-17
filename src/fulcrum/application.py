@@ -13,7 +13,6 @@ from typing import Any
 from fulcrum.analytics import AnalyticsService
 from fulcrum.completion import CompletionService
 from fulcrum.configuration import ConfigurationService, ProjectService
-from fulcrum.continuity import ContinuityService
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 from fulcrum.diagnostics import DiagnosticLog, DiagnosticService
 from fulcrum.delivery_service import DeliveryService
@@ -27,19 +26,12 @@ from fulcrum.ledger import (
     OperationService,
     operation_view,
 )
-from fulcrum.leadership import LeadershipService
-from fulcrum.knowledge import KnowledgeService, MemoryService
+from fulcrum.knowledge import KnowledgeService
 from fulcrum.hooks import HookService
 from fulcrum.plans import PlanService
 from fulcrum.publication import LedgerPublicationService
-from fulcrum.recovery_service import HumanService, RecoveryService
 from fulcrum.reset import ResetService
-from fulcrum.installation_service import ServiceService, SkillsService
-from fulcrum.runtime_service import RuntimeService, TaskService
-from fulcrum.source_refresh import SourceRefreshService
-from fulcrum.reviews import ReviewService
-from fulcrum.roles import RoleService
-from fulcrum.supervision import ReconciliationService
+from fulcrum.desktop_services import ServiceService, SkillsService
 from fulcrum.work import WorkService
 
 Handler = Callable[[ParsedRequest], CommandResult]
@@ -61,7 +53,6 @@ class Application:
         self.register(("service", "stop"), services.stop)
         self.register(("service", "restart"), services.restart)
         self.register(("service", "status"), services.status)
-        self.register(("service", "update"), SourceRefreshService().update)
         self.register(("reset",), ResetService().hard_reset)
         self.register(("skills", "reconcile"), SkillsService().reconcile)
         configuration = ConfigurationService()
@@ -77,26 +68,6 @@ class Application:
         self.register(("project", "enable"), projects.enable)
         self.register(("project", "disable"), projects.disable)
         self.register(("project", "remove"), projects.remove)
-        runtime = RuntimeService()
-        self.register(("runtime", "launch-desktop"), runtime.launch_desktop)
-        self.register(("runtime", "capabilities"), runtime.capabilities)
-        self.register(("runtime", "status"), runtime.status)
-        tasks = TaskService()
-        self.register(("task", "list"), tasks.list)
-        self.register(("task", "show"), tasks.show)
-        self.register(("task", "start"), tasks.start)
-        self.register(("task", "send"), tasks.send)
-        self.register(("task", "output"), tasks.output)
-        self.register(("task", "wait"), tasks.wait)
-        self.register(("task", "interrupt"), tasks.interrupt)
-        self.register(("task", "requests"), tasks.requests)
-        self.register(("task", "respond"), tasks.respond)
-        self.register(("task", "terminals"), tasks.terminals)
-        self.register(("task", "terminal", "stop"), tasks.terminal_stop)
-        self.register(("task", "release"), tasks.release)
-        self.register(("task", "archive"), tasks.archive)
-        self.register(("task", "unarchive"), tasks.unarchive)
-        self.register(("task", "delete"), tasks.delete)
         delivery = DeliveryService()
         self.register(("worktree", "prepare"), delivery.worktree_prepare)
         self.register(("worktree", "inspect"), delivery.worktree_inspect)
@@ -108,23 +79,6 @@ class Application:
         self.register(("promotion", "start"), delivery.promotion_start)
         self.register(("promotion", "show"), delivery.promotion_show)
         self.register(("source", "sync"), delivery.source_sync)
-        roles = RoleService()
-        self.register(("enter",), roles.enter)
-        self.register(("context",), roles.context)
-        self.register(("hook", "context"), roles.hook_context)
-        leadership = LeadershipService()
-        self.register(("leader", "show"), leadership.leader_show)
-        continuity = ContinuityService()
-        self.register(("leader", "replace"), continuity.leader_replace)
-        self.register(("fleet", "replace"), continuity.fleet_replace)
-        self.register(("marshal", "brief"), leadership.marshal_brief)
-        self.register(("marshal", "request"), leadership.marshal_request)
-        self.register(("marshal", "decide"), leadership.marshal_decide)
-        self.register(("backlog", "list"), leadership.backlog_list)
-        self.register(("dispatch",), leadership.dispatch)
-        reviews = ReviewService()
-        self.register(("plan", "review", "start"), reviews.start)
-        self.register(("plan", "review", "finish"), reviews.finish)
         plans = PlanService()
         self.register(("plan", "draft"), plans.draft)
         self.register(("plan", "show"), plans.show)
@@ -133,12 +87,7 @@ class Application:
         self.register(("plan", "refine"), plans.refine)
         self.register(("plan", "activate"), plans.activate)
         self.register(("plan", "complete"), plans.complete)
-        memory = MemoryService()
-        self.register(("memory", "list"), memory.list)
-        self.register(("memory", "show"), memory.show)
-        self.register(("memory", "set"), memory.set)
         knowledge = KnowledgeService()
-        self.register(("knowledge", "publish"), knowledge.publish)
         self.register(("config", "sync"), knowledge.config_sync)
         publication = LedgerPublicationService()
         self.register(("ledger", "sync"), publication.sync)
@@ -150,14 +99,6 @@ class Application:
         self.register(("rates", "show"), analytics.rates_show)
         self.register(("rates", "add"), analytics.rates_add)
         self.register(("usage", "reconcile"), analytics.reconcile)
-        recovery = RecoveryService(self)
-        self.register(("recover", "inspect"), recovery.inspect)
-        self.register(("recover", "takeover"), recovery.takeover)
-        self.register(("recover", "repair"), recovery.repair)
-        self.register(("recover", "release"), recovery.release)
-        human = HumanService()
-        self.register(("human", "list"), human.list)
-        self.register(("human", "resolve"), human.resolve)
         work = WorkService()
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)
@@ -165,7 +106,6 @@ class Application:
         self.register(("work", "children"), work.children)
         self.register(("work", "adopt"), work.adopt)
         self.register(("work", "update"), work.update)
-        self.register(("work", "transfer"), work.transfer)
         self.register(("work", "dependencies"), work.dependencies)
         self.register(("work", "close"), work.close)
         self.register(("work", "reopen"), work.reopen)
@@ -177,7 +117,6 @@ class Application:
         self.register(("operation", "wait"), self._operation_wait)
         self.register(("operation", "cancel"), self._operation_cancel)
         self.register(("operation", "reconcile"), self._operation_reconcile)
-        self.register(("reconcile",), ReconciliationService(self).reconcile)
         desktop = DesktopProtocolService()
         self.register(("register", "standing"), desktop.register_standing)
         self.register(("action", "queue"), desktop.queue_action)

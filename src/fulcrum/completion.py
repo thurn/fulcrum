@@ -505,7 +505,7 @@ class CompletionService:
                 "implementation_notes": list(implementation_notes),
                 "owner": owner,
             },
-            next_action="Return implementation-ready scope for Marshal review; do not dispatch.",
+            next_action="Commit implementation-ready scope for automatic Steward selection.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
@@ -524,7 +524,7 @@ class CompletionService:
         }
         fc["owner"] = owner
         fc["role"] = "marshal" if owner != "HUMAN" else None
-        fc["phase"] = "backlog"
+        fc["phase"] = "ready"
         fc["dispatch"] = None
         fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")
         fc["last_transition"] = operation.id
@@ -1169,9 +1169,7 @@ def _finish_replay(request: ParsedRequest, ledger: Ledger) -> CommandResult | No
 
 
 def _scope_next_action(owner: str) -> str:
-    if owner == "HUMAN":
-        return "HUMAN must arrange Marshal review; no standing Marshal is registered. Implementation is not authorized."
-    return "Marshal must review the prepared scope and authorize implementation. Reconciliation discovers this backlog; notification is not yet confirmed."
+    return "Steward may select this implementation-ready scope when capacity permits."
 
 
 def _complete_scope_return(
@@ -1186,15 +1184,11 @@ def _complete_scope_return(
             "bead_id": work.id,
             "accepted": True,
             "owner": owner,
-            "phase": "backlog",
-            "scope_state": (
-                "awaiting_marshal_review" if owner != "HUMAN" else "awaiting_human"
-            ),
-            "attention": (
-                "reconciliation_discovery" if owner != "HUMAN" else "human_required"
-            ),
-            "implementation_authorized": False,
-            "next_actor": "marshal" if owner != "HUMAN" else "HUMAN",
+            "phase": "ready",
+            "scope_state": "implementation_ready",
+            "attention": "steward_selection",
+            "implementation_authorized": True,
+            "next_actor": "steward",
         },
         next_action=_scope_next_action(owner),
     )
@@ -1477,14 +1471,14 @@ def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -
 
 
 def _wake_controller(request: ParsedRequest) -> None:
-    from fulcrum.resident_client import exchange
+    from fulcrum.broker import broker_request
 
     try:
         with external_effect():
             asyncio.run(
-                exchange(
-                    request.instance.instance_root / "resident.sock",
-                    {"action": "wake", "timeout": 0.25},
+                broker_request(
+                    request.instance.instance_root / "broker.sock",
+                    {"type": "signal"},
                 )
             )
     except Exception:
