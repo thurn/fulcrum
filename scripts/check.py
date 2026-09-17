@@ -64,6 +64,7 @@ def main() -> int:
                 "tests",
                 "scripts/check.py",
                 "scripts/run-tests.py",
+                "scripts/profile-operation",
             ],
         ),
         (

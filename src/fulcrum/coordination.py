@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-from fulcrum.timing import record_timing
+from fulcrum.timing import record_timing, span, stage_name
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -83,7 +83,7 @@ class ProcessLock:
                 ) from error
             raise
         held[self.key] = [fd, 1]
-        record_timing("lock.wait", started)
+        record_timing(stage_name("lock.wait", _lock_kind(self.path)), started)
         return self
 
     def __exit__(self, *args: Any) -> None:
@@ -188,46 +188,50 @@ def coordinated(function: Any) -> Any:
 
     @functools.wraps(function)
     def invoke(self: Any, request: Any, *args: Any, **kwargs: Any) -> Any:
-        root = request.instance.brain_root
-        if root is None or request.request_id is None:
-            return function(self, request, *args, **kwargs)
-        if (root / ".fulcrum-locks/migration.json").exists():
-            raise FulcrumError(
-                "MAINTENANCE_IN_PROGRESS",
-                "state migration has fenced admission",
-                exit_code=3,
-                retryable=True,
-            )
-        with (
-            operation_lock(root, request.request_id),
-            contextlib.ExitStack() as resources,
-        ):
-            target = (
-                request.arguments.get("bead")
-                or request.arguments.get("id")
-                or request.thread_id
-            )
-            if target:
-                resources.enter_context(
-                    ProcessLock(
-                        root
-                        / ".fulcrum-locks"
-                        / "resources"
-                        / str(target).encode().hex(),
-                        blocking=False,
-                    )
+        timing_stage = stage_name(
+            "operation", f"{function.__module__}.{function.__qualname__}"
+        )
+        with span(timing_stage):
+            root = request.instance.brain_root
+            if root is None or request.request_id is None:
+                return function(self, request, *args, **kwargs)
+            if (root / ".fulcrum-locks/migration.json").exists():
+                raise FulcrumError(
+                    "MAINTENANCE_IN_PROGRESS",
+                    "state migration has fenced admission",
+                    exit_code=3,
+                    retryable=True,
                 )
-            with ProcessLock(root / ".fulcrum-locks" / "maintenance", shared=True):
-                source = os.environ.get("FULCRUM_SOURCE")
-                if source and (Path(source) / ".retired-for-state").exists():
-                    raise FulcrumError(
-                        "SOURCE_RETIRED",
-                        "retry with the selected source after state migration",
-                        exit_code=3,
-                        retryable=True,
+            with (
+                operation_lock(root, request.request_id),
+                contextlib.ExitStack() as resources,
+            ):
+                target = (
+                    request.arguments.get("bead")
+                    or request.arguments.get("id")
+                    or request.thread_id
+                )
+                if target:
+                    resources.enter_context(
+                        ProcessLock(
+                            root
+                            / ".fulcrum-locks"
+                            / "resources"
+                            / str(target).encode().hex(),
+                            blocking=False,
+                        )
                     )
-                with transition(root):
-                    return function(self, request, *args, **kwargs)
+                with ProcessLock(root / ".fulcrum-locks" / "maintenance", shared=True):
+                    source = os.environ.get("FULCRUM_SOURCE")
+                    if source and (Path(source) / ".retired-for-state").exists():
+                        raise FulcrumError(
+                            "SOURCE_RETIRED",
+                            "retry with the selected source after state migration",
+                            exit_code=3,
+                            retryable=True,
+                        )
+                    with transition(root):
+                        return function(self, request, *args, **kwargs)
 
     return invoke
 
@@ -237,10 +241,25 @@ def unlocked(function: Any) -> Any:
 
     @functools.wraps(function)
     def invoke(*args: Any, **kwargs: Any) -> Any:
-        with external_effect():
-            return function(*args, **kwargs)
+        timing_stage = stage_name(
+            "external", f"{function.__module__}.{function.__qualname__}"
+        )
+        with span(timing_stage):
+            with external_effect():
+                return function(*args, **kwargs)
 
     return invoke
+
+
+def _lock_kind(path: Path) -> str:
+    parts = path.parts
+    if "operations" in parts:
+        return "operation"
+    if "resources" in parts:
+        return "resource"
+    if path.name in {"state", "maintenance"}:
+        return path.name
+    return "other"
 
 
 def maintenance_operation(function: Any) -> Any:

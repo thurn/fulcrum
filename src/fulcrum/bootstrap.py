@@ -12,7 +12,78 @@ import os
 from pathlib import Path
 import sys
 import subprocess
+import time
 from typing import Any
+import uuid
+
+_active_timing_span: str | None = None
+
+
+class _BootstrapSpan:
+    """Stdlib-only timing span; bootstrap cannot import application modules."""
+
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.started = 0.0
+        self.span_id: str | None = None
+        self.parent_span_id: str | None = None
+        self.previous: str | None = None
+
+    def __enter__(self) -> _BootstrapSpan:
+        global _active_timing_span
+        if not os.environ.get("FULCRUM_TIMING_FILE"):
+            return self
+        self.started = time.monotonic()
+        self.span_id = uuid.uuid4().hex
+        self.previous = _active_timing_span
+        self.parent_span_id = self.previous or os.environ.get(
+            "FULCRUM_TIMING_PARENT_SPAN"
+        )
+        _active_timing_span = self.span_id
+        return self
+
+    def __exit__(self, exception_type: object, *_: object) -> None:
+        global _active_timing_span
+        if self.span_id is None:
+            return
+        _active_timing_span = self.previous
+        row: dict[str, Any] = {
+            "schema": 1,
+            "trace_id": os.environ.get("FULCRUM_TRACE_ID") or f"process-{os.getpid()}",
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "stage": self.stage,
+            "started_monotonic": self.started,
+            "duration_ms": (time.monotonic() - self.started) * 1000,
+            "outcome": "error" if exception_type else "ok",
+        }
+        for environment, field, limit in (
+            ("FULCRUM_TIMING_LABEL", "label", 128),
+            ("FULCRUM_TIMING_SAMPLE", "sample", 32),
+        ):
+            value = os.environ.get(environment)
+            if value:
+                row[field] = value[:limit]
+        path = os.environ.get("FULCRUM_TIMING_FILE")
+        if not path:
+            return
+        try:
+            fd = os.open(
+                path,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+                0o600,
+            )
+            try:
+                os.write(
+                    fd,
+                    (json.dumps(row, separators=(",", ":")) + "\n").encode(),
+                )
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
 
 def instance_from_args(args: list[str]) -> Path:
@@ -64,20 +135,21 @@ def source_repository(instance: Path) -> Path:
 
 
 def local_commit(repository: Path) -> str:
-    return subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repository),
-            "rev-parse",
-            "--verify",
-            "refs/heads/master^{commit}",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    ).stdout.strip()
+    with _BootstrapSpan("bootstrap.local_commit"):
+        return subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "rev-parse",
+                "--verify",
+                "refs/heads/master^{commit}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
 
 
 def fresh_selection(instance: Path, config: Path) -> tuple[dict[str, Any], int]:
@@ -89,7 +161,8 @@ def fresh_selection(instance: Path, config: Path) -> tuple[dict[str, Any], int]:
     repository = source_repository(instance)
     for _ in range(8):
         commit = local_commit(repository)
-        selected, lease = pinned_selection(instance)
+        with _BootstrapSpan("bootstrap.pinned_selection"):
+            selected, lease = pinned_selection(instance)
         if selected and selected["commit"] == commit:
             assert lease is not None
             return selected, lease
@@ -102,7 +175,10 @@ def fresh_selection(instance: Path, config: Path) -> tuple[dict[str, Any], int]:
             "fulcrum.activation",
             [str(instance), str(config), str(repository)],
         )
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=240)
+        with _BootstrapSpan("bootstrap.source_preparation"):
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=240
+            )
         if completed.returncode:
             raise RuntimeError(
                 f"cannot execute local master {commit}: "
@@ -148,10 +224,12 @@ def main(
                 "commit": os.environ["FULCRUM_COMMIT"],
                 "python": sys.executable,
             }
-            fd = pin(Path(inherited))
+            with _BootstrapSpan("bootstrap.inherited_pin"):
+                fd = pin(Path(inherited))
         else:
             try:
-                selected, fd = fresh_selection(instance, config)
+                with _BootstrapSpan("bootstrap.source_selection"):
+                    selected, fd = fresh_selection(instance, config)
             except (
                 OSError,
                 ValueError,

@@ -6,10 +6,11 @@ typed views over native issues; they are not a second persistence layer.
 
 from __future__ import annotations
 
-from fulcrum.timing import timed
+from fulcrum.timing import span, stage_name, timed
 
 import json
 import copy
+import contextlib
 import re
 import shutil
 import subprocess
@@ -20,7 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from fulcrum.coordination import ProcessLock, inherited_lock_fds, merge_change
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
@@ -28,6 +29,16 @@ from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedR
 CAPTURE_BYTES = 256 * 1024
 JSON_BYTES = 64 * 1024 * 1024
 _PROCESS_SLOTS = threading.BoundedSemaphore(4)
+
+
+@contextlib.contextmanager
+def _process_slot() -> Iterator[None]:
+    with span("ledger.slot.wait"):
+        _PROCESS_SLOTS.acquire()
+    try:
+        yield
+    finally:
+        _PROCESS_SLOTS.release()
 
 
 class LedgerFailure(RuntimeError):
@@ -196,20 +207,21 @@ class Ledger:
         ]
         started = time.monotonic()
         with (
-            _PROCESS_SLOTS,
+            _process_slot(),
             tempfile.TemporaryFile() as stdout_file,
             tempfile.TemporaryFile() as stderr_file,
         ):
             try:
-                completed = subprocess.run(
-                    argv,
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=timeout or self.timeout,
-                    check=False,
-                    pass_fds=inherited_lock_fds() if mutating else (),
-                )
+                with span(stage_name("ledger.command", arguments[0])):
+                    completed = subprocess.run(
+                        argv,
+                        stdin=subprocess.DEVNULL,
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                        timeout=timeout or self.timeout,
+                        check=False,
+                        pass_fds=inherited_lock_fds() if mutating else (),
+                    )
             except subprocess.TimeoutExpired as error:
                 stdout, stdout_truncated = _read_capture(stdout_file)
                 stderr, stderr_truncated = _read_capture(stderr_file)
@@ -231,11 +243,12 @@ class Ledger:
                     uncertain=False,
                     duration_ms=int((time.monotonic() - started) * 1000),
                 ) from error
-            stdout, stdout_truncated = _read_capture(stdout_file)
-            stderr, stderr_truncated = _read_capture(stderr_file)
-            stdout_json, stdout_json_truncated = _read_capture(
-                stdout_file, limit=JSON_BYTES
-            )
+            with span("ledger.capture"):
+                stdout, stdout_truncated = _read_capture(stdout_file)
+                stderr, stderr_truncated = _read_capture(stderr_file)
+                stdout_json, stdout_json_truncated = _read_capture(
+                    stdout_file, limit=JSON_BYTES
+                )
         duration = int((time.monotonic() - started) * 1000)
         truncated = stdout_truncated or stderr_truncated
         if completed.returncode != 0:

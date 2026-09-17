@@ -8,7 +8,8 @@ workflow queue.
 
 The normative architecture is the [Codex Desktop integration](docs/architecture/desktop-integration.md).
 Operational guidance is in [setup](docs/setup.md), [operations](docs/operations.md),
-[hooks](docs/hooks.md), and [validation](docs/validation.md).
+[performance tracing](docs/performance.md), [hooks](docs/hooks.md), and
+[validation](docs/validation.md).
 
 ## Control plane
 

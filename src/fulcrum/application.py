@@ -31,6 +31,7 @@ from fulcrum.publication import LedgerPublicationService
 from fulcrum.desktop_reset import ResetService
 from fulcrum.desktop_services import ServiceService, SkillsService
 from fulcrum.work import WorkService
+from fulcrum.timing import span, stage_name, timed
 
 Handler = Callable[[ParsedRequest], CommandResult]
 
@@ -146,6 +147,7 @@ class Application:
             )
         self._handlers[command] = handler
 
+    @timed("application.dispatch")
     def dispatch(self, request: ParsedRequest) -> CommandResult:
         started = time.monotonic()
         handler = self._handlers.get(request.command)
@@ -162,7 +164,8 @@ class Application:
             self._log(request, started, error=error)
             raise error
         try:
-            result = handler(request)
+            with span(stage_name("application.command", request.command_name)):
+                result = handler(request)
         except LedgerFailure as error:
             state = CommandState.UNCERTAIN if error.uncertain else CommandState.FAILED
             converted = FulcrumError(
@@ -191,6 +194,7 @@ class Application:
         return result
 
     @staticmethod
+    @timed("application.diagnostic_log")
     def _log(
         request: ParsedRequest,
         started: float,

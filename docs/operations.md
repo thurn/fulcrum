@@ -19,6 +19,10 @@ Status separates work, capacity, delivery, publication, standing identities,
 outstanding actions/waits, schedule state, and diagnostic health. Missing native
 or transcript evidence is an explicit gap, never a successful completion.
 
+For slow operations, use the opt-in correlated profiler and exclusive-time
+analysis described in [performance tracing](performance.md). It preserves normal
+command output and does not write workflow state.
+
 ## Work
 
 Use `$weaver` for new requests and `$fulcrum-bead` for one small incidental report.
