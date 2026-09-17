@@ -38,13 +38,34 @@ and prerequisites. Reuse a request UUID only to resume the exact same command
 after a client timeout. Use a new request UUID after returned actions or
 prerequisites settle so bootstrap can observe the new postconditions.
 
-An existing task does not acquire MCP tools added after that task started. If the
-initial response reports `mcp.changed: true`, or the MCP block is already present
-but the current non-continuation task lacks Fulcrum MCP tools, stop before its
-returned native setup actions and create exactly one continuation task so it
-receives the current tool catalog. Invocation of this skill authorizes that single
-bounded task. A task whose prompt marks it as the sole MCP-refresh continuation
-must never create another; it stops and reports the missing tools instead.
+**Approve hooks before refreshing the tool catalog.** If bootstrap reports
+`hooks.operator_confirmation_required: true` or
+`hooks.operational_state: confirmation_required`, ask the user to approve the
+hooks and end the current turn. Do not create the MCP-refresh continuation,
+invoke any returned setup action, or poll while approval is pending. A configured
+hook command is not evidence of approval.
+
+- Open **Settings**.
+- Select **Hooks**.
+- Click **Trust** for the five required Fulcrum hooks: SessionStart,
+  UserPromptSubmit, PreToolUse, PostToolUse, and Stop.
+- Click **Enable** for those five required hooks.
+
+After the user explicitly confirms approval, rerun bootstrap with a new request
+UUID so it can observe the postconditions. Do not create the continuation until
+that response confirms all five hooks are trusted and enabled and no longer
+requires operator confirmation. If approval is still incomplete, report the
+exact gap and stop again.
+
+Only after hook approval has been observed, apply the MCP catalog boundary. An
+existing task does not acquire MCP tools added after that task started. If the
+response reports `mcp.changed: true`, or the MCP block is already present but the
+current non-continuation task lacks Fulcrum MCP tools, stop before its returned
+native setup actions and create exactly one continuation task so it receives the
+current tool catalog. Invocation of this skill authorizes that single bounded
+task only after the hook gate has passed. A task whose prompt marks it as the sole
+MCP-refresh continuation must never create another; it stops and reports the
+missing tools instead.
 
 - Call native `create_thread` once with title `Resume Fulcrum bootstrap`, omit
   model/effort overrides, and use target
@@ -73,18 +94,6 @@ removed Restart control, toggle the server, or quit the app. A fresh task—not 
 process restart—is the required catalog boundary; this follows the current
 [OpenAI Plugins guidance](https://learn.chatgpt.com/docs/plugins) that newly added
 tools become available in new chats.
-
-**You must approve fulcrum hooks in Codex Settings**
-
-- Open **Settings**.
-- Select **Hooks**.
-- Click **Trust** for the five required Fulcrum hooks: SessionStart,
-  UserPromptSubmit, PreToolUse, PostToolUse, and Stop.
-- Click **Enable** for those five required hooks.
-
-Do not report hook setup as complete until the user has approved and enabled all
-five required Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
-can observe the new postconditions.
 
 For every returned setup action in the continuation task, call `action claim`
 before invoking the exact named native tool once, then call `action result` with
