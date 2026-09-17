@@ -49,8 +49,7 @@ native actions. Do not create the brain, configuration, skill links, or MCP entr
 by hand. See [setup](docs/setup.md) for prerequisites and the exact first-run
 sequence.
 
-Bootstrap installs the source-following MCP entry, five required scoped hooks plus
-an optional best-effort Interrupt hook, the
+Bootstrap installs the source-following MCP entry, five scoped hooks, the
 broker service, the three standing tasks, and one Marshal heartbeat. Admission
 remains paused until focused acceptance is recorded. An existing task retains its
 original MCP catalog, so the bootstrap skill creates exactly one fresh

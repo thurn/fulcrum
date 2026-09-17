@@ -1,14 +1,13 @@
 # Codex hooks
 
-Bootstrap configures five required Fulcrum command hooks in the Codex profile:
-`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`. It also
-configures `Interrupt` as best-effort evidence when the host emits it. A missing
-Interrupt callback does not block setup because transcript `turn_aborted` evidence
-and client-disconnect cancellation provide the authoritative fallback. Unrelated
-hook configuration is preserved. Each command reads one JSON
+Bootstrap configures exactly five Fulcrum command hooks in the Codex profile:
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`.
+Interrupt is deliberately not installed: transcript `turn_aborted` evidence and
+client-disconnect cancellation provide the authoritative interruption path.
+Unrelated hook configuration is preserved. Each command reads one JSON
 event from stdin, emits only event-specific hook JSON on stdout, and writes
-diagnostics to stderr. Interrupt has a three-second timeout; other hooks have a
-ten-second timeout and compact added context is capped at 2,000 characters.
+diagnostics to stderr. Hooks have a ten-second timeout and compact added context
+is capped at 2,000 characters.
 
 Hooks are cooperative evidence and admission checks, not a universal execution
 sandbox. The CLI independently validates every durable transition. `PreToolUse`

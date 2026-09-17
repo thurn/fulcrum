@@ -32,7 +32,6 @@ HOOK_EVENTS = {
     "PreToolUse",
     "PostToolUse",
     "Stop",
-    "Interrupt",
 }
 MARKER: re.Pattern[str] = re.compile(
     r"^Fulcrum-Action: (?P<value>\{[^\n]+\})", re.MULTILINE
@@ -307,20 +306,6 @@ class HookService:
                 }
                 protocol["standing"] = standing
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-            if event_name == "Interrupt":
-                self._cancel_waits_for_terminal_events(
-                    ledger,
-                    _task_id_for_binding(bound),
-                    (
-                        {
-                            "type": "turn_interrupted",
-                            "task_id": _task_id_for_binding(bound),
-                            "turn_id": event.get("turn_id"),
-                            "reason": event.get("reason"),
-                            "time": _utc_now(),
-                        },
-                    ),
-                )
 
     def _collect_transcript(
         self,

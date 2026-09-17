@@ -44,12 +44,29 @@ class InstallTests(unittest.TestCase):
                 "fulcrum-broker", definitions["broker"]["ProgramArguments"][0]
             )
 
-    def test_hook_install_preserves_unrelated_handlers_and_owns_six_events(self):
+    def test_hook_install_preserves_unrelated_handlers_and_removes_interrupt(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hooks.json"
             unrelated = {"type": "command", "command": "personal-hook"}
             path.write_text(
-                json.dumps({"hooks": {"Stop": [{"hooks": [unrelated]}]}}),
+                json.dumps(
+                    {
+                        "hooks": {
+                            "Stop": [{"hooks": [unrelated]}],
+                            "Interrupt": [
+                                {
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "old-fulcrum-hook",
+                                            "statusMessage": "Fulcrum: recording Interrupt",
+                                        }
+                                    ]
+                                }
+                            ],
+                        }
+                    }
+                ),
                 encoding="utf-8",
             )
             install_hook_config(path, "/tmp/fulcrum hook handle")
@@ -62,7 +79,6 @@ class InstallTests(unittest.TestCase):
                     "PreToolUse",
                     "PostToolUse",
                     "Stop",
-                    "Interrupt",
                 },
             )
             self.assertIn(unrelated, hooks["Stop"][0]["hooks"])
@@ -73,7 +89,6 @@ class InstallTests(unittest.TestCase):
                 "PreToolUse",
                 "PostToolUse",
                 "Stop",
-                "Interrupt",
             }:
                 self.assertNotIn("additionalContextLimit", owned[event])
 
@@ -106,7 +121,7 @@ class InstallTests(unittest.TestCase):
                     "Stop",
                 ],
             )
-            self.assertEqual(result["hook"]["optional_events"], ["Interrupt"])
+            self.assertNotIn("optional_events", result["hook"])
             self.assertEqual(
                 result["hook"]["operational_state"], "confirmation_required"
             )

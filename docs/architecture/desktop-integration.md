@@ -590,11 +590,10 @@ not permission to create another inbox automatically.
 
 ## Hooks, context, and observation
 
-Require trusted `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
-and `Stop` command hooks on the selected installation. Configure `Interrupt` as
-best-effort evidence, but do not gate setup on it because some Desktop builds do
-not emit it. Transcript `turn_aborted` evidence and transport disconnects are the
-authoritative interruption fallback. The hooks provide
+Require exactly five trusted command hooks on the selected installation:
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `Stop`. Do not
+install an Interrupt hook. Transcript `turn_aborted` evidence and transport
+disconnects are the authoritative interruption path. The hooks provide
 context and evidence and help catch protocol mistakes. They are not a security
 boundary against another same-user process or a guarantee that a model stops.
 Known broken configuration closes affected new admission; one missed result hook
@@ -609,9 +608,9 @@ Never execute strings from hook input as shell commands. Preserve unrelated
 hooks and other instances. User-level routing covers projectless standing tasks
 and saved-project workers; match startup/resume/clear/compact where supported.
 
-Use a three-second Interrupt deadline and ten-second deadlines for other hooks,
-with at most 2,000 tokens of context. Verify the actual supported behavior.
-Interrupted persistence must not delay or veto the user's Stop. Detached writes
+Use ten-second hook deadlines with at most 2,000 tokens of context. Verify the
+actual supported behavior. Interruption collection must not delay or veto the
+user's Stop. Detached writes
 can finish after a hook deadline; only their verified Beads commit counts as
 accepted evidence. Setup/trust changes require the supported native flow;
 ordinary handler edits require neither reinstall nor re-trust.
@@ -623,7 +622,6 @@ ordinary handler edits require neither reinstall nor re-trust.
 | `PreToolUse` | Correlate admission calls and native invocation IDs. On covered paths, reject unclaimed native effects, changed arguments, or calls outside assigned authority. |
 | `PostToolUse` | Normalize and persist claimed native results through the same validator as agent reports. Capture transcript locators and signal fresh reconciliation. |
 | `Stop` | Record an exit attempt and any missing worker outcome. Do not infer completion or force a healthy Steward to exit after an action. |
-| `Interrupt` (optional) | When emitted, record interruption of the exact managed turn; preserve uncertain effects. Do not restart that turn or reinterpret it as a durable system pause. |
 
 Only bound instances/tasks receive role context. Unknown tasks are untouched,
 except for prospective identity evidence tied to an exact retained creation
@@ -1052,8 +1050,7 @@ asking repeatedly. A ready socket alone is not successful setup.
    initial MCP configuration change creates one bounded continuation task in the
    saved Fulcrum project. Its fresh bootstrap call rebinds pending setup actions
    to the new native task. No Desktop process restart is part of setup.
-3. Install and trust the five required scoped command hooks; configure Interrupt
-   as optional best-effort evidence. Verify actual callback paths for projectless
+3. Install and trust the five scoped command hooks. Verify actual callback paths for projectless
    standing tasks and saved-project workers. Check native task
    tools, model/effort support, workspace access, transcript observation, and
    accounting. Unsupported project creation requires the user to add that exact

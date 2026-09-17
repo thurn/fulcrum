@@ -109,7 +109,7 @@ def _replace_owned_link(source: Path, target: Path) -> None:
 
 
 def install_hook_config(path: Path, command: str) -> None:
-    """Preserve unrelated hooks and install the six scoped command hooks."""
+    """Preserve unrelated hooks and install the five scoped command hooks."""
 
     existing: Any = (
         json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -152,12 +152,11 @@ def install_hook_config(path: Path, command: str) -> None:
         "PreToolUse",
         "PostToolUse",
         "Stop",
-        "Interrupt",
     ):
         handler = {
             "type": "command",
             "command": command,
-            "timeout": 3 if event == "Interrupt" else 10,
+            "timeout": 10,
             "statusMessage": f"Fulcrum: recording {event}",
         }
         if event == "SessionStart":
@@ -268,7 +267,6 @@ def reconcile_skills(
                 "PostToolUse",
                 "Stop",
             ],
-            "optional_events": ["Interrupt"],
             "operational_state": (
                 "confirmation_required" if hook_command is not None else "unavailable"
             ),

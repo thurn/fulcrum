@@ -81,8 +81,6 @@ tools become available in new chats.
 - Click **Trust** for the five required Fulcrum hooks: SessionStart,
   UserPromptSubmit, PreToolUse, PostToolUse, and Stop.
 - Click **Enable** for those five required hooks.
-- Trust and enable Interrupt when offered, but treat it as optional best-effort
-  evidence because some Desktop builds do not emit it.
 
 Do not report hook setup as complete until the user has approved and enabled all
 five required Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
