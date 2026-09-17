@@ -1506,6 +1506,18 @@ def _loop_health(
             if isinstance(schedule, Mapping)
             else None
         )
+        if (
+            activated_at is not None
+            and last_delivery_at is not None
+            and last_delivery_at < activated_at
+        ):
+            last_delivery_at = None
+        if (
+            activated_at is not None
+            and last_cycle_completed_at is not None
+            and last_cycle_completed_at < activated_at
+        ):
+            last_cycle_completed_at = None
         interval = timedelta(minutes=15)
         first_delivery_grace = timedelta(minutes=20)
         cycle_grace = timedelta(minutes=10)
