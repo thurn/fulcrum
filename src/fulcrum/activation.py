@@ -216,7 +216,7 @@ def activate(
                 status["state"] = "superseded"
             else:
                 selection_started = time.monotonic()
-                select_candidate(instance, candidate)
+                select_candidate(instance, candidate, config)
                 status["timings"]["selection"] = time.monotonic() - selection_started
                 status.update(state="activated", selected=candidate)
                 status["timings"]["local_activation"] = time.monotonic() - local_started
@@ -281,7 +281,7 @@ def perform_handoff(instance: Path, config: Path, candidate: dict[str, Any]) -> 
     stopped = ServiceService().stop(request)
     if not stopped.ok:
         raise RuntimeError("broker did not reach a safe handoff boundary")
-    select_candidate(instance, candidate)
+    select_candidate(instance, candidate, config)
     command = launch_arguments(
         candidate,
         "fulcrum.cli",
@@ -298,7 +298,9 @@ def perform_handoff(instance: Path, config: Path, candidate: dict[str, Any]) -> 
     subprocess.run(command, check=True, capture_output=True, timeout=60)
 
 
-def select_candidate(instance: Path, candidate: dict[str, Any]) -> None:
+def select_candidate(
+    instance: Path, candidate: dict[str, Any], config: Path | None = None
+) -> None:
     # The build lock and selection lock MUST stay distinct. Dependency setup
     # may take minutes; fresh commands can pin the old selection throughout it.
     with ProcessLock(instance / "activation.lock"):
@@ -310,7 +312,7 @@ def select_candidate(instance: Path, candidate: dict[str, Any]) -> None:
             instance.resolve()
             == (Path.home() / "Library/Application Support/Fulcrum").resolve()
         )
-        reconcile_fulcrum2_skills(instance, production=production)
+        reconcile_fulcrum2_skills(instance, production=production, config_path=config)
         write_json(instance / "selected.json", candidate)
 
 

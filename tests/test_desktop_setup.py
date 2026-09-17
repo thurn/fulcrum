@@ -165,3 +165,6 @@ def test_bootstrap_preserves_unrelated_codex_configuration():
         assert 'model = "gpt-6-astra"' in retained
         assert "[mcp_servers.fulcrum]" in retained
         assert "tool_timeout_sec = 3900" in retained
+        assert str(root / "brain" / "fulcrum.yaml") in retained
+        hooks = (root / "codex" / "hooks.json").read_text(encoding="utf-8")
+        assert f"--config {root / 'brain' / 'fulcrum.yaml'}" in hooks

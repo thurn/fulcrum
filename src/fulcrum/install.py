@@ -178,6 +178,7 @@ def reconcile_fulcrum2_skills(
     instance_root: Path,
     *,
     production: bool,
+    config_path: Path | None = None,
     skills_root: Path | None = None,
     source_root: Path | None = None,
     install_hook: bool = True,
@@ -233,11 +234,16 @@ def reconcile_fulcrum2_skills(
     hook_config = root.parent / "hooks.json"
     hook_command: str | None = None
     if install_hook and executable.is_file() and os.access(executable, os.X_OK):
+        authoritative_config = (config_path or instance_root / "config").resolve(
+            strict=False
+        )
         hook_command = " ".join(
             (
                 shlex.quote(str(executable.resolve(strict=True))),
                 "hook handle --input - --instance",
                 shlex.quote(str(instance_root.resolve(strict=False))),
+                "--config",
+                shlex.quote(str(authoritative_config)),
             )
         )
         install_hook_config(hook_config, hook_command)

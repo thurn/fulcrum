@@ -172,7 +172,7 @@ def prepare_bootstrap_primitives(request: ParsedRequest) -> dict[str, Any]:
 
 
 def install_codex_mcp_config(
-    path: Path, *, instance: Path, executable: Path
+    path: Path, *, instance: Path, config: Path, executable: Path
 ) -> dict[str, Any]:
     """Install one owned TOML block while preserving unrelated Codex settings."""
 
@@ -187,11 +187,12 @@ def install_codex_mcp_config(
         )
     escaped_command = json.dumps(str(executable.resolve(strict=False)))
     escaped_instance = json.dumps(str(instance.resolve(strict=False)))
+    escaped_config = json.dumps(str(config.resolve(strict=False)))
     block = (
         f"{begin}\n"
         "[mcp_servers.fulcrum]\n"
         f"command = {escaped_command}\n"
-        f'args = ["--instance", {escaped_instance}]\n'
+        f'args = ["--instance", {escaped_instance}, "--config", {escaped_config}]\n'
         "startup_timeout_sec = 10\n"
         "tool_timeout_sec = 3900\n"
         "required = true\n"
@@ -248,11 +249,15 @@ class DesktopSetupService(DesktopProtocolService):
             else Path.home() / ".codex"
         )
         mcp = install_codex_mcp_config(
-            codex_root / "config.toml", instance=instance, executable=executable
+            codex_root / "config.toml",
+            instance=instance,
+            config=request.instance.config_path,
+            executable=executable,
         )
         skills = reconcile_fulcrum2_skills(
             instance,
             production=not request.instance.explicit_selection,
+            config_path=request.instance.config_path,
             skills_root=(codex_root / "skills"),
             source_root=source,
         )

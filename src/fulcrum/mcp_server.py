@@ -114,8 +114,9 @@ def tool_descriptions() -> list[dict[str, Any]]:
 
 
 class FreshCli:
-    def __init__(self, instance: Path, executable: Path) -> None:
+    def __init__(self, instance: Path, config: Path, executable: Path) -> None:
         self.instance = instance
+        self.config = config
         self.executable = executable
 
     def invocation(
@@ -141,6 +142,8 @@ class FreshCli:
             *command,
             "--instance",
             str(self.instance),
+            "--config",
+            str(self.config),
             "--json",
             "--input",
             "-",
@@ -287,14 +290,18 @@ class McpServer:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fulcrum-mcp")
     parser.add_argument("--instance", required=True)
+    parser.add_argument("--config", required=True)
     args = parser.parse_args(argv)
     instance = Path(args.instance).expanduser()
+    config = Path(args.config).expanduser()
     if not instance.is_absolute():
         parser.error("--instance must be absolute")
+    if not config.is_absolute():
+        parser.error("--config must be absolute")
     executable = Path.home() / "fulcrum" / ".venv" / "bin" / "fulcrum"
     if not executable.is_file():
         executable = Path(sys.executable).with_name("fulcrum")
-    asyncio.run(McpServer(FreshCli(instance, executable)).serve())
+    asyncio.run(McpServer(FreshCli(instance, config, executable)).serve())
     return 0
 
 

@@ -207,6 +207,7 @@ class SkillsService:
             result = reconcile_fulcrum2_skills(
                 request.instance.instance_root,
                 production=not request.instance.explicit_selection,
+                config_path=request.instance.config_path,
             )
         except InstallationError as error:
             raise FulcrumError("ASSET_CONFLICT", str(error), exit_code=4) from error
