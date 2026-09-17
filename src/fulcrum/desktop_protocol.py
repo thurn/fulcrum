@@ -302,7 +302,8 @@ class DesktopProtocolService:
             or assignment.get("task_id") != task_id
             or not token
             or assignment.get("assignment_token") != token
-            or assignment.get("state") not in {"reserved", "issuing", "active", "uncertain"}
+            or assignment.get("state")
+            not in {"reserved", "issuing", "active", "uncertain"}
         ):
             raise FulcrumError(
                 "AUTHORITY_MISMATCH",
@@ -498,6 +499,39 @@ class DesktopProtocolService:
         )
         return _result(request, value)
 
+    @staticmethod
+    def _append_action(
+        protocol: dict[str, Any],
+        *,
+        record_id: str,
+        executor: str,
+        tool: str,
+        arguments: Mapping[str, Any],
+        purpose: str,
+        expected_result: Mapping[str, Any] | None = None,
+        assignment_token: str | None = None,
+        reporting: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        actions = dict(protocol.get("actions") or {})
+        action_id = _opaque("action")
+        action = {
+            "action_id": action_id,
+            "record_id": record_id,
+            "executor": executor,
+            "tool": tool,
+            "arguments": copy.deepcopy(dict(arguments)),
+            "expected_result": copy.deepcopy(dict(expected_result or {})),
+            "reporting": copy.deepcopy(dict(reporting or {})),
+            "assignment_token": assignment_token,
+            "state": "pending",
+            "attempts": [],
+            "created_at": _utc_now(),
+            "purpose": purpose,
+        }
+        actions[action_id] = action
+        protocol["actions"] = actions
+        return action
+
     def _action_response(
         self, request: ParsedRequest, action: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -516,8 +550,6 @@ class DesktopProtocolService:
             if isinstance(arguments.get(field), str):
                 arguments[field] = marker + "\n" + arguments[field]
                 break
-        else:
-            arguments["prompt"] = marker
         return {
             "action_id": action["action_id"],
             "record_id": action["record_id"],
@@ -702,6 +734,58 @@ class DesktopProtocolService:
                 if assignment.get("state") != "active":
                     assignment["state"] = "issuing"
                 protocol["assignment"] = assignment
+        if (
+            action.get("tool") == "create_thread"
+            and outcome == "succeeded"
+            and action.get("executor") != "bootstrap"
+        ):
+            created_task = _native_identifier(
+                request.input.get("native_result"), "threadId", "thread_id", "id"
+            )
+            expected_title = (action.get("arguments") or {}).get("title")
+            if created_task and isinstance(expected_title, str) and expected_title:
+                purpose = f"normalize_title:{action_id}"
+                if not any(
+                    isinstance(item, Mapping) and item.get("purpose") == purpose
+                    for item in (protocol.get("actions") or {}).values()
+                ):
+                    self._append_action(
+                        protocol,
+                        record_id=record.id,
+                        executor="steward",
+                        tool="set_thread_title",
+                        arguments={"threadId": created_task, "title": expected_title},
+                        purpose=purpose,
+                        expected_result={
+                            "threadId": created_task,
+                            "title": expected_title,
+                        },
+                        assignment_token=(
+                            str(action["assignment_token"])
+                            if action.get("assignment_token")
+                            else None
+                        ),
+                    )
+        if (
+            action.get("purpose", "").startswith("archive_task:")
+            and outcome == "succeeded"
+        ):
+            native_tasks = dict(protocol.get("native_tasks") or {})
+            task_id = str((action.get("arguments") or {}).get("threadId") or "")
+            native_tasks[task_id] = {
+                **dict(native_tasks.get(task_id) or {}),
+                "archived": True,
+                "archive_action_id": action_id,
+                "observed_at": _utc_now(),
+            }
+            protocol["native_tasks"] = native_tasks
+        if (
+            action.get("purpose", "").startswith("reconcile_action:")
+            and outcome == "succeeded"
+        ):
+            self._settle_inspected_action(
+                protocol, action, request.input.get("native_result")
+            )
         if action.get("purpose") in {
             "bootstrap_marshal_schedule",
             "bootstrap_marshal_schedule_activation",
@@ -776,6 +860,136 @@ class DesktopProtocolService:
             outcome=outcome,
         )
         return _result(request, value)
+
+    @staticmethod
+    def _settle_inspected_action(
+        protocol: dict[str, Any],
+        inspection: Mapping[str, Any],
+        native_result: Any,
+    ) -> None:
+        original_id = str(inspection.get("purpose") or "").partition(":")[2]
+        actions = dict(protocol.get("actions") or {})
+        original_value = actions.get(original_id)
+        if not isinstance(original_value, Mapping) or not isinstance(
+            native_result, Mapping
+        ):
+            return
+        original = dict(original_value)
+        arguments = original.get("arguments") or {}
+        settled = False
+        if original.get("tool") == "set_thread_title":
+            settled = native_result.get("title") == arguments.get("title")
+        elif original.get("tool") == "set_thread_archived":
+            settled = native_result.get("archived") is arguments.get("archived")
+        elif original.get("tool") == "create_thread":
+            settled = bool(
+                _native_identifier(native_result, "threadId", "thread_id", "id")
+            )
+        if settled:
+            original["state"] = "succeeded"
+            original["reconciled_by"] = inspection.get("action_id")
+            original["reconciled_at"] = _utc_now()
+            original["native_result"] = copy.deepcopy(native_result)
+            actions[original_id] = original
+            protocol["actions"] = actions
+
+    def _compile_lifecycle_action(
+        self, ledger: Ledger, request: ParsedRequest
+    ) -> tuple[LedgerRecord, dict[str, Any]] | None:
+        records = ledger.list_records(limit=0)
+        for record in sorted(records, key=lambda item: item.id):
+            protocol = _protocol(record.fc or {})
+            actions = dict(protocol.get("actions") or {})
+            for original in actions.values():
+                if (
+                    not isinstance(original, Mapping)
+                    or original.get("state") != "uncertain"
+                ):
+                    continue
+                if original.get("executor") != "steward":
+                    continue
+                purpose = f"reconcile_action:{original.get('action_id')}"
+                if any(
+                    isinstance(item, Mapping)
+                    and item.get("purpose") == purpose
+                    and item.get("state") not in {"rejected", "superseded"}
+                    for item in actions.values()
+                ):
+                    continue
+                task_id = _native_identifier(
+                    original.get("native_result"), "threadId", "thread_id", "id"
+                ) or str((original.get("arguments") or {}).get("threadId") or "")
+                if not task_id:
+                    continue
+                inspection = self._append_action(
+                    protocol,
+                    record_id=record.id,
+                    executor="steward",
+                    tool="read_thread",
+                    arguments={"threadId": task_id},
+                    purpose=purpose,
+                    expected_result={"threadId": task_id},
+                    reporting={"reconciles": original.get("action_id")},
+                )
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+                return self._record(ledger, record.id), inspection
+            if record.id == "fc-system" or record.status != "closed":
+                continue
+            if protocol.get("assignment") or not self._archival_obligations_settled(
+                record, protocol
+            ):
+                continue
+            history = protocol.get("assignment_history")
+            task_ids = {
+                str(item.get("task_id"))
+                for item in history or []
+                if isinstance(item, Mapping) and item.get("task_id")
+            }
+            native_tasks = protocol.get("native_tasks") or {}
+            for task_id in sorted(task_ids):
+                if isinstance(native_tasks.get(task_id), Mapping) and native_tasks[
+                    task_id
+                ].get("archived"):
+                    continue
+                purpose = f"archive_task:{task_id}"
+                if any(
+                    isinstance(item, Mapping)
+                    and item.get("purpose") == purpose
+                    and item.get("state") not in {"rejected", "superseded"}
+                    for item in actions.values()
+                ):
+                    continue
+                archive = self._append_action(
+                    protocol,
+                    record_id=record.id,
+                    executor="steward",
+                    tool="set_thread_archived",
+                    arguments={"threadId": task_id, "archived": True},
+                    purpose=purpose,
+                    expected_result={"threadId": task_id, "archived": True},
+                )
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+                return self._record(ledger, record.id), archive
+        return None
+
+    @staticmethod
+    def _archival_obligations_settled(
+        record: LedgerRecord, protocol: Mapping[str, Any]
+    ) -> bool:
+        fc = record.fc or {}
+        if fc.get("cleanup_obligation") or fc.get("recovery_fence"):
+            return False
+        if any(
+            isinstance(value, Mapping) and value.get("state") != "resolved"
+            for value in (protocol.get("incidents") or {}).values()
+        ):
+            return False
+        if any(
+            isinstance(value, Mapping) and value.get("state") == "open"
+            for value in (protocol.get("human_decisions") or {}).values()
+        ):
+            return False
+        return True
 
     def _recover_wait_grant(
         self, ledger: Ledger, wait_id: str
@@ -1116,6 +1330,10 @@ class DesktopProtocolService:
         candidates = self._eligible_actions(
             ledger, paused=protocol.get("run_control", "paused") == "paused"
         )
+        if not candidates and protocol.get("run_control", "paused") != "paused":
+            lifecycle = self._compile_lifecycle_action(ledger, request)
+            if lifecycle is not None:
+                candidates = [lifecycle]
         if not candidates and protocol.get("run_control", "paused") != "paused":
             compiled = self._compile_ready_assignment(ledger, request)
             if compiled is not None:

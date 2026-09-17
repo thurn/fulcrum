@@ -153,3 +153,23 @@ class LeadershipTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(raised.exception.code, "AUTHORITY_MISMATCH")
+
+    def test_incident_alert_is_recorded_once_for_marshal(self):
+        first = self.service.report_incident(
+            call(
+                ("incident", "report"),
+                arguments={"bead": "fc-a"},
+                payload={"incident_key": "ci", "scope": "repair CI"},
+            )
+        )
+        second = self.service.report_incident(
+            call(
+                ("incident", "report"),
+                arguments={"bead": "fc-a"},
+                payload={"incident_key": "ci", "scope": "repair CI"},
+            )
+        )
+        self.assertEqual(first.result["alert"]["tool"], "send_message_to_thread")
+        self.assertEqual(
+            first.result["alert"]["action_id"], second.result["alert"]["action_id"]
+        )

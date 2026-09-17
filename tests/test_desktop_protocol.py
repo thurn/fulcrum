@@ -105,6 +105,76 @@ def test_managed_task_cannot_inject_native_action():
     assert raised.exception.code == "AUTHORITY_MISMATCH"
 
 
+def test_successful_creation_compiles_exact_title_normalization():
+    service, _ = registered_service()
+    action = service.queue_action(
+        mutation(
+            ("action", "queue"),
+            payload={
+                "executor": "steward",
+                "tool": "create_thread",
+                "arguments": {"prompt": "work", "title": "EXECUTOR fc-a"},
+                "purpose": "routine_dispatch",
+            },
+        )
+    ).result["action"]
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "attempt-create"},
+        )
+    )
+    service.report_action_result(
+        mutation(
+            ("action", "result"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "attempt-create",
+                "outcome": "succeeded",
+                "native_result": {"threadId": "worker-1"},
+            },
+        )
+    )
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "titles"},
+        )
+    )
+    assert result.result["action"]["tool"] == "set_thread_title"
+    assert result.result["action"]["arguments"]["title"] == "EXECUTOR fc-a"
+
+
+def test_closed_settled_worker_compiles_archive_action():
+    work = record(
+        "fc-a",
+        status="closed",
+        phase="done",
+        desktop={
+            "assignment_history": [
+                {"task_id": "worker-1", "role": "executor", "state": "finished"}
+            ]
+        },
+    )
+    service, _ = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "archive"},
+        )
+    )
+    assert result.result["action"]["tool"] == "set_thread_archived"
+    assert result.result["action"]["arguments"]["threadId"] == "worker-1"
+    assert result.result["action"]["arguments"]["archived"] is True
+
+
 def test_steward_selects_ready_action_without_marshal_and_pause_holds_it():
     work = record("fc-a", phase="ready", priority=1)
     service, ledger = registered_service(work)
@@ -384,7 +454,63 @@ def test_assignment_history_uses_completing_native_turn():
     assert history[-1]["turn_id"] == "turn-real"
 
 
+def test_recovery_slot_releases_after_finish_and_native_completion():
+    recovery_id = "recovery-1"
+    ledger = MemoryLedger(
+        record(
+            "fc-system",
+            kind="control",
+            desktop={
+                "recovery_slot": {
+                    "recovery_id": recovery_id,
+                    "bead": "fc-a",
+                    "state": "active",
+                }
+            },
+        ),
+        record(
+            "fc-a",
+            owner="justiciar-1",
+            phase="done",
+            desktop={
+                "assignment": {
+                    "assignment_token": "assignment-1",
+                    "task_id": "justiciar-1",
+                    "turn_id": "turn-1",
+                    "role": "justiciar",
+                    "state": "active",
+                    "capacity_class": "recovery",
+                    "recovery_id": recovery_id,
+                    "finish_operation": "fc-op-finish",
+                },
+                "observations": {
+                    "lifecycle": {
+                        "done": {
+                            "type": "turn_completed",
+                            "task_id": "justiciar-1",
+                            "turn_id": "turn-1",
+                        }
+                    }
+                },
+            },
+        ),
+    )
+    assert settle_native_completion(request(), ledger, "fc-a")
+    slot = (ledger.show("fc-system").fc or {})["desktop"]["recovery_slot"]
+    assert slot["state"] == "released"
+    assert slot["release_reason"] == "accepted outcome and native completion"
+
+
 class DesktopProtocolTests(unittest.TestCase):
+    def test_managed_task_cannot_inject_action(self):
+        test_managed_task_cannot_inject_native_action()
+
+    def test_creation_normalizes_title(self):
+        test_successful_creation_compiles_exact_title_normalization()
+
+    def test_settled_worker_archives(self):
+        test_closed_settled_worker_compiles_archive_action()
+
     def test_equal_action_claim_is_idempotent(self):
         test_equal_action_claim_replays_without_authorizing_second_invocation()
 
@@ -408,3 +534,6 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_native_completion_retains_actual_turn(self):
         test_assignment_history_uses_completing_native_turn()
+
+    def test_native_completion_releases_recovery_slot(self):
+        test_recovery_slot_releases_after_finish_and_native_completion()

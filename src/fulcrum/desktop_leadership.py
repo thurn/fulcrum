@@ -309,7 +309,32 @@ class DesktopLeadershipService(DesktopProtocolService):
         }
         incidents[incident_key] = incident
         protocol["incidents"] = incidents
-        value = {"incident": incident, "coalesced": existing is not None}
+        alert = self._ensure_notice(
+            ledger,
+            record.id,
+            protocol,
+            target_role="marshal",
+            purpose=f"incident_alert:{incident['incident_id']}",
+            prompt=(
+                f"Fulcrum incident {incident['incident_id']} affects {record.id}. "
+                f"Scope: {incident.get('scope') or 'unspecified'}. Run marshal_check "
+                "and act only on current retained facts."
+            ),
+        )
+        decision = None
+        if (
+            incident.get("required_decision")
+            and int(incident.get("justiciar_interventions", 0)) >= 1
+        ):
+            decision = self._ensure_human_decision(
+                ledger, record.id, protocol, incident
+            )
+        value: dict[str, Any] = {
+            "incident": incident,
+            "coalesced": existing is not None,
+        }
+        value["alert"] = alert
+        value["decision"] = decision
         _save_request(protocol, request, value)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         return _result(request, value)
@@ -351,6 +376,11 @@ class DesktopLeadershipService(DesktopProtocolService):
                 incident["required_decision"] = (
                     "Marshal may authorize one Justiciar intervention."
                 )
+            if int(incident.get("justiciar_interventions", 0)) >= 1:
+                incident["repair_hold"] = True
+                incident["required_decision"] = (
+                    "Human direction is required after the scoped Justiciar intervention."
+                )
         elif outcome == "succeeded":
             incident["state"] = "resolved"
             incident["resolved_at"] = _utc_now()
@@ -360,10 +390,116 @@ class DesktopLeadershipService(DesktopProtocolService):
             )
         incidents[key] = incident
         protocol["incidents"] = incidents
-        value = {"incident": incident}
+        alert = None
+        if incident.get("repair_hold"):
+            alert = self._ensure_notice(
+                ledger,
+                record.id,
+                protocol,
+                target_role="marshal",
+                purpose=f"repair_hold:{incident.get('incident_id')}",
+                prompt=(
+                    f"Repair allowance is exhausted for {record.id}, incident "
+                    f"{incident.get('incident_id')}. Inspect current evidence before "
+                    "authorizing any scoped recovery."
+                ),
+            )
+        decision = None
+        if outcome == "failed" and int(incident.get("justiciar_interventions", 0)) >= 1:
+            decision = self._ensure_human_decision(
+                ledger, record.id, protocol, incident
+            )
+        value = {"incident": incident, "alert": alert, "decision": decision}
         _save_request(protocol, request, value)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         return _result(request, value)
+
+    def _ensure_notice(
+        self,
+        ledger: Any,
+        record_id: str,
+        protocol: dict[str, Any],
+        *,
+        target_role: str,
+        purpose: str,
+        prompt: str,
+    ) -> Mapping[str, Any]:
+        actions = dict(protocol.get("actions") or {})
+        for action in actions.values():
+            if (
+                isinstance(action, Mapping)
+                and action.get("purpose") == purpose
+                and action.get("state") not in {"rejected", "superseded"}
+            ):
+                return dict(action)
+        system = self._system(ledger)
+        binding = (_protocol(system.fc or {}).get("standing") or {}).get(target_role)
+        if not isinstance(binding, Mapping) or binding.get("state") != "registered":
+            return {
+                "state": "blocked",
+                "reason": f"{target_role} is not registered",
+                "purpose": purpose,
+            }
+        return self._append_action(
+            protocol,
+            record_id=record_id,
+            executor="steward",
+            tool="send_message_to_thread",
+            arguments={"threadId": binding.get("task_id"), "prompt": prompt},
+            purpose=purpose,
+            expected_result={"thread_id": binding.get("task_id")},
+            reporting={"kind": "recorded_notification", "target": target_role},
+        )
+
+    def _ensure_human_decision(
+        self,
+        ledger: Any,
+        record_id: str,
+        protocol: dict[str, Any],
+        incident: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        decisions = dict(protocol.get("human_decisions") or {})
+        incident_id = str(incident.get("incident_id") or "")
+        existing = next(
+            (
+                value
+                for value in decisions.values()
+                if isinstance(value, Mapping)
+                and value.get("incident_id") == incident_id
+                and value.get("state") == "open"
+            ),
+            None,
+        )
+        if isinstance(existing, Mapping):
+            return dict(existing)
+        decision_id = _opaque("human-decision")
+        decision = {
+            "decision_id": decision_id,
+            "incident_id": incident_id,
+            "state": "open",
+            "question": incident.get("required_decision"),
+            "scope": incident.get("scope"),
+            "evidence": copy.deepcopy(incident.get("evidence") or []),
+            "created_at": _utc_now(),
+        }
+        decisions[decision_id] = decision
+        protocol["human_decisions"] = decisions
+        notice = self._ensure_notice(
+            ledger,
+            record_id,
+            protocol,
+            target_role="vizier",
+            purpose=f"human_decision:{decision_id}",
+            prompt=(
+                f"Human decision {decision_id} is required for {record_id}: "
+                f"{decision.get('question')}. Reread current Fulcrum state before "
+                "presenting or recording a response."
+            ),
+        )
+        decision["notice"] = copy.deepcopy(dict(notice))
+        decisions[decision_id] = decision
+        protocol["human_decisions"] = decisions
+        return decision
 
     @coordinated
     def recovery_prepare(self, request: ParsedRequest) -> CommandResult:

@@ -1620,15 +1620,15 @@ def _release_desktop_assignment(
     bead_id: str,
     finish_operation: str | None,
     native_turn_id: str | None = None,
-) -> None:
+) -> Mapping[str, Any] | None:
     current = ledger.show(bead_id)
     if current is None or not current.fc:
-        return
+        return None
     fc = dict(current.fc)
     desktop = dict(fc.get("desktop") or {})
     assignment = desktop.pop("assignment", None)
     if not isinstance(assignment, Mapping):
-        return
+        return None
     history = list(desktop.get("assignment_history") or [])
     history.append(
         {
@@ -1646,6 +1646,34 @@ def _release_desktop_assignment(
     fc["role"] = None
     fc["ownership_operation"] = None
     ledger.update_fc(current.id, fc, assignee=owner)
+    return assignment
+
+
+def _release_recovery_slot(
+    ledger: Ledger, bead_id: str, assignment: Mapping[str, Any]
+) -> None:
+    if assignment.get("capacity_class") != "recovery":
+        return
+    system = ledger.show("fc-system")
+    if system is None or not system.fc:
+        return
+    system_fc = dict(system.fc)
+    desktop = dict(system_fc.get("desktop") or {})
+    slot = desktop.get("recovery_slot")
+    if not isinstance(slot, Mapping):
+        return
+    if slot.get("bead") != bead_id or slot.get("recovery_id") != assignment.get(
+        "recovery_id"
+    ):
+        return
+    desktop["recovery_slot"] = {
+        **dict(slot),
+        "state": "released",
+        "released_at": utc_now(),
+        "release_reason": "accepted outcome and native completion",
+    }
+    system_fc["desktop"] = desktop
+    ledger.update_fc(system.id, system_fc)
 
 
 def settle_native_completion(
@@ -1737,12 +1765,14 @@ def settle_native_completion(
             )
             ledger.update_fc(bead_id, fc, status="in_progress")
     native_turn_id = request.input.get("turn_id")
-    _release_desktop_assignment(
+    released = _release_desktop_assignment(
         ledger,
         bead_id,
         finish_operation,
         str(native_turn_id) if native_turn_id else None,
     )
+    if released is not None:
+        _release_recovery_slot(ledger, bead_id, released)
     return True
 
 
