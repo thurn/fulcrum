@@ -1143,7 +1143,7 @@ source-editing step.
 ## Implementation handoff
 
 Implement this design directly; no discovery/probe milestone precedes coding.
-Give Luna bounded slices with an observable outcome, relevant checks, diagnostic
+Take bounded slices with an observable outcome, relevant checks, diagnostic
 events, and a landing boundary. Establish causal logging with the first protocol
 slice, not as a final instrumentation pass. Work in this order:
 
