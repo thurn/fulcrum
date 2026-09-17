@@ -218,6 +218,60 @@ def test_ci_wait_recovers_candidate_created_by_finish_validation():
     assert (ledger.show("fc-a").fc or {})["delivery"]["validation"]["state"] == "passed"
 
 
+def test_ci_wait_repairs_terminal_candidate_with_stale_delivery():
+    work = record(
+        "fc-a",
+        delivery={
+            "source_oid": "abc",
+            "provider_handle": "provider-1",
+            "validation": {"state": "pending"},
+        },
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-1",
+                "task_id": "warden-1",
+                "role": "warden",
+                "state": "active",
+            },
+            "candidate": {
+                "candidate_id": "provider-1",
+                "source": "abc",
+                "state": "passed",
+                "deadline": "2026-09-16T00:30:00Z",
+            },
+        },
+    )
+    ledger = MemoryLedger(work)
+    service = DesktopProtocolService(ledger)
+    with patch(
+        "fulcrum.delivery_service.DeliveryService.validation_show",
+        return_value=CommandResult.query(
+            {
+                "state": "passed",
+                "delivery": {
+                    "source_oid": "abc",
+                    "provider_handle": "provider-1",
+                    "validation": {"state": "passed"},
+                },
+            }
+        ),
+    ) as validation_show:
+        result = service.wait_for_ci_results(
+            mutation(
+                ("ci", "wait"),
+                actor="task:warden-1",
+                arguments={"bead": "fc-a"},
+                payload={
+                    "candidate_id": "provider-1",
+                    "assignment_token": "assignment-1",
+                },
+            )
+        )
+    assert result.result["status"] == "passed"
+    validation_show.assert_called_once()
+    assert (ledger.show("fc-a").fc or {})["delivery"]["validation"]["state"] == "passed"
+
+
 def test_steward_dispatches_executor_from_retained_worktree_path():
     work = record(
         "fc-a",
@@ -291,6 +345,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_ci_wait_recovers_finish_candidate(self):
         test_ci_wait_recovers_candidate_created_by_finish_validation()
+
+    def test_ci_wait_repairs_stale_delivery(self):
+        test_ci_wait_repairs_terminal_candidate_with_stale_delivery()
 
     def test_dispatch_uses_retained_worktree(self):
         test_steward_dispatches_executor_from_retained_worktree_path()

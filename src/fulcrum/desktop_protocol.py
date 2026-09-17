@@ -1449,7 +1449,19 @@ class DesktopProtocolService:
                 "CANDIDATE_MISMATCH", "CI wait candidate does not match", exit_code=5
             )
         state = str(candidate.get("state"))
-        if state not in {"passed", "failed", "blocked"}:
+        retained_delivery = (record.fc or {}).get("delivery")
+        retained_validation = (
+            retained_delivery.get("validation")
+            if isinstance(retained_delivery, Mapping)
+            else None
+        )
+        retained_state = (
+            str(retained_validation.get("state"))
+            if isinstance(retained_validation, Mapping)
+            and retained_validation.get("state")
+            else None
+        )
+        if state not in {"passed", "failed", "blocked"} or retained_state != state:
             from fulcrum.delivery_service import DeliveryService
 
             observed = DeliveryService().validation_show(
