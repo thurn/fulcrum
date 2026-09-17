@@ -872,6 +872,8 @@ class DesktopProtocolService:
                 if isinstance(fc.get("delivery"), Mapping)
                 else None
             )
+            if not workspace and isinstance(fc.get("worktree"), Mapping):
+                workspace = fc["worktree"].get("path")
             project_config = (
                 projects.get(project) if isinstance(projects, Mapping) else None
             )
@@ -918,6 +920,11 @@ class DesktopProtocolService:
             or (
                 fc.get("delivery", {}).get("workspace")
                 if isinstance(fc.get("delivery"), Mapping)
+                else ""
+            )
+            or (
+                fc.get("worktree", {}).get("path")
+                if isinstance(fc.get("worktree"), Mapping)
                 else ""
             )
         )

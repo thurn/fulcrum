@@ -160,6 +160,24 @@ def test_ci_wait_is_transport_state_and_keeps_assignment_active():
     assert waiting.result["transport_wait"]["kind"] == "ci"
 
 
+def test_steward_dispatches_executor_from_retained_worktree_path():
+    work = record(
+        "fc-a",
+        phase="ready",
+        requested_role="executor",
+        worktree={"path": "/tmp/managed-worktree"},
+        codex_project_id="project-1",
+    )
+    service, _ = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "acceptance"}))
+    result = service.wait_for_instructions(
+        mutation(("instruction", "wait"), actor="task:steward-1")
+    )
+    assert result.result["kind"] == "action"
+    assert result.result["action"]["arguments"]["prompt"].startswith("Fulcrum-Action:")
+    assert "/tmp/managed-worktree" in result.result["action"]["arguments"]["prompt"]
+
+
 def test_assignment_releases_only_after_exact_native_completion():
     assignment = {
         "assignment_token": "assignment-1",
@@ -212,6 +230,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_ci_wait_is_transport_state(self):
         test_ci_wait_is_transport_state_and_keeps_assignment_active()
+
+    def test_dispatch_uses_retained_worktree(self):
+        test_steward_dispatches_executor_from_retained_worktree_path()
 
     def test_native_completion_releases_assignment(self):
         test_assignment_releases_only_after_exact_native_completion()
