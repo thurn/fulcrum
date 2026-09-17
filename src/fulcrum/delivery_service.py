@@ -565,7 +565,6 @@ class DeliveryService:
             return _failed_operation(ledger, operation, error, "source_sync")
         if facts.synchronization == "complete":
             from fulcrum.broker import broker_request
-            from fulcrum.coordination import external_effect
 
             try:
                 with external_effect():

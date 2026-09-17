@@ -154,6 +154,44 @@ class DeliverySafetyTests(unittest.TestCase):
             "integration",
         )
 
+    def test_completed_source_sync_records_publication_and_signals_broker(self):
+        work = record(delivery=self.delivery)
+        ledger = MemoryLedger(work)
+        provider = Mock()
+        provider.synchronize = AsyncMock(
+            return_value=DeliveryFacts(
+                "handle",
+                "current-source",
+                "passed",
+                "promoted",
+                "integration",
+                "complete",
+                "pending",
+                {},
+                "2026-09-15T00:00:00Z",
+            )
+        )
+        with (
+            patch(
+                "fulcrum.delivery_service._context",
+                return_value=(ledger, work, {}, provider),
+            ),
+            patch(
+                "fulcrum.delivery_service._retained_delivery_source",
+                return_value=(self.source, "handle"),
+            ),
+            patch("fulcrum.broker.broker_request", new=AsyncMock()) as signal,
+        ):
+            result = DeliveryService().source_sync(
+                request(("source", "sync"), arguments={"bead": "fc-work"})
+            )
+        self.assertTrue(result.ok)
+        provider.synchronize.assert_awaited_once_with(self.source, "handle")
+        signal.assert_awaited_once()
+        synchronization = ledger.show("fc-work").fc["delivery"]["synchronization"]
+        self.assertEqual(synchronization["state"], "observed")
+        self.assertEqual(synchronization["provider_state"], "complete")
+
     def test_unowned_or_dirty_workspace_is_never_deleted(self):
         tollgate = Mock()
         adapter = TollgateDelivery(tollgate)
