@@ -90,6 +90,12 @@ class HookService:
             or ""
         )
         bound = _binding_for_task(ledger, task_id) if task_id else None
+        if bound is None:
+            session_id = request.input.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                bound = _binding_for_session(ledger, session_id)
+                if bound is not None:
+                    task_id = _task_id_for_binding(bound)
         marker = _parse_marker(request.input)
         if bound is None and marker is not None:
             bound = _prospective_binding(ledger, request, marker)
@@ -102,9 +108,9 @@ class HookService:
                 "additionalContext": _context(bound),
             }
         elif event_name == "UserPromptSubmit" and marker is not None:
-            response = self._prompt(ledger, request, marker, bound)
+            response = self._prompt(ledger, request, marker, bound, task_id)
         elif event_name == "UserPromptSubmit" and bound is not None:
-            self._record_manual_task_activity(ledger, request, bound)
+            self._record_manual_task_activity(ledger, request, bound, task_id)
         elif event_name == "PreToolUse":
             response = self._pre_tool(ledger, request, bound)
         elif event_name == "PostToolUse":
@@ -113,7 +119,7 @@ class HookService:
             self._lifecycle(ledger, request, bound, event_name)
         if bound is not None:
             bound = _binding_for_task(ledger, task_id) or bound
-            self._collect_transcript(ledger, request, bound)
+            self._collect_transcript(ledger, request, bound, task_id)
         self._log(request, event_name, task_id, response)
         return CommandResult.query(response)
 
@@ -122,6 +128,7 @@ class HookService:
         ledger: Ledger,
         request: ParsedRequest,
         bound: tuple[LedgerRecord, str],
+        task_id: str,
     ) -> None:
         record, role = bound
         if role in {"steward", "marshal", "vizier"}:
@@ -139,13 +146,6 @@ class HookService:
                 protocol["standing"] = standing
                 ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
             return
-        task_id = str(
-            request.input.get("thread_id")
-            or request.input.get("task_id")
-            or request.actor.task_id
-            or request.thread_id
-            or ""
-        )
         protocol = _protocol(record.fc or {})
         assignment = protocol.get("assignment")
         if isinstance(assignment, Mapping) and assignment.get("task_id") == task_id:
@@ -169,6 +169,7 @@ class HookService:
         request: ParsedRequest,
         marker: Mapping[str, Any],
         bound: tuple[LedgerRecord, str] | None,
+        task_id: str,
     ) -> dict[str, Any]:
         record = ledger.show(str(marker.get("record_id") or ""))
         if record is None:
@@ -191,7 +192,7 @@ class HookService:
             "event_id": event_id,
             "kind": "prompt",
             "action_id": action_id,
-            "task_id": request.actor.task_id or request.thread_id,
+            "task_id": task_id,
             "session_id": request.input.get("session_id"),
             "turn_id": request.input.get("turn_id"),
         }
@@ -317,6 +318,7 @@ class HookService:
         ledger: Ledger,
         request: ParsedRequest,
         bound: tuple[LedgerRecord, str],
+        task_id: str,
     ) -> None:
         transcript = request.input.get("transcript_path") or request.input.get(
             "transcriptPath"
@@ -324,13 +326,6 @@ class HookService:
         if not isinstance(transcript, str) or not Path(transcript).is_absolute():
             return
         record, role = bound
-        task_id = str(
-            request.input.get("thread_id")
-            or request.input.get("task_id")
-            or request.actor.task_id
-            or request.thread_id
-            or ""
-        )
         self._collect_transcript_path(
             ledger,
             request,
@@ -534,6 +529,65 @@ def _binding_for_task(ledger: Ledger, task_id: str) -> tuple[LedgerRecord, str] 
                 if isinstance(retained, Mapping) and retained.get("task_id") == task_id:
                     return record, str(retained.get("role") or "worker")
     return None
+
+
+def _binding_for_session(
+    ledger: Ledger, session_id: str
+) -> tuple[LedgerRecord, str] | None:
+    system = ledger.show("fc-system")
+    if system is not None:
+        standing = _protocol(system.fc or {}).get("standing")
+        if isinstance(standing, Mapping):
+            for role, binding in standing.items():
+                if (
+                    isinstance(binding, Mapping)
+                    and binding.get("session_id") == session_id
+                ):
+                    return system, str(role)
+    for record in ledger.list_records(limit=0):
+        protocol = _protocol(record.fc or {})
+        assignment = protocol.get("assignment")
+        if (
+            isinstance(assignment, Mapping)
+            and assignment.get("session_id") == session_id
+        ):
+            return record, str(assignment.get("role") or "worker")
+        history = protocol.get("assignment_history")
+        if isinstance(history, list):
+            for retained in reversed(history):
+                if (
+                    isinstance(retained, Mapping)
+                    and retained.get("session_id") == session_id
+                ):
+                    return record, str(retained.get("role") or "worker")
+    return None
+
+
+def _task_id_for_binding(bound: tuple[LedgerRecord, str]) -> str:
+    record, role = bound
+    protocol = _protocol(record.fc or {})
+    if record.id == "fc-system":
+        standing = protocol.get("standing")
+        binding = standing.get(role) if isinstance(standing, Mapping) else None
+    else:
+        binding = protocol.get("assignment")
+        if not isinstance(binding, Mapping) or binding.get("role") != role:
+            history = protocol.get("assignment_history")
+            binding = (
+                next(
+                    (
+                        retained
+                        for retained in reversed(history)
+                        if isinstance(retained, Mapping)
+                        and retained.get("role") == role
+                    ),
+                    None,
+                )
+                if isinstance(history, list)
+                else None
+            )
+    task_id = binding.get("task_id") if isinstance(binding, Mapping) else None
+    return str(task_id or "")
 
 
 def _prospective_binding(

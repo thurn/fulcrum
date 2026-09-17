@@ -40,6 +40,53 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_session_only_hook_identity_binds_registered_standing_task(self):
+        ledger = MemoryLedger()
+        desktop = DesktopProtocolService(ledger)
+        action = seed_action(
+            ledger,
+            {
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register marshal"},
+                "purpose": "bootstrap_marshal",
+            },
+        )
+        observe_action_prompt(
+            ledger, action, task_id="marshal-1", session_id="session-1"
+        )
+        desktop.register_standing(
+            replace(
+                request(("register", "standing")),
+                input={
+                    "role": "marshal",
+                    "task_id": "marshal-1",
+                    "session_id": "session-1",
+                    "action_id": action["action_id"],
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(
+                json.dumps({"type": "turn_context", "turn_id": "turn-1"}) + "\n"
+            )
+            HookService(ledger).handle(
+                replace(
+                    request(("hook", "handle")),
+                    input={
+                        "hook_event_name": "SessionStart",
+                        "session_id": "session-1",
+                        "turn_id": "turn-1",
+                        "transcript_path": str(path),
+                    },
+                    request_id=str(uuid.uuid4()),
+                )
+            )
+        protocol = (ledger.show("fc-system").fc or {})["desktop"]
+        self.assertIn("marshal-1", protocol["transcripts"])
+
     def test_stop_callback_is_not_positive_terminal_evidence(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)
