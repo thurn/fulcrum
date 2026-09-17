@@ -665,6 +665,31 @@ class DesktopProtocolService:
         )
         selected = recovered or (candidates[0] if candidates else None)
         if selected is None:
+            deadline = datetime.fromisoformat(
+                str(wait["deadline"]).replace("Z", "+00:00")
+            )
+            if self.now() >= deadline:
+                value = {
+                    "kind": "stop",
+                    "reason": "idle_deadline",
+                    "wait_id": wait_id,
+                    "retained_obligation": False,
+                }
+                wait["state"] = "expired"
+                wait["resolved_at"] = _utc_now()
+                wait["response"] = copy.deepcopy(value)
+                waits[wait_id] = wait
+                protocol["instruction_waits"] = waits
+                _save_request(protocol, request, value)
+                ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
+                self._write_event(
+                    request,
+                    "instruction_wait_expired",
+                    wait_id=wait_id,
+                    task_id=binding["task_id"],
+                    outcome="idle_deadline",
+                )
+                return _result(request, value)
             value = {"transport_wait": {"kind": "instruction", **wait}}
             self._write_event(
                 request,
@@ -905,17 +930,62 @@ class DesktopProtocolService:
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
             return _result(request, value)
         waits = dict(protocol.get("ci_waits") or {})
-        if any(
-            isinstance(item, Mapping) and item.get("state") == "waiting"
-            for item in waits.values()
+        matching = next(
+            (
+                item
+                for item in waits.values()
+                if isinstance(item, Mapping)
+                and item.get("state") == "waiting"
+                and item.get("request_id") == _request_id(request)
+                and item.get("accepted_input") == _request_input(request)
+            ),
+            None,
+        )
+        if (
+            any(
+                isinstance(item, Mapping) and item.get("state") == "waiting"
+                for item in waits.values()
+            )
+            and matching is None
         ):
             raise FulcrumError(
                 "CI_WAIT_ACTIVE", "candidate already has a pending CI wait", exit_code=5
+            )
+        if matching is not None:
+            deadline = datetime.fromisoformat(
+                str(candidate["deadline"]).replace("Z", "+00:00")
+            )
+            if self.now() >= deadline:
+                value = {
+                    "status": "blocked",
+                    "reason": "ci_deadline",
+                    "candidate": copy.deepcopy(dict(candidate)),
+                }
+                wait = copy.deepcopy(dict(matching))
+                wait["state"] = "expired"
+                wait["resolved_at"] = _utc_now()
+                waits[str(wait["wait_id"])] = wait
+                protocol["ci_waits"] = waits
+                _save_request(protocol, request, value)
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+                return _result(request, value)
+            return CommandResult(
+                ok=True,
+                state=CommandState.RUNNING,
+                request_id=request.request_id,
+                result={
+                    "transport_wait": {
+                        "kind": "ci",
+                        "bead": bead_id,
+                        **dict(matching),
+                    }
+                },
             )
         wait_id = _opaque("wait")
         wait = {
             "wait_id": wait_id,
             "request_id": _request_id(request),
+            "accepted_input": _request_input(request),
             "candidate_id": candidate["candidate_id"],
             "task_id": assignment["task_id"],
             "turn_id": request.input.get("turn_id"),

@@ -49,6 +49,8 @@ dev = [
 [project.scripts]
 fulcrum = "fulcrum.bootstrap:main"
 fulcrum-recover = "fulcrum.recovery_entry:main"
+fulcrum-broker = "fulcrum.broker:main"
+fulcrum-mcp = "fulcrum.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
