@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -12,6 +13,48 @@ from fulcrum.mcp_server import FreshCli, McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transcript_change_wakes_wait_before_timer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "rollout.jsonl"
+            transcript.write_text("first\n", encoding="utf-8")
+            calls = 0
+
+            async def runner(argv, stdin):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    return {
+                        "ok": True,
+                        "state": "running",
+                        "result": {
+                            "transport_wait": {
+                                "wait_id": "watched",
+                                "watch_paths": [str(transcript)],
+                            }
+                        },
+                    }
+                return {"ok": True, "state": "completed", "result": {"calls": calls}}
+
+            async def change_file():
+                await asyncio.sleep(0.05)
+                transcript.write_text("second\n", encoding="utf-8")
+
+            changed = asyncio.create_task(change_file())
+            started = time.monotonic()
+            result = await PendingBroker(runner).wait(
+                Evaluation(
+                    argv=("fulcrum",),
+                    stdin="{}",
+                    interval_seconds=5,
+                    deadline_monotonic=time.monotonic() + 6,
+                    wait_id="watched",
+                    kind="instruction",
+                )
+            )
+            await changed
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(result["result"]["calls"], 2)
+
     async def test_each_evaluation_starts_from_current_operation_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

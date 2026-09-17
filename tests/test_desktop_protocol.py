@@ -501,6 +501,27 @@ def test_recovery_slot_releases_after_finish_and_native_completion():
     assert slot["release_reason"] == "accepted outcome and native completion"
 
 
+def test_transition_limit_fences_new_mutation():
+    retained = {
+        str(uuid.uuid4()): {"state": "completed", "result": {}} for _ in range(128)
+    }
+    ledger = MemoryLedger(record("fc-a", desktop={"requests": retained}))
+    service = DesktopProtocolService(ledger)
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.queue_action(
+            mutation(
+                ("action", "queue"),
+                payload={
+                    "record_id": "fc-a",
+                    "executor": "steward",
+                    "tool": "read_thread",
+                    "arguments": {"threadId": "worker-1"},
+                },
+            )
+        )
+    assert raised.exception.code == "TRANSITION_STORAGE_BLOCKED"
+
+
 class DesktopProtocolTests(unittest.TestCase):
     def test_managed_task_cannot_inject_action(self):
         test_managed_task_cannot_inject_native_action()
@@ -537,3 +558,6 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_native_completion_releases_recovery_slot(self):
         test_recovery_slot_releases_after_finish_and_native_completion()
+
+    def test_transition_limit_blocks_new_mutation(self):
+        test_transition_limit_fences_new_mutation()

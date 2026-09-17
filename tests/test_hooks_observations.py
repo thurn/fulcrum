@@ -34,6 +34,69 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_registered_transcript_collects_delayed_writes(self):
+        ledger = MemoryLedger()
+        desktop = DesktopProtocolService(ledger)
+        action = desktop.queue_action(
+            replace(
+                request(("action", "queue")),
+                input={
+                    "executor": "bootstrap",
+                    "tool": "create_thread",
+                    "arguments": {"prompt": "register steward"},
+                    "purpose": "bootstrap_steward",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        ).result["action"]
+        desktop.register_standing(
+            replace(
+                request(("register", "standing")),
+                input={
+                    "role": "steward",
+                    "task_id": "steward-1",
+                    "session_id": "session-1",
+                    "action_id": action["action_id"],
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(
+                json.dumps({"type": "turn_context", "turn_id": "turn-1"}) + "\n"
+            )
+            hook = HookService(ledger)
+            hook.handle(
+                replace(
+                    request(("hook", "handle")),
+                    actor=ActorContext.parse("task:steward-1"),
+                    thread_id="steward-1",
+                    input={
+                        "hook_event_name": "SessionStart",
+                        "thread_id": "steward-1",
+                        "turn_id": "turn-1",
+                        "transcript_path": str(path),
+                    },
+                    request_id=str(uuid.uuid4()),
+                )
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "token_usage_record",
+                            "response_id": "response-delayed",
+                            "usage": {"input_tokens": 3, "output_tokens": 1},
+                        }
+                    )
+                    + "\n"
+                )
+            watched = hook.collect_registered(request())
+        protocol = (ledger.show("fc-system").fc or {})["desktop"]
+        self.assertEqual(watched, [str(path)])
+        self.assertIn("response-delayed", protocol["observations"]["usage"])
+
     def test_standing_tasks_keep_independent_transcript_cursors(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)

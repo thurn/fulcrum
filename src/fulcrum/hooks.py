@@ -237,6 +237,76 @@ class HookService:
             or request.thread_id
             or ""
         )
+        self._collect_transcript_path(
+            ledger,
+            request,
+            record,
+            role,
+            task_id,
+            transcript,
+            request.input.get("turn_id"),
+        )
+
+    def collect_registered(self, request: ParsedRequest) -> list[str]:
+        """Collect every retained transcript and return its watched path."""
+
+        ledger = self._ledger(request)
+        paths: list[str] = []
+        for record in ledger.list_records(limit=0):
+            protocol = _protocol(record.fc or {})
+            transcripts = protocol.get("transcripts")
+            if not isinstance(transcripts, Mapping):
+                continue
+            assignment = protocol.get("assignment")
+            standing = protocol.get("standing") or {}
+            for task_id, retained in transcripts.items():
+                if not isinstance(retained, Mapping):
+                    continue
+                transcript = retained.get("path")
+                if (
+                    not isinstance(transcript, str)
+                    or not Path(transcript).is_absolute()
+                ):
+                    continue
+                role = "worker"
+                turn_id = None
+                if (
+                    isinstance(assignment, Mapping)
+                    and assignment.get("task_id") == task_id
+                ):
+                    role = str(assignment.get("role") or role)
+                    turn_id = assignment.get("turn_id")
+                else:
+                    for standing_role, binding in standing.items():
+                        if (
+                            isinstance(binding, Mapping)
+                            and binding.get("task_id") == task_id
+                        ):
+                            role = str(standing_role)
+                            turn_id = binding.get("turn_id")
+                            break
+                self._collect_transcript_path(
+                    ledger,
+                    request,
+                    record,
+                    role,
+                    str(task_id),
+                    transcript,
+                    turn_id,
+                )
+                paths.append(transcript)
+        return sorted(set(paths))
+
+    def _collect_transcript_path(
+        self,
+        ledger: Ledger,
+        request: ParsedRequest,
+        record: LedgerRecord,
+        role: str,
+        task_id: str,
+        transcript: str,
+        turn_id: Any,
+    ) -> None:
         protocol = _protocol(record.fc or {})
         transcripts = dict(protocol.get("transcripts") or {})
         current = transcripts.get(task_id)
@@ -256,9 +326,7 @@ class HookService:
         for item in page.lifecycle:
             normalized = dict(item)
             normalized["task_id"] = normalized.get("task_id") or task_id
-            normalized["turn_id"] = normalized.get("turn_id") or request.input.get(
-                "turn_id"
-            )
+            normalized["turn_id"] = normalized.get("turn_id") or turn_id
             if normalized.get("type") == "turn_context" and normalized.get("model"):
                 models[str(normalized.get("turn_id"))] = str(normalized["model"])
             identity = normalized.get("event_id") or ":".join(
@@ -269,9 +337,7 @@ class HookService:
         for item in page.usage:
             normalized = dict(item)
             normalized["task_id"] = normalized.get("task_id") or task_id
-            normalized["turn_id"] = normalized.get("turn_id") or request.input.get(
-                "turn_id"
-            )
+            normalized["turn_id"] = normalized.get("turn_id") or turn_id
             normalized["model"] = normalized.get("model") or models.get(
                 str(normalized.get("turn_id"))
             )

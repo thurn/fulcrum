@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import json
+import socket
 from collections.abc import Mapping
 from typing import Any
 
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
-from fulcrum.coordination import coordinated
+from fulcrum.coordination import coordinated, external_effect
 from fulcrum.desktop_protocol import (
     DesktopProtocolService,
     _opaque,
@@ -20,6 +22,27 @@ from fulcrum.desktop_protocol import (
     _with_protocol,
     action_marker,
 )
+
+
+def _active_broker_wait_ids(request: ParsedRequest) -> set[str]:
+    path = request.instance.instance_root / "broker.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.25)
+            client.connect(str(path))
+            client.sendall(b'{"type":"health"}\n')
+            raw = client.makefile("rb").readline(1024 * 1024)
+        response = json.loads(raw)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return set()
+    pending = response.get("pending") if isinstance(response, Mapping) else None
+    if not isinstance(pending, list):
+        return set()
+    return {
+        str(item["wait_id"])
+        for item in pending
+        if isinstance(item, Mapping) and item.get("wait_id")
+    }
 
 
 class DesktopLeadershipService(DesktopProtocolService):
@@ -68,8 +91,12 @@ class DesktopLeadershipService(DesktopProtocolService):
                     }
                 )
         waits = protocol.get("instruction_waits") or {}
+        with external_effect():
+            active_wait_ids = _active_broker_wait_ids(request)
         healthy_wait = any(
-            isinstance(value, Mapping) and value.get("state") == "waiting"
+            isinstance(value, Mapping)
+            and value.get("state") == "waiting"
+            and value.get("wait_id") in active_wait_ids
             for value in waits.values()
         )
         steward = (protocol.get("standing") or {}).get("steward")

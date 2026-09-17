@@ -64,6 +64,7 @@ class ProcessLock:
             return self
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.set_inheritable(fd, True)
         try:
             fcntl.flock(
                 fd,
@@ -91,6 +92,13 @@ class ProcessLock:
         if not held[self.key][1]:
             os.close(held.pop(self.key)[0])
         self.mutex.release()
+
+
+def inherited_lock_fds() -> tuple[int, ...]:
+    """Return lock descriptors a mutation child must retain until it exits."""
+
+    held = getattr(_local, "held", {})
+    return tuple(sorted(value[0] for value in held.values() if value))
 
 
 _active: contextvars.ContextVar[ProcessLock | None] = contextvars.ContextVar[

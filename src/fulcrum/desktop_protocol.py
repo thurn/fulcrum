@@ -152,6 +152,23 @@ def _save_request(
     state: str = "completed",
 ) -> None:
     requests = dict(protocol.get("requests") or {})
+    existing = requests.get(_request_id(request))
+    completed = sum(
+        1
+        for key, value in requests.items()
+        if key != _request_id(request)
+        and isinstance(value, Mapping)
+        and value.get("state") == "completed"
+        and not value.get("projected_at")
+    )
+    if existing is None and completed >= MAX_UNPROJECTED_TRANSITIONS:
+        raise FulcrumError(
+            "TRANSITION_STORAGE_BLOCKED",
+            "the record has 128 unprojected completed transitions",
+            exit_code=4,
+            retryable=False,
+            details={"limit": MAX_UNPROJECTED_TRANSITIONS},
+        )
     requests[_request_id(request)] = {
         "accepted_input": _request_input(request),
         "source_commit": os.environ.get("FULCRUM_COMMIT"),
@@ -1280,6 +1297,9 @@ class DesktopProtocolService:
         saved = _saved_request(protocol, request)
         if saved:
             return _replay(saved, request)
+        from fulcrum.hooks import HookService
+
+        watch_paths = HookService(ledger).collect_registered(request)
         request_id = _request_id(request)
         waits = dict(protocol.get("instruction_waits") or {})
         outstanding = [
@@ -1365,7 +1385,13 @@ class DesktopProtocolService:
                     outcome="idle_deadline",
                 )
                 return _result(request, value)
-            value = {"transport_wait": {"kind": "instruction", **wait}}
+            value = {
+                "transport_wait": {
+                    "kind": "instruction",
+                    "watch_paths": watch_paths,
+                    **wait,
+                }
+            }
             self._write_event(
                 request,
                 "instruction_wait_registered",
@@ -1659,6 +1685,9 @@ class DesktopProtocolService:
             raise FulcrumError(
                 "ASSIGNMENT_MISMATCH", "CI wait token does not match", exit_code=5
             )
+        from fulcrum.hooks import HookService
+
+        watch_paths = HookService(ledger).collect_registered(request)
         supplied_candidate = request.input.get("candidate_id")
         if (
             not isinstance(candidate, Mapping)
@@ -1805,6 +1834,7 @@ class DesktopProtocolService:
                     "transport_wait": {
                         "kind": "ci",
                         "bead": bead_id,
+                        "watch_paths": watch_paths,
                         **dict(matching),
                     }
                 },
@@ -1837,5 +1867,12 @@ class DesktopProtocolService:
             ok=True,
             state=CommandState.RUNNING,
             request_id=request.request_id,
-            result={"transport_wait": {"kind": "ci", "bead": bead_id, **wait}},
+            result={
+                "transport_wait": {
+                    "kind": "ci",
+                    "bead": bead_id,
+                    "watch_paths": watch_paths,
+                    **wait,
+                }
+            },
         )

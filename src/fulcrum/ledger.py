@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from fulcrum.coordination import ProcessLock, merge_change
+from fulcrum.coordination import ProcessLock, inherited_lock_fds, merge_change
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
 
 CAPTURE_BYTES = 256 * 1024
@@ -208,6 +208,7 @@ class Ledger:
                     stderr=stderr_file,
                     timeout=timeout or self.timeout,
                     check=False,
+                    pass_fds=inherited_lock_fds() if mutating else (),
                 )
             except subprocess.TimeoutExpired as error:
                 stdout, stdout_truncated = _read_capture(stdout_file)

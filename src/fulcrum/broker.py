@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from watchfiles import awatch
+
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 
@@ -129,6 +131,7 @@ class PendingBroker:
                         duration_ms=int((time.monotonic() - started) * 1000),
                     )
                     return result
+                watch_paths = _watch_paths(result)
                 remaining = evaluation.deadline_monotonic - time.monotonic()
                 if remaining <= 0:
                     result = await self.runner(evaluation.argv, evaluation.stdin)
@@ -146,11 +149,10 @@ class PendingBroker:
                     )
                     return result
                 try:
-                    await asyncio.wait_for(
-                        self._wake.wait(),
-                        timeout=min(evaluation.interval_seconds, remaining),
+                    await self._wait_for_change(
+                        watch_paths,
+                        min(evaluation.interval_seconds, remaining),
                     )
-                    self._wake.clear()
                 except TimeoutError:
                     pass
         except BaseException:
@@ -165,6 +167,30 @@ class PendingBroker:
         finally:
             self._active.pop(evaluation.wait_id, None)
         raise AssertionError("pending wait loop exited without a result")
+
+    async def _wait_for_change(
+        self, watch_paths: tuple[Path, ...], timeout: float
+    ) -> None:
+        signal_task = asyncio.create_task(self._wake.wait())
+        tasks: set[asyncio.Task[Any]] = {signal_task}
+        if watch_paths:
+            tasks.add(asyncio.create_task(_wait_for_files(watch_paths)))
+        try:
+            done, pending = await asyncio.wait(
+                tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            if not done:
+                raise TimeoutError
+            self._wake.clear()
+            for task in done:
+                task.result()
+            for task in pending:
+                task.cancel()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def health(self) -> dict[str, Any]:
         return {
@@ -192,6 +218,31 @@ def _is_transport_wait(result: Mapping[str, Any]) -> bool:
         and isinstance(payload, Mapping)
         and isinstance(payload.get("transport_wait"), Mapping)
     )
+
+
+def _watch_paths(result: Mapping[str, Any]) -> tuple[Path, ...]:
+    payload = result.get("result")
+    wait = payload.get("transport_wait") if isinstance(payload, Mapping) else None
+    values = wait.get("watch_paths") if isinstance(wait, Mapping) else None
+    if not isinstance(values, list):
+        return ()
+    return tuple(
+        path
+        for value in values
+        if isinstance(value, str)
+        and (path := Path(value)).is_absolute()
+        and path.exists()
+    )
+
+
+async def _wait_for_files(paths: tuple[Path, ...]) -> None:
+    async for _ in awatch(
+        *paths,
+        recursive=False,
+        debounce=50,
+        step=50,
+    ):
+        return
 
 
 class BrokerServer:
