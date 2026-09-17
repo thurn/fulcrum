@@ -157,7 +157,7 @@ interval or testing alternate creation-, activation-, or completion-time anchors
 Report that incident without reopening bootstrap or retrying an uncertain
 automation mutation.
 
-Explain that Desktop Stop does not durably pause Fulcrum. The initial MCP
-configuration change requires the one fresh continuation task described above;
-ordinary source edits never require a new task, restart, activation, installation,
-or remote publication.
+Mention stop semantics only when the user asks about stopping or pausing:
+Desktop Stop does not durably pause Fulcrum. The initial MCP configuration change
+requires the one fresh continuation task described above; ordinary source edits
+never require a new task, restart, activation, installation, or remote publication.
