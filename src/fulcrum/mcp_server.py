@@ -151,7 +151,12 @@ def _schema(name: str) -> dict[str, Any]:
     properties.update(TOOL_INPUT_PROPERTIES.get(name, {}))
     required.extend(
         {
-            "register_standing": ["role", "action_id"],
+            "register_standing": [
+                "role",
+                "action_id",
+                "task_id",
+                "session_id",
+            ],
             "report_progress": ["kind", "summary", "evidence"],
             "submit_candidate": ["source"],
             "wait_for_ci_results": ["candidate_id"],
@@ -170,8 +175,8 @@ def tool_descriptions() -> list[dict[str, Any]]:
     descriptions = {
         "register_standing": (
             "Bind this standing task using its lowercase role and the action_id "
-            "from the Fulcrum-Action marker. Task and session identity are observed "
-            "from the current Codex environment."
+            "from the Fulcrum-Action marker. Supply this task's CODEX_THREAD_ID as "
+            "task_id and CODEX_SESSION_ID as session_id."
         ),
         "wait_for_instructions": "Steward only: wait for one exact recorded native action.",
         "wait_for_ci_results": "Warden only: wait for terminal evidence for the exact candidate.",

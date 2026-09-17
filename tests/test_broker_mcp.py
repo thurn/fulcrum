@@ -94,6 +94,8 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         registration = tools["register_standing"]["inputSchema"]
         self.assertIn("role", registration["required"])
         self.assertIn("action_id", registration["required"])
+        self.assertIn("task_id", registration["required"])
+        self.assertIn("session_id", registration["required"])
         finish = tools["finish"]["inputSchema"]
         self.assertIn("outcome", finish["required"])
         self.assertEqual(
