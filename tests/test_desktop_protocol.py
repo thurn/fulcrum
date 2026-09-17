@@ -333,6 +333,40 @@ def test_assignment_releases_only_after_exact_native_completion():
     assert settled_desktop["assignment_history"][-1]["state"] == "finished"
 
 
+def test_assignment_history_uses_completing_native_turn():
+    ledger = MemoryLedger(
+        record(
+            "fc-a",
+            owner="warden-1",
+            phase="ready",
+            desktop={
+                "assignment": {
+                    "assignment_token": "assignment-1",
+                    "task_id": "warden-1",
+                    "turn_id": "registration-placeholder",
+                    "role": "warden",
+                    "state": "active",
+                    "finish_operation": "fc-op-finish",
+                },
+                "observations": {
+                    "lifecycle": {
+                        "done": {
+                            "type": "task_complete",
+                            "task_id": "warden-1",
+                            "turn_id": "turn-real",
+                        }
+                    }
+                },
+            },
+        )
+    )
+    assert settle_native_completion(
+        replace(request(), input={"turn_id": "turn-real"}), ledger, "fc-a"
+    )
+    history = (ledger.show("fc-a").fc or {})["desktop"]["assignment_history"]
+    assert history[-1]["turn_id"] == "turn-real"
+
+
 class DesktopProtocolTests(unittest.TestCase):
     def test_equal_action_claim_is_idempotent(self):
         test_equal_action_claim_replays_without_authorizing_second_invocation()
@@ -354,3 +388,6 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_native_completion_releases_assignment(self):
         test_assignment_releases_only_after_exact_native_completion()
+
+    def test_native_completion_retains_actual_turn(self):
+        test_assignment_history_uses_completing_native_turn()

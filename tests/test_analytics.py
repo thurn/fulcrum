@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from fulcrum.analytics import AnalyticsService
+from fulcrum.analytics import AnalyticsService, _expected_workflow_gaps
 from tests.support import MemoryLedger, record
 
 
@@ -60,3 +60,39 @@ def test_completion_correction_records_coverage_change_without_new_turns():
 class AnalyticsTests(unittest.TestCase):
     def test_completion_correction_tracks_coverage_change(self):
         test_completion_correction_records_coverage_change_without_new_turns()
+
+    def test_expected_gaps_use_native_lifecycle_turn(self):
+        work = record(
+            "fc-root",
+            workflow_root="fc-root",
+            desktop={
+                "assignment_history": [
+                    {
+                        "task_id": "task-1",
+                        "turn_id": "task-1",
+                        "state": "finished",
+                    }
+                ],
+                "observations": {
+                    "lifecycle": {
+                        "done": {
+                            "task_id": "task-1",
+                            "turn_id": "turn-1",
+                            "type": "task_complete",
+                        }
+                    }
+                },
+            },
+        )
+        usage = record(
+            "fc-usage",
+            kind="analytics",
+            subtype="turn",
+            workflow_root="fc-root",
+            thread_id="task-1",
+            turn_id="turn-1",
+            coverage="complete",
+        )
+        assert (
+            _expected_workflow_gaps(MemoryLedger(work, usage), "fc-root", [usage]) == []
+        )

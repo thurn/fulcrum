@@ -1216,6 +1216,7 @@ def _expected_workflow_gaps(
 ) -> list[dict[str, Any]]:
     included = {_turn_identity(item) for item in observed}
     gaps: list[dict[str, Any]] = []
+    retained_gaps: set[tuple[str, str]] = set()
     for work in ledger.list_records(kind="work", limit=0):
         fc = work.fc or {}
         if work.id != workflow_root and fc.get("workflow_root") != workflow_root:
@@ -1223,6 +1224,26 @@ def _expected_workflow_gaps(
         desktop = fc.get("desktop")
         if not isinstance(desktop, Mapping):
             continue
+        observations = desktop.get("observations")
+        lifecycle = (
+            observations.get("lifecycle") if isinstance(observations, Mapping) else None
+        )
+        terminal_turns = {
+            (str(item.get("task_id")), str(item.get("turn_id")))
+            for item in (lifecycle.values() if isinstance(lifecycle, Mapping) else [])
+            if isinstance(item, Mapping)
+            and item.get("task_id")
+            and item.get("turn_id")
+            and item.get("type")
+            in {
+                "task_complete",
+                "task_completed",
+                "turn_complete",
+                "turn_completed",
+                "turn_interrupted",
+                "interrupted",
+            }
+        }
         assignments: list[Mapping[str, Any]] = []
         active = desktop.get("assignment")
         if isinstance(active, Mapping):
@@ -1236,6 +1257,15 @@ def _expected_workflow_gaps(
             identity = f"{task_id}:{turn_id}"
             if not task_id or not turn_id or identity in included:
                 continue
+            task_has_terminal_turn = any(
+                observed_task == str(task_id) for observed_task, _ in terminal_turns
+            )
+            if (
+                task_has_terminal_turn
+                and (str(task_id), str(turn_id)) not in terminal_turns
+            ):
+                continue
+            retained_gaps.add((str(task_id), str(turn_id)))
             gaps.append(
                 {
                     "bead_id": work.id,
@@ -1247,6 +1277,19 @@ def _expected_workflow_gaps(
                         if assignment.get("state") == "finished"
                         else "native lifecycle is not terminal"
                     ),
+                }
+            )
+        for task_id, turn_id in sorted(terminal_turns):
+            identity = f"{task_id}:{turn_id}"
+            if identity in included or (task_id, turn_id) in retained_gaps:
+                continue
+            gaps.append(
+                {
+                    "bead_id": work.id,
+                    "thread_id": task_id,
+                    "turn_id": turn_id,
+                    "terminal_state": "finished",
+                    "reason": "terminal usage has not been persisted",
                 }
             )
     return gaps

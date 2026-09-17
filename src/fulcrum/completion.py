@@ -1616,7 +1616,10 @@ def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -
 
 
 def _release_desktop_assignment(
-    ledger: Ledger, bead_id: str, finish_operation: str | None
+    ledger: Ledger,
+    bead_id: str,
+    finish_operation: str | None,
+    native_turn_id: str | None = None,
 ) -> None:
     current = ledger.show(bead_id)
     if current is None or not current.fc:
@@ -1630,6 +1633,7 @@ def _release_desktop_assignment(
     history.append(
         {
             **dict(assignment),
+            **({"turn_id": native_turn_id} if native_turn_id else {}),
             "state": "finished",
             "finish_operation": finish_operation,
             "released_at": utc_now(),
@@ -1732,7 +1736,13 @@ def settle_native_completion(
                 "Reconcile the retained cleanup operation; do not repeat an uncertain effect."
             )
             ledger.update_fc(bead_id, fc, status="in_progress")
-    _release_desktop_assignment(ledger, bead_id, finish_operation)
+    native_turn_id = request.input.get("turn_id")
+    _release_desktop_assignment(
+        ledger,
+        bead_id,
+        finish_operation,
+        str(native_turn_id) if native_turn_id else None,
+    )
     return True
 
 
