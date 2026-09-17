@@ -1468,11 +1468,13 @@ class DesktopProtocolService:
                 "observed_at": _utc_now(),
             }
             protocol["candidate"] = candidate
-            # validation_show refreshes the retained delivery evidence.  Merge the
-            # protocol update into that fresh record instead of restoring the
-            # pre-observation delivery snapshot.
             record = self._record(ledger, bead_id)
-            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            fc = dict(record.fc or {})
+            observed_delivery = observed_value.get("delivery")
+            if isinstance(observed_delivery, Mapping):
+                fc["delivery"] = copy.deepcopy(dict(observed_delivery))
+            ledger.update_fc(record.id, _with_protocol(fc, protocol))
+            record = self._record(ledger, bead_id)
             state = observed_state
         if state in {"passed", "failed", "blocked"}:
             value = {"status": state, "candidate": copy.deepcopy(dict(candidate))}
