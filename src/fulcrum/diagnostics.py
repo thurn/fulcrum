@@ -33,6 +33,7 @@ from fulcrum.ledger import (
 from fulcrum.work import work_view
 
 DEFAULT_LIMIT = 20
+NON_FAILURE_HEALTH_STATES = {"healthy", "initializing", "paused"}
 DEFAULT_CHUNK_BYTES = 256 * 1024
 _SECRET_KEY: re.Pattern[str] = re.compile(
     r"(?:token|secret|password|passwd|credential|authorization|api[_-]?key|cookie)",
@@ -1386,7 +1387,7 @@ def _doctor_result(
         {"kind": kind, "name": item.get("name"), "state": item.get("state")}
         for kind, items in (("component", components), ("loop", loops))
         for item in items
-        if item.get("state") != "healthy"
+        if item.get("state") not in NON_FAILURE_HEALTH_STATES
     ]
     if not issues:
         return CommandResult.query(result)
@@ -1531,9 +1532,13 @@ def _loop_health(
                     "run_control": run_control,
                     "intentionally_paused": intentionally_paused,
                 },
-                affected_commands=[] if state == "healthy" else ["scheduled recovery"],
+                affected_commands=(
+                    [] if state in NON_FAILURE_HEALTH_STATES else ["scheduled recovery"]
+                ),
                 next_commands=(
-                    [] if state == "healthy" else [["fulcrum", "bootstrap", "--json"]]
+                    []
+                    if state in NON_FAILURE_HEALTH_STATES
+                    else [["fulcrum", "bootstrap", "--json"]]
                 ),
                 last_success_at=(
                     last_delivery_at.isoformat().replace("+00:00", "Z")

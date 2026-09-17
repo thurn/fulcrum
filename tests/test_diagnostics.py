@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from fulcrum.diagnostics import _loop_health
+from fulcrum.diagnostics import _doctor_result, _loop_health
 from tests.support import MemoryLedger, record, request
 
 
@@ -79,6 +79,7 @@ def test_active_heartbeat_is_initializing_until_first_delivery():
         )
     assert health[0]["state"] == "initializing"
     assert health[0]["last_success_at"] is None
+    assert _doctor_result([], health).ok is True
 
 
 def test_active_heartbeat_without_delivery_becomes_degraded():
