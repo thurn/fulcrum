@@ -16,8 +16,11 @@ from observed state rather than asking the user to transcribe them:
 - Call `list_projects` and retain exact project IDs. The saved project whose path
   is `~/fulcrum` is the only valid target for an MCP-refresh continuation task.
 
-On first use, run `~/fulcrum/scripts/setup` with a stable request UUID and JSON
-input containing `codex_root`, `native_tools`, and `model_support`. Use setup when
+On first use, run `~/fulcrum/scripts/setup` with a stable request UUID from
+`uuidgen` and JSON input containing `codex_root`, `native_tools`, and
+`model_support`. Pass JSON through an already-attached stdin stream with
+`--input -`; never pass inline JSON as the `--input` argument or start the command
+before its stdin content is attached. Use setup when
 the source-following launcher has not yet been provisioned; after the first
 invocation use `fulcrum bootstrap` directly. Setup provisions Python 3.12
 dependencies, installs the source-following command launcher, and atomically
@@ -73,12 +76,20 @@ tools become available in new chats.
 
 For every returned setup action in the continuation task, call `action claim`
 before invoking the exact named native tool once, then call `action result` with
-the actual result. Do not edit its arguments, invent a retry ID, or retry an
-uncertain native effect. A newly created standing task must call
+the actual result and the `attempt_id` returned by the claim. Omit `request_id`,
+`attempt_id`, `loop_id`, and `turn_id` on new MCP calls when the tool schema says
+Fulcrum generates them. Supply retained IDs only when resuming the exact timed-out
+call. Do not edit action arguments, augment a native result, invent a retry ID, or
+retry an uncertain native effect. A newly created standing task must call
 `register_standing` with its retained action marker before other activity.
 Report a successful `create_thread` result immediately; when the native creation
 path does not emit an initial prompt callback, the matching settled `threadId`
 provides the registration evidence instead.
+After all standing creations are reported, make one bounded `wait_threads` call
+for the still-running standing tasks, with a maximum wait of 120 seconds, so their
+initial registration turns can settle. Do not poll unchanged tasks. Rerun
+bootstrap with a new request UUID after that bounded wait; a still-missing
+registration is an exact prerequisite, not authority to recreate the task.
 Preserve the fixed titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and
 `🔮 VIZIER 🔮`; correct a normalized title only through a separately retained
 native action.
@@ -86,12 +97,28 @@ native action.
 Setup is complete only when all three identities, the source-following MCP server,
 six trusted hooks, broker socket, supported models/tools, transcript and
 accounting checks, exact Marshal heartbeat, and focused acceptance are recorded.
-Pass an `acceptance` object with true values for `workspace_access`,
-`hook_identity`, `transcript_lifecycle`, `usage_accounting`, `task_targeting`, and
-`schedule_overlap` only after each check actually succeeds. Bootstrap first
-creates the heartbeat paused, then returns a distinct activation action after
-acceptance; admission opens only after that activation result succeeds. Keep
-admission paused and report exact gaps otherwise.
+Record acceptance only from direct evidence:
+
+- `workspace_access`: each retained standing task has its reported workspace and
+  can read the expected local resources;
+- `hook_identity`: callbacks bind the exact retained task/session identity and
+  unrelated tasks remain unbound;
+- `transcript_lifecycle`: registered task turns expose prompt, tool, completion or
+  pending-wait lifecycle with no collection gap;
+- `usage_accounting`: exercised managed turns have attributed token/cost rows or
+  an explicit supported zero-cost observation, with no missing reason;
+- `task_targeting`: exact titles and retained task IDs match creation, diagnostic,
+  and schedule targets;
+- `schedule_overlap`: after activation, one real heartbeat overlaps a controlled
+  Marshal prompt without duplicate effects, lost targeting, or silent failure.
+
+First pass true values for the five checks other than `schedule_overlap` after
+they actually succeed. Bootstrap then returns the distinct action that activates
+the already-paused heartbeat while admission remains paused. After the real
+overlap check succeeds, rerun bootstrap with all six true values; only then may
+admission open. Never activate the schedule directly, infer acceptance from unit
+tests, or mark an unexercised check true. Keep admission paused and report exact
+gaps otherwise.
 
 Explain that Desktop Stop does not durably pause Fulcrum. The initial MCP
 configuration change requires the one fresh continuation task described above;

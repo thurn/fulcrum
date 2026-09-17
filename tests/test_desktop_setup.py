@@ -9,6 +9,7 @@ import uuid
 from fulcrum.contracts import ActorContext, FulcrumError, InstanceContext
 from fulcrum.desktop_setup import (
     DesktopSetupService,
+    PRE_ACTIVATION_ACCEPTANCE,
     REQUIRED_ACCEPTANCE,
     REQUIRED_NATIVE_TOOLS,
 )
@@ -55,6 +56,18 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             if "role" in row["reporting"]
         }
         assert set(actions) == {"steward", "marshal", "vizier"}
+        assert (
+            "without inventing loop or turn IDs"
+            in actions["steward"]["arguments"]["prompt"]
+        )
+        assert (
+            "~/fulcrum/skills/fulcrum-marshal/SKILL.md"
+            in actions["marshal"]["arguments"]["prompt"]
+        )
+        assert (
+            "~/fulcrum/skills/fulcrum-vizier/SKILL.md"
+            in actions["vizier"]["arguments"]["prompt"]
+        )
         for role, action in actions.items():
             observe_action_prompt(
                 service._ledger_override,
@@ -145,13 +158,16 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             )
         )
         (root / "instance" / "broker.sock").touch()
+        pre_activation = {name: True for name in PRE_ACTIVATION_ACCEPTANCE}
         activating = service.bootstrap(
             bootstrap_request(
                 root,
-                acceptance={name: True for name in REQUIRED_ACCEPTANCE},
+                acceptance=pre_activation,
                 **supplied,
             )
         )
+        assert activating.result["admission"] == "paused"
+        assert activating.result["prerequisites"]["acceptance"] == ["schedule_overlap"]
         activation = next(
             row
             for row in activating.result["pending_actions"]
@@ -187,6 +203,12 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                 },
             )
         )
+        still_paused = service.bootstrap(
+            bootstrap_request(root, acceptance=pre_activation, **supplied)
+        )
+        assert still_paused.result["admission"] == "paused"
+        assert still_paused.result["schedule"]["status"] == "ACTIVE"
+        assert still_paused.result["pending_actions"] == []
         ready = service.bootstrap(
             bootstrap_request(
                 root,

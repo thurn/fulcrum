@@ -228,7 +228,15 @@ def _validated_action_outcome(
         observed_target = _native_field(
             normalized, "targetThreadId", "target_thread_id"
         )
-        if expected_target is not None and observed_target != expected_target:
+        # Codex automation mutations currently return identity and status but omit
+        # the target. The target is still fixed by the claimed arguments and the
+        # trusted pre-tool observation. Reject an explicit conflict without
+        # requiring a field the native result does not provide.
+        if (
+            expected_target is not None
+            and observed_target is not None
+            and observed_target != expected_target
+        ):
             raise FulcrumError(
                 "RESULT_CONFLICT",
                 "automation target does not match the claimed action",

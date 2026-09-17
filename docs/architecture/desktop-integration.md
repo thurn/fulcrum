@@ -1053,10 +1053,12 @@ asking repeatedly. A ready socket alone is not successful setup.
    heartbeat on Steward. Persist the automation ID and its intended/observed
    state. Configure notifications for meaningful failures/decisions, not routine
    healthy status on every run.
-6. Complete focused implementation acceptance, then enable admission and the
-   verified schedule for the new instance. Pending ready work can resolve
-   Steward's instruction call independently of a Marshal decision. Expose task
-   links, exact schedule, capability gaps, and any required operator action.
+6. Complete the five focused checks that do not require a running schedule, then
+   activate the verified schedule while admission remains paused. Observe one
+   real overlap to establish `schedule_overlap`; only the following receipt with
+   all six checks may enable admission. Pending ready work can resolve Steward's
+   instruction call independently of a Marshal decision. Expose task links,
+   exact schedule, capability gaps, and any required operator action.
 
 Bootstrap authorization covers ordinary Steward task actions, Marshal's direct
 Justiciar creation and the extra recovery slot, safe same-Steward resumption by

@@ -51,11 +51,12 @@ sequence.
 
 Bootstrap installs the source-following MCP entry, six scoped trusted hooks, the
 broker service, the three standing tasks, and one Marshal heartbeat. Admission
-remains paused until focused acceptance is recorded. After the first MCP
-configuration change, use Settings > MCP servers > Restart in Codex Desktop and
-rerun `$fulcrum-bootstrap`; retained setup resumes rather than creating duplicate
-tasks. A full macOS app quit is unnecessary when the in-app Restart control is
-available.
+remains paused until focused acceptance is recorded. An existing task retains its
+original MCP catalog, so the bootstrap skill creates exactly one fresh
+continuation task after the initial MCP configuration change. Current Desktop
+builds list the server under Settings > Plugins > MCPs; do not look for a removed
+Restart control, toggle the server, or quit the app. Retained setup resumes in the
+fresh task rather than creating duplicate resources.
 
 Configuration contains Beads, Tollgate, saved-project IDs, role models, capacity,
 wait budgets, source selection, and diagnostics. It contains no App Server endpoint

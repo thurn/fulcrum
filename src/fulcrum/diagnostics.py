@@ -1480,18 +1480,37 @@ def _loop_health(
         schedule = (
             desktop.get("marshal_schedule") if isinstance(desktop, Mapping) else None
         )
+        run_control = (
+            str(desktop.get("run_control") or "paused")
+            if isinstance(desktop, Mapping)
+            else "paused"
+        )
+        schedule_status = (
+            schedule.get("status") if isinstance(schedule, Mapping) else None
+        )
+        intentionally_paused = (
+            run_control == "paused"
+            and isinstance(schedule, Mapping)
+            and schedule.get("state") == "succeeded"
+            and schedule_status in {None, "PAUSED"}
+        )
         state = (
             "healthy"
             if isinstance(schedule, Mapping)
             and schedule.get("state") == "succeeded"
-            and schedule.get("status") == "ACTIVE"
+            and (schedule_status == "ACTIVE" or intentionally_paused)
             else "unavailable"
         )
         return [
             _health(
                 "marshal_heartbeat",
                 state,
-                evidence={"interval_seconds": 900, "schedule": schedule},
+                evidence={
+                    "interval_seconds": 900,
+                    "schedule": schedule,
+                    "run_control": run_control,
+                    "intentionally_paused": intentionally_paused,
+                },
                 affected_commands=[] if state == "healthy" else ["scheduled recovery"],
                 next_commands=(
                     [] if state == "healthy" else [["fulcrum", "bootstrap", "--json"]]

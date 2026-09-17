@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from pathlib import Path
 import asyncio
 import tempfile
@@ -212,6 +213,14 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("claim_action", names)
         claim = tools["claim_action"]["inputSchema"]
         self.assertNotIn("turn_id", claim["properties"])
+        self.assertIn("attempt_id", claim["properties"])
+        self.assertNotIn("request_id", claim["required"])
+        result = tools["report_action_result"]["inputSchema"]
+        self.assertIn("attempt_id", result["required"])
+        self.assertIn("outcome", result["required"])
+        self.assertIn("native_result", result["required"])
+        wait = tools["wait_for_instructions"]["inputSchema"]
+        self.assertIn("loop_id", wait["properties"])
         registration = tools["register_standing"]["inputSchema"]
         self.assertIn("role", registration["required"])
         self.assertIn("action_id", registration["required"])
@@ -259,3 +268,20 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("task:thread-1", argv)
         self.assertEqual(json.loads(stdin)["session_id"], "session-1")
+
+    def test_mcp_generates_new_request_attempt_and_wait_identities(self):
+        cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
+        claim_argv, claim_stdin = cli.invocation(
+            "claim_action",
+            {"record_id": "fc-system", "action_id": "action-1"},
+        )
+        claim_payload = json.loads(claim_stdin)
+        self.assertIn("--request-id", claim_argv)
+        uuid.UUID(claim_argv[claim_argv.index("--request-id") + 1])
+        uuid.UUID(claim_payload["attempt_id"])
+
+        wait_argv, wait_stdin = cli.invocation("wait_for_instructions", {})
+        wait_payload = json.loads(wait_stdin)
+        uuid.UUID(wait_argv[wait_argv.index("--request-id") + 1])
+        uuid.UUID(wait_payload["loop_id"])
+        uuid.UUID(wait_payload["turn_id"])

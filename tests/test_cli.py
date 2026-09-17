@@ -27,6 +27,14 @@ class CliTests(unittest.TestCase):
                 parser.parse_args([*definition.path, "--help"])
             self.assertIn("usage:", output.getvalue())
 
+    def test_input_help_names_file_and_stdin_contract(self):
+        parser = build_parser()
+        with redirect_stdout(StringIO()) as output, self.assertRaises(SystemExit):
+            parser.parse_args(["bootstrap", "--help"])
+        help_text = output.getvalue()
+        self.assertIn("--input PATH|-", help_text)
+        self.assertIn("standard input with", help_text)
+
     def test_retired_direct_runtime_commands_are_absent(self):
         commands = {definition.path for definition in COMMANDS}
         for retired in {

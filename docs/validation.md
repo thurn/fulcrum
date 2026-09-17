@@ -31,6 +31,12 @@ heartbeat, same-Steward recovery, one Justiciar slot, Desktop/broker restart
 uncertainty, and operation-boundary source freshness. Record unsupported behavior
 and gaps honestly; unit tests do not prove native compatibility.
 
+Bootstrap stages that live acceptance to avoid a circular schedule gate. The five
+non-schedule checks activate the previously paused Marshal heartbeat without
+opening admission. One real active-heartbeat overlap observation then establishes
+`schedule_overlap`; admission opens only on the following bootstrap receipt with
+all six checks recorded.
+
 The former deterministic provider, App Server/runtime, continuous-controller,
 plan-review, curated-memory, fleet-replacement, and live role-suite tests were
 removed with those products. Do not revive them as an optional or nightly harness.

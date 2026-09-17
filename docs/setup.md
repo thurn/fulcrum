@@ -49,7 +49,9 @@ The four stock timing defaults are:
 
 ## Deterministic bootstrap
 
-On the first invocation, `scripts/setup --input - --request-id UUID --json`
+On the first invocation, attach JSON to stdin before running
+`scripts/setup --input - --request-id UUID --json`; `--input` accepts a file path
+or `-`, not inline JSON. Generate new request IDs with `uuidgen`. The command
 provisions the environment and enters bootstrap. Later invocations use
 `fulcrum bootstrap --input - --request-id UUID --json` directly. Input contains
 the observed `codex_root`, `native_tools`, and `model_support`; it may include a
@@ -63,10 +65,13 @@ point. It links owned skills directly to `~/fulcrum/skills`, installs the six
 scoped command hooks, and returns exact native actions for the standing tasks and
 heartbeat.
 
-Claim each action before invoking it and report its actual result. Never edit a
-returned prompt, target, model, effort, or schedule; never retry an uncertain
-effect. New standing tasks register with the action marker before work. Bootstrap
-reruns inspect retained IDs and postconditions instead of recreating tasks.
+Claim each action before invoking it and report its actual result using the
+attempt ID returned by the claim. New MCP calls may omit request, attempt, loop,
+and turn IDs where the schema says Fulcrum generates them. Never edit a returned
+prompt, target, model, effort, schedule, or native result; never retry an
+uncertain effect. New standing tasks register with the action marker before work.
+One bounded native wait lets their initial turns settle; bootstrap reruns inspect
+retained IDs and postconditions instead of recreating tasks.
 
 The fixed identities are `🧰 STEWARD 🧰` on `gpt-5.6-luna` and `🧭 MARSHAL 🧭`
 plus `🔮 VIZIER 🔮` on `gpt-5.6-sol`. One heartbeat targets the registered Marshal
@@ -77,9 +82,11 @@ Admission opens only after the broker answers, required native tools and model
 efforts are observed, all three tasks register, the schedule result is retained,
 and focused acceptance is explicitly recorded. Acceptance is an evidence map with
 `workspace_access`, `hook_identity`, `transcript_lifecycle`, `usage_accounting`,
-`task_targeting`, and `schedule_overlap`; each value must be true. Bootstrap creates
-the heartbeat paused and returns a separate activation action only after that
-evidence is supplied. A ready socket alone is not setup.
+`task_targeting`, and `schedule_overlap`; each value must be true. Bootstrap
+creates the heartbeat paused. Evidence for the other five checks authorizes a
+separate activation action while admission stays paused; the real
+active-heartbeat overlap check then supplies `schedule_overlap`. Admission opens
+only after all six checks succeed. A ready socket alone is not setup.
 An existing task does not acquire MCP tools added after it started. When the
 initial MCP configuration changes, the bootstrap skill creates exactly one new
 task in the saved `~/fulcrum` project, using the retained checkout directly rather

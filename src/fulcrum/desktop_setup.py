@@ -51,6 +51,7 @@ REQUIRED_ACCEPTANCE = {
     "task_targeting",
     "schedule_overlap",
 }
+PRE_ACTIVATION_ACCEPTANCE: set[str] = REQUIRED_ACCEPTANCE - {"schedule_overlap"}
 STANDING = {
     "steward": {
         "title": "🧰 STEWARD 🧰",
@@ -58,8 +59,10 @@ STANDING = {
         "prompt": (
             "First call register_standing with role `steward` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
-            "CODEX_SESSION_ID as session_id. Then recover any outstanding instruction/result. "
-            "Call wait_for_instructions. Execute only its exact authorized native action: "
+            "CODEX_SESSION_ID as session_id. Omit request_id for new Fulcrum calls; "
+            "the MCP server generates valid UUIDs. Then recover any outstanding "
+            "instruction/result. Call wait_for_instructions without inventing loop or "
+            "turn IDs; the MCP server generates them. Execute only its exact authorized native action: "
             "claim it, invoke it once, and report the actual result. Then wait again. Do not "
             "choose priorities, invent prompts, retry uncertain effects, or poll tasks. On an "
             "explicit stop, end. On an unrecoverable connection/protocol failure, attempt the "
@@ -70,9 +73,10 @@ STANDING = {
         "title": "🧭 MARSHAL 🧭",
         "model": "gpt-5.6-sol",
         "prompt": (
-            "$fulcrum-marshal\nFirst call register_standing with role `marshal` and the action_id from "
+            "$fulcrum-marshal\nRead and follow `~/fulcrum/skills/fulcrum-marshal/SKILL.md` "
+            "from local master. First call register_standing with role `marshal` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
-            "CODEX_SESSION_ID as session_id. On scheduled prompts call "
+            "CODEX_SESSION_ID as session_id, and omit request_id for a new registration. On scheduled prompts call "
             "marshal_check, settle only the returned bounded curation or recovery scope, and "
             "end quietly when there is no action."
         ),
@@ -81,9 +85,10 @@ STANDING = {
         "title": "🔮 VIZIER 🔮",
         "model": "gpt-5.6-sol",
         "prompt": (
-            "$fulcrum-vizier\nFirst call register_standing with role `vizier` and the action_id from "
+            "$fulcrum-vizier\nRead and follow `~/fulcrum/skills/fulcrum-vizier/SKILL.md` "
+            "from local master. First call register_standing with role `vizier` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
-            "CODEX_SESSION_ID as session_id. Present exact retained human "
+            "CODEX_SESSION_ID as session_id, and omit request_id for a new registration. Present exact retained human "
             "decisions and record only the authority the human explicitly grants."
         ),
     },
@@ -593,6 +598,11 @@ class DesktopSetupService(DesktopProtocolService):
         missing_acceptance = sorted(
             name for name in REQUIRED_ACCEPTANCE if not acceptance_evidence.get(name)
         )
+        missing_pre_activation = sorted(
+            name
+            for name in PRE_ACTIVATION_ACCEPTANCE
+            if not acceptance_evidence.get(name)
+        )
         if (
             standing_ready
             and isinstance(schedule, Mapping)
@@ -637,7 +647,7 @@ class DesktopSetupService(DesktopProtocolService):
             and isinstance(schedule, Mapping)
             and schedule.get("state") == "succeeded"
             and schedule.get("automation_id")
-            and not missing_acceptance
+            and not missing_pre_activation
             and not schedule.get("activation_action_id")
         ):
             activation_action_id = _opaque("action")

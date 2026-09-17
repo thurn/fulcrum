@@ -218,7 +218,12 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--instance", default=argparse.SUPPRESS)
     parser.add_argument("--config", default=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    parser.add_argument("--input", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--input",
+        metavar="PATH|-",
+        help="read JSON input from PATH, or from standard input with -",
+        default=argparse.SUPPRESS,
+    )
     parser.add_argument("--project", default=argparse.SUPPRESS)
     parser.add_argument("--thread-id", default=argparse.SUPPRESS)
     parser.add_argument("--actor", default=argparse.SUPPRESS)

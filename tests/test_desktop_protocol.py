@@ -131,6 +131,94 @@ def test_message_success_requires_matching_target_identity():
     assert raised.exception.code == "RESULT_CONFLICT"
 
 
+def test_automation_success_accepts_native_result_without_target_but_rejects_conflict():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "automation_update",
+            "arguments": {
+                "id": "marshal-check",
+                "mode": "update",
+                "status": "PAUSED",
+                "targetThreadId": "marshal-1",
+            },
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "automation-attempt"},
+        )
+    )
+    completed = service.report_action_result(
+        mutation(
+            ("action", "result"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "automation-attempt",
+                "outcome": "succeeded",
+                "native_result": {
+                    "automationId": "marshal-check",
+                    "mode": "update",
+                    "status": "PAUSED",
+                },
+            },
+        )
+    )
+    assert completed.result["state"] == "succeeded"
+
+    conflict = seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "automation_update",
+            "arguments": {
+                "id": "other-check",
+                "mode": "update",
+                "status": "PAUSED",
+                "targetThreadId": "marshal-1",
+            },
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": conflict["action_id"]},
+            payload={"attempt_id": "conflict-attempt"},
+        )
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.report_action_result(
+            mutation(
+                ("action", "result"),
+                actor="task:steward-1",
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": conflict["action_id"],
+                },
+                payload={
+                    "attempt_id": "conflict-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {
+                        "automationId": "other-check",
+                        "status": "PAUSED",
+                        "targetThreadId": "different-marshal",
+                    },
+                },
+            )
+        )
+    assert raised.exception.code == "RESULT_CONFLICT"
+
+
 def test_claim_revalidates_dependency_after_reservation():
     work = record(
         "fc-a",
