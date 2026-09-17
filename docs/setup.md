@@ -39,6 +39,9 @@ Configuration top-level maps are `brain`, `beads`, `delivery`, `projects`,
 runtime/App Server endpoint. Project roots and executable paths are absolute.
 Project enrollment requires an observed `codex_project_id`; Fulcrum never invents
 project creation after an uncertain native result.
+Agents should use the bounded [project enrollment procedure](project-enrollment.md)
+instead of inspecting implementation source or manually configuring Beads and
+Tollgate.
 
 The four stock timing defaults are:
 

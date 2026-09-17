@@ -140,6 +140,29 @@ with a new request UUID. A returned automation identity and `ACTIVE` status prov
 configuration, not delivery; they are sufficient to finish bootstrap because
 scheduled delivery is monitored asynchronously.
 
+After bootstrap returns `state: ready` and `admission: running`, enroll the
+canonical `~/fulcrum` checkout as project `fulcrum` when possible. Read and
+follow `~/fulcrum/docs/project-enrollment.md`. Invocation of this skill authorizes
+only that canonical enrollment. Reuse the exact saved Codex project ID already
+observed for path `~/fulcrum`; the fixed integration branch is `master`, prepare
+argv is `["scripts/prepare-check"]`, validate argv is `["scripts/check"]`, and
+the project is enabled.
+
+If `fulcrum project list --json` already shows the exact enrollment, do nothing.
+If it is absent, send one exact enrollment request to the retained Vizier because
+the bootstrap continuation is not configuration authority, make one bounded
+`wait_threads` call of at most 120 seconds for that turn, then verify with
+`fulcrum project show fulcrum --json`. Do not retry an uncertain native message or
+enrollment. A missing or ambiguous saved project, conflicting existing enrollment,
+or unverified Vizier result is an enrollment prerequisite to report; it does not
+reopen an otherwise ready bootstrap.
+
+At the end, if native `list_projects` contains other saved local projects not in
+`fulcrum project list`, ask once whether the user wants any of them enrolled.
+List only their labels and paths. Do not enroll them until the user selects them,
+and then follow the same enrollment procedure without inventing project-specific
+branches or commands.
+
 Do not wait for a heartbeat, keep Marshal busy across a guessed schedule boundary,
 or manufacture an overlap test. Native task turns are serialized, so a controlled
 Marshal turn can defer the heartbeat it is intended to observe. The first genuine
