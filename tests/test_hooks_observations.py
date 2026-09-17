@@ -18,14 +18,17 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rollout.jsonl"
             path.write_bytes(
-                b'{"type":"turn_completed","event_id":"e1","turn_id":"t1"}\n'
-                b'{"type":"token_usage_record","response_id":"r1","usage":{"input_tokens":12,"output_tokens":4}}\n'
+                b'{"type":"turn_context","event_id":"e1","turn_id":"t1","model":"gpt-5.6-luna"}\n'
+                b'{"type":"token_usage_record","response_id":"r1","usage":{"input_tokens":12,"cache_write_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}\n'
                 b'{"type":"turn_started"'
             )
             page = read_transcript(path)
         self.assertEqual(page.lifecycle[0]["event_id"], "e1")
+        self.assertEqual(page.lifecycle[0]["model"], "gpt-5.6-luna")
         self.assertEqual(page.usage[0]["response_id"], "r1")
         self.assertEqual(page.usage[0]["input_tokens"], 12)
+        self.assertEqual(page.usage[0]["cache_write_tokens"], 3)
+        self.assertEqual(page.usage[0]["reasoning_tokens"], 2)
         self.assertEqual(page.gaps[0]["kind"], "incomplete_trailing_line")
 
 

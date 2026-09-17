@@ -146,6 +146,9 @@ class HookService:
         if bound is None:
             return {}
         record, _ = bound
+        task_id = str(
+            request.input.get("thread_id") or request.input.get("task_id") or ""
+        )
         protocol = _protocol(record.fc or {})
         action, attempt = _issuing_action(protocol, request.input)
         if action is None or attempt is None:
@@ -226,7 +229,14 @@ class HookService:
         )
         if not isinstance(transcript, str) or not Path(transcript).is_absolute():
             return
-        record, _ = bound
+        record, role = bound
+        task_id = str(
+            request.input.get("thread_id")
+            or request.input.get("task_id")
+            or request.actor.task_id
+            or request.thread_id
+            or ""
+        )
         protocol = _protocol(record.fc or {})
         current = protocol.get("transcript")
         cursor = int(current.get("cursor", 0)) if isinstance(current, Mapping) else 0
@@ -234,14 +244,39 @@ class HookService:
         observations = dict(protocol.get("observations") or {})
         lifecycle = dict(observations.get("lifecycle") or {})
         usage = dict(observations.get("usage") or {})
+        models = {
+            str(value.get("turn_id")): str(value["model"])
+            for value in lifecycle.values()
+            if isinstance(value, Mapping)
+            and value.get("type") == "turn_context"
+            and value.get("turn_id")
+            and value.get("model")
+        }
         for item in page.lifecycle:
-            identity = item.get("event_id")
-            if identity:
-                lifecycle[str(identity)] = dict(item)
+            normalized = dict(item)
+            normalized["task_id"] = normalized.get("task_id") or task_id
+            normalized["turn_id"] = normalized.get("turn_id") or request.input.get(
+                "turn_id"
+            )
+            if normalized.get("type") == "turn_context" and normalized.get("model"):
+                models[str(normalized.get("turn_id"))] = str(normalized["model"])
+            identity = normalized.get("event_id") or ":".join(
+                str(normalized.get(field) or "unknown")
+                for field in ("task_id", "turn_id", "type")
+            )
+            lifecycle[str(identity)] = normalized
         for item in page.usage:
-            identity = item.get("response_id") or item.get("event_id")
+            normalized = dict(item)
+            normalized["task_id"] = normalized.get("task_id") or task_id
+            normalized["turn_id"] = normalized.get("turn_id") or request.input.get(
+                "turn_id"
+            )
+            normalized["model"] = normalized.get("model") or models.get(
+                str(normalized.get("turn_id"))
+            )
+            identity = normalized.get("response_id") or normalized.get("event_id")
             if identity:
-                usage[str(identity)] = dict(item)
+                usage[str(identity)] = normalized
         observations["lifecycle"] = lifecycle
         observations["usage"] = usage
         protocol["observations"] = observations
@@ -257,7 +292,7 @@ class HookService:
             record_desktop_usage(
                 ledger,
                 record,
-                bound[1],
+                role,
                 [value for value in usage.values() if isinstance(value, Mapping)],
                 [value for value in lifecycle.values() if isinstance(value, Mapping)],
             )

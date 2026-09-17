@@ -52,6 +52,17 @@ class CliTests(unittest.TestCase):
         original = request(input={"summary": "literal '$()'\nquotes ; | &"})
         self.assertEqual(ParsedRequest.from_wire(original.to_wire()), original)
 
+    def test_bootstrap_defaults_to_human_inside_a_codex_task(self):
+        context = request().instance
+        parser = build_parser()
+        with (
+            patch("fulcrum.cli.resolve_instance", return_value=context),
+            patch.dict("os.environ", {"CODEX_THREAD_ID": "native-task"}),
+        ):
+            parsed = _build_request(parser.parse_args(["bootstrap"]))
+        self.assertEqual(parsed.actor.kind, "human")
+        self.assertIsNone(parsed.thread_id)
+
     def test_each_cli_invocation_dispatches_in_its_fresh_operation_process(self):
         pending = request(("work", "create"))
         with patch("fulcrum.cli.default_application") as application:

@@ -127,6 +127,7 @@ def _lifecycle(
             event.get("turn_id"), event.get("turnId"), root.get("turn_id")
         ),
         "response_id": _first(event.get("response_id"), event.get("responseId")),
+        "model": _first(event.get("model"), root.get("model")),
         "time": _first(
             event.get("time"), event.get("timestamp"), root.get("timestamp")
         ),
@@ -149,9 +150,19 @@ def _usage(root: Mapping[str, Any], event: Mapping[str, Any]) -> Mapping[str, An
         "service_tier": _first(event.get("service_tier"), root.get("service_tier")),
         "input_tokens": _counter(values, "input_tokens", "input"),
         "cached_input_tokens": _counter(values, "cached_input_tokens", "cached_input"),
-        "cache_write_tokens": _counter(values, "cache_write_tokens", "cache_write"),
+        "cache_write_tokens": _counter(
+            values,
+            "cache_write_input_tokens",
+            "cache_write_tokens",
+            "cache_write",
+        ),
         "output_tokens": _counter(values, "output_tokens", "output"),
-        "reasoning_tokens": _counter(values, "reasoning_tokens", "reasoning"),
+        "reasoning_tokens": _counter(
+            values,
+            "reasoning_output_tokens",
+            "reasoning_tokens",
+            "reasoning",
+        ),
         "cumulative": bool(event.get("cumulative", False)),
     }
 
