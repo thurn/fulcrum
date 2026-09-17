@@ -32,6 +32,12 @@ Warden submits one candidate and blocks in `wait_for_ci_results` instead of poll
 Failed CI returns to the same Warden task. Justiciar uses one separate recovery slot
 only after three ordinary repair failures and may intervene once.
 
+An accepted finish does not itself release capacity. The transcript collector must
+observe terminal lifecycle evidence for the exact registered task and turn first.
+For Warden, that boundary also authorizes workspace cleanup; promotion and source
+sync remain separate retained facts, and failed or uncertain cleanup stays visible
+after the worker slot is released.
+
 Plans retain stable keys, approved scope, publication/refinement, future activation,
 dependencies, and mechanical parent completion. Substantial plan review occurs as
 a native Weaver subagent and is addressed in the authored plan; there are no review
