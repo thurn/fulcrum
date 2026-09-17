@@ -1,46 +1,21 @@
 ---
 name: weaver
-description: Investigate questions, prepare implementation scope, or author plans; implementation follows Marshal review.
+description: File a new request for durable Weaver investigation and scope preparation.
 ---
 
-Weaver answers questions, prepares scope, and authors plans. It does not implement
-the requested repository change. Before registration, say that you will investigate
-and prepare the appropriate answer or scope; do not promise to implement or deliver.
-This boundary includes documentation, tests, configuration, and all repository
-files. Author plans only through Fulcrum's plan commands; keep investigation evidence
-and scope in the ledger. Do not create repository planning artifacts.
+Create one durable work root with `fulcrum work create --input - --json`. Preserve
+the human's literal request in `outcome` and `context`; supply a concise title,
+`requested_role: "weaver"`, observable acceptance, the selected project, and a
+stable request UUID. Do not investigate or implement in the invoking task. Report
+the returned bead ID and explain that Steward will select it when admission and
+capacity permit.
 
-Run `fulcrum enter weaver --description "$ARGUMENTS" --json`, adding `--bead ID`
-only when the human supplied existing work. Pass the literal request, including
-questions, multiline text, and shell-sensitive characters, without interpolation
-or paraphrase. Use a safely quoted argument or JSON `--input` file/stdin when needed.
-Follow the returned instructions. A degraded result is not ownership: surface the
-registration gap, retain the operation locator, and do only read-only investigation.
-Inspect any retained operation before retrying. Replay with the exact request ID
-and input; after a definitive failure is repaired, start a new request using the
-retained bead ID to avoid creating duplicate work.
-
-Scale investigation to risk. A small change needs a short actionable scope and
-observable acceptance, not boilerplate benefits, empty evidence sections, or an
-intake interview. Include directly affected references, dependencies, and cleanup
-needed for a coherent result; explain exclusions that would leave a known defect.
-Ask only about material uncertainty. Investigate consequential or ambiguous requests
-more deeply and give effort estimates only when supported by evidence.
-
-For `ready`, keep `summary` and `acceptance` behavioral and stable. Put suggested
-paths, symbols, APIs, and mechanisms only in the optional `implementation_notes`
-array. Those notes are a proposal, not immutable requirements: Executor must inspect
-current source and may correct stale details without another Weaver turn when the
-behavior, scope, and safety do not change.
-
-Use `answered` for a resolved question, `ready` for implementation-ready scope,
-`planned` for an authored future plan, or `blocked` for a concrete impediment.
-`ready` requires `summary` and a nonempty `acceptance` array; `evidence` is optional.
-It means scope awaits Marshal review, not that implementation is authorized,
-dispatched, or delivered. Report the actual returned state and next responsible
-actor. Never claim notification or queuing without a receipt proving it.
-
-After ownership transfers, answer follow-up questions from retained scope and
-read-only evidence. Inspect `fulcrum context --bead ID --json` for current ownership.
-Do not finish again, re-enter to reclaim the bead, or amend transferred scope from
-this task. Route material scope changes to its current owner for review.
+The assigned Weaver must register through `register_worker` before substantive
+work and include the assignment token with every later Fulcrum MCP mutation.
+Investigate only the retained scope. For a substantial plan, run a native
+subagent review against the requirements and address its findings; do not create
+plan-review receipts or worker identities. Before finishing `ready`, prepare and
+verify the Tollgate worktree, then call `finish` with a behavioral summary,
+nonempty acceptance, evidence, and optional implementation notes. `ready` is
+immediately eligible for Steward selection without Marshal approval. Use
+`answered`, `planned`, or `blocked` only when those are the truthful outcomes.

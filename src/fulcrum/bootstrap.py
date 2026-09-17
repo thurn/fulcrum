@@ -59,16 +59,7 @@ def launch_arguments(
 
 
 def source_repository(instance: Path) -> Path:
-    """Production always follows local master; instance fixtures may name a repo."""
-    production = Path.home() / "Library/Application Support/Fulcrum"
-    if instance.resolve() != production.resolve():
-        settings = instance / "resident.json"
-        if settings.exists():
-            repository = (
-                json.loads(settings.read_text()).get("source", {}).get("repository")
-            )
-            if repository:
-                return Path(repository)
+    """Every operation follows the authoritative local master checkout."""
     return Path.home() / "fulcrum"
 
 
@@ -127,9 +118,6 @@ def main(
     config: Path | None = None,
 ) -> int:
     args = list(sys.argv[1:] if arguments is None else arguments)
-    if args and args[0] == "--fulcrum-recovery":
-        module = "fulcrum.recovery_entry"
-        args.pop(0)
     instance = instance or instance_from_args(args)
     instance = instance.expanduser()
     if not instance.is_absolute():
@@ -144,14 +132,11 @@ def main(
     config = config.expanduser()
     if not config.is_absolute():
         return _invalid_path(args, "config")
-    if module == "fulcrum.recovery_entry":
-        # Recovery must remain available when the workflow configuration is broken.
-        config = instance / ".recovery-source-preflight"
     try:
         # These diagnostics/repair commands must remain reachable when preparation
         # rejects master. Ordinary commands never take this explicit repair path.
         control = any(
-            args[i : i + 2] in (["service", "update"], ["service", "status"])
+            args[i : i + 2] in (["service", "status"], ["service", "update"])
             for i in range(len(args) - 1)
         )
         inherited = os.environ.get("FULCRUM_OPERATION_SOURCE")
@@ -193,7 +178,6 @@ def main(
         FULCRUM_OPERATION_SOURCE=selected["source"],
         FULCRUM_COMMIT=selected["commit"],
         FULCRUM_SOURCE_FD=str(fd),
-        FULCRUM_WORKER_SELECTED="1" if module == "fulcrum.worker" else "",
         PYTHONDONTWRITEBYTECODE="1",
     )
     env.pop("PYTHONPATH", None)

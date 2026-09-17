@@ -148,7 +148,7 @@ class Ledger:
         workspace: Path,
         *,
         executable: str | None = None,
-        actor: str = "fulcrum-controller",
+        actor: str = "fulcrum",
         timeout: float = 30.0,
         dolt_auto_commit: str | None = None,
     ) -> None:

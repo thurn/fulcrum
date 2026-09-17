@@ -1,13 +1,11 @@
-"""Small application boundary shared by the controller and offline CLI."""
+"""Fresh-process application boundary shared by CLI and MCP operations."""
 
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import datetime, timezone
 from typing import Any
 
 from fulcrum.analytics import AnalyticsService
@@ -30,7 +28,7 @@ from fulcrum.knowledge import KnowledgeService
 from fulcrum.hooks import HookService
 from fulcrum.plans import PlanService
 from fulcrum.publication import LedgerPublicationService
-from fulcrum.reset import ResetService
+from fulcrum.desktop_reset import ResetService
 from fulcrum.desktop_services import ServiceService, SkillsService
 from fulcrum.work import WorkService
 
@@ -52,6 +50,7 @@ class Application:
         self.register(("service", "start"), services.start)
         self.register(("service", "stop"), services.stop)
         self.register(("service", "restart"), services.restart)
+        self.register(("service", "update"), services.update)
         self.register(("service", "status"), services.status)
         self.register(("reset",), ResetService().hard_reset)
         self.register(("skills", "reconcile"), SkillsService().reconcile)
@@ -67,7 +66,6 @@ class Application:
         self.register(("project", "add"), projects.add)
         self.register(("project", "enable"), projects.enable)
         self.register(("project", "disable"), projects.disable)
-        self.register(("project", "remove"), projects.remove)
         delivery = DeliveryService()
         self.register(("worktree", "prepare"), delivery.worktree_prepare)
         self.register(("worktree", "inspect"), delivery.worktree_inspect)
@@ -414,41 +412,6 @@ class Application:
                     "truncated": error.truncated,
                 },
             ) from error
-
-    @staticmethod
-    def _service_status(request: ParsedRequest) -> CommandResult:
-        socket = request.instance.socket_path
-        health_path = request.instance.instance_root / "service-health.json"
-        controller_pid: int | None = None
-        try:
-            retained = json.loads(health_path.read_text(encoding="utf-8"))
-            if isinstance(retained, dict):
-                pids = [
-                    value.get("pid")
-                    for value in retained.values()
-                    if isinstance(value, dict) and isinstance(value.get("pid"), int)
-                ]
-                if pids and len(set(pids)) == 1:
-                    controller_pid = pids[0]
-        except (OSError, json.JSONDecodeError):
-            pass
-        return CommandResult.query(
-            {
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-                "instance": str(request.instance.instance_root),
-                "socket": {"path": str(socket), "exists": socket.exists()},
-                "config": {
-                    "path": str(request.instance.config_path),
-                    "exists": request.instance.config_path.exists(),
-                },
-                "process": {
-                    "pid": os.getpid(),
-                    "controller_pid": controller_pid,
-                },
-                "responsive": True,
-                "gaps": (["inspection executed in a fresh process"]),
-            }
-        )
 
 
 def default_application() -> Application:

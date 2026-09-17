@@ -828,7 +828,7 @@ def _authorize_memory_write(
 def _authorize_publication(
     request: ParsedRequest, ledger: Ledger, record: LedgerRecord
 ) -> None:
-    if request.actor.kind in {"human", "controller"}:
+    if request.actor.kind in {"human", "system"}:
         return
     actor = request.thread_id or request.actor.task_id
     if request.actor.kind == "task" and actor == (record.fc or {}).get("owner"):
@@ -845,7 +845,7 @@ def _authorize_publication(
 
 
 def _authorize_config_publication(request: ParsedRequest, ledger: Ledger) -> None:
-    if request.actor.kind in {"human", "controller"}:
+    if request.actor.kind in {"human", "system"}:
         return
     control = ledger.show("fc-system")
     vizier = (control.fc or {}).get("vizier_thread") if control is not None else None

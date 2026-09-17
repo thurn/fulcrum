@@ -169,7 +169,7 @@ class HookService:
     ) -> None:
         if bound is None:
             return
-        record, _ = bound
+        record, role = bound
         protocol = _protocol(record.fc or {})
         action, attempt = _issuing_action(protocol, request.input)
         if action is None or attempt is None:
@@ -178,10 +178,9 @@ class HookService:
         attempt["post_hook_event_id"] = _event_id(request.input)
         attempt["hook_result"] = copy.deepcopy(result)
         if isinstance(result, Mapping) and isinstance(result.get("isError"), bool):
-            outcome = "rejected" if result["isError"] else "succeeded"
-            attempt["state"] = outcome
-            attempt["outcome"] = outcome
-            action["state"] = outcome
+            attempt["hook_observed_outcome"] = (
+                "rejected" if result["isError"] else "succeeded"
+            )
         _replace_attempt(protocol, str(action["action_id"]), attempt, action)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
 
@@ -192,7 +191,7 @@ class HookService:
         bound: tuple[LedgerRecord, str],
         event_name: str,
     ) -> None:
-        record, _ = bound
+        record, role = bound
         protocol = _protocol(record.fc or {})
         events = list(protocol.get("hook_events") or [])
         event = {
@@ -205,6 +204,15 @@ class HookService:
         if not any(item.get("event_id") == event["event_id"] for item in events):
             events.append(event)
             protocol["hook_events"] = events[-128:]
+            standing = dict(protocol.get("standing") or {})
+            binding = standing.get(role)
+            if isinstance(binding, Mapping):
+                standing[role] = {
+                    **dict(binding),
+                    "state": "stopped" if event_name == "Stop" else "interrupted",
+                    "last_lifecycle_event": event,
+                }
+                protocol["standing"] = standing
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
 
     def _collect_transcript(
@@ -243,6 +251,19 @@ class HookService:
             "gaps": [dict(item) for item in page.gaps][-20:],
         }
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        if usage:
+            from fulcrum.analytics import record_desktop_usage
+
+            record_desktop_usage(
+                ledger,
+                record,
+                bound[1],
+                [value for value in usage.values() if isinstance(value, Mapping)],
+                [value for value in lifecycle.values() if isinstance(value, Mapping)],
+            )
+        from fulcrum.completion import settle_native_completion
+
+        settle_native_completion(request, ledger, record.id)
 
     def _log(
         self,
@@ -288,9 +309,15 @@ def _binding_for_task(ledger: Ledger, task_id: str) -> tuple[LedgerRecord, str] 
                 if isinstance(binding, Mapping) and binding.get("task_id") == task_id:
                     return system, str(role)
     for record in ledger.list_records(limit=0):
-        assignment = _protocol(record.fc or {}).get("assignment")
+        protocol = _protocol(record.fc or {})
+        assignment = protocol.get("assignment")
         if isinstance(assignment, Mapping) and assignment.get("task_id") == task_id:
             return record, str(assignment.get("role") or "worker")
+        history = protocol.get("assignment_history")
+        if isinstance(history, list):
+            for retained in reversed(history):
+                if isinstance(retained, Mapping) and retained.get("task_id") == task_id:
+                    return record, str(retained.get("role") or "worker")
     return None
 
 

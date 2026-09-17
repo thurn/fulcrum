@@ -24,11 +24,16 @@ fulcrum report --input - <<'JSON'
   "observed_evidence": "specific evidence observed in this session",
   "required_change": "bounded implementation change",
   "acceptance_checks": ["observable validation check"],
+  "implementation_ready": true,
   "dependencies": [],
   "context": []
 }
 JSON
 ```
+
+For an implementation-ready report, immediately run `fulcrum worktree prepare
+--bead RETURNED_ID --json` with a new stable request UUID and report any concrete
+workspace prerequisite instead of claiming the item is dispatchable.
 
 Omit `project` when it can be inferred. Include only relevant dependency Bead IDs
 and concise implementation context. File independent problems as separate

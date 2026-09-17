@@ -1,4 +1,4 @@
-"""Non-destructive publication for the controller-owned brain repository."""
+"""Explicit non-destructive publication for the Fulcrum brain repository."""
 
 from __future__ import annotations
 

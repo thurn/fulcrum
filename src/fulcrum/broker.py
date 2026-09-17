@@ -90,10 +90,36 @@ class PendingBroker:
             raise RuntimeError(f"wait {evaluation.wait_id} already has a connection")
         self._active[evaluation.wait_id] = evaluation
         started = time.monotonic()
+        provider_errors = 0
         _log("broker_wait_started", wait_id=evaluation.wait_id, kind=evaluation.kind)
         try:
             while True:
-                result = await self.runner(evaluation.argv, evaluation.stdin)
+                try:
+                    result = await self.runner(evaluation.argv, evaluation.stdin)
+                    provider_errors = 0
+                except Exception as error:
+                    if evaluation.kind != "ci":
+                        raise
+                    remaining = evaluation.deadline_monotonic - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    delays = (60.0, 120.0, 300.0)
+                    delay = min(
+                        delays[min(provider_errors, len(delays) - 1)], remaining
+                    )
+                    provider_errors += 1
+                    _log(
+                        "broker_ci_observation_failed",
+                        wait_id=evaluation.wait_id,
+                        retry_in_seconds=delay,
+                        error=str(error),
+                    )
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=delay)
+                        self._wake.clear()
+                    except TimeoutError:
+                        pass
+                    continue
                 if not _is_transport_wait(result):
                     self.completed += 1
                     _log(

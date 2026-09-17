@@ -1,159 +1,70 @@
 # Setup
 
-Fulcrum setup is rerunnable and Beads-only. It never imports an earlier workflow
-database or replay journal.
-
-## Non-installation invariant
-
-Local master in ~/fulcrum is authoritative. Committing an ordinary application
-change is sufficient for the next command or background operation to use it.
-Launch automatically prepares an immutable snapshot when necessary; agents never
-run installation, activation, or restart steps to expose ordinary behavior.
-Dependency environments provide interpreters and dependencies, not independently
-installed copies of the application. Running operations retain their source.
-
-Every owned Codex skill is an absolute symlink from
-`~/.codex/skills/fulcrum-*` directly to `~/fulcrum/skills/fulcrum-*`. A link
-through an instance directory, `skills-current`, a packaged asset directory, or a
-selected source snapshot is invalid and reconciliation repairs it automatically.
+Use the `$fulcrum-bootstrap` skill in Codex Desktop. It discovers the retained
+checkout, selected instance, saved projects, native task tools, and supported
+models, then resumes one deterministic bootstrap receipt until every prerequisite
+or native result is settled.
 
 ## Prerequisites
 
-- macOS and Python 3.12
-- authenticated Codex Desktop/CLI with an available app-server
-- Git, `bd`, and `dolt`
-- `tg` when using the Tollgate delivery adapter
-- a retained Fulcrum checkout and a Git-backed brain destination
+- macOS, Python 3.12, Codex Desktop/CLI, Git, `bd`, `dolt`, and `tg`
+- the authoritative local checkout at `~/fulcrum`
+- an authenticated Codex profile and exact saved Codex project IDs
+- a Beads brain and authoritative YAML configuration
 
-Run setup from the retained checkout:
+Configuration top-level maps are `brain`, `beads`, `delivery`, `projects`,
+`models`, `policy`, `knowledge`, `source`, `timing`, and `diagnostics`. It has no
+runtime/App Server endpoint. Project roots and executable paths are absolute.
+Project enrollment requires an observed `codex_project_id`; Fulcrum never invents
+project creation after an uncertain native result.
 
-```sh
-scripts/setup --input setup.json --non-interactive --json
-```
+The four stock timing defaults are:
 
-If you pass `--instance`, it must be an absolute path. Setup writes source-following
-launchers to `<instance>/bin`. Production setup also installs
-`~/.local/bin/fulcrum` and `~/.local/bin/fulcrum-recover` as collision-safe links
-to those launchers; it refuses to replace unrelated links or real files. Ensure
-`~/.local/bin` is on `PATH`. Explicit `--instance` setups remain isolated and use
-`<instance>/bin/fulcrum` directly.
+- Steward instruction wait: 3,600 seconds
+- Warden CI wait: 1,800 seconds
+- MCP tool timeout: 3,900 seconds
+- Marshal heartbeat: 900 seconds
 
-A minimal `setup.json` is:
+## Deterministic bootstrap
 
-```json
-{
-  "brain": {"root": "/absolute/path/to/brain"},
-  "runtime": {"endpoint": "ws://127.0.0.1:4500"}
-}
-```
+`fulcrum bootstrap --input - --request-id UUID --json` preserves unrelated Codex
+configuration and installs an owned `[mcp_servers.fulcrum]` block pointing at the
+source-following `fulcrum-mcp` entry point. It links owned skills directly to
+`~/fulcrum/skills`, installs the six scoped command hooks, and returns exact native
+actions for the standing tasks and heartbeat.
 
-Setup discovers `bd`, `codex`, and `tg` on `PATH` when their executable fields
-are omitted. The brain must be a Git worktree with its configured remote
-(`origin` by default), and that remote must already contain at least one branch
-and commit. For a brand-new remote, create and push its initial commit before
-running setup; setup does not create the remote's first branch.
+Claim each action before invoking it and report its actual result. Never edit a
+returned prompt, target, model, effort, or schedule; never retry an uncertain
+effect. New standing tasks register with the action marker before work. Bootstrap
+reruns inspect retained IDs and postconditions instead of recreating tasks.
 
-The input is a partial configuration object. Accepted top-level maps are
-`brain`, `beads`, `runtime`, `delivery`, `models`, `projects`, `knowledge`,
-`source`, `timing`, `diagnostics`, `resources`, and `policy`. Omitted values use
-the defaults written to `fulcrum.yaml`. The principal fields are:
+The fixed identities are `🧰 STEWARD 🧰` on `gpt-5.6-luna` and `🧭 MARSHAL 🧭`
+plus `🔮 VIZIER 🔮` on `gpt-5.6-sol`. One heartbeat targets the registered Marshal
+every 15 minutes and stays quiet on healthy no-op runs. There is no Steward
+heartbeat or hourly recovery task.
 
-- `brain`: `root`, `remote`, `branch`, `push_interval_seconds`
-- `beads`: `executable`, loopback `host`, `port`, `database`
-- `runtime`: `kind` (`codex`), `endpoint`, `executable`
-- `delivery`: `kind` (`tollgate`), `executable`
-- `models`: per-role `model` and `effort`
-- `projects`: a map keyed by project ID; each entry accepts `root`,
-  `codex_project_id`, `delivery`, `integration_branch`, `prepare_argv`,
-  `validate_argv`, `source_remote`, `require_source_sync`, `models`, and
-  `enabled`
-- `knowledge`: `root`, `remote`, `branch`, `require_remote_sync`
-- `source`: `repository`, `remote`, `branch`
-- `policy`: capacity, pause, suspension, and rationale fields
-- `timing`, `diagnostics`, and `resources`: operational overrides
+Admission opens only after the broker answers, required native tools and model
+efforts are observed, all three tasks register, the schedule result is retained,
+and focused acceptance is explicitly recorded. Acceptance is an evidence map with
+`workspace_access`, `hook_identity`, `transcript_lifecycle`, `usage_accounting`,
+`task_targeting`, and `schedule_overlap`; each value must be true. Bootstrap creates
+the heartbeat paused and returns a separate activation action only after that
+evidence is supplied. A ready socket alone is not setup.
+The initial MCP configuration may require one exceptional Desktop reconnect;
+ordinary committed edits never do.
 
-All roots and executable paths must be absolute. Use distinct loopback runtime
-and Beads ports for an isolated test instance. Production setup owns and starts
-its configured runtime service. For an explicit isolated instance, start the
-documented runtime prerequisite yourself before setup, for example:
+## Services and source
 
-```sh
-codex app-server --listen ws://127.0.0.1:4500
-```
+Owned launch services are only Dolt and the thin broker. Codex Desktop owns its
+runtime. `service stop` pauses admission and refuses to hand off a broker with
+pending responses unless interruption was explicitly requested; it never stops
+Desktop or Dolt. Skills read local master directly, and fresh CLI evaluations make
+operation-boundary hot reload automatic.
 
-The command must remain running at the endpoint in `setup.json` while setup
-validates capabilities. If required capability validation fails, setup retains
-its configuration, service definitions, and failure receipt for the documented
-rerun, but stops any runtime or Dolt service that this failed attempt started.
+After changing `pyproject.toml` or `requirements-dev.lock`, refresh requirements
+and the editable package in `.venv`. This dependency refresh is exceptional
+packaging maintenance, not the ordinary editing workflow.
 
-The input document supplies any non-default configuration and initial projects.
-`brain.root` is the directory containing the authoritative `fulcrum.yaml`. Runtime
-and delivery provider identities are explicit; projects include absolute roots,
-validation commands, exact provider IDs when already registered, and whether
-source synchronization is required. Use `fulcrum config validate --json` to inspect
-the effective document and missing prerequisites.
-
-Setup is a one-time/rerunnable bootstrap and performs these bounded operations:
-
-1. Creates only declared instance and brain paths and provisions locked dependencies.
-2. Keeps entry points bound to the editable master checkout; it never copies Fulcrum.
-3. Provides `fulcrum` and `fulcrum-recover` launchers from the same master source
-   on the production user's `PATH`.
-4. Writes uniquely named controller, Dolt, optional runtime, and updater services.
-5. Initializes one externally served `fulcrum` Beads database, then receipts all
-   subsequent external effects.
-6. Reconciles the nine human-invoked skills and the read-only compaction hook without
-   replacing real user directories or unrelated hooks.
-7. Validates runtime models/efforts and exact project/delivery registrations.
-8. Creates or reuses standing Vizier and Marshal identities and sends one bounded
-   readiness turn to each new task so it is durable and visible in Codex Desktop.
-
-Automatic capacity defaults to four globally and four per project. The owned shared
-runtime service uses an FD soft limit of 4096. Setup reports actual capability facts;
-a protocol handshake does not by itself claim Desktop attachment.
-
-Rerun the same command after repairing any named prerequisite. Existing valid YAML,
-leadership IDs, service identity, provider registrations, and completed operation
-receipts are reused. Test fixtures use isolated roots/services and never rewrite
-production links or configuration.
-
-Useful checks:
-
-```sh
-fulcrum service status --instance INSTANCE --json
-fulcrum runtime capabilities --instance INSTANCE --json
-fulcrum project list --instance INSTANCE --json
-fulcrum skills reconcile --instance INSTANCE --json
-fulcrum doctor --instance INSTANCE --json
-```
-
-For a disposable test instance, archive or delete its exact managed tasks before
-running `service stop`; task commands use the resident connection and are
-unavailable after it stops. `service stop` deliberately leaves the dedicated Dolt
-service running. Fulcrum has no one-command instance disposal operation, and hard
-reset is not a disposal substitute because it bootstraps clean leadership and
-services again.
-
-Launch Codex Desktop against the configured shared runtime with:
-
-```sh
-fulcrum runtime launch-desktop
-```
-
-The command reads the selected runtime endpoint and starts Desktop with the
-required `CODEX_APP_SERVER_WS_URL` environment variable. The retained-checkout
-shortcut `scripts/launch_codex.sh` invokes the same command.
-
-After changing `pyproject.toml` or `requirements-dev.lock`, refresh the dependency
-environment and editable entry-point metadata in `.venv`; `scripts/setup` does
-this. This dependency refresh is not a Fulcrum installation and is never needed
-for ordinary application, documentation, role, or skill changes.
-
-## Local master
-
-Production launches observe refs/heads/master in ~/fulcrum without waiting for
-origin/master. The source.repository setting describes the canonical repository;
-remote/branch settings do not gate execution. Uncommitted application edits do not
-change new operation behavior; commit them first. Skills remain direct live links.
-See [live iteration](architecture/live-iteration.md) for source consistency,
-diagnostics, and exceptional maintenance.
+If broker transport code changes, use `fulcrum service update --maintenance` after
+pending responses settle. That explicit handoff is not part of ordinary policy or
+skill iteration.

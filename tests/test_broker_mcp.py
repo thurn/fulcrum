@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
+import tempfile
 import unittest
 
 from fulcrum.broker import Evaluation, PendingBroker
@@ -8,6 +10,42 @@ from fulcrum.mcp_server import McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_each_evaluation_starts_from_current_operation_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            revision = root / "revision"
+            revision.write_text("first", encoding="utf-8")
+            calls = 0
+
+            async def runner(argv, stdin):
+                nonlocal calls
+                calls += 1
+                observed = revision.read_text(encoding="utf-8")
+                if calls == 1:
+                    revision.write_text("second", encoding="utf-8")
+                    return {
+                        "ok": True,
+                        "state": "running",
+                        "result": {"transport_wait": {"wait_id": "source-wait"}},
+                    }
+                return {
+                    "ok": True,
+                    "state": "completed",
+                    "result": {"revision": observed},
+                }
+
+            result = await PendingBroker(runner).wait(
+                Evaluation(
+                    argv=("fulcrum",),
+                    stdin="{}",
+                    interval_seconds=0.01,
+                    deadline_monotonic=time.monotonic() + 1,
+                    wait_id="source-wait",
+                    kind="instruction",
+                )
+            )
+            self.assertEqual(result["result"]["revision"], "second")
+
     async def test_pending_wait_returns_only_terminal_result(self):
         calls = 0
         policy_revision = "old"

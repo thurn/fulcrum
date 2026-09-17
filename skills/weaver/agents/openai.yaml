@@ -1,5 +1,5 @@
 interface:
   display_name: "Weaver"
-  short_description: "Answer questions or prepare scope for Marshal"
+  short_description: "File durable investigation and scope work"
 policy:
   allow_implicit_invocation: false

@@ -1,5 +1,5 @@
 interface:
   display_name: "Fulcrum Warden"
-  short_description: "Review and deliver exact source"
+  short_description: "Review and deliver one exact candidate"
 policy:
   allow_implicit_invocation: false

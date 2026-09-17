@@ -6,7 +6,11 @@ import tempfile
 import uuid
 
 from fulcrum.contracts import InstanceContext
-from fulcrum.desktop_setup import DesktopSetupService, REQUIRED_NATIVE_TOOLS
+from fulcrum.desktop_setup import (
+    DesktopSetupService,
+    REQUIRED_ACCEPTANCE,
+    REQUIRED_NATIVE_TOOLS,
+)
 from tests.support import MemoryLedger, request
 
 
@@ -98,12 +102,55 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             )
         )
         (root / "instance" / "broker.sock").touch()
+        activating = service.bootstrap(
+            bootstrap_request(
+                root,
+                acceptance={name: True for name in REQUIRED_ACCEPTANCE},
+                **supplied,
+            )
+        )
+        activation = next(
+            row
+            for row in activating.result["pending_actions"]
+            if row["reporting"].get("purpose") == "marshal_schedule_activation"
+        )
+        service.claim_action(
+            replace(
+                bootstrap_request(root),
+                command=("action", "claim"),
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": activation["action_id"],
+                },
+                input={"attempt_id": "activation-attempt"},
+            )
+        )
+        service.report_action_result(
+            replace(
+                bootstrap_request(root),
+                command=("action", "result"),
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": activation["action_id"],
+                },
+                input={
+                    "attempt_id": "activation-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {"automationId": "automation-1"},
+                },
+            )
+        )
         ready = service.bootstrap(
-            bootstrap_request(root, acceptance_passed=True, **supplied)
+            bootstrap_request(
+                root,
+                acceptance={name: True for name in REQUIRED_ACCEPTANCE},
+                **supplied,
+            )
         )
         assert ready.result["state"] == "ready"
         assert ready.result["admission"] == "running"
         assert ready.result["schedule"]["automation_id"] == "automation-1"
+        assert ready.result["schedule"]["status"] == "ACTIVE"
         assert len(ready.result["standing"]) == 3
 
 

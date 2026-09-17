@@ -342,8 +342,7 @@ class DiagnosticService:
                 records = [
                     item
                     for item in ledger.list_records(limit=0)
-                    if item.kind
-                    not in {"control", "task", "memory", "analytics", "operation"}
+                    if item.kind not in {"control", "analytics", "operation"}
                     and (
                         not request.project
                         or (item.fc and item.fc.get("project") == request.project)
@@ -530,7 +529,7 @@ class DiagnosticService:
                     "execution": "local_process",
                 },
                 affected_commands=(
-                    ["automatic reconciliation"] if not socket_exists else []
+                    ["instruction wait", "ci wait"] if not socket_exists else []
                 ),
                 next_commands=(
                     [["fulcrum", "service", "start", "--json"]]
@@ -631,20 +630,12 @@ class DiagnosticService:
         related_operations = [
             operation for operation in operations if operation.id in related_ids
         ]
-        related_task_ids: set[str] = set()
         for operation in related_operations:
             fc = operation.operation
             result = fc.get("result") if isinstance(fc.get("result"), Mapping) else {}
             external = (
                 fc.get("external") if isinstance(fc.get("external"), Mapping) else {}
             )
-            for candidate in (
-                fc.get("owner"),
-                external.get("task_id"),
-                external.get("thread_id"),
-            ):
-                if isinstance(candidate, str) and candidate:
-                    related_task_ids.add(candidate)
             source_oids = _trace_source_oids(fc)
             items.append(
                 {
@@ -750,38 +741,30 @@ class DiagnosticService:
                     "provider_handles": [],
                 }
             )
-        for task in ledger.list_records(kind="task", limit=0):
-            task_fc = task.fc or {}
-            if (
-                task_fc.get("work_bead") != bead_id
-                and bead_id not in task_fc.get("associated_beads", [])
-                and task.id not in related_task_ids
-                and task_fc.get("thread_id") not in related_task_ids
-                and task_fc.get("creation_operation") not in related_ids
-            ):
-                continue
-            retained = task_fc.get("last_observed")
-            turn = retained.get("last_turn") if isinstance(retained, Mapping) else None
+        desktop = fc.get("desktop")
+        assignment_rows: list[Mapping[str, Any]] = []
+        if isinstance(desktop, Mapping):
+            history = desktop.get("assignment_history")
+            if isinstance(history, list):
+                assignment_rows.extend(
+                    item for item in history if isinstance(item, Mapping)
+                )
+            active = desktop.get("assignment")
+            if isinstance(active, Mapping):
+                assignment_rows.append(active)
+        for index, assignment in enumerate(assignment_rows):
             items.append(
                 {
-                    "time": task.native.get("created_at")
-                    or task.native.get("updated_at"),
-                    "id": f"{task.id}:task",
+                    "time": assignment.get("registered_at")
+                    or assignment.get("reserved_at"),
+                    "id": f"{record.id}:assignment:{index}",
                     "bead_id": bead_id,
-                    "task_id": task_fc.get("thread_id"),
-                    "turn_id": turn.get("id") if isinstance(turn, Mapping) else None,
-                    "operation_id": task_fc.get("creation_operation"),
+                    "task_id": assignment.get("task_id"),
+                    "turn_id": assignment.get("turn_id"),
+                    "operation_id": assignment.get("finish_operation"),
                     "transition": "task_observed",
-                    "effect": task_fc.get("role"),
-                    "outcome": (
-                        turn.get("status")
-                        if isinstance(turn, Mapping)
-                        else (
-                            (retained or {}).get("runtime_status")
-                            if isinstance(retained, Mapping)
-                            else None
-                        )
-                    ),
+                    "effect": assignment.get("role"),
+                    "outcome": assignment.get("state"),
                     "evidence": [],
                     "source_oid": None,
                     "source_oids": [],
@@ -1191,7 +1174,9 @@ def _loop_health(
         )
         state = (
             "healthy"
-            if isinstance(schedule, Mapping) and schedule.get("state") == "succeeded"
+            if isinstance(schedule, Mapping)
+            and schedule.get("state") == "succeeded"
+            and schedule.get("status") == "ACTIVE"
             else "unavailable"
         )
         return [

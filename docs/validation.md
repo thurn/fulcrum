@@ -1,66 +1,36 @@
 # Validation
 
-## Prepare dependencies
-
-Run once in each checkout, and again after changing dependency or packaging inputs:
+Prepare the environment initially and after dependency or packaging changes:
 
 ```sh
 scripts/prepare-check
 ```
 
-This installs `requirements-dev.lock` and the editable package into `.venv` without
-starting Fulcrum services. Set `FULCRUM_CHECK_VENV` to select a different prepared
-environment or `FULCRUM_PYTHON` to select Python 3.12 for environment creation.
-Dependency provisioning is outside the check's runtime budget.
-
-## Complete repository check
+Run the complete repository gate with:
 
 ```sh
 scripts/check
 ```
 
-The command checks formatting, performs full strict type checking, and discovers
-all tests. It prints phase durations and the five slowest tests. Normal execution
-should finish within 30 seconds; the hard deadline is 55 seconds, including child
-process termination. Failed, skipped, empty, or timed-out tests cannot produce a
-passing check. Dependencies are never installed or environments rebuilt here.
+It checks formatting, strict types, and focused tests. The normal budget is 30
+seconds and the hard deadline is 55 seconds. The check performs no dependency
+installation, provider/model calls, real CI waits, scheduled delays, or live
+Desktop experiments.
 
-Tests exercise real Fulcrum decision logic with small in-memory record stores and
-mocked external adapter results. Coverage prioritizes request reuse and conflicts,
-ownership, dependencies, capacity and admission, exact recovery matching, delivery
-evidence, runtime protocols, CLI contracts, and resource cleanup boundaries.
-Small temporary-file and local-socket tests remain where they test those interfaces.
-Unexpected process execution fails immediately; exceptions are the launcher
-stub and exact local Python commands for source-pinning and process-lock tests.
+Tests concentrate on durable request/action replay, authorization, ready selection
+without Marshal, stale curation, repair limits, broker-held waits, source
+reevaluation, hook denial, transcript gaps, bootstrap reruns, exact schedule
+binding, report-key conflicts, Tollgate safety, and the public CLI cut. Fake clocks,
+small record stores, sockets, and recorded adapter results replace long waits.
 
-Beads, Dolt, Git, Tollgate, Codex, remote services, and model calls are not required
-to run the tests. These checks do not establish live provider compatibility or
-prove complete production workflows. New regressions should be expressed through
-the narrowest relevant production boundary, using clocks/events instead of long
-waits and adapter results instead of external installations.
+Focused live acceptance is established once for the replacement and repeated only
+when an affected boundary changes. It must cover standing titles/IDs, native tool
+and model support, hook trust and isolation, transcript/accounting evidence, a
+pending Steward wait, five-minute CI delivery to the same Warden turn, one Marshal
+heartbeat, same-Steward recovery, one Justiciar slot, Desktop/broker restart
+uncertainty, and operation-boundary source freshness. Record unsupported behavior
+and gaps honestly; unit tests do not prove native compatibility.
 
-## Retired validation
-
-The former deterministic CLI, eight-role live workflow, and thirty-task smoke
-harnesses were deleted, together with their expensive integration suites. There
-is no optional or nightly copy. The `fixture`, `scenario`, and `smoke concurrency`
-commands, file-backed simulated providers, and crash-injection hooks were removed.
-Runtime configuration now requires `codex`; delivery configuration requires
-`tollgate`. Invalid retired kinds are rejected rather than migrated.
-
-[Historical replacement reports](fulcrum2/validation-results.md) describe earlier
-observations only. They impose no rerun or shipping requirement. The repository
-acceptance gate is the complete check above.
-
-## Measured acceptance
-
-On 2026-09-15, the complete check passed locally in **3.55 seconds with cold
-formatter/type-check caches**, then **3.14 and 3.44 seconds** on repeated runs.
-Each run included formatting, full strict type checking, and all **79 tests**.
-The tests also passed with Beads, Dolt, Git, Tollgate, and Codex unavailable on PATH.
-
-An intentionally failing test returned exit 1. An intentionally stalled test was
-terminated after 53.11 seconds with exit 124; a separate process-tree probe verified
-that timeout cleanup terminates grandchildren too. Those temporary acceptance
-probes were removed. These timings exclude dependency provisioning and describe
-this local execution environment, not an unmeasured remote runner.
+The former deterministic provider, App Server/runtime, continuous-controller,
+plan-review, curated-memory, fleet-replacement, and live role-suite tests were
+removed with those products. Do not revive them as an optional or nightly harness.

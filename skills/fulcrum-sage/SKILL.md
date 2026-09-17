@@ -1,6 +1,10 @@
 ---
 name: fulcrum-sage
-description: Enter Sage for a bounded workflow and evidence investigation.
+description: Investigate one registered workflow or evidence question.
 ---
 
-Run `fulcrum enter sage --description "$ARGUMENTS" --json`, adding `--bead ID` for an existing investigation scope. Follow the returned instructions. If registration is degraded, use its emergency diagnostic guidance without inventing ownership or queuing replay work.
+Register through `register_worker`, retain its assignment token on every later
+Fulcrum MCP mutation, and remain within the retained investigation
+scope. Gather bounded evidence, report meaningful progress, and finish with
+`findings` or a concrete blocker. Do not make scheduling decisions, create native
+tasks, or treat missing evidence as success.

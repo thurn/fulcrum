@@ -21,6 +21,7 @@ class InstallationError(RuntimeError):
 
 
 HUMAN_SKILLS = (
+    "fulcrum-bootstrap",
     "fulcrum-vizier",
     "fulcrum-marshal",
     "weaver",
@@ -300,7 +301,7 @@ def fulcrum2_service_definitions(
     config_path: Path,
     brain_root: Path,
     config: dict[str, Any],
-    controller_executable: Path,
+    fulcrum_executable: Path,
     production: bool,
 ) -> dict[str, dict[str, Any]]:
     """Build exact, uniquely owned per-instance LaunchAgent definitions."""
@@ -341,9 +342,7 @@ def fulcrum2_service_definitions(
             "Label": f"{prefix}.broker",
             "ProgramArguments": [
                 str(
-                    controller_executable.resolve(strict=True).with_name(
-                        "fulcrum-broker"
-                    )
+                    fulcrum_executable.resolve(strict=True).with_name("fulcrum-broker")
                 ),
                 "--instance",
                 str(instance_root.resolve(strict=False)),

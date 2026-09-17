@@ -14,6 +14,7 @@ import os
 import socket
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,6 +37,30 @@ WAIT_STATES = {"waiting", "resolved", "cancelled", "expired"}
 STANDING_ROLES = {"steward", "marshal", "vizier"}
 WORKER_ROLES = {"weaver", "executor", "warden", "sage", "mason", "justiciar"}
 MAX_UNPROJECTED_TRANSITIONS = 128
+
+
+def _positive_native_completion(
+    protocol: Mapping[str, Any], assignment: Mapping[str, Any]
+) -> bool:
+    observations = protocol.get("observations")
+    lifecycle = (
+        observations.get("lifecycle") if isinstance(observations, Mapping) else None
+    )
+    if not isinstance(lifecycle, Mapping):
+        return False
+    task_id = assignment.get("task_id")
+    turn_id = assignment.get("turn_id")
+    for event in lifecycle.values():
+        if not isinstance(event, Mapping) or event.get("task_id") != task_id:
+            continue
+        kind = event.get("type")
+        if kind in {"task_complete", "task_completed"}:
+            return True
+        if kind in {"turn_complete", "turn_completed"} and (
+            not turn_id or event.get("turn_id") == turn_id
+        ):
+            return True
+    return False
 
 
 def _utc_now() -> str:
@@ -293,8 +318,11 @@ class DesktopProtocolService:
             )
         actions = dict(protocol.get("actions") or {})
         action = actions.get(action_id)
-        expected_purpose = f"bootstrap_{role}"
-        if not isinstance(action, Mapping) or action.get("purpose") != expected_purpose:
+        expected_purposes = {f"bootstrap_{role}", f"recover_{role}"}
+        if (
+            not isinstance(action, Mapping)
+            or action.get("purpose") not in expected_purposes
+        ):
             raise FulcrumError(
                 "REGISTRATION_NOT_AUTHORIZED",
                 f"{role} registration requires its retained creation or recovery action",
@@ -325,7 +353,16 @@ class DesktopProtocolService:
             )
         standing = dict(protocol.get("standing") or {})
         current = standing.get(role)
-        if isinstance(current, Mapping) and current.get("task_id") != task_id:
+        replacing = (
+            isinstance(current, Mapping)
+            and current.get("state") == "replacement_pending"
+            and action.get("purpose") == f"recover_{role}"
+        )
+        if (
+            isinstance(current, Mapping)
+            and current.get("task_id") != task_id
+            and not replacing
+        ):
             raise FulcrumError(
                 "IDENTITY_CONFLICT",
                 f"{role} is already bound to another task",
@@ -340,6 +377,7 @@ class DesktopProtocolService:
             "action_id": action_id,
             "state": "registered",
             "registered_at": _utc_now(),
+            "previous_task_id": current.get("task_id") if replacing else None,
         }
         standing[role] = binding
         protocol["standing"] = standing
@@ -597,22 +635,83 @@ class DesktopProtocolService:
         actions = dict(protocol.get("actions") or {})
         actions[action_id] = action
         protocol["actions"] = actions
-        if action.get("purpose") == "bootstrap_marshal_schedule":
+        if action.get("purpose") == "routine_dispatch" and outcome == "succeeded":
+            assignment = dict(protocol.get("assignment") or {})
+            created_task = _native_identifier(
+                request.input.get("native_result"), "threadId", "thread_id", "id"
+            )
+            if created_task:
+                retained_task = assignment.get("task_id")
+                if retained_task and retained_task != created_task:
+                    raise FulcrumError(
+                        "IDENTITY_CONFLICT",
+                        "native creation result conflicts with worker registration",
+                        exit_code=5,
+                    )
+                assignment.update(
+                    task_id=created_task,
+                    creation_action_id=action_id,
+                    created_at=_utc_now(),
+                )
+                if assignment.get("state") != "active":
+                    assignment["state"] = "issuing"
+                protocol["assignment"] = assignment
+        if action.get("purpose") in {
+            "bootstrap_marshal_schedule",
+            "bootstrap_marshal_schedule_activation",
+        }:
             schedule = dict(protocol.get("marshal_schedule") or {})
+            if action.get("purpose") == "bootstrap_marshal_schedule":
+                schedule.update(
+                    {
+                        "action_id": action_id,
+                        "state": outcome,
+                        "automation_id": _native_identifier(
+                            request.input.get("native_result"),
+                            "automationId",
+                            "automation_id",
+                            "id",
+                        ),
+                        "observed_at": _utc_now(),
+                    }
+                )
+            else:
+                schedule.update(
+                    {
+                        "activation_action_id": action_id,
+                        "activation_state": outcome,
+                        "status": "ACTIVE" if outcome == "succeeded" else "PAUSED",
+                        "observed_at": _utc_now(),
+                    }
+                )
+            protocol["marshal_schedule"] = schedule
+        if action.get("purpose") == "recover_marshal_schedule":
+            schedule = dict(protocol.get("marshal_schedule") or {})
+            target = (action.get("arguments") or {}).get("targetThreadId")
             schedule.update(
                 {
-                    "action_id": action_id,
-                    "state": outcome,
-                    "automation_id": _native_identifier(
-                        request.input.get("native_result"),
-                        "automationId",
-                        "automation_id",
-                        "id",
+                    "retarget_action_id": action_id,
+                    "retarget_state": outcome,
+                    "target_task_id": (
+                        target
+                        if outcome == "succeeded"
+                        else schedule.get("target_task_id")
                     ),
                     "observed_at": _utc_now(),
                 }
             )
             protocol["marshal_schedule"] = schedule
+        if action.get("purpose") == "recover_steward_loop" and outcome == "succeeded":
+            standing = dict(protocol.get("standing") or {})
+            steward = standing.get("steward")
+            if isinstance(steward, Mapping):
+                standing["steward"] = {
+                    **dict(steward),
+                    "state": "registered",
+                    "resumed_at": _utc_now(),
+                    "resume_action_id": action_id,
+                }
+                protocol["standing"] = standing
         value = {
             "action_id": action_id,
             "attempt_id": attempt_id,
@@ -735,12 +834,31 @@ class DesktopProtocolService:
                 project, 0
             ) >= project_capacity.get(project, default_project_capacity):
                 continue
-            if record.status == "closed" or str(fc.get("phase")) not in {
-                "ready",
-                "implementation_ready",
-            }:
+            phase = str(fc.get("phase"))
+            requested_role = str(fc.get("requested_role") or "")
+            if record.status == "closed" or not (
+                phase in {"ready", "implementation_ready"}
+                or (phase == "backlog" and requested_role == "weaver")
+            ):
                 continue
             if protocol.get("assignment") or fc.get("holds") or fc.get("blocked"):
+                continue
+            history = protocol.get("assignment_history")
+            prior = (
+                next(
+                    (
+                        value
+                        for value in reversed(history)
+                        if isinstance(value, Mapping)
+                    ),
+                    None,
+                )
+                if isinstance(history, list)
+                else None
+            )
+            if isinstance(prior, Mapping) and not _positive_native_completion(
+                protocol, prior
+            ):
                 continue
             dependencies = ledger.dependencies(record.id)
             if any(
@@ -757,6 +875,12 @@ class DesktopProtocolService:
             project_config = (
                 projects.get(project) if isinstance(projects, Mapping) else None
             )
+            if (
+                not workspace
+                and requested_role == "weaver"
+                and isinstance(project_config, Mapping)
+            ):
+                workspace = project_config.get("root")
             codex_project = (
                 project_config.get("codex_project_id")
                 if isinstance(project_config, Mapping)
@@ -801,6 +925,8 @@ class DesktopProtocolService:
         project_config = (
             projects.get(project) if isinstance(projects, Mapping) else None
         )
+        if not workspace and role == "weaver" and isinstance(project_config, Mapping):
+            workspace = str(project_config.get("root") or "")
         codex_project = (
             project_config.get("codex_project_id")
             if isinstance(project_config, Mapping)
@@ -859,7 +985,12 @@ class DesktopProtocolService:
         protocol["assignment"] = assignment
         ledger.update_fc(
             record.id,
-            _with_protocol(fc, protocol),
+            {
+                **_with_protocol(fc, protocol),
+                "owner": "STEWARD",
+                "role": role,
+                "ownership_operation": assignment_token,
+            },
             assignee="STEWARD",
         )
         self._write_event(
@@ -1079,6 +1210,10 @@ class DesktopProtocolService:
                 "ASSIGNMENT_MISMATCH", "assignment token does not match", exit_code=5
             )
         task_id = request.actor.task_id or request.thread_id
+        if not task_id:
+            raise FulcrumError.invalid(
+                "IDENTITY_REQUIRED", "worker registration requires the native task ID"
+            )
         if assignment.get("task_id") and assignment.get("task_id") != task_id:
             raise FulcrumError(
                 "ASSIGNMENT_CONFLICT",
@@ -1092,20 +1227,43 @@ class DesktopProtocolService:
                 "worker is not in the assigned workspace",
                 exit_code=5,
             )
+        observed_root = request.input.get("git_root")
+        if observed_root != assignment.get("workspace"):
+            raise FulcrumError(
+                "SOURCE_MISMATCH",
+                "worker Git root is not the assigned workspace",
+                exit_code=5,
+            )
+        expected_source = assignment.get("source")
+        observed_source = request.input.get("source")
+        if expected_source and observed_source != expected_source:
+            raise FulcrumError(
+                "SOURCE_MISMATCH",
+                "worker source differs from the reserved assignment source",
+                exit_code=5,
+            )
         active = {
             **dict(assignment),
             "task_id": task_id,
             "host_id": request.input.get("host_id"),
             "turn_id": request.input.get("turn_id"),
+            "session_id": request.input.get("session_id"),
+            "git_root": observed_root,
+            "branch": request.input.get("branch"),
+            "observed_source": observed_source,
             "state": "active",
             "registered_at": _utc_now(),
         }
         protocol["assignment"] = active
         value = {"assignment": active}
         _save_request(protocol, request, value)
-        ledger.update_fc(
-            record.id, _with_protocol(record.fc or {}, protocol), assignee=str(task_id)
-        )
+        fc = {
+            **_with_protocol(record.fc or {}, protocol),
+            "owner": str(task_id),
+            "role": active.get("role"),
+            "ownership_operation": active.get("assignment_token"),
+        }
+        ledger.update_fc(record.id, fc, assignee=str(task_id))
         self._write_event(
             request,
             "worker_registered",
@@ -1142,12 +1300,44 @@ class DesktopProtocolService:
                 "candidate does not belong to this task",
                 exit_code=5,
             )
-        candidate_id = str(request.input.get("candidate_id") or _opaque("candidate"))
+        if request.input.get("assignment_token") != assignment.get("assignment_token"):
+            raise FulcrumError(
+                "ASSIGNMENT_MISMATCH", "candidate token does not match", exit_code=5
+            )
+        source = request.input.get("source")
+        if not isinstance(source, str) or not source:
+            raise FulcrumError.invalid(
+                "SOURCE_REQUIRED", "candidate submission requires the exact source OID"
+            )
+        from fulcrum.delivery_service import DeliveryService
+
+        submitted = DeliveryService().validation_start(
+            replace(
+                request,
+                command=("validation", "start"),
+                arguments={"bead": bead_id, "source": source},
+            )
+        )
+        current = self._record(ledger, bead_id)
+        record = current
+        delivery = (current.fc or {}).get("delivery")
+        validation = (
+            delivery.get("validation") if isinstance(delivery, Mapping) else None
+        )
+        provider_handle = (
+            delivery.get("provider_handle") if isinstance(delivery, Mapping) else None
+        )
+        provider_state = (
+            str(validation.get("state"))
+            if isinstance(validation, Mapping) and validation.get("state")
+            else submitted.state.value
+        )
+        candidate_id = str(provider_handle or _opaque("candidate"))
         candidate = {
             "candidate_id": candidate_id,
-            "source": request.input.get("source"),
-            "provider_run_id": request.input.get("provider_run_id"),
-            "state": str(request.input.get("state") or "submitted"),
+            "source": source,
+            "provider_run_id": provider_handle,
+            "state": provider_state,
             "submitted_at": _utc_now(),
             "deadline": (
                 self.now()
@@ -1155,7 +1345,11 @@ class DesktopProtocolService:
             )
             .isoformat()
             .replace("+00:00", "Z"),
-            "evidence": copy.deepcopy(request.input.get("evidence") or {}),
+            "evidence": copy.deepcopy(
+                validation.get("facts")
+                if isinstance(validation, Mapping)
+                else submitted.result or {}
+            ),
         }
         protocol["candidate"] = candidate
         value = {"candidate": candidate}
@@ -1190,6 +1384,10 @@ class DesktopProtocolService:
                 "CI wait requires the active assignment",
                 exit_code=5,
             )
+        if request.input.get("assignment_token") != assignment.get("assignment_token"):
+            raise FulcrumError(
+                "ASSIGNMENT_MISMATCH", "CI wait token does not match", exit_code=5
+            )
         if not isinstance(candidate, Mapping) or candidate.get(
             "candidate_id"
         ) != request.input.get("candidate_id"):
@@ -1197,6 +1395,27 @@ class DesktopProtocolService:
                 "CANDIDATE_MISMATCH", "CI wait candidate does not match", exit_code=5
             )
         state = str(candidate.get("state"))
+        if state not in {"passed", "failed", "blocked"}:
+            from fulcrum.delivery_service import DeliveryService
+
+            observed = DeliveryService().validation_show(
+                replace(
+                    request,
+                    command=("validation", "show"),
+                    arguments={"bead": bead_id},
+                )
+            )
+            observed_value = observed.result or {}
+            observed_state = str(observed_value.get("state") or state)
+            candidate = {
+                **dict(candidate),
+                "state": observed_state,
+                "evidence": copy.deepcopy(dict(observed_value)),
+                "observed_at": _utc_now(),
+            }
+            protocol["candidate"] = candidate
+            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            state = observed_state
         if state in {"passed", "failed", "blocked"}:
             value = {"status": state, "candidate": copy.deepcopy(dict(candidate))}
             _save_request(protocol, request, value)

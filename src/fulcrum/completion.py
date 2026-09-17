@@ -78,7 +78,7 @@ class CompletionService:
                 details={"role": role, "outcome": outcome},
             )
         if result.request_id == request.request_id:
-            _wake_controller(request)
+            _wake_broker(request)
         return result
 
     def _leadership_completed(
@@ -661,7 +661,9 @@ class CompletionService:
             "ownership_operation": request.ownership_operation,
             "sealed_at": utc_now(),
         }
-        fc["phase"] = "handoff"
+        fc["phase"] = "ready"
+        fc["requested_role"] = "warden"
+        fc["source"] = payload["source_oid"]
         fc["handoff"] = {
             "from_thread": request.thread_id,
             "from_ownership_operation": request.ownership_operation,
@@ -679,8 +681,8 @@ class CompletionService:
             "state": "waiting_for_executor_terminal",
         }
         fc["next_action"] = (
-            "End the Executor turn; the controller will start Warden only after the "
-            "turn, subscription, and owned terminals are observed stopped."
+            "End the Executor turn; Steward may start Warden after positive native "
+            "turn completion and settled process ownership are observed."
         )
         fc["last_transition"] = operation.id
         updated = ledger.update_fc(work.id, fc, status="in_progress")
@@ -745,7 +747,7 @@ class CompletionService:
             request,
             bead_id=work.id,
             planned={"finish": payload, "children": {}},
-            next_action="Submit exact-source validation, then seal one Warden judgment for controller-owned delivery.",
+            next_action="Submit exact-source validation, then seal one Warden judgment for software-owned delivery.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
@@ -855,34 +857,127 @@ class CompletionService:
                 next_action=fc["next_action"],
             )
             return _operation_result(operation)
+        if not isinstance(validation, Mapping) or validation.get("state") != "passed":
+            operation = ledger.update_operation(
+                operation.id,
+                state="failed",
+                step="warden_validation_not_terminal",
+                result={
+                    "bead_id": work.id,
+                    "accepted": False,
+                    "validation": validation,
+                    "children": children,
+                },
+                error={
+                    "code": "VALIDATION_NOT_PASSED",
+                    "message": "Warden finish requires the retained exact-source CI result to pass",
+                    "retryable": False,
+                },
+                next_action="Remain in the same assignment and wait for exact-source CI.",
+            )
+            return _operation_result(operation)
+
+        work = _reload_work(ledger, work.id)
+        delivery = (work.fc or {}).get("delivery")
+        approved = (
+            delivery.get("approved_source") if isinstance(delivery, Mapping) else None
+        )
+        if (
+            not isinstance(approved, Mapping)
+            or approved.get("oid") != payload["source_oid"]
+        ):
+            review = service.review_approve(
+                _child_request(request, operation.id, "review", ("review", "approve"))
+            )
+            children["review"] = _child_result(review)
+            if review.state is not CommandState.COMPLETED:
+                return _finish_child_unresolved(
+                    ledger,
+                    work,
+                    operation,
+                    payload,
+                    children,
+                    workspace,
+                    "review",
+                    review,
+                )
+
+        promotion = service.promotion_start(
+            _child_request(request, operation.id, "promotion", ("promotion", "start"))
+        )
+        children["promotion"] = _child_result(promotion)
+        if promotion.state is not CommandState.COMPLETED:
+            return _finish_child_unresolved(
+                ledger,
+                work,
+                operation,
+                payload,
+                children,
+                workspace,
+                "promotion",
+                promotion,
+            )
+        work = _reload_work(ledger, work.id)
+        delivery = (work.fc or {}).get("delivery")
+        promotion_state = (
+            delivery.get("promotion") if isinstance(delivery, Mapping) else None
+        )
+        if (
+            not isinstance(promotion_state, Mapping)
+            or promotion_state.get("state") != "observed"
+        ):
+            operation = ledger.update_operation(
+                operation.id,
+                state="uncertain",
+                step="promotion_not_observed",
+                result={"children": children, "delivery": delivery},
+                error={
+                    "code": "PROMOTION_NOT_OBSERVED",
+                    "message": "provider accepted promotion but did not return a terminal promoted result",
+                    "retryable": True,
+                },
+                next_action="Inspect the retained provider handle before another effect.",
+            )
+            return _operation_result(operation)
+
+        synchronization = service.source_sync(
+            _child_request(request, operation.id, "source-sync", ("source", "sync"))
+        )
+        children["source_sync"] = _child_result(synchronization)
+        if synchronization.state is not CommandState.COMPLETED:
+            return _finish_child_unresolved(
+                ledger,
+                work,
+                operation,
+                payload,
+                children,
+                workspace,
+                "source_sync",
+                synchronization,
+            )
         work = _reload_work(ledger, work.id)
         fc = dict(work.fc or {})
-        fc["phase"] = "delivering"
+        fc["phase"] = "awaiting_native_completion"
         fc["delivery_finish"] = {
             "operation_id": operation.id,
             "source_oid": payload["source_oid"],
             "summary": payload["summary"],
             "checks": payload["checks"],
             "evidence": payload["evidence"],
-            "state": (
-                "waiting_for_warden_terminal"
-                if isinstance(validation, Mapping)
-                and validation.get("state") == "passed"
-                else "waiting_for_validation"
-            ),
-            "requested_at": utc_now(),
+            "state": "awaiting_native_completion",
+            "accepted_at": utc_now(),
         }
         fc["next_action"] = (
-            "End the Warden turn; the controller will observe validation and then "
-            "approve, promote, synchronize, clean up, and close independently."
+            "End the Warden turn; transcript-confirmed native completion authorizes "
+            "workspace cleanup and assignment release."
         )
         fc["last_transition"] = operation.id
-        ledger.update_fc(work.id, fc)
+        awaiting = ledger.update_fc(work.id, fc, status="in_progress")
         _record_task_finish(ledger, work, operation.id)
         operation = ledger.update_operation(
             operation.id,
             state="completed",
-            step="warden_judgment_sealed",
+            step="warden_finish_accepted",
             planned={"finish": payload, "children": children},
             result={
                 "bead_id": work.id,
@@ -891,6 +986,8 @@ class CompletionService:
                 "validation": validation,
                 "children": children,
                 "workspace": workspace,
+                "delivery": (awaiting.fc or {}).get("delivery"),
+                "native_completion_required": True,
                 "report_reminder": _report_reminder(work.id),
             },
             next_action=fc["next_action"],
@@ -1035,62 +1132,39 @@ def _owned_work(request: ParsedRequest, ledger: Ledger) -> tuple[Ledger, LedgerR
         raise FulcrumError.invalid(
             "NOT_FOUND", f"unknown work {request.arguments['bead']}"
         )
+    protocol = (work.fc or {}).get("desktop")
+    assignment = protocol.get("assignment") if isinstance(protocol, Mapping) else None
     if request.actor.kind != "human" and (
-        request.thread_id != (work.fc or {}).get("owner")
-        or request.ownership_operation != (work.fc or {}).get("ownership_operation")
+        not isinstance(assignment, Mapping)
+        or assignment.get("state") != "active"
+        or request.thread_id != assignment.get("task_id")
+        or request.ownership_operation != assignment.get("assignment_token")
     ):
         raise FulcrumError(
             "OWNERSHIP_CONFLICT",
             "finish requires the current task and ownership operation",
             exit_code=5,
             details={
-                "current_owner": (work.fc or {}).get("owner"),
-                "current_ownership_operation": (work.fc or {}).get(
-                    "ownership_operation"
+                "current_owner": (
+                    assignment.get("task_id")
+                    if isinstance(assignment, Mapping)
+                    else None
+                ),
+                "current_ownership_operation": (
+                    assignment.get("assignment_token")
+                    if isinstance(assignment, Mapping)
+                    else None
                 ),
             },
         )
-    if request.actor.kind != "human":
+    if request.actor.kind != "human" and isinstance(assignment, Mapping):
         role = (work.fc or {}).get("role")
-        compiled = (work.fc or {}).get("compiled_role")
-        tasks = [
-            item
-            for item in ledger.list_records(kind="task", limit=0)
-            if item.fc
-            and item.fc.get("thread_id") == request.thread_id
-            and item.fc.get("work_bead") == work.id
-            and item.fc.get("ownership_operation") == request.ownership_operation
-            and item.fc.get("deleted_at") is None
-            and item.fc.get("replaced_by") is None
-        ]
-        task_fc = tasks[0].fc if len(tasks) == 1 else None
-        task_role = task_fc.get("role") if task_fc else None
-        task_contract = task_fc.get("compiled_contract") if task_fc else None
-        authorized_role = (
-            compiled.get("authorized_role") if isinstance(compiled, Mapping) else None
-        )
-        contract_role = (
-            task_contract.get("authorized_role")
-            if isinstance(task_contract, Mapping)
-            else None
-        )
-        if (
-            len(tasks) != 1
-            or role != task_role
-            or role != authorized_role
-            or role != contract_role
-        ):
+        if role != assignment.get("role"):
             raise FulcrumError(
                 "ROLE_MISMATCH",
-                "finish role differs from the compiled ownership contract",
+                "finish role differs from the active Desktop assignment",
                 exit_code=5,
-                details={
-                    "work_role": role,
-                    "task_role": task_role,
-                    "compiled_role": authorized_role,
-                    "contract_role": contract_role,
-                    "task_matches": len(tasks),
-                },
+                details={"work_role": role, "assignment_role": assignment.get("role")},
             )
     return ledger, work
 
@@ -1444,33 +1518,137 @@ def _normalize_finding(value: Any, discovered_from: str, index: int) -> dict[str
 
 
 def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -> None:
-    owner = (work.fc or {}).get("owner")
-    acquisition = (work.fc or {}).get("ownership_operation")
-    matches = [
-        item
-        for item in ledger.list_records(kind="task", limit=0)
-        if item.fc
-        and item.fc.get("thread_id") == owner
-        and (
-            item.fc.get("work_bead") == work.id
-            or work.id in item.fc.get("associated_beads", [])
-        )
-        and item.fc.get("ownership_operation") == acquisition
-    ]
-    if len(matches) != 1:
+    current = ledger.show(work.id)
+    if current is None or not current.fc:
+        raise FulcrumError.invalid("NOT_FOUND", f"unknown work {work.id}")
+    fc = dict(current.fc)
+    desktop = dict(fc.get("desktop") or {})
+    assignment = desktop.get("assignment")
+    if not isinstance(assignment, Mapping):
         raise FulcrumError(
             "TASK_CORRUPT",
-            "finish could not identify one accountable managed task",
+            "finish could not identify one accountable Desktop assignment",
             exit_code=4,
-            details={"matches": [item.id for item in matches]},
         )
-    fc = dict(matches[0].fc or {})
-    fc["finish_operation"] = operation_id
-    fc["last_transition"] = operation_id
-    ledger.update_fc(matches[0].id, fc)
+    desktop["assignment"] = {
+        **dict(assignment),
+        "finish_operation": operation_id,
+        "finish_recorded_at": utc_now(),
+    }
+    fc["desktop"] = desktop
+    ledger.update_fc(current.id, fc)
 
 
-def _wake_controller(request: ParsedRequest) -> None:
+def _release_desktop_assignment(
+    ledger: Ledger, bead_id: str, finish_operation: str | None
+) -> None:
+    current = ledger.show(bead_id)
+    if current is None or not current.fc:
+        return
+    fc = dict(current.fc)
+    desktop = dict(fc.get("desktop") or {})
+    assignment = desktop.pop("assignment", None)
+    if not isinstance(assignment, Mapping):
+        return
+    history = list(desktop.get("assignment_history") or [])
+    history.append(
+        {
+            **dict(assignment),
+            "state": "finished",
+            "finish_operation": finish_operation,
+            "released_at": utc_now(),
+        }
+    )
+    desktop["assignment_history"] = history[-20:]
+    fc["desktop"] = desktop
+    owner = "SYSTEM" if current.status == "closed" else "STEWARD"
+    fc["owner"] = owner
+    fc["role"] = None
+    fc["ownership_operation"] = None
+    ledger.update_fc(current.id, fc, assignee=owner)
+
+
+def settle_native_completion(
+    request: ParsedRequest, ledger: Ledger, bead_id: str
+) -> bool:
+    """Settle a finished assignment only after its exact native turn is terminal."""
+
+    current = ledger.show(bead_id)
+    if current is None or not current.fc:
+        return False
+    fc = dict(current.fc)
+    desktop = dict(fc.get("desktop") or {})
+    assignment = desktop.get("assignment")
+    if not isinstance(assignment, Mapping) or not assignment.get("finish_operation"):
+        return False
+    from fulcrum.desktop_protocol import _positive_native_completion
+
+    if not _positive_native_completion(desktop, assignment):
+        return False
+    finish_operation = str(assignment["finish_operation"])
+    delivery_finish = fc.get("delivery_finish")
+    if (
+        fc.get("phase") == "awaiting_native_completion"
+        and isinstance(delivery_finish, Mapping)
+        and delivery_finish.get("state") == "awaiting_native_completion"
+    ):
+        cleanup_request = replace(
+            request,
+            command=("worktree", "cleanup"),
+            arguments={"bead": bead_id},
+            input={},
+            actor=replace(request.actor, kind="system", task_id=None),
+            request_id=str(
+                uuid.uuid5(FINISH_CHILD_NAMESPACE, f"{finish_operation}:cleanup")
+            ),
+            thread_id=None,
+            ownership_operation=None,
+        )
+        try:
+            cleanup = DeliveryService().worktree_cleanup(cleanup_request)
+        except FulcrumError as error:
+            cleanup = CommandResult(
+                ok=False,
+                state=error.state,
+                result={"error": error.to_result().to_dict()["error"]},
+                request_id=cleanup_request.request_id,
+            )
+        current = _reload_work(ledger, bead_id)
+        fc = dict(current.fc or {})
+        if cleanup.state is CommandState.COMPLETED:
+            completed_at = utc_now()
+            fc["phase"] = "done"
+            fc["delivery_finish"] = {
+                **dict(delivery_finish),
+                "state": "completed",
+                "completed_at": completed_at,
+            }
+            fc["disposition"] = {
+                "outcome": "approved",
+                "summary": delivery_finish.get("summary"),
+                "source_oid": delivery_finish.get("source_oid"),
+                "completed_at": completed_at,
+            }
+            fc["next_action"] = "No delivery or cleanup obligation remains."
+            closed = ledger.update_fc(bead_id, fc, status="closed")
+            if fc.get("workflow_root") == bead_id:
+                AnalyticsService().finalize_root(ledger, closed, finish_operation)
+        else:
+            fc["phase"] = "cleanup_pending"
+            fc["cleanup_obligation"] = {
+                "finish_operation": finish_operation,
+                "result": cleanup.to_dict(),
+                "recorded_at": utc_now(),
+            }
+            fc["next_action"] = (
+                "Reconcile the retained cleanup operation; do not repeat an uncertain effect."
+            )
+            ledger.update_fc(bead_id, fc, status="in_progress")
+    _release_desktop_assignment(ledger, bead_id, finish_operation)
+    return True
+
+
+def _wake_broker(request: ParsedRequest) -> None:
     from fulcrum.broker import broker_request
 
     try:
@@ -1482,8 +1660,8 @@ def _wake_controller(request: ParsedRequest) -> None:
                 )
             )
     except Exception:
-        # The periodic reconciliation pass is the durable fallback. A missing
-        # resident must never roll back an already-recorded finish transition.
+        # Broker delivery is only a hint; a missed signal must never roll back
+        # an already-recorded finish transition.
         pass
 
 

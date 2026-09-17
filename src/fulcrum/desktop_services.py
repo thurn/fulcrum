@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fulcrum.broker import broker_request
+from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.install import (
@@ -177,6 +178,27 @@ class ServiceService:
     def restart(self, request: ParsedRequest) -> CommandResult:
         self.stop(request)
         return self.start(request)
+
+    def update(self, request: ParsedRequest) -> CommandResult:
+        if not request.arguments.get("maintenance"):
+            raise FulcrumError.invalid(
+                "MAINTENANCE_REQUIRED",
+                "connection-owner updates require --maintenance",
+            )
+        from fulcrum.activation import activate
+
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        source = manager.effective(document)["source"]
+        repository = source.get("repository") or str(Path.home() / "fulcrum")
+        result = activate(
+            request.instance.instance_root,
+            request.instance.config_path,
+            {**dict(source), "repository": repository},
+            maintenance=True,
+            retry=bool(request.arguments.get("retry")),
+        )
+        return CommandResult.query(result)
 
 
 class SkillsService:

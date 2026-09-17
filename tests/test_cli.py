@@ -3,16 +3,14 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from fulcrum.application import Application
 from fulcrum.cli import COMMANDS, _build_request, _execute, build_parser
-from fulcrum.contracts import FulcrumError, ParsedRequest
+from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.instance import WriterLock, resolve_instance
-from fulcrum.ledger import operation_id
 from tests.support import request
 
 
@@ -54,20 +52,15 @@ class CliTests(unittest.TestCase):
         original = request(input={"summary": "literal '$()'\nquotes ; | &"})
         self.assertEqual(ParsedRequest.from_wire(original.to_wire()), original)
 
-    def test_detached_timeout_retains_operation_locator(self):
+    def test_each_cli_invocation_dispatches_in_its_fresh_operation_process(self):
         pending = request(("work", "create"))
-        with (
-            patch("fulcrum.cli.subprocess.Popen") as spawn,
-            self.assertRaises(FulcrumError) as raised,
-        ):
-            spawn.return_value.communicate.side_effect = subprocess.TimeoutExpired(
-                "worker", 1
+        with patch("fulcrum.cli.default_application") as application:
+            application.return_value.dispatch.return_value = CommandResult.query(
+                {"accepted": True}
             )
-            _execute(pending)
-        self.assertEqual(raised.exception.code, "WAIT_TIMEOUT")
-        self.assertEqual(
-            raised.exception.operation_id, operation_id(pending.request_id)
-        )
+            result = _execute(pending)
+        application.return_value.dispatch.assert_called_once_with(pending)
+        self.assertEqual(result["result"], {"accepted": True})
 
     def test_writer_lock_is_shared_by_instance_aliases(self):
         with tempfile.TemporaryDirectory() as directory:

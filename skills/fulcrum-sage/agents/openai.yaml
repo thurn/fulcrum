@@ -1,5 +1,5 @@
 interface:
   display_name: "Fulcrum Sage"
-  short_description: "Investigate workflow evidence and failures"
+  short_description: "Investigate registered workflow evidence"
 policy:
   allow_implicit_invocation: false

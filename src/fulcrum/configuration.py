@@ -36,7 +36,6 @@ ROLES: tuple[str, ...] = (
 )
 EFFORTS: set[str] = {"low", "medium", "high", "xhigh", "max", "ultra"}
 TOP_LEVEL: set[str] = {
-    "runtime",
     "delivery",
     "beads",
     "brain",
@@ -47,11 +46,8 @@ TOP_LEVEL: set[str] = {
     "source",
     "timing",
     "diagnostics",
-    "resources",
 }
 RESTART_FIELDS: tuple[str, ...] = (
-    "runtime.endpoint",
-    "runtime.executable",
     "beads.host",
     "beads.port",
     "beads.database",
@@ -65,11 +61,6 @@ def default_config(brain_root: Path) -> dict[str, Any]:
     }
     model_defaults["steward"] = {"model": "gpt-5.6-luna", "effort": "high"}
     return {
-        "runtime": {
-            "kind": "codex",
-            "endpoint": "ws://127.0.0.1:4500",
-            "executable": None,
-        },
         "delivery": {"kind": "tollgate", "executable": shutil.which("tg")},
         "beads": {
             "executable": shutil.which("bd"),
@@ -81,7 +72,6 @@ def default_config(brain_root: Path) -> dict[str, Any]:
             "root": str(brain_root),
             "remote": "origin",
             "branch": None,
-            "push_interval_seconds": 300,
         },
         "projects": {},
         "models": model_defaults,
@@ -105,24 +95,11 @@ def default_config(brain_root: Path) -> dict[str, Any]:
             "ci_deadline_seconds": 1800,
             "mcp_tool_timeout_seconds": 3900,
             "marshal_interval_seconds": 900,
-            "intake_busy_seconds": 2,
-            "intake_idle_seconds": 10,
-            "reconcile_seconds": 15,
-            "external_timeout_seconds": 30,
-            "event_silence_seconds": 120,
-            "checkpoint_seconds": 600,
-            "stalled_seconds": 1800,
-            "archive_idle_seconds": 600,
         },
         "diagnostics": {
             "retention_days": 14,
             "max_bytes": 1073741824,
             "capture_bytes_per_stream": 262144,
-        },
-        "resources": {
-            "fd_soft_limit": 4096,
-            "pause_ratio": 0.85,
-            "resume_ratio": 0.70,
         },
     }
 
@@ -150,17 +127,6 @@ class ConfigurationManager:
         loaded, raw = self._read_document()
         self.validate_document(loaded)
         return loaded, raw
-
-    def desktop_endpoint(self) -> str:
-        """Read only Desktop's runtime settings, independent of workflow state."""
-        document, _ = self._read_document()
-        runtime = dict(default_config(self.path.parent)["runtime"])
-        runtime.update(_mapping(document.get("runtime", {}), "runtime"))
-        _known(runtime, {"kind", "endpoint", "executable"}, "runtime")
-        if runtime["kind"] != "codex":
-            raise _invalid("runtime.kind", "must be codex")
-        _nonempty(runtime["endpoint"], "runtime.endpoint")
-        return runtime["endpoint"]
 
     def _read_document(self) -> tuple[MutableMapping[str, Any], bytes]:
         try:
@@ -214,15 +180,7 @@ class ConfigurationManager:
                     "config_parent": str(self.path.parent.resolve(strict=False)),
                 },
             )
-        _known(brain, {"root", "remote", "branch", "push_interval_seconds"}, "brain")
-        _positive_int(brain["push_interval_seconds"], "brain.push_interval_seconds")
-
-        runtime = _mapping(effective["runtime"], "runtime")
-        _known(runtime, {"kind", "endpoint", "executable"}, "runtime")
-        if runtime["kind"] != "codex":
-            raise _invalid("runtime.kind", "must be codex")
-        _nonempty(runtime["endpoint"], "runtime.endpoint")
-        _optional_absolute(runtime["executable"], "runtime.executable")
+        _known(brain, {"root", "remote", "branch"}, "brain")
 
         delivery = _mapping(effective["delivery"], "delivery")
         _known(delivery, {"kind", "executable"}, "delivery")
@@ -310,22 +268,6 @@ class ConfigurationManager:
         )
         for key, value in diagnostics.items():
             _positive_int(value, f"diagnostics.{key}")
-        resources = _mapping(effective["resources"], "resources")
-        _known(resources, {"fd_soft_limit", "pause_ratio", "resume_ratio"}, "resources")
-        _positive_int(resources["fd_soft_limit"], "resources.fd_soft_limit")
-        for key in ("pause_ratio", "resume_ratio"):
-            if (
-                not isinstance(resources[key], (int, float))
-                or isinstance(resources[key], bool)
-                or not 0 < resources[key] < 1
-            ):
-                raise _invalid(
-                    f"resources.{key}", "must be strictly between zero and one"
-                )
-        if resources["resume_ratio"] >= resources["pause_ratio"]:
-            raise _invalid(
-                "resources.resume_ratio", "must be below resources.pause_ratio"
-            )
 
     def prepare_patch(
         self, patch: Mapping[str, Any], *, prefix: str | None = None
@@ -568,26 +510,11 @@ class ProjectService:
         }:
             return _operation_command_result(operation)
         if not project.get("codex_project_id"):
-            from fulcrum.runtime_service import _runtime_call
-
-            native_project = _runtime_call(
-                request,
-                lambda runtime: runtime.ensure_project(
-                    name=project_id,
-                    root=str(project["root"]),
-                    operation_id=operation.id,
-                ),
-            )
-            project["codex_project_id"] = str(native_project["id"])
-            operation = ledger.update_operation(
-                operation,
-                step="codex_project_verified",
-                external={
-                    "adapter": "codex",
-                    "project_id": project["codex_project_id"],
-                },
-                result={"codex_project": native_project},
-                next_action="Enroll the project in the shared Beads backend.",
+            raise FulcrumError(
+                "PROJECT_PREREQUISITE",
+                "project enrollment requires an exact saved Codex project ID",
+                exit_code=4,
+                details={"project_id": project_id, "root": project["root"]},
             )
         if effective["delivery"].get("kind") == "tollgate":
             try:
@@ -774,23 +701,11 @@ class ProjectService:
             try:
                 runtime_id = project.get("codex_project_id")
                 if isinstance(runtime_id, str) and runtime_id and add_operation:
-                    from fulcrum.runtime_service import _runtime_call
-
-                    runtime_result = _runtime_call(
-                        request,
-                        lambda runtime: _remove_created_runtime_project(
-                            runtime,
-                            str(project["root"]),
-                            runtime_id,
-                            add_operation,
-                        ),
-                    )
-                    provider_removals.append({"runtime_project": runtime_result})
-                    operation = ledger.update_operation(
-                        operation,
-                        step="runtime_project_removal_observed",
-                        result={"provider_removals": provider_removals},
-                        next_action="Remove any exact owned delivery registration.",
+                    raise FulcrumError(
+                        "NATIVE_CONTROL_UNAVAILABLE",
+                        "saved Codex project deletion has no supported native task tool; remove it manually or retain it explicitly",
+                        exit_code=5,
+                        details={"codex_project_id": runtime_id},
                     )
                 if (
                     isinstance(delivery, Mapping)
@@ -1100,48 +1015,6 @@ def _project_add_operation(ledger: Ledger, project_id: str) -> str | None:
         )
     )
     return matches[-1].id
-
-
-async def _remove_created_runtime_project(
-    runtime: Any,
-    root: str,
-    project_id: str,
-    creation_operation: str,
-) -> dict[str, Any]:
-    matches = await runtime.find_projects(root)
-    exact = [
-        project
-        for project in matches
-        if str(project.get("id") or project.get("projectId") or "") == project_id
-    ]
-    if not exact:
-        return {
-            "id": project_id,
-            "exists": False,
-            "deleted": False,
-            "ownership": "previously_removed",
-        }
-    if len(exact) != 1:
-        raise FulcrumError(
-            "PROJECT_PROVIDER_UNCERTAIN",
-            "multiple native projects match the exact configured provider ID",
-            exit_code=4,
-            state=CommandState.UNCERTAIN,
-            details={"project_id": project_id, "matches": len(exact)},
-        )
-    metadata = exact[0].get("metadata")
-    if (
-        not isinstance(metadata, Mapping)
-        or metadata.get("fulcrum_operation") != creation_operation
-    ):
-        return {
-            "id": project_id,
-            "exists": True,
-            "deleted": False,
-            "ownership": "discovered",
-        }
-    removed = await runtime.delete_project(project_id)
-    return {**dict(removed), "ownership": "created"}
 
 
 def _tollgate_repository_state(value: Mapping[str, Any]) -> Mapping[str, Any]:

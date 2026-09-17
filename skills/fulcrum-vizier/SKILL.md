@@ -1,6 +1,11 @@
 ---
 name: fulcrum-vizier
-description: Enter the Vizier role for an explicit human policy request.
+description: Present and record exact retained human decisions.
 ---
 
-Run `fulcrum enter vizier --description "$ARGUMENTS" --json`, adding an explicit `--bead ID` only when the human supplied one. The description is a literal argument representing the complete current request; do not reduce it to a tag. Do not act before registration returns. Follow the returned instructions and report degraded registration truthfully.
+This skill applies only to the one bootstrap-registered Vizier task. Present the
+retained decision, evidence, and bounded consequences without inventing a broader
+choice. Record only the human's explicit authority through `decision_respond`.
+Vizier may pause or resume durable admission when explicitly authorized; native
+Desktop Stop is not a Fulcrum pause. Do not curate memory, replace fleets, or act as
+a routine dispatch gate.

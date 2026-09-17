@@ -1,6 +1,6 @@
 """Shared command and result contracts for Fulcrum.
 
-The public CLI, IPC transport, controller, and offline execution all exchange these
+The public CLI, thin broker, MCP transport, and offline execution all exchange these
 immutable values. This module deliberately contains no workflow policy.
 """
 
@@ -74,9 +74,6 @@ class ParsedRequest:
     ownership_operation: str | None = None
     wait: bool = False
     timeout: float = 30.0
-    # Controller-internal execution hook. It is intentionally absent from the
-    # wire representation so callers cannot inject runtime authority over IPC.
-    runtime_submit: Any | None = field(default=None, compare=False, repr=False)
 
     @property
     def command_name(self) -> str:

@@ -12,8 +12,6 @@ import argparse
 import json
 import os
 import sys
-import subprocess
-import tempfile
 import time
 import uuid
 from collections.abc import Mapping
@@ -30,7 +28,6 @@ from fulcrum.contracts import (
 )
 from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.instance import resolve_instance
-from fulcrum.ledger import operation_id
 
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
@@ -79,6 +76,7 @@ LOCAL_COMMANDS = {
     ("service", "start"),
     ("service", "stop"),
     ("service", "restart"),
+    ("service", "update"),
     ("service", "status"),
     ("reset",),
 }
@@ -103,11 +101,13 @@ COMMANDS = (
     CommandDefinition(("project", "show"), "show an enrolled project"),
     CommandDefinition(("project", "enable"), "enable automatic project work"),
     CommandDefinition(("project", "disable"), "disable automatic project work"),
-    CommandDefinition(("project", "remove"), "remove an enrolled project"),
-    CommandDefinition(("service", "start"), "start the controller service"),
-    CommandDefinition(("service", "stop"), "stop the controller service"),
-    CommandDefinition(("service", "restart"), "restart the controller service"),
-    CommandDefinition(("service", "status"), "inspect controller service artifacts"),
+    CommandDefinition(("service", "start"), "start the owned broker and Dolt services"),
+    CommandDefinition(("service", "stop"), "stop the broker after pausing admission"),
+    CommandDefinition(("service", "restart"), "restart the broker safely"),
+    CommandDefinition(("service", "update"), "apply exceptional broker maintenance"),
+    CommandDefinition(
+        ("service", "status"), "inspect broker and Dolt service artifacts"
+    ),
     CommandDefinition(("skills", "reconcile"), "repair owned role skill links"),
     CommandDefinition(("work", "create"), "create a work root or graph"),
     CommandDefinition(("work", "show"), "show work"),
@@ -524,7 +524,8 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "steward_thinking",
         "marshal_thinking",
         "vizier_thinking",
-        "acceptance_passed",
+        "acceptance",
+        "replacement",
     },
     ("register", "standing"): {
         "role",
@@ -567,12 +568,9 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     },
     ("candidate", "submit"): {
         "bead",
-        "candidate_id",
+        "assignment_token",
         "source",
-        "provider_run_id",
-        "state",
         "deadline_seconds",
-        "evidence",
     },
     ("ci", "wait"): {"bead", "candidate_id", "assignment_token", "turn_id"},
     ("pause",): {"reason"},
@@ -666,6 +664,9 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "overlap_tags",
         "context",
         "intake",
+        "report_key",
+        "implementation_ready",
+        "dependencies",
         "models",
         "children",
     },
@@ -688,6 +689,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "canonical_bead",
     },
     ("finish",): {
+        "assignment_token",
         "summary",
         "acceptance",
         "source_oid",
@@ -704,7 +706,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "required_action",
         "implementation_notes",
     },
-    ("progress",): {"kind", "summary", "evidence", "bead"},
+    ("progress",): {"kind", "summary", "evidence", "bead", "assignment_token"},
     ("report",): {
         "title",
         "problem",
@@ -931,64 +933,11 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
 
 @timed("cli._execute")
 def _execute(request: ParsedRequest) -> dict[str, Any]:
-    if request.command in READ_ONLY_COMMANDS or request.command in LOCAL_COMMANDS:
-        return default_application().dispatch(request).to_dict()
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-    output_file = tempfile.TemporaryFile(mode="w+t")
-    error_file = tempfile.TemporaryFile(mode="w+t")
-    child = subprocess.Popen(
-        [sys.executable, "-B", "-m", "fulcrum.worker"],
-        stdin=subprocess.PIPE,
-        stdout=output_file,
-        stderr=error_file,
-        text=True,
-        env=environment,
-        pass_fds=(
-            (int(environment["FULCRUM_SOURCE_FD"]),)
-            if environment.get("FULCRUM_SOURCE_FD")
-            else ()
-        ),
-        start_new_session=True,
-    )
-    try:
-        child.communicate(json.dumps(request.to_wire()), timeout=request.timeout)
-    except subprocess.TimeoutExpired:
-        # Do not terminate a process that may already have committed an effect.
-        raise FulcrumError(
-            "WAIT_TIMEOUT",
-            "operation continues independently of this client",
-            exit_code=3,
-            retryable=True,
-            request_id=request.request_id,
-            operation_id=(
-                operation_id(request.request_id) if request.request_id else None
-            ),
-            next_command=(
-                (
-                    "fulcrum",
-                    "operation",
-                    "show",
-                    operation_id(request.request_id),
-                    "--json",
-                )
-                if request.request_id
-                else None
-            ),
-        )
-    finally:
-        output_file.seek(0)
-        error_file.seek(0)
-        output, error = output_file.read(), error_file.read()
-        output_file.close()
-        error_file.close()
-    if not output:
-        raise FulcrumError(
-            "WORKER_FAILED",
-            error.strip() or "operation process exited without a result",
-            exit_code=4,
-        )
-    return json.loads(output)
+    if request.command == ("bootstrap",):
+        from fulcrum.desktop_setup import prepare_bootstrap_primitives
+
+        prepare_bootstrap_primitives(request)
+    return default_application().dispatch(request).to_dict()
 
 
 def _exit_code(result: dict[str, Any]) -> int:

@@ -1492,7 +1492,7 @@ def _authorize_activation(request: ParsedRequest, ledger: Ledger) -> str:
 def _authorize_activation_execution(
     request: ParsedRequest, ledger: Ledger, root: LedgerRecord
 ) -> None:
-    if request.actor.kind in {"human", "controller"}:
+    if request.actor.kind in {"human", "system"}:
         return
     marshal = _marshal_or_human(ledger)
     if (
@@ -1511,7 +1511,7 @@ def _authorize_activation_execution(
 def _authorize_completion(
     request: ParsedRequest, root: LedgerRecord, ledger: Ledger
 ) -> None:
-    if request.actor.kind in {"human", "controller"}:
+    if request.actor.kind in {"human", "system"}:
         return
     fc = root.fc or {}
     if (
@@ -1522,7 +1522,7 @@ def _authorize_completion(
         return
     raise FulcrumError(
         "OWNERSHIP_CONFLICT",
-        "plan completion requires the current owner, controller, or human",
+        "plan completion requires the current owner, system settlement, or human",
         exit_code=5,
     )
 

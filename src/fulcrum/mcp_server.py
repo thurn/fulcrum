@@ -56,6 +56,7 @@ def _schema(name: str) -> dict[str, Any]:
         "task_id": {"type": "string"},
         "host_id": {"type": "string"},
         "turn_id": {"type": "string"},
+        "assignment_token": {"type": "string"},
         "input": {"type": "object", "additionalProperties": True},
     }
     if name in {"claim_action", "report_action_result"}:
@@ -77,6 +78,14 @@ def _schema(name: str) -> dict[str, Any]:
     }:
         properties["bead"] = {"type": "string"}
         required.append("bead")
+    if name in {
+        "register_worker",
+        "report_progress",
+        "submit_candidate",
+        "wait_for_ci_results",
+        "finish",
+    }:
+        required.append("assignment_token")
     return {
         "type": "object",
         "properties": properties,
@@ -122,6 +131,7 @@ class FreshCli:
         if not isinstance(payload, Mapping):
             raise ValueError("input must be an object")
         payload = {**dict(payload), **arguments}
+        assignment_token = payload.get("assignment_token")
         if host_id is not None:
             payload.setdefault("host_id", host_id)
         if turn_id is not None:
@@ -141,6 +151,8 @@ class FreshCli:
             argv.extend(("--request-id", str(uuid.uuid4())))
         if task_id:
             argv.extend(("--thread-id", str(task_id), "--actor", f"task:{task_id}"))
+        if assignment_token:
+            argv.extend(("--ownership-operation", str(assignment_token)))
         for field, flag in options.items():
             value = payload.pop(field, None)
             if value is None:

@@ -7,7 +7,6 @@ from fulcrum.coordination import coordinated
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -22,24 +21,6 @@ from fulcrum.ledger import (
     random_record_id,
     utc_now,
 )
-
-
-@dataclass(frozen=True)
-class TaskFacts:
-    id: str
-    title: str | None
-    cwd: str | None
-    project_id: str | None
-    workspace_roots: tuple[str, ...]
-    archived: bool
-    exists: bool
-    loaded: bool
-    runtime_status: str | None
-    active_turn: str | None
-    last_turn: Mapping[str, Any] | None
-    pending_requests: tuple[Mapping[str, Any], ...]
-    observed_at: str
-
 
 ANALYTICS_NAMESPACE = uuid.UUID("58518da5-edaf-42ba-b4ba-308ab18452c8")
 MAX_RESPONSE_RECORDS = 64
@@ -68,6 +49,169 @@ FILTER_FIELDS = {
     "until",
     "group_by",
 }
+
+
+def record_desktop_usage(
+    ledger: Ledger,
+    record: LedgerRecord,
+    role: str,
+    usage_events: Sequence[Mapping[str, Any]],
+    lifecycle_events: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Persist trusted transcript counters without depending on legacy task records."""
+
+    grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
+    for event in usage_events:
+        task_id = event.get("task_id")
+        turn_id = event.get("turn_id")
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(turn_id, str)
+            and turn_id
+        ):
+            grouped[(task_id, turn_id)].append(event)
+    written: list[str] = []
+    for (task_id, turn_id), events in grouped.items():
+        external_ref = f"fulcrum:usage:{task_id}:{turn_id}"
+        record_id = _analytics_id(external_ref)
+        existing = ledger.show(record_id)
+        prior = dict(existing.fc or {}) if existing is not None else {}
+        raw: dict[str, Mapping[str, Any]] = {}
+        for response in prior.get("raw_responses") or []:
+            if isinstance(response, Mapping) and response.get("response_id"):
+                raw[str(response["response_id"])] = response
+        for event in events:
+            identity = event.get("response_id") or event.get("event_id")
+            if identity:
+                raw[str(identity)] = dict(event)
+        normalized_input = [
+            {
+                "response_id": value.get("response_id") or value.get("event_id"),
+                "model": value.get("model"),
+                "service_tier": value.get("service_tier"),
+                "input_tokens": value.get("input_tokens"),
+                "cached_input_tokens": value.get("cached_input_tokens"),
+                "cache_write_input_tokens": value.get("cache_write_tokens"),
+                "output_tokens": value.get("output_tokens"),
+                "reasoning_tokens": value.get("reasoning_tokens"),
+            }
+            for value in raw.values()
+            if value.get("cumulative") is not True
+        ]
+        responses = _response_records(
+            {"usage": {"responses": normalized_input}},
+            configured_model=None,
+            configured_effort=None,
+            reroute=None,
+        )
+        observed_at = str(
+            next(
+                (
+                    event.get("time")
+                    for event in lifecycle_events
+                    if event.get("task_id") == task_id
+                    and event.get("turn_id") == turn_id
+                    and event.get("time")
+                ),
+                utc_now(),
+            )
+        )
+        priced = [
+            _price_response(value, _rate_records(ledger), observed_at)
+            for value in responses
+        ]
+        terminal = next(
+            (
+                str(event.get("type"))
+                for event in lifecycle_events
+                if event.get("task_id") == task_id
+                and event.get("turn_id") == turn_id
+                and event.get("type")
+                in {
+                    "turn_complete",
+                    "turn_completed",
+                    "turn_interrupted",
+                    "interrupted",
+                }
+            ),
+            None,
+        )
+        work_fc = record.fc or {}
+        workflow_root = work_fc.get("workflow_root")
+        fc = {
+            "kind": "analytics",
+            "subtype": "turn",
+            "owner": task_id,
+            "thread_id": task_id,
+            "turn_id": turn_id,
+            "bead_id": record.id if record.kind == "work" else None,
+            "workflow_root": workflow_root,
+            "role": role,
+            "project": work_fc.get("project"),
+            "operation_id": None,
+            "related_task": task_id,
+            "purpose": "coordination" if record.id == "fc-system" else "work",
+            "component": "coordination" if record.id == "fc-system" else "direct",
+            "attributions": (
+                [{"workflow_root": workflow_root, "weight": "1"}]
+                if isinstance(workflow_root, str)
+                else []
+            ),
+            "model": {
+                "configured": None,
+                "effort": None,
+                "origin": None,
+                "effective": _single_effective_model(priced),
+            },
+            "effort": None,
+            "usage": _aggregate_usage(priced),
+            "response_records": priced[:MAX_RESPONSE_RECORDS],
+            "response_blocks": [],
+            "raw_responses": [dict(value) for value in raw.values()],
+            "coverage": (
+                "complete"
+                if terminal
+                and all(value.get("coverage") == "complete" for value in priced)
+                else "partial"
+            ),
+            "missing_reasons": sorted(
+                {
+                    str(reason)
+                    for value in priced
+                    for reason in value.get("missing_reasons", [])
+                }
+                | ({"terminal_lifecycle_missing"} if terminal is None else set())
+                | (
+                    {"only_cumulative_usage_observed"}
+                    if raw and not normalized_input
+                    else set()
+                )
+            ),
+            "terminal_state": terminal,
+            "observed_at": observed_at,
+            "last_observation_at": utc_now(),
+        }
+        if existing is None:
+            ledger.create_record(
+                record_id=record_id,
+                kind="analytics",
+                title=f"Native usage: {task_id}/{turn_id}",
+                description="Trusted Desktop transcript usage and pricing evidence.",
+                owner=task_id,
+                fc=fc,
+                external_ref=external_ref,
+            )
+        else:
+            if existing.kind != "analytics" or prior.get("subtype") != "turn":
+                raise FulcrumError(
+                    "ANALYTICS_ID_CONFLICT",
+                    f"analytics identity {record_id} is occupied",
+                    exit_code=5,
+                )
+            ledger.update_fc(record_id, fc)
+        written.append(record_id)
+    return written
 
 
 class AnalyticsService:
@@ -234,27 +378,83 @@ class AnalyticsService:
             "cancelled",
         }:
             return _operation_result(operation)
-        tasks = _matching_tasks(ledger, request.arguments)
         observed: list[str] = []
         gaps: list[dict[str, Any]] = []
         roots: set[str] = set()
-        for task in tasks:
-            facts = _retained_task_facts(task)
-            if facts is None:
-                if not any(item.get("thread_id") == _thread_id(task) for item in gaps):
-                    gaps.append(
-                        {
-                            "thread_id": _thread_id(task),
-                            "reason": "terminal native usage is not retained or inspectable",
-                        }
-                    )
+        for retained in ledger.list_records(limit=0):
+            if retained.kind not in {"work", "control"}:
                 continue
-            analytics = self.observe_task(ledger, task, facts)
-            if analytics is not None:
-                observed.append(analytics.id)
-                root = (analytics.fc or {}).get("workflow_root")
-                if isinstance(root, str):
-                    roots.add(root)
+            bead = request.arguments.get("bead")
+            if isinstance(bead, str) and retained.id != bead:
+                continue
+            desktop = (retained.fc or {}).get("desktop")
+            observations = (
+                desktop.get("observations") if isinstance(desktop, Mapping) else None
+            )
+            usage = (
+                observations.get("usage") if isinstance(observations, Mapping) else None
+            )
+            lifecycle = (
+                observations.get("lifecycle")
+                if isinstance(observations, Mapping)
+                else None
+            )
+            if not isinstance(usage, Mapping):
+                continue
+            usage_rows = [
+                value for value in usage.values() if isinstance(value, Mapping)
+            ]
+            lifecycle_rows = (
+                [value for value in lifecycle.values() if isinstance(value, Mapping)]
+                if isinstance(lifecycle, Mapping)
+                else []
+            )
+            roles: dict[str, str] = {}
+            standing = desktop.get("standing") if isinstance(desktop, Mapping) else None
+            if isinstance(standing, Mapping):
+                for role, binding in standing.items():
+                    if isinstance(binding, Mapping) and binding.get("task_id"):
+                        roles[str(binding["task_id"])] = str(role)
+            assignments: list[Mapping[str, Any]] = []
+            if isinstance(desktop, Mapping):
+                active = desktop.get("assignment")
+                if isinstance(active, Mapping):
+                    assignments.append(active)
+                history = desktop.get("assignment_history")
+                if isinstance(history, list):
+                    assignments.extend(
+                        value for value in history if isinstance(value, Mapping)
+                    )
+            for assignment in assignments:
+                if assignment.get("task_id"):
+                    roles[str(assignment["task_id"])] = str(
+                        assignment.get("role") or "worker"
+                    )
+            for task_id in sorted(
+                {
+                    str(value.get("task_id"))
+                    for value in usage_rows
+                    if value.get("task_id")
+                }
+            ):
+                if request.arguments.get("thread_id") not in {None, task_id}:
+                    continue
+                observed.extend(
+                    record_desktop_usage(
+                        ledger,
+                        retained,
+                        roles.get(task_id, "unknown"),
+                        [
+                            value
+                            for value in usage_rows
+                            if value.get("task_id") == task_id
+                        ],
+                        lifecycle_rows,
+                    )
+                )
+            root_id = (retained.fc or {}).get("workflow_root")
+            if isinstance(root_id, str):
+                roots.add(root_id)
         bead = request.arguments.get("bead")
         if isinstance(bead, str):
             record = ledger.show(bead)
@@ -286,229 +486,6 @@ class AnalyticsService:
             next_action="No native task was resumed; inspect explicit remaining gaps.",
         )
         return _operation_result(operation)
-
-    def observe_task(
-        self, ledger: Ledger, task: LedgerRecord, facts: Any
-    ) -> LedgerRecord | None:
-        if facts.active_turn is not None or facts.last_turn is None:
-            return None
-        last = facts.last_turn
-        status = str(last.get("status") or facts.runtime_status or "")
-        if status not in {"completed", "failed", "interrupted"}:
-            return None
-        turn_id = last.get("id")
-        if not isinstance(turn_id, str) or not turn_id:
-            return None
-        task_fc = task.fc or {}
-        started = task_fc.get("last_turn")
-        operation_id = (
-            started.get("operation_id")
-            if isinstance(started, Mapping) and started.get("id") == turn_id
-            else None
-        )
-        if not isinstance(operation_id, str):
-            operation_id = _optional(last.get("operation_id"))
-        work, root, project = _task_scope(ledger, task)
-        attributions, component = _attributions(ledger, task, operation_id, root)
-        reroute = task_fc.get("pending_model_reroute")
-        consumed_reroute = task_fc.get("consumed_model_reroute")
-        if not isinstance(reroute, Mapping) and isinstance(consumed_reroute, Mapping):
-            if consumed_reroute.get("turn_id") == turn_id:
-                reroute = consumed_reroute
-        observed_turn = dict(last)
-        retained_usage = task_fc.get("native_usage")
-        turn_usage = (
-            retained_usage.get(turn_id) if isinstance(retained_usage, Mapping) else None
-        )
-        if isinstance(turn_usage, Mapping):
-            observed_turn["usage"] = {
-                "total": dict(turn_usage.get("total") or {}),
-                "responses": [
-                    dict(value)
-                    for value in (turn_usage.get("responses") or {}).values()
-                    if isinstance(value, Mapping)
-                ],
-            }
-        response_records = _response_records(
-            observed_turn,
-            configured_model=_optional(task_fc.get("model")),
-            configured_effort=_optional(task_fc.get("effort")),
-            reroute=reroute if isinstance(reroute, Mapping) else None,
-        )
-        rate_records = _rate_records(ledger)
-        priced = [
-            _price_response(record, rate_records, facts.observed_at)
-            for record in response_records
-        ]
-        external_ref = f"fulcrum:usage:{facts.id}:{turn_id}"
-        record_id = _analytics_id(external_ref)
-        missing = sorted(
-            {
-                reason
-                for record in priced
-                for reason in record.get("missing_reasons", [])
-                if isinstance(reason, str)
-            }
-        )
-        coverage = _coverage(priced)
-        usage, total_missing = _terminal_usage(observed_turn, priced)
-        missing.extend(total_missing)
-        missing = sorted(set(missing))
-        if missing and coverage == "complete":
-            coverage = "partial"
-        blocks = self._write_response_blocks(
-            ledger,
-            record_id,
-            facts.id,
-            turn_id,
-            priced[MAX_RESPONSE_RECORDS:],
-            owner=str(task_fc.get("owner") or facts.id),
-        )
-        fc = {
-            "kind": "analytics",
-            "subtype": "turn",
-            "owner": str(task_fc.get("owner") or facts.id),
-            "thread_id": facts.id,
-            "turn_id": turn_id,
-            "bead_id": work,
-            "workflow_root": root,
-            "role": task_fc.get("role"),
-            "project": project,
-            "operation_id": operation_id,
-            "related_task": task.id,
-            "purpose": task_fc.get("purpose", "work"),
-            "component": component,
-            "attributions": attributions,
-            "model": {
-                "configured": task_fc.get("model"),
-                "effort": task_fc.get("effort"),
-                "origin": task_fc.get("model_origin"),
-                "effective": _single_effective_model(priced),
-            },
-            "effort": task_fc.get("effort"),
-            "usage": usage,
-            "response_records": priced[:MAX_RESPONSE_RECORDS],
-            "response_blocks": blocks,
-            "coverage": coverage,
-            "missing_reasons": missing,
-            "terminal_state": status,
-            "observed_at": facts.observed_at,
-            "last_observation_at": utc_now(),
-        }
-        existing = ledger.show(record_id)
-        if existing is None:
-            observed = ledger.create_record(
-                record_id=record_id,
-                kind="analytics",
-                title=f"Native usage: {facts.id}/{turn_id}",
-                description="Terminal native task/turn usage and pricing evidence.",
-                owner=str(task_fc.get("owner") or facts.id),
-                fc=fc,
-                external_ref=external_ref,
-            )
-        else:
-            if (
-                existing.kind != "analytics"
-                or (existing.fc or {}).get("subtype") != "turn"
-            ):
-                raise FulcrumError(
-                    "ANALYTICS_ID_CONFLICT",
-                    f"analytics identity {record_id} is occupied",
-                    exit_code=5,
-                )
-            prior_fc = dict(existing.fc or {})
-            comparable = dict(fc)
-            comparable["last_observation_at"] = prior_fc.get("last_observation_at")
-            comparable["observed_at"] = prior_fc.get("observed_at")
-            observed = (
-                existing if comparable == prior_fc else ledger.update_fc(record_id, fc)
-            )
-        if isinstance(reroute, Mapping) and _has_response_evidence(observed_turn):
-            current = ledger.show(task.id)
-            if current is not None and current.fc:
-                current_fc = dict(current.fc)
-                current_fc["pending_model_reroute"] = None
-                current_fc["consumed_model_reroute"] = {
-                    **dict(reroute),
-                    "turn_id": turn_id,
-                }
-                ledger.update_fc(current.id, current_fc)
-        return observed
-
-    def record_runtime_event(
-        self, ledger: Ledger, task: LedgerRecord, method: str, params: Mapping[str, Any]
-    ) -> bool:
-        fc = dict(task.fc or {})
-        changed = False
-        lowered = method.lower()
-        if "reroute" in lowered:
-            model = (
-                params.get("toModel")
-                or params.get("effectiveModel")
-                or params.get("model")
-            )
-            if isinstance(model, str):
-                tier = (
-                    params.get("effectiveServiceTier")
-                    or params.get("processingTier")
-                    or params.get("serviceTier")
-                    or params.get("service_tier")
-                )
-                event_id = (
-                    params.get("id") or params.get("eventId") or params.get("event_id")
-                )
-                evidence = {
-                    "event_id": str(event_id) if event_id is not None else None,
-                    "model": model,
-                    "service_tier": str(tier) if tier is not None else None,
-                    "method": method,
-                    "turn_id": params.get("turnId") or params.get("turn_id"),
-                }
-                if fc.get("pending_model_reroute") != evidence:
-                    fc["pending_model_reroute"] = evidence
-                    changed = True
-        token_usage = params.get("tokenUsage") or params.get("token_usage")
-        turn_id = params.get("turnId") or params.get("turn_id")
-        if isinstance(token_usage, Mapping) and isinstance(turn_id, str):
-            total = token_usage.get("total")
-            latest = token_usage.get("last")
-            native_usage = dict(fc.get("native_usage") or {})
-            retained = dict(native_usage.get(turn_id) or {})
-            if isinstance(total, Mapping):
-                retained["total"] = dict(total)
-            responses = dict(retained.get("responses") or {})
-            if isinstance(latest, Mapping):
-                response = dict(latest)
-                for source, target in (
-                    ("effectiveModel", "effective_model"),
-                    ("model", "model"),
-                    ("effectiveServiceTier", "service_tier"),
-                    ("processingTier", "service_tier"),
-                    ("serviceTier", "service_tier"),
-                ):
-                    if params.get(source) is not None and target not in response:
-                        response[target] = params[source]
-                response_id = (
-                    params.get("responseId")
-                    or latest.get("responseId")
-                    or latest.get("response_id")
-                    or _usage_boundary(response)
-                )
-                responses[str(response_id)] = response
-            retained["responses"] = responses
-            existing_retained = native_usage.get(turn_id)
-            comparable_existing = dict(existing_retained or {})
-            comparable_existing.pop("observed_at", None)
-            comparable_new = dict(retained)
-            comparable_new.pop("observed_at", None)
-            if comparable_existing != comparable_new:
-                retained["observed_at"] = utc_now()
-                native_usage[turn_id] = retained
-                fc["native_usage"] = native_usage
-                changed = True
-        if changed:
-            ledger.update_fc(task.id, fc)
-        return changed
 
     def finalize_root(
         self,
@@ -612,48 +589,6 @@ class AnalyticsService:
         current_fc["completion_cost"] = annotation
         ledger.update_fc(current.id, current_fc)
         return annotation
-
-    def _write_response_blocks(
-        self,
-        ledger: Ledger,
-        parent_id: str,
-        thread_id: str,
-        turn_id: str,
-        records: Sequence[Mapping[str, Any]],
-        *,
-        owner: str,
-    ) -> list[str]:
-        identifiers: list[str] = []
-        for offset in range(0, len(records), MAX_RESPONSE_RECORDS):
-            ordinal = offset // MAX_RESPONSE_RECORDS + 1
-            external = f"fulcrum:usage:{thread_id}:{turn_id}:block:{ordinal}"
-            identifier = _analytics_id(external)
-            fc = {
-                "kind": "analytics",
-                "subtype": "turn_response_block",
-                "owner": owner,
-                "parent_analytics": parent_id,
-                "block_ordinal": ordinal,
-                "response_records": [
-                    dict(item)
-                    for item in records[offset : offset + MAX_RESPONSE_RECORDS]
-                ],
-            }
-            existing = ledger.show(identifier)
-            if existing is None:
-                ledger.create_record(
-                    record_id=identifier,
-                    kind="analytics",
-                    title=f"Usage response block: {thread_id}/{turn_id}/{ordinal}",
-                    description="Bounded continuation of terminal response pricing facts.",
-                    owner=owner,
-                    fc=fc,
-                    external_ref=external,
-                )
-            elif dict(existing.fc or {}) != fc:
-                ledger.update_fc(identifier, fc)
-            identifiers.append(identifier)
-        return identifiers
 
     def _selected_turns(
         self, ledger: Ledger, filters: Mapping[str, Any]
@@ -805,19 +740,6 @@ def _response_records(
     return result
 
 
-def _has_response_evidence(turn: Mapping[str, Any]) -> bool:
-    usage = turn.get("usage")
-    if not isinstance(usage, Mapping):
-        return isinstance(turn.get("response_records"), list) and bool(
-            turn.get("response_records")
-        )
-    return (
-        bool(usage.get("responses"))
-        or isinstance(usage.get("last"), Mapping)
-        or (not isinstance(usage.get("total"), Mapping) and bool(usage))
-    )
-
-
 def _terminal_usage(
     turn: Mapping[str, Any], responses: Sequence[Mapping[str, Any]]
 ) -> tuple[dict[str, int], list[str]]:
@@ -836,19 +758,6 @@ def _terminal_usage(
         if key in counters and response_totals.get(key) != counters[key]:
             missing.append(f"response_boundaries_incomplete:{key}")
     return counters, sorted(set(missing))
-
-
-def _usage_boundary(value: Mapping[str, Any]) -> str:
-    counters, _ = _counters(value)
-    return "totals:" + ":".join(
-        str(counters.get(key, "unknown"))
-        for key in (
-            "input_tokens",
-            "cached_input_tokens",
-            "cache_write_input_tokens",
-            "output_tokens",
-        )
-    )
 
 
 def _price_response(
@@ -1248,72 +1157,6 @@ def _matches(fc: Mapping[str, Any], filters: Mapping[str, Any]) -> bool:
     )
 
 
-def _task_scope(
-    ledger: Ledger, task: LedgerRecord
-) -> tuple[str | None, str | None, str | None]:
-    fc = task.fc or {}
-    work_id = _optional(fc.get("work_bead"))
-    if work_id is None:
-        associated = fc.get("associated_beads")
-        if isinstance(associated, list) and associated:
-            work_id = _optional(associated[0])
-    work = ledger.show(work_id) if work_id else None
-    work_fc = work.fc if work is not None and work.fc else {}
-    root = _optional(work_fc.get("workflow_root")) or work_id
-    project = _optional(work_fc.get("project"))
-    return work_id, root, project
-
-
-def _attributions(
-    ledger: Ledger,
-    task: LedgerRecord,
-    operation_id: str | None,
-    root: str | None,
-) -> tuple[list[dict[str, Any]], str]:
-    fc = task.fc or {}
-    role = fc.get("role")
-    purpose = fc.get("purpose")
-    if purpose == "leadership" and role == "marshal" and operation_id:
-        operation = ledger.show(operation_id)
-        planned = (operation.fc or {}).get("planned") if operation else None
-        selected = planned.get("selected_ids") if isinstance(planned, Mapping) else None
-        roots: set[str] = set()
-        if isinstance(selected, list):
-            for identifier in selected:
-                work = ledger.show(str(identifier))
-                candidate = (work.fc or {}).get("workflow_root") if work else None
-                if isinstance(candidate, str):
-                    roots.add(candidate)
-        if roots:
-            weight = Decimal("1") / Decimal(len(roots))
-            return (
-                [
-                    {
-                        "workflow_root": candidate,
-                        "operation_id": operation_id,
-                        "weight": _decimal(weight),
-                        "reason": "equal allocation across explicit Marshal decision roots",
-                    }
-                    for candidate in sorted(roots)
-                ],
-                "coordination",
-            )
-        return [], "overhead"
-    if root is None:
-        return [], "overhead" if purpose == "leadership" else "direct"
-    return (
-        [
-            {
-                "workflow_root": root,
-                "operation_id": operation_id,
-                "weight": "1",
-                "reason": "recorded task/work workflow relationship",
-            }
-        ],
-        "review" if purpose == "plan_review" else "direct",
-    )
-
-
 def _workflow_weight(fc: Mapping[str, Any], workflow: str | None) -> Decimal:
     if workflow is None:
         return Decimal("1")
@@ -1360,55 +1203,40 @@ def _expected_workflow_gaps(
     ledger: Ledger, workflow_root: str, observed: Sequence[LedgerRecord]
 ) -> list[dict[str, Any]]:
     included = {_turn_identity(item) for item in observed}
-    included_tasks = {
-        str((item.fc or {}).get("related_task"))
-        for item in observed
-        if (item.fc or {}).get("related_task")
-    }
     gaps: list[dict[str, Any]] = []
-    for task in ledger.list_records(kind="task", limit=0):
-        fc = task.fc or {}
-        work_ids = {
-            str(item)
-            for item in [fc.get("work_bead"), *(fc.get("associated_beads") or [])]
-            if item
-        }
-        related = False
-        for work_id in work_ids:
-            work = ledger.show(work_id)
-            if (
-                work is not None
-                and work.fc
-                and (
-                    work.id == workflow_root
-                    or work.fc.get("workflow_root") == workflow_root
-                )
-            ):
-                related = True
-                break
-        if not related:
+    for work in ledger.list_records(kind="work", limit=0):
+        fc = work.fc or {}
+        if work.id != workflow_root and fc.get("workflow_root") != workflow_root:
             continue
-        retained = fc.get("last_observed")
-        last = retained.get("last_turn") if isinstance(retained, Mapping) else None
-        thread_id = _thread_id(task)
-        turn_id = last.get("id") if isinstance(last, Mapping) else None
-        status = last.get("status") if isinstance(last, Mapping) else None
-        identity = f"{thread_id}:{turn_id}" if turn_id else None
-        if identity in included or (identity is None and task.id in included_tasks):
+        desktop = fc.get("desktop")
+        if not isinstance(desktop, Mapping):
             continue
-        gaps.append(
-            {
-                "task_record_id": task.id,
-                "thread_id": thread_id,
-                "turn_id": turn_id,
-                "terminal_state": status,
-                "reason": (
-                    "terminal usage has not been persisted"
-                    if status in {"completed", "failed", "interrupted"}
-                    else "causally related task has no observable terminal turn"
-                ),
-            }
-        )
+        assignments: list[Mapping[str, Any]] = []
+        active = desktop.get("assignment")
+        if isinstance(active, Mapping):
+            assignments.append(active)
+        history = desktop.get("assignment_history")
+        if isinstance(history, list):
+            assignments.extend(item for item in history if isinstance(item, Mapping))
+        for assignment in assignments:
+            task_id = assignment.get("task_id")
+            turn_id = assignment.get("turn_id")
+            identity = f"{task_id}:{turn_id}"
+            if not task_id or not turn_id or identity in included:
+                continue
+            gaps.append(
+                {
+                    "bead_id": work.id,
+                    "thread_id": task_id,
+                    "turn_id": turn_id,
+                    "terminal_state": assignment.get("state"),
+                    "reason": (
+                        "terminal usage has not been persisted"
+                        if assignment.get("state") == "finished"
+                        else "native lifecycle is not terminal"
+                    ),
+                }
+            )
     return gaps
 
 
@@ -1549,52 +1377,6 @@ def _rate_view(record: LedgerRecord | None) -> dict[str, Any]:
     return {"id": record.id, "card": record.fc.get("card"), "immutable": True}
 
 
-def _matching_tasks(ledger: Ledger, filters: Mapping[str, Any]) -> list[LedgerRecord]:
-    result = []
-    for task in ledger.list_records(kind="task", limit=0):
-        fc = task.fc or {}
-        if filters.get("thread_id") and fc.get("thread_id") != filters["thread_id"]:
-            continue
-        if filters.get("bead"):
-            related = {fc.get("work_bead"), *(fc.get("associated_beads") or [])}
-            if filters["bead"] not in related:
-                continue
-        result.append(task)
-    return result
-
-
-def _retained_task_facts(task: LedgerRecord) -> TaskFacts | None:
-    fc = task.fc or {}
-    retained = fc.get("last_observed")
-    if not isinstance(retained, Mapping):
-        return None
-    last = retained.get("last_turn")
-    if not isinstance(last, Mapping):
-        return None
-    active = retained.get("active_turn")
-    return TaskFacts(
-        id=str(retained.get("id") or fc.get("thread_id") or ""),
-        title=_optional(retained.get("title")),
-        cwd=_optional(retained.get("cwd")),
-        project_id=_optional(retained.get("project_id")),
-        workspace_roots=tuple(
-            str(item) for item in retained.get("workspace_roots", [])
-        ),
-        archived=bool(retained.get("archived")),
-        exists=bool(retained.get("exists", True)),
-        loaded=bool(retained.get("loaded", False)),
-        runtime_status=_optional(retained.get("runtime_status")),
-        active_turn=_optional(active),
-        last_turn=dict(last),
-        pending_requests=(),
-        observed_at=str(retained.get("observed_at") or utc_now()),
-    )
-
-
-def _thread_id(task: LedgerRecord) -> str:
-    return str((task.fc or {}).get("thread_id") or task.assignee or "")
-
-
 def _record_by_external_ref(ledger: Ledger, external: str) -> LedgerRecord | None:
     return next(
         (
@@ -1617,15 +1399,6 @@ def _single_effective_model(records: Sequence[Mapping[str, Any]]) -> str | None:
         if isinstance(item.get("effective_model"), str)
     }
     return next(iter(models)) if len(models) == 1 else None
-
-
-def _coverage(records: Sequence[Mapping[str, Any]]) -> str:
-    values = [str(item.get("coverage")) for item in records]
-    if values and all(item == "complete" for item in values):
-        return "complete"
-    if any(item in {"complete", "partial"} for item in values):
-        return "partial"
-    return "unknown"
 
 
 def _turn_identity(record: LedgerRecord) -> str:

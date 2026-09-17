@@ -10,7 +10,7 @@ for argument in "$@"; do
       cat <<'EOF'
 usage: scripts/setup [SETUP OPTIONS]
 
-Provision dependencies, then run `fulcrum setup` from the retained checkout.
+Provision dependencies, then run `fulcrum bootstrap` from the retained checkout.
 
 Common options:
   --input FILE          JSON setup input, or - for standard input
@@ -40,4 +40,4 @@ fi
   --requirement "$repo_root/requirements-dev.lock"
 "$repo_root/.venv/bin/python" -m pip install --disable-pip-version-check \
   --no-deps --editable "$repo_root"
-exec "$repo_root/.venv/bin/fulcrum" setup "$@"
+exec "$repo_root/.venv/bin/fulcrum" bootstrap "$@"

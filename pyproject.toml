@@ -17,10 +17,9 @@ dependencies = [
   "websockets==15.0.1",
 ]
 
-[tool.setuptools.package-data]
-fulcrum = ["formulas/*.json", "role_fallbacks/*.md"]
-
 [tool.setuptools.data-files]
+"share/fulcrum/skills/fulcrum-bootstrap" = ["skills/fulcrum-bootstrap/SKILL.md"]
+"share/fulcrum/skills/fulcrum-bootstrap/agents" = ["skills/fulcrum-bootstrap/agents/openai.yaml"]
 "share/fulcrum/skills/fulcrum-vizier" = ["skills/fulcrum-vizier/SKILL.md"]
 "share/fulcrum/skills/fulcrum-vizier/agents" = ["skills/fulcrum-vizier/agents/openai.yaml"]
 "share/fulcrum/skills/fulcrum-marshal" = ["skills/fulcrum-marshal/SKILL.md"]
@@ -48,7 +47,6 @@ dev = [
 
 [project.scripts]
 fulcrum = "fulcrum.bootstrap:main"
-fulcrum-recover = "fulcrum.recovery_entry:main"
 fulcrum-broker = "fulcrum.broker:main"
 fulcrum-mcp = "fulcrum.mcp_server:main"
 

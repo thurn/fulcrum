@@ -1,5 +1,5 @@
 interface:
   display_name: "Fulcrum Vizier"
-  short_description: "Enter explicit Fulcrum policy leadership"
+  short_description: "Record exact retained human decisions"
 policy:
   allow_implicit_invocation: false

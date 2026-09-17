@@ -91,6 +91,54 @@ class DesktopLeadershipService(DesktopProtocolService):
             "started_at": _utc_now(),
         }
         protocol["marshal_decision"] = decision
+        recovery_action: dict[str, Any] | None = None
+        actions = dict(protocol.get("actions") or {})
+        unsettled = any(
+            isinstance(action, Mapping)
+            and action.get("state") in {"issuing", "uncertain"}
+            for action in actions.values()
+        )
+        if (
+            steward_health == "stopped"
+            and isinstance(steward, Mapping)
+            and not healthy_wait
+            and not unsettled
+        ):
+            existing = next(
+                (
+                    action
+                    for action in actions.values()
+                    if isinstance(action, Mapping)
+                    and action.get("purpose") == "recover_steward_loop"
+                    and action.get("state") not in {"rejected", "superseded"}
+                ),
+                None,
+            )
+            if isinstance(existing, Mapping):
+                recovery_action = dict(existing)
+            else:
+                action_id = _opaque("action")
+                recovery_action = {
+                    "action_id": action_id,
+                    "record_id": system.id,
+                    "executor": "marshal",
+                    "tool": "send_message_to_thread",
+                    "arguments": {
+                        "threadId": steward.get("task_id"),
+                        "prompt": (
+                            "Register as the existing Steward, reconcile retained "
+                            "instruction/action state, then call wait_for_instructions."
+                        ),
+                    },
+                    "expected_result": {"thread_id": steward.get("task_id")},
+                    "reporting": {"purpose": "same_steward_resumption"},
+                    "state": "pending",
+                    "attempts": [],
+                    "created_at": _utc_now(),
+                    "purpose": "recover_steward_loop",
+                }
+                actions[action_id] = recovery_action
+                protocol["actions"] = actions
         value = {
             "decision": decision,
             "joined": False,
@@ -105,6 +153,11 @@ class DesktopLeadershipService(DesktopProtocolService):
                     "incidents": max(0, len(incidents) - 20),
                     "ready": max(0, len(ready) - 20),
                 },
+                "recovery_action": (
+                    self._action_response(request, recovery_action)
+                    if recovery_action is not None
+                    else None
+                ),
             },
         }
         _save_request(protocol, request, value)

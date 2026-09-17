@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fulcrum.coordination import unlocked
 
-from fulcrum.coordination import coordinated
+from fulcrum.coordination import coordinated, external_effect
 
 import asyncio
 from collections.abc import Mapping
@@ -59,7 +59,8 @@ class DeliveryService:
             next_action="Create or inspect the retained branch through the delivery provider.",
         )
         try:
-            facts = _call(provider.prepare(reference))
+            with external_effect():
+                facts = _call(provider.prepare(reference))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "workspace_prepare")
         _retain_workspace(ledger, work, reference, facts, operation.id)
@@ -83,7 +84,8 @@ class DeliveryService:
         _, work, project, provider = _context(request)
         reference = _work_ref(request, work, project, _workspace_operation(work))
         try:
-            facts = _call(provider.inspect_workspace(reference))
+            with external_effect():
+                facts = _call(provider.inspect_workspace(reference))
         except DeliveryProviderError as error:
             raise _public_error(error, request) from error
         return CommandResult.query(
@@ -114,7 +116,8 @@ class DeliveryService:
             return _operation_result(operation)
         reference = _retained_work_ref(operation, _workspace_operation(work))
         try:
-            facts = _call(provider.cleanup(reference))
+            with external_effect():
+                facts = _call(provider.cleanup(reference))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "workspace_cleanup")
         current = ledger.show(work.id)
@@ -168,7 +171,8 @@ class DeliveryService:
             return _operation_result(operation)
         source = _retained_source_ref(operation)
         try:
-            facts = _call(provider.validate(source))
+            with external_effect():
+                facts = _call(provider.validate(source))
         except DeliveryProviderError as error:
             _retain_local_check(
                 ledger,
@@ -236,15 +240,16 @@ class DeliveryService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         source = _retained_source_ref(operation)
-        local_check = self.validation_check(
-            replace(
-                request,
-                command=("validation", "check"),
-                arguments={"bead": work.id, "source": source.oid},
-                input={},
-                request_id=str(uuid.uuid4()),
+        with external_effect():
+            local_check = self.validation_check(
+                replace(
+                    request,
+                    command=("validation", "check"),
+                    arguments={"bead": work.id, "source": source.oid},
+                    input={},
+                    request_id=str(uuid.uuid4()),
+                )
             )
-        )
         if local_check.state is not CommandState.COMPLETED:
             payload = (
                 dict(local_check.result)
@@ -277,7 +282,8 @@ class DeliveryService:
             )
             return _operation_result(operation)
         try:
-            facts = _call(provider.submit(source))
+            with external_effect():
+                facts = _call(provider.submit(source))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "validation_submit")
 
@@ -327,7 +333,8 @@ class DeliveryService:
         _, work, project, provider = _context(request)
         source, handle = _retained_delivery_source(request, work, project)
         try:
-            facts = _call(provider.inspect(source, handle))
+            with external_effect():
+                facts = _call(provider.inspect(source, handle))
         except DeliveryProviderError as error:
             raise _public_error(error, request) from error
         return CommandResult.query(
@@ -385,7 +392,8 @@ class DeliveryService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         try:
-            workspace = _call(provider.inspect_workspace(source.work))
+            with external_effect():
+                workspace = _call(provider.inspect_workspace(source.work))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "review_approval")
         if (
@@ -469,7 +477,8 @@ class DeliveryService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         try:
-            workspace = _call(provider.inspect_workspace(source.work))
+            with external_effect():
+                workspace = _call(provider.inspect_workspace(source.work))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "promotion_source")
         if (
@@ -492,7 +501,8 @@ class DeliveryService:
             )
             return _operation_result(operation)
         try:
-            facts = _call(provider.promote(source, handle))
+            with external_effect():
+                facts = _call(provider.promote(source, handle))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "promotion_request")
 
@@ -523,7 +533,8 @@ class DeliveryService:
         _, work, project, provider = _context(request)
         source, handle = _retained_delivery_source(request, work, project)
         try:
-            facts = _call(provider.inspect(source, handle))
+            with external_effect():
+                facts = _call(provider.inspect(source, handle))
         except DeliveryProviderError as error:
             raise _public_error(error, request) from error
         return CommandResult.query(
@@ -548,7 +559,8 @@ class DeliveryService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         try:
-            facts = _call(provider.synchronize(source, handle))
+            with external_effect():
+                facts = _call(provider.synchronize(source, handle))
         except DeliveryProviderError as error:
             return _failed_operation(ledger, operation, error, "source_sync")
         if facts.synchronization == "complete":
@@ -909,7 +921,7 @@ def _require_cleanup_settled(work: LedgerRecord) -> None:
 
 
 def _authorize(ledger: Ledger, request: ParsedRequest, work: LedgerRecord) -> None:
-    if request.actor.kind in {"human", "controller"}:
+    if request.actor.kind in {"human", "system"}:
         return
     fc = work.fc or {}
     control = ledger.show("fc-system")
@@ -925,7 +937,7 @@ def _authorize(ledger: Ledger, request: ParsedRequest, work: LedgerRecord) -> No
         return
     raise FulcrumError(
         "OWNERSHIP_CONFLICT",
-        "delivery mutation requires the current owner, Marshal, controller, or human",
+        "delivery mutation requires the current owner, Marshal, system settlement, or human",
         exit_code=5,
     )
 
@@ -934,7 +946,7 @@ def _authorize_warden(
     ledger: Ledger, request: ParsedRequest, work: LedgerRecord
 ) -> None:
     _authorize(ledger, request, work)
-    if request.actor.kind in {"human", "controller"}:
+    if request.actor.kind in {"human", "system"}:
         return
     role = (work.fc or {}).get("role")
     if role not in {"warden", "justiciar"}:
@@ -977,7 +989,7 @@ def _call(action: Coroutine[Any, Any, T]) -> T:
             raise
         raise FulcrumError(
             "INTERNAL_ASYNC_CONTEXT",
-            "delivery command must run outside the controller event loop",
+            "delivery command must run outside an asynchronous policy call",
             exit_code=4,
         ) from error
 

@@ -4,8 +4,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import uuid
 import unittest
+from unittest.mock import patch
 
-from fulcrum.contracts import ActorContext, FulcrumError
+from fulcrum.contracts import ActorContext, CommandResult, FulcrumError
+from fulcrum.completion import settle_native_completion
 from fulcrum.desktop_protocol import DesktopProtocolService
 from tests.support import MemoryLedger, record, request
 
@@ -127,29 +129,78 @@ def test_ci_wait_is_transport_state_and_keeps_assignment_active():
                 "task_id": "warden-1",
                 "role": "warden",
                 "state": "active",
-            }
+            },
+            "candidate": {
+                "candidate_id": "candidate-1",
+                "source": "abc",
+                "provider_run_id": "run-1",
+                "state": "running",
+                "deadline": "2026-09-16T00:30:00Z",
+            },
         },
     )
     service = DesktopProtocolService(MemoryLedger(work))
-    submitted = service.submit_candidate(
-        mutation(
-            ("candidate", "submit"),
-            actor="task:warden-1",
-            arguments={"bead": "fc-a"},
-            payload={"source": "abc", "provider_run_id": "run-1"},
+    with patch(
+        "fulcrum.delivery_service.DeliveryService.validation_show",
+        return_value=CommandResult.query({"state": "running"}),
+    ):
+        waiting = service.wait_for_ci_results(
+            mutation(
+                ("ci", "wait"),
+                actor="task:warden-1",
+                arguments={"bead": "fc-a"},
+                payload={
+                    "candidate_id": "candidate-1",
+                    "turn_id": "turn-1",
+                    "assignment_token": "assignment-1",
+                },
+            )
         )
-    )
-    candidate = submitted.result["candidate"]
-    waiting = service.wait_for_ci_results(
-        mutation(
-            ("ci", "wait"),
-            actor="task:warden-1",
-            arguments={"bead": "fc-a"},
-            payload={"candidate_id": candidate["candidate_id"], "turn_id": "turn-1"},
-        )
-    )
     assert waiting.state.value == "running"
     assert waiting.result["transport_wait"]["kind"] == "ci"
+
+
+def test_assignment_releases_only_after_exact_native_completion():
+    assignment = {
+        "assignment_token": "assignment-1",
+        "task_id": "executor-1",
+        "turn_id": "turn-1",
+        "role": "executor",
+        "state": "active",
+        "finish_operation": "fc-op-finish",
+    }
+    ledger = MemoryLedger(
+        record(
+            "fc-a",
+            owner="executor-1",
+            phase="ready",
+            desktop={"assignment": assignment, "observations": {"lifecycle": {}}},
+        )
+    )
+    assert not settle_native_completion(request(), ledger, "fc-a")
+    assert (ledger.show("fc-a").fc or {})["desktop"]["assignment"] == assignment
+
+    work = ledger.show("fc-a")
+    fc = dict(work.fc or {})
+    desktop = dict(fc["desktop"])
+    desktop["observations"] = {
+        "lifecycle": {
+            "done": {
+                "event_id": "done",
+                "type": "turn_completed",
+                "task_id": "executor-1",
+                "turn_id": "turn-1",
+            }
+        }
+    }
+    fc["desktop"] = desktop
+    ledger.update_fc("fc-a", fc)
+
+    assert settle_native_completion(request(), ledger, "fc-a")
+    settled = ledger.show("fc-a")
+    settled_desktop = (settled.fc or {})["desktop"]
+    assert "assignment" not in settled_desktop
+    assert settled_desktop["assignment_history"][-1]["state"] == "finished"
 
 
 class DesktopProtocolTests(unittest.TestCase):
@@ -161,3 +212,6 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_ci_wait_is_transport_state(self):
         test_ci_wait_is_transport_state_and_keeps_assignment_active()
+
+    def test_native_completion_releases_assignment(self):
+        test_assignment_releases_only_after_exact_native_completion()

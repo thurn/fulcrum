@@ -1,5 +1,5 @@
 interface:
   display_name: "Fulcrum Justiciar"
-  short_description: "Repair an explicitly scoped failure"
+  short_description: "Perform one scoped recovery intervention"
 policy:
   allow_implicit_invocation: false

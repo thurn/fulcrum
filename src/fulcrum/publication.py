@@ -461,7 +461,7 @@ class LedgerPublicationService:
                     command=("config", "sync"),
                     arguments={},
                     input={},
-                    actor=replace(request.actor, kind="controller", task_id=None),
+                    actor=replace(request.actor, kind="system", task_id=None),
                     request_id=str(
                         uuid.uuid5(
                             PUBLICATION_NAMESPACE,
