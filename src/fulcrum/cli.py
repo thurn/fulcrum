@@ -89,7 +89,7 @@ class CommandDefinition:
 
 
 COMMANDS = (
-    CommandDefinition(("bootstrap",), "prepare the stock Desktop instance"),
+    CommandDefinition(("bootstrap",), "prepare the Fulcrum Desktop instance"),
     CommandDefinition(("config", "show"), "show authoritative configuration"),
     CommandDefinition(("config", "validate"), "validate authoritative configuration"),
     CommandDefinition(("config", "set"), "update authorized configuration fields"),

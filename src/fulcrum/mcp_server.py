@@ -336,7 +336,7 @@ class McpServer:
                 "serverInfo": {
                     "name": "fulcrum",
                     "title": "Fulcrum",
-                    "version": "stock-desktop",
+                    "version": "fulcrum-desktop",
                 },
             }
         elif method == "tools/list":

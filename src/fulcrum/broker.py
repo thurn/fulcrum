@@ -1,4 +1,4 @@
-"""Policy-free pending-response broker for stock Codex Desktop.
+"""Policy-free pending-response broker for Fulcrum's Desktop integration.
 
 The broker owns connections and clocks only. Every evaluation executes the
 source-following ``fulcrum`` launcher, so a commit to local master changes the

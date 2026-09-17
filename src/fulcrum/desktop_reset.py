@@ -1,4 +1,4 @@
-"""Destructive, fenced cutover to an empty stock-Desktop ledger."""
+"""Destructive, fenced cutover to an empty Fulcrum Desktop ledger."""
 
 from __future__ import annotations
 

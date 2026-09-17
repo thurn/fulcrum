@@ -7,14 +7,14 @@ import unittest
 from unittest.mock import patch
 
 from fulcrum.install import (
-    fulcrum2_service_definitions,
     install_hook_config,
-    reconcile_fulcrum2_skills,
+    reconcile_skills,
+    service_definitions,
 )
 
 
 class InstallTests(unittest.TestCase):
-    def test_stock_services_are_only_dolt_and_broker(self):
+    def test_owned_services_are_only_dolt_and_broker(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = root / "bin" / "fulcrum"
@@ -25,7 +25,7 @@ class InstallTests(unittest.TestCase):
             dolt = root / "bin" / "dolt"
             dolt.touch()
             with patch("fulcrum.install.shutil.which", return_value=str(dolt)):
-                definitions = fulcrum2_service_definitions(
+                definitions = service_definitions(
                     instance_root=root / "instance",
                     config_path=root / "brain" / "fulcrum.yaml",
                     brain_root=root / "brain",
@@ -76,7 +76,7 @@ class InstallTests(unittest.TestCase):
             codex.mkdir()
             (codex / "skills").symlink_to(shared, target_is_directory=True)
 
-            reconcile_fulcrum2_skills(
+            reconcile_skills(
                 root / "instance",
                 production=False,
                 config_path=root / "brain" / "fulcrum.yaml",

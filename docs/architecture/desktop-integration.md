@@ -1,4 +1,4 @@
-# Fulcrum through stock Codex Desktop
+# Fulcrum through Codex Desktop
 
 This design replaces Fulcrum's direct App Server integration with three standing
 agents using native task tools in an unmodified public Codex Desktop installation.

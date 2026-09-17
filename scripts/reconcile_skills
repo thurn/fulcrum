@@ -12,13 +12,13 @@ sys.path.insert(0, str(SOURCE_ROOT / "src"))
 
 from fulcrum.install import (  # noqa: E402
     InstallationError,
-    reconcile_fulcrum2_skills,
+    reconcile_skills,
 )
 
 
 def main() -> int:
     try:
-        result = reconcile_fulcrum2_skills(
+        result = reconcile_skills(
             SOURCE_ROOT,
             production=True,
             source_root=SOURCE_ROOT,

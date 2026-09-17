@@ -1,6 +1,6 @@
 ---
 name: fulcrum-bootstrap
-description: Install, bootstrap, or resume the stock Codex Desktop Fulcrum control plane from a fresh ~/fulcrum clone.
+description: Install, bootstrap, or resume the Fulcrum control plane in Codex Desktop from a fresh ~/fulcrum clone.
 ---
 
 Use `~/fulcrum` on local `master` as the retained checkout. Discover the selected

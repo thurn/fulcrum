@@ -1,4 +1,4 @@
-"""Durable stock-Desktop workflow protocol.
+"""Durable Codex Desktop workflow protocol.
 
 The policy in this module runs only in fresh command processes.  Beads remains
 the authority; the broker and MCP server retain connections, never workflow
@@ -247,7 +247,7 @@ class DesktopProtocolService:
             record_id="fc-system",
             kind="control",
             title="Fulcrum system",
-            description="Authoritative stock Desktop coordination state.",
+            description="Authoritative Fulcrum Desktop coordination state.",
             owner="SYSTEM",
             fc={
                 "kind": "control",

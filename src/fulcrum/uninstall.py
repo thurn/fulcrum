@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-MCP_BEGIN = "# BEGIN FULCRUM STOCK DESKTOP"
-MCP_END = "# END FULCRUM STOCK DESKTOP"
+MCP_BEGIN = "# BEGIN FULCRUM MCP"
+MCP_END = "# END FULCRUM MCP"
 OWNED_SKILLS = (
     "fulcrum-bootstrap",
     "fulcrum-uninstall",

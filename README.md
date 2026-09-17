@@ -1,12 +1,12 @@
 # Fulcrum
 
-Fulcrum is a Beads-backed coordination layer for stock Codex Desktop. Python
+Fulcrum is a Beads-backed coordination layer for Codex Desktop. Python
 processes own workflow policy, Tollgate owns worktrees and delivery, and Codex's
 native task and automation tools own task creation, messaging, inspection, naming,
 and archival. Fulcrum does not connect to the Codex App Server or maintain a second
 workflow queue.
 
-The normative architecture is [stock Codex Desktop](docs/architecture/stock-codex-desktop.md).
+The normative architecture is the [Codex Desktop integration](docs/architecture/desktop-integration.md).
 Operational guidance is in [setup](docs/setup.md), [operations](docs/operations.md),
 [hooks](docs/hooks.md), and [validation](docs/validation.md).
 

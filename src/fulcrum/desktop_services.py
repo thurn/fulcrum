@@ -1,4 +1,4 @@
-"""Operator controls for the stock Desktop broker and owned assets."""
+"""Operator controls for the Fulcrum Desktop broker and owned assets."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from fulcrum.install import (
     InstalledService,
     InstallationError,
     inspect_service,
-    reconcile_fulcrum2_skills,
+    reconcile_skills,
 )
 
 
@@ -204,7 +204,7 @@ class ServiceService:
 class SkillsService:
     def reconcile(self, request: ParsedRequest) -> CommandResult:
         try:
-            result = reconcile_fulcrum2_skills(
+            result = reconcile_skills(
                 request.instance.instance_root,
                 production=not request.instance.explicit_selection,
                 config_path=request.instance.config_path,

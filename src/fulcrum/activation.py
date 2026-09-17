@@ -304,7 +304,7 @@ def select_candidate(
     # The build lock and selection lock MUST stay distinct. Dependency setup
     # may take minutes; fresh commands can pin the old selection throughout it.
     with ProcessLock(instance / "activation.lock"):
-        from fulcrum.install import reconcile_fulcrum2_skills
+        from fulcrum.install import reconcile_skills
 
         # Skills are live source, not selected deployment assets. Their direct
         # master links must never follow an activation snapshot.
@@ -312,7 +312,7 @@ def select_candidate(
             instance.resolve()
             == (Path.home() / "Library/Application Support/Fulcrum").resolve()
         )
-        reconcile_fulcrum2_skills(instance, production=production, config_path=config)
+        reconcile_skills(instance, production=production, config_path=config)
         write_json(instance / "selected.json", candidate)
 
 

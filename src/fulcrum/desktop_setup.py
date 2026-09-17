@@ -1,4 +1,4 @@
-"""Deterministic bootstrap for the stock Codex Desktop architecture."""
+"""Deterministic bootstrap for the Codex Desktop architecture."""
 
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ from fulcrum.desktop_protocol import (
 )
 from fulcrum.install import (
     InstallationError,
-    fulcrum2_service_definitions,
-    install_fulcrum2_service_definitions,
+    install_service_definitions,
     master_source_root,
-    reconcile_fulcrum2_skills,
+    reconcile_skills,
+    service_definitions,
 )
 
 REQUIRED_NATIVE_TOOLS = {
@@ -107,7 +107,7 @@ def prepare_bootstrap_primitives(request: ParsedRequest) -> dict[str, Any]:
     except InstallationError:
         source = Path(__file__).resolve().parents[2]
     executable = source / ".venv" / "bin" / "fulcrum"
-    definitions = fulcrum2_service_definitions(
+    definitions = service_definitions(
         instance_root=request.instance.instance_root,
         config_path=request.instance.config_path,
         brain_root=request.instance.brain_root,
@@ -115,7 +115,7 @@ def prepare_bootstrap_primitives(request: ParsedRequest) -> dict[str, Any]:
         fulcrum_executable=executable,
         production=not request.instance.explicit_selection,
     )
-    installed, changed = install_fulcrum2_service_definitions(
+    installed, changed = install_service_definitions(
         definitions, request.instance.instance_root
     )
     from fulcrum.desktop_services import _start
@@ -182,8 +182,8 @@ def install_codex_mcp_config(
 ) -> dict[str, Any]:
     """Install one owned TOML block while preserving unrelated Codex settings."""
 
-    begin = "# BEGIN FULCRUM STOCK DESKTOP"
-    end = "# END FULCRUM STOCK DESKTOP"
+    begin = "# BEGIN FULCRUM MCP"
+    end = "# END FULCRUM MCP"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     if (begin in existing) != (end in existing):
         raise FulcrumError(
@@ -260,7 +260,7 @@ class DesktopSetupService(DesktopProtocolService):
             config=request.instance.config_path,
             executable=executable,
         )
-        skills = reconcile_fulcrum2_skills(
+        skills = reconcile_skills(
             instance,
             production=not request.instance.explicit_selection,
             config_path=request.instance.config_path,
@@ -275,7 +275,7 @@ class DesktopSetupService(DesktopProtocolService):
             try:
                 manager = ConfigurationManager(request.instance.config_path)
                 document, _ = manager.load()
-                definitions = fulcrum2_service_definitions(
+                definitions = service_definitions(
                     instance_root=instance,
                     config_path=request.instance.config_path,
                     brain_root=request.instance.brain_root,
@@ -283,9 +283,7 @@ class DesktopSetupService(DesktopProtocolService):
                     fulcrum_executable=source / ".venv" / "bin" / "fulcrum",
                     production=not request.instance.explicit_selection,
                 )
-                installed, changed = install_fulcrum2_service_definitions(
-                    definitions, instance
-                )
+                installed, changed = install_service_definitions(definitions, instance)
                 service_setup = {
                     "installed": sorted(installed),
                     "changed": changed,

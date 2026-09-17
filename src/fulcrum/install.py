@@ -1,4 +1,4 @@
-"""Fulcrum2 assets and per-instance macOS service definitions."""
+"""Fulcrum assets and per-instance macOS service definitions."""
 
 from __future__ import annotations
 
@@ -175,7 +175,7 @@ def install_hook_config(path: Path, command: str) -> None:
     os.replace(temporary, path)
 
 
-def reconcile_fulcrum2_skills(
+def reconcile_skills(
     instance_root: Path,
     *,
     production: bool,
@@ -303,7 +303,7 @@ def service_executable_path(*, user_home: Path | None = None) -> str:
     return os.pathsep.join(entries)
 
 
-def fulcrum2_service_definitions(
+def service_definitions(
     *,
     instance_root: Path,
     config_path: Path,
@@ -366,7 +366,7 @@ def fulcrum2_service_definitions(
     return definitions
 
 
-def install_fulcrum2_service_definitions(
+def install_service_definitions(
     definitions: dict[str, dict[str, Any]], instance_root: Path
 ) -> tuple[dict[str, InstalledService], list[str]]:
     root = instance_root / "services"
