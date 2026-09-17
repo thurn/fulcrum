@@ -158,9 +158,10 @@ def install_hook_config(path: Path, command: str) -> None:
             "type": "command",
             "command": command,
             "timeout": 3 if event == "Interrupt" else 10,
-            "additionalContextLimit": 2000,
             "statusMessage": f"Fulcrum: recording {event}",
         }
+        if event == "SessionStart":
+            handler["additionalContextLimit"] = 2000
         group: dict[str, Any] = {"hooks": [handler]}
         if event == "SessionStart":
             group["matcher"] = "^(startup|resume|clear|compact)$"

@@ -74,6 +74,17 @@ process restart—is the required catalog boundary; this follows the current
 [OpenAI Plugins guidance](https://learn.chatgpt.com/docs/plugins) that newly added
 tools become available in new chats.
 
+**You must approve fulcrum hooks in Codex Settings**
+
+- Open **Settings**.
+- Select **Hooks**.
+- Click **Trust** for every Fulcrum hook.
+- Click **Enable** for every Fulcrum hook.
+
+Do not report hook setup as complete until the user has approved and enabled all
+six Fulcrum hooks. Resume bootstrap with a new request UUID after approval so it
+can observe the new postconditions.
+
 For every returned setup action in the continuation task, call `action claim`
 before invoking the exact named native tool once, then call `action result` with
 the actual result and the `attempt_id` returned by the claim. Omit `request_id`,

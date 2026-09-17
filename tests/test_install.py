@@ -66,6 +66,16 @@ class InstallTests(unittest.TestCase):
                 },
             )
             self.assertIn(unrelated, hooks["Stop"][0]["hooks"])
+            owned = {event: groups[-1]["hooks"][0] for event, groups in hooks.items()}
+            self.assertEqual(owned["SessionStart"]["additionalContextLimit"], 2000)
+            for event in {
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+                "Interrupt",
+            }:
+                self.assertNotIn("additionalContextLimit", owned[event])
 
     def test_skill_storage_symlink_does_not_redirect_codex_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
