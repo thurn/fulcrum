@@ -1468,6 +1468,10 @@ class DesktopProtocolService:
                 "observed_at": _utc_now(),
             }
             protocol["candidate"] = candidate
+            # validation_show refreshes the retained delivery evidence.  Merge the
+            # protocol update into that fresh record instead of restoring the
+            # pre-observation delivery snapshot.
+            record = self._record(ledger, bead_id)
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
             state = observed_state
         if state in {"passed", "failed", "blocked"}:

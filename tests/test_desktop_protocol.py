@@ -181,9 +181,22 @@ def test_ci_wait_recovers_candidate_created_by_finish_validation():
     service = DesktopProtocolService(
         ledger, now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc)
     )
+
+    def observe_validation(*_args):
+        current = ledger.show("fc-a")
+        fc = dict(current.fc or {})
+        delivery = dict(fc["delivery"])
+        delivery["validation"] = {
+            "state": "passed",
+            "facts": {"handle": "provider-1", "validation": "passed"},
+        }
+        fc["delivery"] = delivery
+        ledger.update_fc("fc-a", fc)
+        return CommandResult.query({"state": "passed"})
+
     with patch(
         "fulcrum.delivery_service.DeliveryService.validation_show",
-        return_value=CommandResult.query({"state": "passed"}),
+        side_effect=observe_validation,
     ):
         completed = service.wait_for_ci_results(
             mutation(
@@ -200,6 +213,7 @@ def test_ci_wait_recovers_candidate_created_by_finish_validation():
     candidate = (ledger.show("fc-a").fc or {})["desktop"]["candidate"]
     assert candidate["candidate_id"] == "provider-1"
     assert candidate["recovered_from_delivery"] is True
+    assert (ledger.show("fc-a").fc or {})["delivery"]["validation"]["state"] == "passed"
 
 
 def test_steward_dispatches_executor_from_retained_worktree_path():
