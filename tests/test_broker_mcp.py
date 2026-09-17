@@ -84,10 +84,17 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
 
 class McpTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_advertises_blocking_protocol_tools(self):
-        names = {item["name"] for item in tool_descriptions()}
+        tools = {item["name"]: item for item in tool_descriptions()}
+        names = set(tools)
         self.assertIn("wait_for_instructions", names)
         self.assertIn("wait_for_ci_results", names)
         self.assertIn("claim_action", names)
+        finish = tools["finish"]["inputSchema"]
+        self.assertIn("outcome", finish["required"])
+        self.assertEqual(
+            finish["properties"]["checks"]["items"]["required"],
+            ["name", "status", "evidence"],
+        )
 
         class Cli:
             async def run(self, name, arguments):

@@ -48,6 +48,60 @@ TOOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
 
 WAIT_TOOLS = {"wait_for_instructions", "wait_for_ci_results"}
 
+CHECK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "status": {"type": "string", "enum": ["passed", "failed", "not_run"]},
+        "evidence": {"type": "string"},
+    },
+    "required": ["name", "status", "evidence"],
+    "additionalProperties": False,
+}
+
+TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
+    "register_worker": {
+        "workspace": {"type": "string"},
+        "git_root": {"type": "string"},
+        "source": {"type": "string"},
+        "session_id": {"type": "string"},
+        "branch": {"type": "string"},
+    },
+    "report_progress": {
+        "kind": {
+            "type": "string",
+            "enum": ["source", "validation", "finding", "status"],
+        },
+        "summary": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+    },
+    "submit_candidate": {
+        "source": {"type": "string"},
+        "deadline_seconds": {"type": "integer", "minimum": 1},
+    },
+    "wait_for_ci_results": {"candidate_id": {"type": "string"}},
+    "finish": {
+        "outcome": {
+            "type": "string",
+            "enum": [
+                "approved",
+                "answered",
+                "blocked",
+                "completed",
+                "findings",
+                "planned",
+                "ready",
+                "ready_for_review",
+                "repaired",
+            ],
+        },
+        "summary": {"type": "string"},
+        "source_oid": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "checks": {"type": "array", "items": CHECK_SCHEMA},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
 
 def _schema(name: str) -> dict[str, Any]:
     required = ["request_id"] if name not in {"status", "trace"} else []
@@ -86,6 +140,15 @@ def _schema(name: str) -> dict[str, Any]:
         "finish",
     }:
         required.append("assignment_token")
+    properties.update(TOOL_INPUT_PROPERTIES.get(name, {}))
+    required.extend(
+        {
+            "report_progress": ["kind", "summary", "evidence"],
+            "submit_candidate": ["source"],
+            "wait_for_ci_results": ["candidate_id"],
+            "finish": ["outcome", "summary"],
+        }.get(name, [])
+    )
     return {
         "type": "object",
         "properties": properties,
@@ -100,6 +163,23 @@ def tool_descriptions() -> list[dict[str, Any]]:
         "wait_for_ci_results": "Warden only: wait for terminal evidence for the exact candidate.",
         "claim_action": "Claim one native invocation before executing it.",
         "report_action_result": "Record the actual result of one claimed native invocation.",
+        "register_worker": (
+            "Bind this native task to its reserved assignment before editing. "
+            "Supply the exact workspace, Git root, and observed source when assigned."
+        ),
+        "report_progress": (
+            "Record substantive assigned-work progress with a supported kind, summary, "
+            "and nonempty evidence references."
+        ),
+        "submit_candidate": (
+            "Warden only: submit one full exact source commit OID for configured local "
+            "validation and provider CI."
+        ),
+        "finish": (
+            "Seal the active role outcome. Executor uses ready_for_review and Warden "
+            "uses approved; code outcomes also supply source_oid, exact check objects, "
+            "and evidence references."
+        ),
     }
     return [
         {
