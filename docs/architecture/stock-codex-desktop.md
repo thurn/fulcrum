@@ -1004,9 +1004,11 @@ loop is part of the design.
 
 ## Bootstrap, naming, and standing-task recovery
 
-The eventual `$fulcrum-bootstrap` skill discovers the retained checkout and
-existing configuration, then drives deterministic CLI setup and exact returned
-native actions. It does not reconstruct workflow policy in prose. Missing
+The checkout exposes `$fulcrum-bootstrap` through `.agents/skills` before global
+installation. The skill discovers the retained checkout and existing
+configuration, initializes stock configuration when it is absent, then drives
+deterministic CLI setup and exact returned native actions. It does not reconstruct
+workflow policy in prose. Missing
 executables, credentials, saved projects, model choices, or native trust are
 specific prerequisites. Complete work already authorized by setup without
 asking repeatedly. A ready socket alone is not successful setup.
@@ -1014,7 +1016,10 @@ asking repeatedly. A ready socket alone is not successful setup.
 ### Setup algorithm
 
 1. Discover local master, dependency runtime, brain/Beads configuration, provider
-   configuration, projects, and instance ownership. Use the existing singleton
+   configuration, projects, and instance ownership. On a fresh clone, provision
+   the retained `.venv` and atomically create the authoritative configuration from
+   validated stock defaults plus explicit setup input. Never overwrite an existing
+   file. Use the existing singleton
    writer identity at the resolved brain root; reject a conflicting instance or
    mismatched backend. Bootstrap primitives before Beads exists are bounded,
    idempotent, inspected filesystem/service operations, not a second journal.
@@ -1051,9 +1056,11 @@ recovery scope. Initial cutover timing is already authorized as recorded below;
 bootstrap does not authorize unrelated deletion or later resets.
 Explain the prompt-supervision limits and the Stop-versus-pause behavior.
 
-The bootstrap skill's short entrypoint should call deterministic setup with the
-selected instance and a stable request ID, execute only its returned actions,
-and resume the same receipt after prerequisites are fixed. Configure native tool
+The bootstrap skill's short entrypoint calls `scripts/setup` for first-use
+dependency provisioning and configuration creation, then calls deterministic
+bootstrap directly. It uses a stable request ID for an exact timed-out invocation,
+executes only returned actions, and starts a new receipt after prerequisites or
+native results settle. Configure native tool
 approvals and hook trust through supported flows. Do not bypass native trust or
 install an experimental App Server fallback. Saved Steward/Marshal prompts name
 the protocol and current-state calls; role details come from fresh CLI context.

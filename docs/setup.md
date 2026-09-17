@@ -1,16 +1,38 @@
 # Setup
 
-Use the `$fulcrum-bootstrap` skill in Codex Desktop. It discovers the retained
-checkout, selected instance, saved projects, native task tools, and supported
-models, then resumes one deterministic bootstrap receipt until every prerequisite
-or native result is settled.
+## Fresh installation
+
+1. Install macOS prerequisites: Python 3.12, Git, `bd`, `dolt`, `tg`, and an
+   authenticated Codex Desktop/CLI profile.
+2. Clone Fulcrum at the canonical path `~/fulcrum` with `master` checked out.
+3. Open `~/fulcrum` as a project in Codex Desktop.
+4. Invoke `$fulcrum-bootstrap` in that project.
+
+The repository exposes this one bootstrap skill through `.agents/skills`, so it is
+available immediately from a fresh clone. The skill discovers the selected
+instance, Codex root, native task tools, supported models, and saved projects. It
+runs `~/fulcrum/scripts/setup` for first-use dependency provisioning and then
+resumes deterministic bootstrap receipts until every prerequisite or native
+result is settled.
+
+Do not pre-create `~/brain`, edit Codex configuration, link skills, or run a
+separate package installer. Setup creates `.venv`, installs an editable launcher at
+`~/.local/bin/fulcrum`, and atomically writes the initial authoritative
+`~/brain/fulcrum.yaml`. It refuses to replace a foreign launcher or an existing
+invalid configuration. A clone outside `~/fulcrum` is rejected because local
+`master` at that path is the runtime authority.
+
+The setup script is an agent entry point, not a shell-only installer: bootstrap
+returns native Codex task and automation actions that must be claimed, invoked
+once, and reported. Running it manually can prepare local resources and display
+the remaining actions, but it cannot create or verify Codex tasks by itself.
 
 ## Prerequisites
 
 - macOS, Python 3.12, Codex Desktop/CLI, Git, `bd`, `dolt`, and `tg`
 - the authoritative local checkout at `~/fulcrum`
-- an authenticated Codex profile and exact saved Codex project IDs
-- a Beads brain and authoritative YAML configuration
+- an authenticated Codex profile
+- exact saved Codex project IDs only for projects enrolled during setup
 
 Configuration top-level maps are `brain`, `beads`, `delivery`, `projects`,
 `models`, `policy`, `knowledge`, `source`, `timing`, and `diagnostics`. It has no
@@ -27,11 +49,19 @@ The four stock timing defaults are:
 
 ## Deterministic bootstrap
 
-`fulcrum bootstrap --input - --request-id UUID --json` preserves unrelated Codex
-configuration and installs an owned `[mcp_servers.fulcrum]` block pointing at the
-source-following `fulcrum-mcp` entry point. It links owned skills directly to
-`~/fulcrum/skills`, installs the six scoped command hooks, and returns exact native
-actions for the standing tasks and heartbeat.
+On the first invocation, `scripts/setup --input - --request-id UUID --json`
+provisions the environment and enters bootstrap. Later invocations use
+`fulcrum bootstrap --input - --request-id UUID --json` directly. Input contains
+the observed `codex_root`, `native_tools`, and `model_support`; it may include a
+`configuration` mapping only for initial configuration. Stock defaults create an
+empty project map, so projects can be enrolled after installation without making
+an invented saved-project choice.
+
+Bootstrap preserves unrelated Codex configuration and installs an owned
+`[mcp_servers.fulcrum]` block pointing at the source-following `fulcrum-mcp` entry
+point. It links owned skills directly to `~/fulcrum/skills`, installs the six
+scoped command hooks, and returns exact native actions for the standing tasks and
+heartbeat.
 
 Claim each action before invoking it and report its actual result. Never edit a
 returned prompt, target, model, effort, or schedule; never retry an uncertain
@@ -51,7 +81,9 @@ and focused acceptance is explicitly recorded. Acceptance is an evidence map wit
 the heartbeat paused and returns a separate activation action only after that
 evidence is supplied. A ready socket alone is not setup.
 The initial MCP configuration may require one exceptional Desktop reconnect;
-ordinary committed edits never do.
+ordinary committed edits never do. After reconnecting, invoke
+`$fulcrum-bootstrap` again. Retained action IDs and registered task identities make
+the rerun resumable rather than duplicative.
 
 ## Services and source
 

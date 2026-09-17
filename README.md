@@ -35,11 +35,24 @@ edits. See [live iteration](docs/architecture/live-iteration.md).
 
 ## Bootstrap
 
-After preparing the dependency environment, invoke `$fulcrum-bootstrap` in Codex
-Desktop. The skill drives deterministic `fulcrum bootstrap` receipts and executes
-only returned native actions. Bootstrap installs the source-following MCP entry,
-six scoped trusted hooks, the broker service, the three standing tasks, and one
-Marshal heartbeat. Admission remains paused until focused acceptance is recorded.
+For a fresh installation, clone the repository at `~/fulcrum`, open that checkout
+in Codex Desktop, and invoke `$fulcrum-bootstrap`. The bootstrap skill is exposed
+directly by the checkout, so it is available before Fulcrum has installed any
+global skills or configuration.
+
+The skill runs the checked-in setup script, which creates the Python environment,
+installs a source-following `fulcrum` launcher, and atomically initializes
+`~/brain/fulcrum.yaml` with discovered executable paths and stock defaults. It then
+drives deterministic `fulcrum bootstrap` receipts and executes only returned
+native actions. Do not create the brain, configuration, skill links, or MCP entry
+by hand. See [setup](docs/setup.md) for prerequisites and the exact first-run
+sequence.
+
+Bootstrap installs the source-following MCP entry, six scoped trusted hooks, the
+broker service, the three standing tasks, and one Marshal heartbeat. Admission
+remains paused until focused acceptance is recorded. The first MCP configuration
+change may require one Codex Desktop reconnect; rerunning `$fulcrum-bootstrap`
+resumes retained setup rather than creating duplicate tasks.
 
 Configuration contains Beads, Tollgate, saved-project IDs, role models, capacity,
 wait budgets, source selection, and diagnostics. It contains no App Server endpoint
