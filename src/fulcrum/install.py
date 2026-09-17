@@ -187,14 +187,12 @@ def reconcile_fulcrum2_skills(
 
     checkout = (source_root or master_source_root()).absolute()
     source = checkout / "skills"
-    root = (
-        skills_root
-        or (
-            Path.home() / ".codex" / "skills"
-            if production
-            else instance_root / "codex" / "skills"
-        )
-    ).resolve(strict=False)
+    configured_root = skills_root or (
+        Path.home() / ".codex" / "skills"
+        if production
+        else instance_root / "codex" / "skills"
+    )
+    root = configured_root.resolve(strict=False)
     installed: list[str] = []
     unchanged: list[str] = []
     for name in HUMAN_SKILLS:
@@ -231,7 +229,10 @@ def reconcile_fulcrum2_skills(
         legacy_removed = True
 
     executable = checkout / ".venv" / "bin" / "fulcrum"
-    hook_config = root.parent / "hooks.json"
+    # Skill storage may itself be a compatibility symlink (for example,
+    # ~/.codex/skills -> ~/.llms/skills). Hooks still belong to the selected Codex
+    # profile, not to the resolved skill-storage parent.
+    hook_config = configured_root.parent / "hooks.json"
     hook_command: str | None = None
     if install_hook and executable.is_file() and os.access(executable, os.X_OK):
         authoritative_config = (config_path or instance_root / "config").resolve(

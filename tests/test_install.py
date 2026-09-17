@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fulcrum.install import fulcrum2_service_definitions, install_hook_config
+from fulcrum.install import (
+    fulcrum2_service_definitions,
+    install_hook_config,
+    reconcile_fulcrum2_skills,
+)
 
 
 class InstallTests(unittest.TestCase):
@@ -62,6 +66,26 @@ class InstallTests(unittest.TestCase):
                 },
             )
             self.assertIn(unrelated, hooks["Stop"][0]["hooks"])
+
+    def test_skill_storage_symlink_does_not_redirect_codex_hooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex = root / ".codex"
+            shared = root / ".llms" / "skills"
+            shared.mkdir(parents=True)
+            codex.mkdir()
+            (codex / "skills").symlink_to(shared, target_is_directory=True)
+
+            reconcile_fulcrum2_skills(
+                root / "instance",
+                production=False,
+                config_path=root / "brain" / "fulcrum.yaml",
+                skills_root=codex / "skills",
+                source_root=Path(__file__).parents[1],
+            )
+
+            self.assertTrue((codex / "hooks.json").is_file())
+            self.assertFalse((shared.parent / "hooks.json").exists())
 
 
 if __name__ == "__main__":
