@@ -528,11 +528,21 @@ class AnalyticsService:
         included = report["included_native_turn_ids"]
         if correction and isinstance(prior_summary, str):
             prior = ledger.show(prior_summary)
-            prior_included = (
-                (prior.fc or {}).get("included_native_turn_ids") if prior else None
+            prior_fc = dict(prior.fc or {}) if prior else {}
+            correction_fields = (
+                "included_native_turn_ids",
+                "rate_card_ids",
+                "coverage",
+                "missing_reasons",
+                "exclusions",
+                "currency",
+                "priced_subtotal",
+                "total",
+                "components",
             )
-            prior_rates = (prior.fc or {}).get("rate_card_ids") if prior else None
-            if prior_included == included and prior_rates == report["rate_card_ids"]:
+            if all(
+                prior_fc.get(field) == report.get(field) for field in correction_fields
+            ):
                 return dict(prior_annotation)
         summary_id = existing.id if existing is not None else _analytics_id(identity)
         completed_at = _completion_time(root)
