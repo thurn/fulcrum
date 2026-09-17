@@ -904,11 +904,12 @@ def _ensure_publication_control(ledger: Ledger, request: ParsedRequest) -> None:
                 if request.instance.brain_root is not None
                 else None
             ),
-            "vizier_thread": None,
-            "marshal_thread": None,
-            "vizier_creation_operation": None,
-            "marshal_creation_operation": None,
-            "active_takeover": None,
+            "desktop": {
+                "run_control": "paused",
+                "standing": {},
+                "requests": {},
+                "instruction_waits": {},
+            },
             "last_transition": None,
         },
     )

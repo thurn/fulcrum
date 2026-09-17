@@ -3,10 +3,17 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 import uuid
+from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext, FulcrumError
 from fulcrum.desktop_leadership import DesktopLeadershipService
-from tests.support import MemoryLedger, record, request
+from tests.support import (
+    MemoryLedger,
+    observe_action_prompt,
+    record,
+    request,
+    seed_action,
+)
 
 
 def call(command, *, actor="human", arguments=None, payload=None):
@@ -34,17 +41,16 @@ class LeadershipTests(unittest.TestCase):
         self.ledger = MemoryLedger(self.work)
         self.service = DesktopLeadershipService(self.ledger)
         for role, task in (("steward", "steward-1"), ("marshal", "marshal-1")):
-            action = self.service.queue_action(
-                call(
-                    ("action", "queue"),
-                    payload={
-                        "executor": "bootstrap",
-                        "tool": "create_thread",
-                        "arguments": {"prompt": f"register {role}"},
-                        "purpose": f"bootstrap_{role}",
-                    },
-                )
-            ).result["action"]
+            action = seed_action(
+                self.ledger,
+                {
+                    "executor": "bootstrap",
+                    "tool": "create_thread",
+                    "arguments": {"prompt": f"register {role}"},
+                    "purpose": f"bootstrap_{role}",
+                },
+            )
+            observe_action_prompt(self.ledger, action, task_id=task, session_id=task)
             self.service.register_standing(
                 call(
                     ("register", "standing"),
@@ -56,6 +62,7 @@ class LeadershipTests(unittest.TestCase):
                     },
                 )
             )
+        self.service.resume(call(("resume",), payload={"reason": "test setup"}))
 
     def test_ready_work_compiles_without_marshal_approval(self):
         self.service.resume(call(("resume",), payload={"reason": "test"}))
@@ -85,6 +92,7 @@ class LeadershipTests(unittest.TestCase):
                 actor="task:marshal-1",
                 payload={
                     "decision_id": checked.result["decision"]["decision_id"],
+                    "turn_id": "turn-1",
                     "decisions": [
                         {
                             "bead": "fc-a",
@@ -115,15 +123,56 @@ class LeadershipTests(unittest.TestCase):
                     payload={"incident_key": "ci", "outcome": "failed"},
                 )
             )
-        prepared = self.service.recovery_prepare(
+        with patch("fulcrum.desktop_leadership.ConfigurationManager") as manager:
+            manager.return_value.load.return_value = ({}, None)
+            manager.return_value.effective.return_value = {
+                "projects": {
+                    "toy": {
+                        "codex_project_id": "project-1",
+                        "models": {},
+                    }
+                },
+                "models": {"justiciar": {"model": "gpt-5.6-sol", "effort": "high"}},
+            }
+            prepared = self.service.recovery_prepare(
+                call(
+                    ("recovery", "prepare"),
+                    actor="task:marshal-1",
+                    arguments={"bead": "fc-a"},
+                    payload={"incident_key": "ci", "scope": "repair CI"},
+                )
+            )
+        self.assertEqual(prepared.result["action"]["executor"], "marshal")
+        self.assertEqual(
+            prepared.result["action"]["arguments"]["target"]["projectId"],
+            "project-1",
+        )
+        self.assertEqual(prepared.result["action"]["arguments"]["model"], "gpt-5.6-sol")
+        retained = self.ledger.show("fc-a").fc
+        self.assertEqual(retained["recovery_fence"]["state"], "active")
+        assignment = retained["desktop"]["assignment"]
+        self.assertEqual(assignment["workspace"], "/tmp/worktree")
+        observe_action_prompt(
+            self.ledger,
+            prepared.result["action"],
+            task_id="justiciar-1",
+            session_id="justiciar-session",
+        )
+        registered = self.service.register_worker(
             call(
-                ("recovery", "prepare"),
-                actor="task:marshal-1",
+                ("worker", "register"),
+                actor="task:justiciar-1",
                 arguments={"bead": "fc-a"},
-                payload={"incident_key": "ci", "scope": "repair CI"},
+                payload={
+                    "assignment_token": assignment["assignment_token"],
+                    "workspace": "/tmp/worktree",
+                    "git_root": "/tmp/worktree",
+                    "session_id": "justiciar-session",
+                    "turn_id": "justiciar-turn",
+                },
             )
         )
-        self.assertEqual(prepared.result["action"]["executor"], "marshal")
+        self.assertEqual(registered.result["assignment"]["role"], "justiciar")
         with self.assertRaises(FulcrumError) as raised:
             self.service.recovery_prepare(
                 call(

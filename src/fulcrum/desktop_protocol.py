@@ -37,6 +37,8 @@ WAIT_STATES = {"waiting", "resolved", "cancelled", "expired"}
 STANDING_ROLES = {"steward", "marshal", "vizier"}
 WORKER_ROLES = {"weaver", "executor", "warden", "sage", "mason", "justiciar"}
 MAX_UNPROJECTED_TRANSITIONS = 128
+RETAINED_PROJECTED_REQUESTS = 32
+REQUEST_PROJECTION_NAMESPACE = uuid.UUID("40d1f5df-973e-47fd-bd90-407f55ab9514")
 
 
 def _positive_native_completion(
@@ -50,14 +52,23 @@ def _positive_native_completion(
         return False
     task_id = assignment.get("task_id")
     turn_id = assignment.get("turn_id")
+    if not isinstance(task_id, str) or not task_id:
+        return False
+    if not isinstance(turn_id, str) or not turn_id:
+        return False
     for event in lifecycle.values():
         if not isinstance(event, Mapping) or event.get("task_id") != task_id:
             continue
         kind = event.get("type")
-        if kind in {"task_complete", "task_completed"}:
-            return True
-        if kind in {"turn_complete", "turn_completed"} and (
-            not turn_id or event.get("turn_id") == turn_id
+        if (
+            kind
+            in {
+                "task_complete",
+                "task_completed",
+                "turn_complete",
+                "turn_completed",
+            }
+            and event.get("turn_id") == turn_id
         ):
             return True
     return False
@@ -72,13 +83,102 @@ def _opaque(prefix: str) -> str:
 
 
 def _native_identifier(value: Any, *fields: str) -> str | None:
-    if not isinstance(value, Mapping):
+    normalized = _native_result_mapping(value)
+    if not isinstance(normalized, Mapping):
         return None
     for field in fields:
-        candidate = value.get(field)
+        candidate = normalized.get(field)
         if isinstance(candidate, str) and candidate:
             return candidate
     return None
+
+
+def _native_result_mapping(value: Any) -> Mapping[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    structured = value.get("structuredContent")
+    if isinstance(structured, Mapping):
+        return structured
+    result = value.get("result")
+    if isinstance(result, Mapping):
+        return result
+    content = value.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, Mapping) or not isinstance(block.get("text"), str):
+                continue
+            try:
+                decoded = json.loads(str(block["text"]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, Mapping):
+                return decoded
+    return value
+
+
+def _validated_action_outcome(
+    action: Mapping[str, Any], native_result: Any, requested: str
+) -> str:
+    if requested == "uncertain":
+        return "uncertain"
+    normalized = _native_result_mapping(native_result)
+    if isinstance(native_result, Mapping) and native_result.get("isError") is True:
+        if requested == "succeeded":
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "native tool evidence reports an error, not success",
+                exit_code=5,
+            )
+        return "rejected"
+    if requested == "rejected":
+        return "rejected"
+    if not isinstance(normalized, Mapping):
+        raise FulcrumError(
+            "RESULT_EVIDENCE_REQUIRED",
+            "successful native action requires structured result evidence",
+            exit_code=5,
+        )
+    tool = str(action.get("tool") or "")
+    arguments = action.get("arguments")
+    expected_arguments = dict(arguments) if isinstance(arguments, Mapping) else {}
+    if tool == "create_thread":
+        if _native_identifier(normalized, "threadId", "thread_id", "id"):
+            return "succeeded"
+        if _native_identifier(normalized, "clientThreadId", "client_thread_id"):
+            return "uncertain"
+        raise FulcrumError(
+            "RESULT_EVIDENCE_REQUIRED",
+            "create_thread success requires threadId or clientThreadId",
+            exit_code=5,
+        )
+    if tool == "set_thread_title":
+        if normalized.get("title") != expected_arguments.get("title"):
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "title result does not match the claimed action",
+                exit_code=5,
+            )
+    elif tool == "set_thread_archived":
+        if normalized.get("archived") is not expected_arguments.get("archived"):
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "archive result does not match the claimed action",
+                exit_code=5,
+            )
+    elif tool == "automation_update":
+        if not _native_identifier(normalized, "automationId", "automation_id", "id"):
+            raise FulcrumError(
+                "RESULT_EVIDENCE_REQUIRED",
+                "automation result requires its native identity",
+                exit_code=5,
+            )
+    elif tool in {"read_thread", "list_threads", "list_projects"} and not normalized:
+        raise FulcrumError(
+            "RESULT_EVIDENCE_REQUIRED",
+            f"{tool} success requires returned inspection evidence",
+            exit_code=5,
+        )
+    return "succeeded"
 
 
 def action_marker(
@@ -105,6 +205,22 @@ def _with_protocol(
     return {**dict(fc), "desktop": copy.deepcopy(dict(protocol))}
 
 
+def require_run_control(ledger: Ledger, effect: str) -> None:
+    """Reject a new downstream effect while durable admission is paused."""
+
+    system = ledger.show("fc-system")
+    if system is None:
+        return
+    protocol = _protocol(system.fc or {})
+    if protocol.get("run_control", "paused") == "paused":
+        raise FulcrumError(
+            "RUN_PAUSED",
+            f"Fulcrum is paused; {effect} cannot start",
+            exit_code=5,
+            details={"effect": effect, "run_control": "paused"},
+        )
+
+
 def _request_input(request: ParsedRequest) -> dict[str, Any]:
     return {
         "command": list(request.command),
@@ -125,13 +241,45 @@ def _request_id(request: ParsedRequest) -> str:
     return request.request_id
 
 
+def _request_projection_id(request_id: str) -> str:
+    return f"fc-request-{uuid.uuid5(REQUEST_PROJECTION_NAMESPACE, request_id)}"
+
+
+def _projection_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(value.get(key))
+        for key in (
+            "accepted_input",
+            "source_commit",
+            "operation_id",
+            "state",
+            "result",
+            "recorded_at",
+        )
+    }
+
+
 def _saved_request(
-    protocol: Mapping[str, Any], request: ParsedRequest
+    protocol: Mapping[str, Any],
+    request: ParsedRequest,
+    *,
+    ledger: Ledger | None = None,
 ) -> Mapping[str, Any] | None:
     requests = protocol.get("requests")
     saved = (
         requests.get(_request_id(request)) if isinstance(requests, Mapping) else None
     )
+    if not isinstance(saved, Mapping) and ledger is not None:
+        projected = ledger.show(_request_projection_id(_request_id(request)))
+        projected_fc = projected.fc if projected is not None else None
+        candidate = (
+            projected_fc.get("request_transition")
+            if isinstance(projected_fc, Mapping)
+            and projected_fc.get("projection_state") == "verified"
+            else None
+        )
+        if isinstance(candidate, Mapping):
+            saved = candidate
     if not isinstance(saved, Mapping):
         return None
     if saved.get("accepted_input") != _request_input(request):
@@ -150,8 +298,41 @@ def _save_request(
     result: Mapping[str, Any],
     *,
     state: str = "completed",
+    ledger: Ledger | None = None,
 ) -> None:
     requests = dict(protocol.get("requests") or {})
+    if ledger is not None:
+        for saved_id, saved_value in list(requests.items()):
+            if (
+                not isinstance(saved_value, Mapping)
+                or saved_value.get("state") != "completed"
+                or saved_value.get("projected_at")
+            ):
+                continue
+            projected = ledger.show(_request_projection_id(saved_id))
+            projected_fc = projected.fc if projected is not None else None
+            candidate = (
+                projected_fc.get("request_transition")
+                if isinstance(projected_fc, Mapping)
+                else None
+            )
+            if (
+                projected is None
+                or not isinstance(projected_fc, Mapping)
+                or candidate != _projection_payload(saved_value)
+            ):
+                continue
+            verified_fc = {
+                **dict(projected_fc),
+                "projection_state": "verified",
+                "verified_at": _utc_now(),
+            }
+            ledger.update_fc(projected.id, verified_fc, status="closed")
+            requests[saved_id] = {
+                **dict(saved_value),
+                "projected_at": verified_fc["verified_at"],
+                "projection_record": projected.id,
+            }
     existing = requests.get(_request_id(request))
     completed = sum(
         1
@@ -169,7 +350,7 @@ def _save_request(
             retryable=False,
             details={"limit": MAX_UNPROJECTED_TRANSITIONS},
         )
-    requests[_request_id(request)] = {
+    retained = {
         "accepted_input": _request_input(request),
         "source_commit": os.environ.get("FULCRUM_COMMIT"),
         "operation_id": _opaque("operation"),
@@ -177,6 +358,51 @@ def _save_request(
         "result": copy.deepcopy(dict(result)),
         "recorded_at": _utc_now(),
     }
+    if ledger is not None:
+        projection_id = _request_projection_id(_request_id(request))
+        projected = ledger.show(projection_id)
+        projection_fc = {
+            "kind": "control",
+            "subtype": "request_transition",
+            "owner": "SYSTEM",
+            "projection_state": "prepared",
+            "request_transition": copy.deepcopy(retained),
+        }
+        if projected is None:
+            ledger.create_record(
+                record_id=projection_id,
+                kind="control",
+                title=f"Request transition {_request_id(request)}",
+                description="Durable replay projection for one accepted Desktop request.",
+                owner="SYSTEM",
+                fc=projection_fc,
+                external_ref=f"fulcrum:request:{_request_id(request)}",
+            )
+            ledger.update_fc(projection_id, projection_fc, status="closed")
+        else:
+            projected_transition = (projected.fc or {}).get("request_transition")
+            if projected_transition != retained:
+                if (projected.fc or {}).get("projection_state") == "prepared":
+                    ledger.update_fc(projection_id, projection_fc, status="closed")
+                else:
+                    raise FulcrumError(
+                        "REQUEST_CONFLICT",
+                        "durable request projection conflicts with the accepted result",
+                        exit_code=5,
+                        request_id=request.request_id,
+                    )
+    requests[_request_id(request)] = retained
+    projected_keys = [
+        key
+        for key, value in requests.items()
+        if isinstance(value, Mapping) and value.get("projected_at")
+    ]
+    projected_keys.sort(
+        key=lambda key: str((requests.get(key) or {}).get("recorded_at") or ""),
+        reverse=True,
+    )
+    for key in projected_keys[RETAINED_PROJECTED_REQUESTS:]:
+        requests.pop(key, None)
     protocol["requests"] = requests
 
 
@@ -204,6 +430,42 @@ def _result(request: ParsedRequest, value: Mapping[str, Any]) -> CommandResult:
         request_id=request.request_id,
         result=dict(value),
     )
+
+
+def _consume_registration_handshake(
+    protocol: dict[str, Any],
+    *,
+    action_id: str,
+    task_id: str,
+    session_id: str,
+) -> Mapping[str, Any]:
+    handshakes = dict(protocol.get("handshakes") or {})
+    matches = [
+        (event_id, value)
+        for event_id, value in handshakes.items()
+        if isinstance(value, Mapping)
+        and value.get("kind") == "prompt"
+        and value.get("action_id") == action_id
+        and value.get("task_id") == task_id
+        and value.get("session_id") == session_id
+        and not value.get("consumed_at")
+    ]
+    if len(matches) != 1:
+        raise FulcrumError(
+            "REGISTRATION_OBSERVATION_REQUIRED",
+            "registration requires one matching trusted prompt observation",
+            exit_code=5,
+            details={"action_id": action_id, "matching_observations": len(matches)},
+        )
+    event_id, retained = matches[0]
+    consumed = {
+        **dict(retained),
+        "consumed_at": _utc_now(),
+        "disposition": "registered",
+    }
+    handshakes[event_id] = consumed
+    protocol["handshakes"] = handshakes
+    return consumed
 
 
 class DesktopProtocolService:
@@ -238,6 +500,140 @@ class DesktopProtocolService:
             executable=executable,
             timeout=request.timeout,
         )
+
+    def _timing_seconds(self, request: ParsedRequest, name: str, default: int) -> int:
+        try:
+            manager = ConfigurationManager(request.instance.config_path)
+            document, _ = manager.load()
+            value = manager.effective(document)["timing"][name]
+            return max(1, int(value))
+        except (FulcrumError, KeyError, TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _candidate_repair_cycle(protocol: Mapping[str, Any], source: str) -> int:
+        previous = protocol.get("candidate")
+        if not isinstance(previous, Mapping):
+            return 0
+        previous_state = str(previous.get("state") or "")
+        if previous_state in {"pending", "running", "queued"}:
+            raise FulcrumError(
+                "CANDIDATE_ACTIVE",
+                "the current candidate must settle before another submission",
+                exit_code=5,
+            )
+        if previous_state not in {"failed", "blocked"}:
+            return int(previous.get("repair_cycle") or 0)
+        if previous.get("source") == source:
+            raise FulcrumError(
+                "SOURCE_UNCHANGED",
+                "a repair candidate must use a changed source commit",
+                exit_code=5,
+            )
+        incidents = protocol.get("incidents")
+        incident = (
+            incidents.get("ci-validation") if isinstance(incidents, Mapping) else None
+        )
+        ordinary = int((incident or {}).get("repair_cycles", 0))
+        additional = int((incident or {}).get("additional_repair_cycles", 0))
+        next_cycle = int(previous.get("repair_cycle") or 0) + 1
+        if next_cycle > 3 + additional or (
+            isinstance(incident, Mapping)
+            and incident.get("repair_hold")
+            and next_cycle > ordinary
+        ):
+            raise FulcrumError(
+                "REPAIR_LIMIT",
+                "the authorized repair-cycle allowance is exhausted",
+                exit_code=5,
+                details={
+                    "ordinary_limit": 3,
+                    "additional_repair_cycles": additional,
+                    "attempted_cycle": next_cycle,
+                },
+            )
+        return next_cycle
+
+    def _record_candidate_outcome(
+        self,
+        ledger: Ledger,
+        record: LedgerRecord,
+        protocol: dict[str, Any],
+        candidate: Mapping[str, Any],
+        state: str,
+    ) -> None:
+        incidents = dict(protocol.get("incidents") or {})
+        existing = incidents.get("ci-validation")
+        incident = (
+            dict(existing)
+            if isinstance(existing, Mapping)
+            else {
+                "incident_id": _opaque("incident"),
+                "incident_key": "ci-validation",
+                "scope": "exact-source provider validation",
+                "repair_cycles": 0,
+                "justiciar_interventions": 0,
+            }
+        )
+        if state == "passed":
+            if existing is not None:
+                incident["state"] = "resolved"
+                incident["resolved_at"] = _utc_now()
+                incident["repair_hold"] = False
+                incidents["ci-validation"] = incident
+                protocol["incidents"] = incidents
+            return
+        if state not in {"failed", "blocked"}:
+            return
+        cycle = int(candidate.get("repair_cycle") or 0)
+        incident.update(
+            {
+                "state": "open",
+                "initial_failure_recorded": True,
+                "evidence": copy.deepcopy(candidate.get("evidence") or {}),
+                "updated_at": _utc_now(),
+                "repair_cycles": max(int(incident.get("repair_cycles", 0)), cycle),
+            }
+        )
+        allowance = 3 + int(incident.get("additional_repair_cycles", 0))
+        if cycle >= allowance and cycle > 0:
+            incident["repair_hold"] = True
+            incident["required_decision"] = (
+                "Marshal may authorize the one scoped Justiciar intervention."
+            )
+            purpose = f"repair_hold:{incident['incident_id']}"
+            actions = dict(protocol.get("actions") or {})
+            if not any(
+                isinstance(value, Mapping)
+                and value.get("purpose") == purpose
+                and value.get("state") not in {"rejected", "superseded"}
+                for value in actions.values()
+            ):
+                system = self._system(ledger)
+                marshal = (_protocol(system.fc or {}).get("standing") or {}).get(
+                    "marshal"
+                )
+                if (
+                    isinstance(marshal, Mapping)
+                    and marshal.get("state") == "registered"
+                ):
+                    self._append_action(
+                        protocol,
+                        record_id=record.id,
+                        executor="steward",
+                        tool="send_message_to_thread",
+                        arguments={
+                            "threadId": marshal.get("task_id"),
+                            "prompt": (
+                                f"Repair allowance is exhausted for {record.id}, "
+                                f"incident {incident['incident_id']}. Run marshal_check."
+                            ),
+                        },
+                        purpose=purpose,
+                        expected_result={"thread_id": marshal.get("task_id")},
+                    )
+        incidents["ci-validation"] = incident
+        protocol["incidents"] = incidents
 
     def _system(self, ledger: Ledger) -> LedgerRecord:
         record = ledger.show("fc-system")
@@ -360,7 +756,7 @@ class DesktopProtocolService:
         ledger = self._ledger(request)
         system = self._system(ledger)
         protocol = _protocol(system.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         role = str(request.input.get("role") or request.arguments.get("role") or "")
@@ -409,6 +805,12 @@ class DesktopProtocolService:
                 "the native creation result identifies another task",
                 exit_code=5,
             )
+        handshake = _consume_registration_handshake(
+            protocol,
+            action_id=action_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
         standing = dict(protocol.get("standing") or {})
         current = standing.get(role)
         replacing = (
@@ -435,12 +837,33 @@ class DesktopProtocolService:
             "action_id": action_id,
             "state": "registered",
             "registered_at": _utc_now(),
+            "registration_observation": copy.deepcopy(dict(handshake)),
             "previous_task_id": current.get("task_id") if replacing else None,
         }
+        if action.get("tool") == "create_thread" and action.get("state") in {
+            "pending",
+            "issuing",
+            "uncertain",
+        }:
+            actions[action_id] = {
+                **dict(action),
+                "state": "succeeded",
+                "native_result": {
+                    **(
+                        dict(action.get("native_result"))
+                        if isinstance(action.get("native_result"), Mapping)
+                        else {}
+                    ),
+                    "threadId": task_id,
+                    **({"hostId": host_id} if host_id else {}),
+                },
+                "registered_at": _utc_now(),
+            }
+            protocol["actions"] = actions
         standing[role] = binding
         protocol["standing"] = standing
         value = {"standing": binding}
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
         self._write_event(
             request,
@@ -448,71 +871,6 @@ class DesktopProtocolService:
             task_id=task_id,
             role=role,
             outcome="completed",
-        )
-        return _result(request, value)
-
-    @coordinated
-    def queue_action(self, request: ParsedRequest) -> CommandResult:
-        """Internal deterministic compiler boundary used by setup/work transitions."""
-
-        if request.actor.kind != "human":
-            raise FulcrumError(
-                "AUTHORITY_MISMATCH",
-                "native actions are compiled by Fulcrum, not queued by managed tasks",
-                exit_code=5,
-            )
-        ledger = self._ledger(request)
-        record_id = str(request.input.get("record_id") or "fc-system")
-        record = (
-            self._system(ledger)
-            if record_id == "fc-system"
-            else self._record(ledger, record_id)
-        )
-        protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
-        if saved:
-            return _replay(saved, request)
-        executor = str(request.input.get("executor") or "")
-        tool = str(request.input.get("tool") or "")
-        arguments = request.input.get("arguments")
-        if executor not in {*STANDING_ROLES, "bootstrap"} or not tool:
-            raise FulcrumError.invalid(
-                "INVALID_ACTION", "executor and tool are required"
-            )
-        if not isinstance(arguments, Mapping):
-            raise FulcrumError.invalid(
-                "INVALID_ACTION", "action arguments must be an object"
-            )
-        actions = dict(protocol.get("actions") or {})
-        action_id = _opaque("action")
-        assignment = request.input.get("assignment_token")
-        action = {
-            "action_id": action_id,
-            "record_id": record.id,
-            "executor": executor,
-            "tool": tool,
-            "arguments": copy.deepcopy(dict(arguments)),
-            "expected_result": copy.deepcopy(request.input.get("expected_result")),
-            "reporting": copy.deepcopy(request.input.get("reporting") or {}),
-            "assignment_token": assignment,
-            "state": "pending",
-            "attempts": [],
-            "created_at": _utc_now(),
-            "purpose": request.input.get("purpose"),
-        }
-        actions[action_id] = action
-        protocol["actions"] = actions
-        value = {"action": self._action_response(request, action)}
-        _save_request(protocol, request, value)
-        ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-        self._write_event(
-            request,
-            "action_committed",
-            action_id=action_id,
-            bead_id=None if record.id == "fc-system" else record.id,
-            tool=tool,
-            executor=executor,
-            outcome="pending",
         )
         return _result(request, value)
 
@@ -623,10 +981,23 @@ class DesktopProtocolService:
                 "INVALID_CLAIM", "record_id, action_id, and attempt_id are required"
             )
         record, protocol, action = self._find_action(ledger, record_id, action_id)
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         self._authorize_executor(ledger, request, action)
+        system_protocol = _protocol(self._system(ledger).fc or {})
+        if (
+            action.get("executor") != "bootstrap"
+            and system_protocol.get("run_control", "paused") == "paused"
+            and action.get("purpose") not in {"diagnostic", "settlement"}
+            and action.get("purpose") != "routine_dispatch"
+        ):
+            raise FulcrumError(
+                "RUN_PAUSED",
+                "Fulcrum is paused; the unissued native action cannot be claimed",
+                exit_code=5,
+                details={"action_id": action_id},
+            )
         obsolete = self._obsolete_unissued_action(ledger, record, action, request)
         if obsolete:
             action["state"] = "superseded"
@@ -680,7 +1051,7 @@ class DesktopProtocolService:
                 "attempt_id": attempt_id,
                 "invoke": True,
             }
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         self._write_event(
             request,
@@ -745,7 +1116,7 @@ class DesktopProtocolService:
                 "action result must be succeeded, rejected, or uncertain",
             )
         record, protocol, action = self._find_action(ledger, record_id, action_id)
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         self._authorize_executor(ledger, request, action)
@@ -756,15 +1127,60 @@ class DesktopProtocolService:
                 "result does not match the issuing attempt",
                 exit_code=5,
             )
-        if action["state"] != "issuing":
-            raise FulcrumError(
-                "ACTION_NOT_ISSUING", f"action is {action['state']}", exit_code=5
-            )
         attempt = dict(attempts[-1])
+        observed_outcome = attempt.get("hook_observed_outcome")
+        if observed_outcome in {"succeeded", "rejected"} and (
+            outcome != observed_outcome and outcome != "uncertain"
+        ):
+            raise FulcrumError(
+                "RESULT_CONFLICT",
+                "reported outcome conflicts with trusted post-tool evidence",
+                exit_code=5,
+                details={"reported": outcome, "observed": observed_outcome},
+            )
+        normalized_outcome = _validated_action_outcome(
+            action, request.input.get("native_result"), outcome
+        )
+        if action["state"] != "issuing":
+            if action["state"] != normalized_outcome:
+                raise FulcrumError(
+                    "RESULT_CONFLICT",
+                    f"action is already settled as {action['state']}",
+                    exit_code=5,
+                )
+            if action.get("tool") == "create_thread":
+                created_task = _native_identifier(
+                    request.input.get("native_result"),
+                    "threadId",
+                    "thread_id",
+                    "id",
+                )
+                assignment = protocol.get("assignment")
+                if (
+                    created_task
+                    and isinstance(assignment, Mapping)
+                    and assignment.get("task_id")
+                    and assignment.get("task_id") != created_task
+                ):
+                    raise FulcrumError(
+                        "IDENTITY_CONFLICT",
+                        "native creation result conflicts with worker registration",
+                        exit_code=5,
+                    )
+            value = {
+                "action_id": action_id,
+                "attempt_id": attempt_id,
+                "state": action["state"],
+                "reservation_retained": action["state"] == "uncertain",
+                "converged": True,
+            }
+            _save_request(protocol, request, value, ledger=ledger)
+            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            return _result(request, value)
         attempt.update(
             {
-                "state": outcome,
-                "outcome": outcome,
+                "state": normalized_outcome,
+                "outcome": normalized_outcome,
                 "evidence": copy.deepcopy(request.input.get("evidence")),
                 "native_result": copy.deepcopy(request.input.get("native_result")),
                 "completed_at": _utc_now(),
@@ -772,13 +1188,21 @@ class DesktopProtocolService:
         )
         attempts[-1] = attempt
         action["attempts"] = attempts
-        action["state"] = outcome
+        action["state"] = normalized_outcome
         action["completed_at"] = _utc_now()
         action["native_result"] = copy.deepcopy(request.input.get("native_result"))
+        client_task = _native_identifier(
+            request.input.get("native_result"), "clientThreadId", "client_thread_id"
+        )
+        if client_task:
+            action["client_thread_id"] = client_task
         actions = dict(protocol.get("actions") or {})
         actions[action_id] = action
         protocol["actions"] = actions
-        if action.get("purpose") == "routine_dispatch" and outcome == "succeeded":
+        if action.get("purpose") in {
+            "routine_dispatch",
+            "exceptional_recovery",
+        } and normalized_outcome in {"succeeded", "uncertain"}:
             assignment = dict(protocol.get("assignment") or {})
             created_task = _native_identifier(
                 request.input.get("native_result"), "threadId", "thread_id", "id"
@@ -799,9 +1223,13 @@ class DesktopProtocolService:
                 if assignment.get("state") != "active":
                     assignment["state"] = "issuing"
                 protocol["assignment"] = assignment
+            elif client_task:
+                assignment["client_thread_id"] = client_task
+                assignment["state"] = "uncertain"
+                protocol["assignment"] = assignment
         if (
             action.get("tool") == "create_thread"
-            and outcome == "succeeded"
+            and normalized_outcome == "succeeded"
             and action.get("executor") != "bootstrap"
         ):
             created_task = _native_identifier(
@@ -832,8 +1260,8 @@ class DesktopProtocolService:
                         ),
                     )
         if (
-            action.get("purpose", "").startswith("archive_task:")
-            and outcome == "succeeded"
+            str(action.get("purpose") or "").startswith("archive_task:")
+            and normalized_outcome == "succeeded"
         ):
             native_tasks = dict(protocol.get("native_tasks") or {})
             task_id = str((action.get("arguments") or {}).get("threadId") or "")
@@ -845,12 +1273,43 @@ class DesktopProtocolService:
             }
             protocol["native_tasks"] = native_tasks
         if (
-            action.get("purpose", "").startswith("reconcile_action:")
-            and outcome == "succeeded"
+            str(action.get("purpose") or "").startswith("reconcile_action:")
+            and normalized_outcome == "succeeded"
         ):
             self._settle_inspected_action(
                 protocol, action, request.input.get("native_result")
             )
+            original_id = str(action.get("purpose") or "").partition(":")[2]
+            original = (protocol.get("actions") or {}).get(original_id)
+            if isinstance(original, Mapping) and original.get("state") == "uncertain":
+                incidents = dict(protocol.get("incidents") or {})
+                incident_key = f"native-action:{original_id}"
+                existing_incident = incidents.get(incident_key)
+                incident = (
+                    dict(existing_incident)
+                    if isinstance(existing_incident, Mapping)
+                    else {
+                        "incident_id": _opaque("incident"),
+                        "incident_key": incident_key,
+                        "repair_cycles": 0,
+                        "justiciar_interventions": 0,
+                    }
+                )
+                incident.update(
+                    {
+                        "state": "open",
+                        "scope": "uncertain native action reconciliation",
+                        "required_decision": (
+                            "Marshal must inspect or authorize scoped recovery; "
+                            "absence from bounded inventory is not proof of absence."
+                        ),
+                        "evidence": copy.deepcopy(request.input.get("native_result")),
+                        "action_id": original_id,
+                        "updated_at": _utc_now(),
+                    }
+                )
+                incidents[incident_key] = incident
+                protocol["incidents"] = incidents
         if action.get("purpose") in {
             "bootstrap_marshal_schedule",
             "bootstrap_marshal_schedule_activation",
@@ -860,7 +1319,7 @@ class DesktopProtocolService:
                 schedule.update(
                     {
                         "action_id": action_id,
-                        "state": outcome,
+                        "state": normalized_outcome,
                         "automation_id": _native_identifier(
                             request.input.get("native_result"),
                             "automationId",
@@ -874,8 +1333,10 @@ class DesktopProtocolService:
                 schedule.update(
                     {
                         "activation_action_id": action_id,
-                        "activation_state": outcome,
-                        "status": "ACTIVE" if outcome == "succeeded" else "PAUSED",
+                        "activation_state": normalized_outcome,
+                        "status": (
+                            "ACTIVE" if normalized_outcome == "succeeded" else "PAUSED"
+                        ),
                         "observed_at": _utc_now(),
                     }
                 )
@@ -886,17 +1347,20 @@ class DesktopProtocolService:
             schedule.update(
                 {
                     "retarget_action_id": action_id,
-                    "retarget_state": outcome,
+                    "retarget_state": normalized_outcome,
                     "target_task_id": (
                         target
-                        if outcome == "succeeded"
+                        if normalized_outcome == "succeeded"
                         else schedule.get("target_task_id")
                     ),
                     "observed_at": _utc_now(),
                 }
             )
             protocol["marshal_schedule"] = schedule
-        if action.get("purpose") == "recover_steward_loop" and outcome == "succeeded":
+        if (
+            action.get("purpose") == "recover_steward_loop"
+            and normalized_outcome == "succeeded"
+        ):
             standing = dict(protocol.get("standing") or {})
             steward = standing.get("steward")
             if isinstance(steward, Mapping):
@@ -910,10 +1374,10 @@ class DesktopProtocolService:
         value = {
             "action_id": action_id,
             "attempt_id": attempt_id,
-            "state": outcome,
-            "reservation_retained": outcome == "uncertain",
+            "state": normalized_outcome,
+            "reservation_retained": normalized_outcome == "uncertain",
         }
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         self._write_event(
             request,
@@ -922,7 +1386,7 @@ class DesktopProtocolService:
             attempt_id=attempt_id,
             bead_id=None if record.id == "fc-system" else record.id,
             tool=action.get("tool"),
-            outcome=outcome,
+            outcome=normalized_outcome,
         )
         return _result(request, value)
 
@@ -932,7 +1396,7 @@ class DesktopProtocolService:
         inspection: Mapping[str, Any],
         native_result: Any,
     ) -> None:
-        original_id = str(inspection.get("purpose") or "").partition(":")[2]
+        original_id: str = str(inspection.get("purpose") or "").partition(":")[2]
         actions = dict(protocol.get("actions") or {})
         original_value = actions.get(original_id)
         if not isinstance(original_value, Mapping) or not isinstance(
@@ -947,14 +1411,65 @@ class DesktopProtocolService:
         elif original.get("tool") == "set_thread_archived":
             settled = native_result.get("archived") is arguments.get("archived")
         elif original.get("tool") == "create_thread":
-            settled = bool(
-                _native_identifier(native_result, "threadId", "thread_id", "id")
+            task_id = _native_identifier(
+                original.get("native_result"), "threadId", "thread_id", "id"
             )
+            if not task_id and inspection.get("tool") == "list_threads":
+                locator: str | None = _native_identifier(
+                    original.get("native_result"),
+                    "clientThreadId",
+                    "client_thread_id",
+                )
+                matches: list[Mapping[str, Any]] = []
+
+                def visit(value: Any) -> None:
+                    if isinstance(value, Mapping):
+                        client = _native_identifier(
+                            value, "clientThreadId", "client_thread_id"
+                        )
+                        marker = json.dumps(value, sort_keys=True, default=str)
+                        if (locator and client == locator) or original_id in marker:
+                            if _native_identifier(value, "threadId", "thread_id", "id"):
+                                matches.append(value)
+                        for child in value.values():
+                            visit(child)
+                    elif isinstance(value, list):
+                        for child in value:
+                            visit(child)
+
+                visit(native_result)
+                identities = {
+                    identifier
+                    for value in matches
+                    if (
+                        identifier := _native_identifier(
+                            value, "threadId", "thread_id", "id"
+                        )
+                    )
+                }
+                if len(identities) == 1:
+                    task_id = next(iter(identities))
+            settled = bool(task_id)
+            if task_id:
+                original["native_result"] = {
+                    **(
+                        dict(original.get("native_result"))
+                        if isinstance(original.get("native_result"), Mapping)
+                        else {}
+                    ),
+                    "threadId": task_id,
+                }
+                assignment = protocol.get("assignment")
+                if isinstance(assignment, Mapping) and assignment.get(
+                    "assignment_token"
+                ) == original.get("assignment_token"):
+                    protocol["assignment"] = {**dict(assignment), "task_id": task_id}
         if settled:
             original["state"] = "succeeded"
             original["reconciled_by"] = inspection.get("action_id")
             original["reconciled_at"] = _utc_now()
-            original["native_result"] = copy.deepcopy(native_result)
+            if original.get("tool") != "create_thread":
+                original["native_result"] = copy.deepcopy(native_result)
             actions[original_id] = original
             protocol["actions"] = actions
 
@@ -985,7 +1500,27 @@ class DesktopProtocolService:
                     original.get("native_result"), "threadId", "thread_id", "id"
                 ) or str((original.get("arguments") or {}).get("threadId") or "")
                 if not task_id:
-                    continue
+                    locator = _native_identifier(
+                        original.get("native_result"),
+                        "clientThreadId",
+                        "client_thread_id",
+                    )
+                    if original.get("tool") != "create_thread" or not locator:
+                        continue
+                    inspection = self._append_action(
+                        protocol,
+                        record_id=record.id,
+                        executor="steward",
+                        tool="list_threads",
+                        arguments={"limit": 100},
+                        purpose=purpose,
+                        expected_result={"clientThreadId": locator},
+                        reporting={"reconciles": original.get("action_id")},
+                    )
+                    ledger.update_fc(
+                        record.id, _with_protocol(record.fc or {}, protocol)
+                    )
+                    return self._record(ledger, record.id), inspection
                 inspection = self._append_action(
                     protocol,
                     record_id=record.id,
@@ -1012,9 +1547,12 @@ class DesktopProtocolService:
             }
             native_tasks = protocol.get("native_tasks") or {}
             for task_id in sorted(task_ids):
-                if isinstance(native_tasks.get(task_id), Mapping) and native_tasks[
-                    task_id
-                ].get("archived"):
+                if isinstance(native_tasks.get(task_id), Mapping):
+                    if native_tasks[task_id].get("archived"):
+                        continue
+                    if native_tasks[task_id].get("manual_unarchive"):
+                        continue
+                if not self._task_archival_obligations_settled(ledger, task_id):
                     continue
                 purpose = f"archive_task:{task_id}"
                 if any(
@@ -1037,12 +1575,45 @@ class DesktopProtocolService:
                 return self._record(ledger, record.id), archive
         return None
 
+    def _task_archival_obligations_settled(self, ledger: Ledger, task_id: str) -> bool:
+        for record in ledger.list_records(limit=0):
+            fc = record.fc or {}
+            protocol = _protocol(fc)
+            assignment = protocol.get("assignment")
+            history = protocol.get("assignment_history") or []
+            associated = (
+                isinstance(assignment, Mapping) and assignment.get("task_id") == task_id
+            ) or any(
+                isinstance(item, Mapping) and item.get("task_id") == task_id
+                for item in history
+            )
+            if not associated:
+                continue
+            if record.status != "closed" or isinstance(assignment, Mapping):
+                return False
+            if not self._archival_obligations_settled(record, protocol):
+                return False
+            if any(
+                isinstance(action, Mapping)
+                and action.get("state") not in TERMINAL_ACTION_STATES
+                and not str(action.get("purpose") or "").startswith("archive_task:")
+                for action in (protocol.get("actions") or {}).values()
+            ):
+                return False
+        return True
+
     @staticmethod
     def _archival_obligations_settled(
         record: LedgerRecord, protocol: Mapping[str, Any]
     ) -> bool:
         fc = record.fc or {}
-        if fc.get("cleanup_obligation") or fc.get("recovery_fence"):
+        if (
+            fc.get("cleanup_obligation")
+            or fc.get("recovery_fence")
+            or fc.get("reporting_obligation")
+            or fc.get("process_obligation")
+            or fc.get("process_obligations")
+        ):
             return False
         if any(
             isinstance(value, Mapping) and value.get("state") != "resolved"
@@ -1088,6 +1659,7 @@ class DesktopProtocolService:
                 if (
                     action.get("executor") != "steward"
                     or action.get("state") != "pending"
+                    or action.get("granted_wait_id")
                 ):
                     continue
                 if paused and action.get("purpose") not in {"diagnostic", "settlement"}:
@@ -1244,16 +1816,9 @@ class DesktopProtocolService:
         role = str(fc.get("requested_role") or "executor")
         if role not in WORKER_ROLES:
             role = "executor"
-        model_config = models.get(role) if isinstance(models, Mapping) else None
-        model = (
-            model_config.get("model")
-            if isinstance(model_config, Mapping)
-            else fc.get("model")
-        )
-        thinking = (
-            model_config.get("effort")
-            if isinstance(model_config, Mapping)
-            else fc.get("effort")
+        work_models = fc.get("models")
+        model_config = (
+            work_models.get(role) if isinstance(work_models, Mapping) else None
         )
         workspace = str(
             fc.get("workspace")
@@ -1279,11 +1844,49 @@ class DesktopProtocolService:
             if isinstance(project_config, Mapping)
             else fc.get("codex_project_id")
         )
+        project_models = (
+            project_config.get("models")
+            if isinstance(project_config, Mapping)
+            else None
+        )
+        if not isinstance(model_config, Mapping) and isinstance(
+            project_models, Mapping
+        ):
+            model_config = project_models.get(role)
+        if not isinstance(model_config, Mapping):
+            model_config = models.get(role) if isinstance(models, Mapping) else None
+        model = (
+            model_config.get("model")
+            if isinstance(model_config, Mapping)
+            else fc.get("model")
+        )
+        thinking = (
+            model_config.get("effort")
+            if isinstance(model_config, Mapping)
+            else fc.get("effort")
+        )
+        skill = {
+            "weaver": "$weaver",
+            "executor": "$fulcrum-executor",
+            "warden": "$fulcrum-warden",
+            "sage": "$fulcrum-sage",
+            "mason": "$fulcrum-mason",
+            "justiciar": "$fulcrum-justiciar",
+        }[role]
+        branch = (
+            fc.get("worktree", {}).get("branch")
+            if isinstance(fc.get("worktree"), Mapping)
+            else None
+        )
         prompt = (
-            f"Register as {role} for {record.id} before editing. Work only in "
+            f"{skill}\nRegister as {role} for {record.id} before editing. Work only in "
             f"{workspace}. Assignment token: {assignment_token}.\n\n"
             f"Outcome: {fc.get('outcome') or record.title}\n"
             f"Acceptance: {fc.get('acceptance') or []}\n"
+            f"Scope: {fc.get('scope') or fc.get('outcome') or record.title}\n"
+            f"Context: {fc.get('context') or record.title}\n"
+            f"Implementation notes: {fc.get('implementation_notes') or []}\n"
+            f"Current source: {fc.get('source') or 'not retained'}\n"
             "Report progress and finish through Fulcrum MCP."
         )
         arguments: dict[str, Any] = {
@@ -1304,6 +1907,8 @@ class DesktopProtocolService:
             "role": role,
             "workspace": workspace,
             "source": fc.get("source"),
+            "project": project,
+            "branch": branch,
             "scope": fc.get("scope") or fc.get("outcome"),
             "capacity_class": "ordinary",
             "state": "reserved",
@@ -1357,9 +1962,19 @@ class DesktopProtocolService:
         binding = self._standing_actor(ledger, "steward", request)
         system = self._system(ledger)
         protocol = _protocol(system.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
+        loop_id = request.input.get("loop_id")
+        turn_id = request.input.get("turn_id")
+        if not isinstance(loop_id, str) or not loop_id:
+            raise FulcrumError.invalid(
+                "LOOP_ID_REQUIRED", "Steward instruction wait requires loop_id"
+            )
+        if not isinstance(turn_id, str) or not turn_id:
+            raise FulcrumError.invalid(
+                "IDENTITY_REQUIRED", "Steward instruction wait requires turn_id"
+            )
         from fulcrum.hooks import HookService
 
         watch_paths = HookService(ledger).collect_registered(request)
@@ -1385,20 +2000,52 @@ class DesktopProtocolService:
                 "Steward already has a pending instruction request",
                 exit_code=5,
             )
+        matching_wait_id = (
+            matching.get("wait_id") if isinstance(matching, Mapping) else None
+        )
+        for candidate_record in ledger.list_records(limit=0):
+            candidate_actions = _protocol(candidate_record.fc or {}).get("actions")
+            if not isinstance(candidate_actions, Mapping):
+                continue
+            unresolved = next(
+                (
+                    value
+                    for value in candidate_actions.values()
+                    if isinstance(value, Mapping)
+                    and value.get("executor") == "steward"
+                    and value.get("granted_wait_id")
+                    and value.get("granted_wait_id") != matching_wait_id
+                    and value.get("state") in {"pending", "issuing"}
+                ),
+                None,
+            )
+            if isinstance(unresolved, Mapping):
+                raise FulcrumError(
+                    "ACTION_RESULT_REQUIRED",
+                    "the prior Steward instruction must be claimed and settled before another wait",
+                    exit_code=5,
+                    details={
+                        "record_id": candidate_record.id,
+                        "action_id": unresolved.get("action_id"),
+                        "state": unresolved.get("state"),
+                    },
+                )
         if matching is not None:
             wait = copy.deepcopy(dict(matching))
             wait_id = str(wait["wait_id"])
         else:
             wait_id = _opaque("wait")
-            idle_seconds = int(request.input.get("idle_seconds") or 3600)
+            idle_seconds = self._timing_seconds(
+                request, "instruction_idle_seconds", 3600
+            )
             wait = {
                 "wait_id": wait_id,
                 "request_id": request_id,
                 "accepted_input": _request_input(request),
                 "task_id": binding["task_id"],
                 "host_id": binding.get("host_id"),
-                "turn_id": request.input.get("turn_id"),
-                "loop_id": request.input.get("loop_id"),
+                "turn_id": turn_id,
+                "loop_id": loop_id,
                 "state": "waiting",
                 "registered_at": _utc_now(),
                 "deadline": (self.now() + timedelta(seconds=idle_seconds))
@@ -1438,7 +2085,7 @@ class DesktopProtocolService:
                 wait["response"] = copy.deepcopy(value)
                 waits[wait_id] = wait
                 protocol["instruction_waits"] = waits
-                _save_request(protocol, request, value)
+                _save_request(protocol, request, value, ledger=ledger)
                 ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
                 self._write_event(
                     request,
@@ -1452,6 +2099,9 @@ class DesktopProtocolService:
                 "transport_wait": {
                     "kind": "instruction",
                     "watch_paths": watch_paths,
+                    "remaining_seconds": max(
+                        1, int((deadline - self.now()).total_seconds())
+                    ),
                     **wait,
                 }
             }
@@ -1489,9 +2139,13 @@ class DesktopProtocolService:
         wait["resolved_at"] = _utc_now()
         wait["response"] = copy.deepcopy(value)
         waits[wait_id] = wait
+        if record.id == system.id:
+            current_system = self._system(ledger)
+            protocol = _protocol(current_system.fc or {})
         protocol["instruction_waits"] = waits
-        _save_request(protocol, request, value)
-        ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
+        _save_request(protocol, request, value, ledger=ledger)
+        current_system = self._system(ledger)
+        ledger.update_fc(system.id, _with_protocol(current_system.fc or {}, protocol))
         self._write_event(
             request,
             "instruction_resolved",
@@ -1519,7 +2173,7 @@ class DesktopProtocolService:
             ledger = self._ledger(request)
         system = self._system(ledger)
         protocol = _protocol(system.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         protocol["run_control"] = state
@@ -1543,7 +2197,7 @@ class DesktopProtocolService:
                         }
                     )
         value = {"run_control": state, "in_flight": in_flight}
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
         self._write_event(
             request, "run_control_changed", outcome=state, in_flight=in_flight
@@ -1556,7 +2210,7 @@ class DesktopProtocolService:
         bead_id = str(request.arguments.get("bead") or request.input.get("bead") or "")
         record = self._record(ledger, bead_id)
         protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         assignment = protocol.get("assignment")
@@ -1573,6 +2227,17 @@ class DesktopProtocolService:
         if not task_id:
             raise FulcrumError.invalid(
                 "IDENTITY_REQUIRED", "worker registration requires the native task ID"
+            )
+        session_id = request.input.get("session_id")
+        turn_id = request.input.get("turn_id")
+        if not isinstance(session_id, str) or not session_id:
+            raise FulcrumError.invalid(
+                "IDENTITY_REQUIRED",
+                "worker registration requires the native session ID",
+            )
+        if not isinstance(turn_id, str) or not turn_id:
+            raise FulcrumError.invalid(
+                "IDENTITY_REQUIRED", "worker registration requires the native turn ID"
             )
         if assignment.get("task_id") and assignment.get("task_id") != task_id:
             raise FulcrumError(
@@ -1602,21 +2267,91 @@ class DesktopProtocolService:
                 "worker source differs from the reserved assignment source",
                 exit_code=5,
             )
+        expected_branch = assignment.get("branch")
+        observed_branch = request.input.get("branch")
+        if expected_branch and observed_branch != expected_branch:
+            raise FulcrumError(
+                "SOURCE_MISMATCH",
+                "worker branch differs from the reserved assignment branch",
+                exit_code=5,
+            )
+        expected_host = assignment.get("host_id")
+        observed_host = request.input.get("host_id")
+        if expected_host and observed_host != expected_host:
+            raise FulcrumError(
+                "IDENTITY_CONFLICT",
+                "worker host differs from the reserved native host",
+                exit_code=5,
+            )
+        actions = dict(protocol.get("actions") or {})
+        creation = next(
+            (
+                dict(value)
+                for value in actions.values()
+                if isinstance(value, Mapping)
+                and value.get("tool") == "create_thread"
+                and value.get("assignment_token") == supplied
+                and value.get("state")
+                in {"pending", "issuing", "succeeded", "uncertain"}
+            ),
+            None,
+        )
+        if creation is None:
+            raise FulcrumError(
+                "REGISTRATION_NOT_AUTHORIZED",
+                "worker registration requires its retained creation action",
+                exit_code=5,
+            )
+        handshake = _consume_registration_handshake(
+            protocol,
+            action_id=str(creation["action_id"]),
+            task_id=str(task_id),
+            session_id=session_id,
+        )
+        native_result = creation.get("native_result")
+        observed_task = _native_identifier(native_result, "threadId", "thread_id", "id")
+        if observed_task and observed_task != task_id:
+            raise FulcrumError(
+                "IDENTITY_CONFLICT",
+                "worker registration conflicts with the native creation result",
+                exit_code=5,
+            )
+        actions[str(creation["action_id"])] = {
+            **creation,
+            "state": "succeeded",
+            "native_result": {
+                **(dict(native_result) if isinstance(native_result, Mapping) else {}),
+                "threadId": task_id,
+                **({"hostId": observed_host} if observed_host else {}),
+            },
+            "registered_at": _utc_now(),
+        }
+        protocol["actions"] = actions
         active = {
             **dict(assignment),
             "task_id": task_id,
-            "host_id": request.input.get("host_id"),
-            "turn_id": request.input.get("turn_id"),
-            "session_id": request.input.get("session_id"),
+            "host_id": observed_host,
+            "turn_id": turn_id,
+            "session_id": session_id,
             "git_root": observed_root,
-            "branch": request.input.get("branch"),
+            "branch": observed_branch,
             "observed_source": observed_source,
             "state": "active",
             "registered_at": _utc_now(),
+            "registration_observation": copy.deepcopy(dict(handshake)),
         }
         protocol["assignment"] = active
+        native_tasks = dict(protocol.get("native_tasks") or {})
+        if task_id in native_tasks:
+            native_tasks[str(task_id)] = {
+                **dict(native_tasks[str(task_id)]),
+                "archived": False,
+                "manual_unarchive": False,
+                "renewed_assignment_at": _utc_now(),
+            }
+            protocol["native_tasks"] = native_tasks
         value = {"assignment": active}
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         fc = {
             **_with_protocol(record.fc or {}, protocol),
             "owner": str(task_id),
@@ -1640,7 +2375,7 @@ class DesktopProtocolService:
         bead_id = str(request.arguments.get("bead") or request.input.get("bead") or "")
         record = self._record(ledger, bead_id)
         protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         assignment = protocol.get("assignment")
@@ -1669,6 +2404,8 @@ class DesktopProtocolService:
             raise FulcrumError.invalid(
                 "SOURCE_REQUIRED", "candidate submission requires the exact source OID"
             )
+        repair_cycle = self._candidate_repair_cycle(protocol, source)
+        deadline_seconds = self._timing_seconds(request, "ci_deadline_seconds", 1800)
         from fulcrum.delivery_service import DeliveryService
 
         submitted = DeliveryService().validation_start(
@@ -1693,18 +2430,19 @@ class DesktopProtocolService:
             else submitted.state.value
         )
         candidate_id = str(provider_handle or _opaque("candidate"))
+        deadline = (
+            (self.now() + timedelta(seconds=deadline_seconds))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         candidate = {
             "candidate_id": candidate_id,
             "source": source,
             "provider_run_id": provider_handle,
             "state": provider_state,
             "submitted_at": _utc_now(),
-            "deadline": (
-                self.now()
-                + timedelta(seconds=int(request.input.get("deadline_seconds") or 1800))
-            )
-            .isoformat()
-            .replace("+00:00", "Z"),
+            "deadline": deadline,
+            "repair_cycle": repair_cycle,
             "evidence": copy.deepcopy(
                 validation.get("facts")
                 if isinstance(validation, Mapping)
@@ -1713,8 +2451,13 @@ class DesktopProtocolService:
         }
         protocol["candidate"] = candidate
         value = {"candidate": candidate}
-        _save_request(protocol, request, value)
-        ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        _save_request(protocol, request, value, ledger=ledger)
+        fc = dict(record.fc or {})
+        delivery = dict(fc.get("delivery") or {})
+        delivery["ci_deadline"] = deadline
+        delivery["ci_repair_cycle"] = repair_cycle
+        fc["delivery"] = delivery
+        ledger.update_fc(record.id, _with_protocol(fc, protocol))
         self._write_event(
             request,
             "candidate_submitted",
@@ -1731,7 +2474,7 @@ class DesktopProtocolService:
         bead_id = str(request.arguments.get("bead") or request.input.get("bead") or "")
         record = self._record(ledger, bead_id)
         protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         assignment = protocol.get("assignment")
@@ -1768,11 +2511,15 @@ class DesktopProtocolService:
             source = (
                 delivery.get("source_oid") if isinstance(delivery, Mapping) else None
             )
+            retained_deadline = (
+                delivery.get("ci_deadline") if isinstance(delivery, Mapping) else None
+            )
             if (
                 isinstance(provider_handle, str)
                 and provider_handle == supplied_candidate
                 and isinstance(source, str)
                 and isinstance(validation, Mapping)
+                and isinstance(retained_deadline, str)
             ):
                 candidate = {
                     "candidate_id": provider_handle,
@@ -1780,9 +2527,8 @@ class DesktopProtocolService:
                     "provider_run_id": provider_handle,
                     "state": str(validation.get("state") or "pending"),
                     "submitted_at": _utc_now(),
-                    "deadline": (self.now() + timedelta(seconds=1800))
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "deadline": retained_deadline,
+                    "repair_cycle": int(delivery.get("ci_repair_cycle") or 0),
                     "evidence": copy.deepcopy(validation.get("facts") or {}),
                     "recovered_from_delivery": True,
                 }
@@ -1845,8 +2591,31 @@ class DesktopProtocolService:
             record = self._record(ledger, bead_id)
             state = observed_state
         if state in {"passed", "failed", "blocked"}:
+            self._record_candidate_outcome(ledger, record, protocol, candidate, state)
             value = {"status": state, "candidate": copy.deepcopy(dict(candidate))}
-            _save_request(protocol, request, value)
+            _save_request(protocol, request, value, ledger=ledger)
+            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            return _result(request, value)
+        deadline = datetime.fromisoformat(
+            str(candidate["deadline"]).replace("Z", "+00:00")
+        )
+        if self.now() >= deadline:
+            candidate = {
+                **dict(candidate),
+                "state": "blocked",
+                "blocked_reason": "ci_deadline",
+                "observed_at": _utc_now(),
+            }
+            protocol["candidate"] = candidate
+            self._record_candidate_outcome(
+                ledger, record, protocol, candidate, "blocked"
+            )
+            value = {
+                "status": "blocked",
+                "reason": "ci_deadline",
+                "candidate": copy.deepcopy(dict(candidate)),
+            }
+            _save_request(protocol, request, value, ledger=ledger)
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
             return _result(request, value)
         waits = dict(protocol.get("ci_waits") or {})
@@ -1872,23 +2641,6 @@ class DesktopProtocolService:
                 "CI_WAIT_ACTIVE", "candidate already has a pending CI wait", exit_code=5
             )
         if matching is not None:
-            deadline = datetime.fromisoformat(
-                str(candidate["deadline"]).replace("Z", "+00:00")
-            )
-            if self.now() >= deadline:
-                value = {
-                    "status": "blocked",
-                    "reason": "ci_deadline",
-                    "candidate": copy.deepcopy(dict(candidate)),
-                }
-                wait = copy.deepcopy(dict(matching))
-                wait["state"] = "expired"
-                wait["resolved_at"] = _utc_now()
-                waits[str(wait["wait_id"])] = wait
-                protocol["ci_waits"] = waits
-                _save_request(protocol, request, value)
-                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-                return _result(request, value)
             return CommandResult(
                 ok=True,
                 state=CommandState.RUNNING,
@@ -1898,6 +2650,10 @@ class DesktopProtocolService:
                         "kind": "ci",
                         "bead": bead_id,
                         "watch_paths": watch_paths,
+                        "remaining_seconds": max(
+                            1,
+                            int((deadline - self.now()).total_seconds()),
+                        ),
                         **dict(matching),
                     }
                 },
@@ -1935,6 +2691,17 @@ class DesktopProtocolService:
                     "kind": "ci",
                     "bead": bead_id,
                     "watch_paths": watch_paths,
+                    "remaining_seconds": max(
+                        1,
+                        int(
+                            (
+                                datetime.fromisoformat(
+                                    str(candidate["deadline"]).replace("Z", "+00:00")
+                                )
+                                - self.now()
+                            ).total_seconds()
+                        ),
+                    ),
                     **wait,
                 }
             },

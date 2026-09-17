@@ -8,13 +8,20 @@ import os
 import re
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.coordination import coordinated
-from fulcrum.desktop_protocol import _protocol, _with_protocol
+from fulcrum.desktop_protocol import (
+    DesktopProtocolService,
+    _protocol,
+    _utc_now,
+    _validated_action_outcome,
+    _with_protocol,
+)
 from fulcrum.diagnostics import DiagnosticLog
 from fulcrum.ledger import Ledger, LedgerRecord
 from fulcrum.observations import read_transcript
@@ -30,6 +37,16 @@ HOOK_EVENTS = {
 MARKER: re.Pattern[str] = re.compile(
     r"^Fulcrum-Action: (?P<value>\{[^\n]+\})", re.MULTILINE
 )
+MANAGED_NATIVE_TOOLS = {
+    "automation_update",
+    "create_thread",
+    "list_projects",
+    "list_threads",
+    "read_thread",
+    "send_message_to_thread",
+    "set_thread_archived",
+    "set_thread_title",
+}
 
 
 class HookService:
@@ -89,6 +106,8 @@ class HookService:
             }
         elif event_name == "UserPromptSubmit" and marker is not None:
             response = self._prompt(ledger, request, marker, bound)
+        elif event_name == "UserPromptSubmit" and bound is not None:
+            self._record_manual_task_activity(ledger, request, bound)
         elif event_name == "PreToolUse":
             response = self._pre_tool(ledger, request, bound)
         elif event_name == "PostToolUse":
@@ -96,9 +115,43 @@ class HookService:
         elif bound is not None:
             self._lifecycle(ledger, request, bound, event_name)
         if bound is not None:
+            bound = _binding_for_task(ledger, task_id) or bound
             self._collect_transcript(ledger, request, bound)
         self._log(request, event_name, task_id, response)
         return CommandResult.query(response)
+
+    def _record_manual_task_activity(
+        self,
+        ledger: Ledger,
+        request: ParsedRequest,
+        bound: tuple[LedgerRecord, str],
+    ) -> None:
+        record, role = bound
+        if role in {"steward", "marshal", "vizier"}:
+            return
+        task_id = str(
+            request.input.get("thread_id")
+            or request.input.get("task_id")
+            or request.actor.task_id
+            or request.thread_id
+            or ""
+        )
+        protocol = _protocol(record.fc or {})
+        assignment = protocol.get("assignment")
+        if isinstance(assignment, Mapping) and assignment.get("task_id") == task_id:
+            return
+        native_tasks = dict(protocol.get("native_tasks") or {})
+        current = native_tasks.get(task_id)
+        if not isinstance(current, Mapping) or not current.get("archived"):
+            return
+        native_tasks[task_id] = {
+            **dict(current),
+            "archived": False,
+            "manual_unarchive": True,
+            "manual_activity_at": _utc_now(),
+        }
+        protocol["native_tasks"] = native_tasks
+        ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
 
     def _prompt(
         self,
@@ -145,14 +198,14 @@ class HookService:
     ) -> dict[str, Any]:
         if bound is None:
             return {}
-        record, _ = bound
-        task_id = str(
-            request.input.get("thread_id") or request.input.get("task_id") or ""
-        )
-        protocol = _protocol(record.fc or {})
-        action, attempt = _issuing_action(protocol, request.input)
-        if action is None or attempt is None:
+        tool_name = _tool_name(request.input)
+        if tool_name not in MANAGED_NATIVE_TOOLS:
+            return {}
+        located = _issuing_action_for_actor(ledger, bound, request.input)
+        if located is None:
             return _deny("native effect has no matching claimed Fulcrum action")
+        record, action, attempt = located
+        protocol = _protocol(record.fc or {})
         expected = dict(action.get("arguments") or {})
         actual = request.input.get("tool_input") or request.input.get("toolInput")
         if not isinstance(actual, Mapping) or not _arguments_match(expected, actual):
@@ -172,20 +225,46 @@ class HookService:
     ) -> None:
         if bound is None:
             return
-        record, role = bound
-        protocol = _protocol(record.fc or {})
-        action, attempt = _issuing_action(protocol, request.input)
-        if action is None or attempt is None:
+        tool_name = _tool_name(request.input)
+        if tool_name not in MANAGED_NATIVE_TOOLS:
             return
+        located = _issuing_action_for_actor(ledger, bound, request.input)
+        if located is None:
+            return
+        record, action, attempt = located
         result = request.input.get("tool_response") or request.input.get("toolResponse")
-        attempt["post_hook_event_id"] = _event_id(request.input)
-        attempt["hook_result"] = copy.deepcopy(result)
+        observed = "uncertain"
         if isinstance(result, Mapping) and isinstance(result.get("isError"), bool):
-            attempt["hook_observed_outcome"] = (
-                "rejected" if result["isError"] else "succeeded"
+            observed = "rejected" if result["isError"] else "succeeded"
+        try:
+            observed = _validated_action_outcome(action, result, observed)
+        except FulcrumError:
+            observed = "uncertain"
+        event_id = _event_id(request.input)
+        DesktopProtocolService(ledger).report_action_result(
+            replace(
+                request,
+                command=("action", "result"),
+                arguments={
+                    "record_id": record.id,
+                    "action_id": str(action["action_id"]),
+                },
+                input={
+                    "record_id": record.id,
+                    "action_id": str(action["action_id"]),
+                    "attempt_id": str(attempt["attempt_id"]),
+                    "outcome": observed,
+                    "evidence": {
+                        "post_hook_event_id": event_id,
+                        "source": "PostToolUse",
+                    },
+                    "native_result": copy.deepcopy(result),
+                },
+                request_id=str(
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"hook-result:{event_id}")
+                ),
             )
-        _replace_attempt(protocol, str(action["action_id"]), attempt, action)
-        ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        )
 
     def _lifecycle(
         self,
@@ -505,28 +584,48 @@ def _retain_callback(
     callbacks[event_id] = copy.deepcopy(dict(value))
 
 
-def _issuing_action(
-    protocol: Mapping[str, Any], value: Mapping[str, Any]
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def _tool_name(value: Mapping[str, Any]) -> str:
+    name = str(value.get("tool_name") or value.get("toolName") or "")
+    return name.rsplit("__", 1)[-1]
+
+
+def _issuing_action_for_actor(
+    ledger: Ledger,
+    bound: tuple[LedgerRecord, str],
+    value: Mapping[str, Any],
+) -> tuple[LedgerRecord, dict[str, Any], dict[str, Any]] | None:
     tool_use_id = value.get("tool_use_id") or value.get("toolUseId")
-    tool_name = str(value.get("tool_name") or value.get("toolName") or "")
-    tool_name = tool_name.rsplit("__", 1)[-1]
-    for candidate in (protocol.get("actions") or {}).values():
-        if not isinstance(candidate, Mapping) or candidate.get("state") != "issuing":
-            continue
-        if str(candidate.get("tool")) != tool_name:
-            continue
-        attempts = candidate.get("attempts")
-        if not isinstance(attempts, list) or not attempts:
-            continue
-        attempt = attempts[-1]
-        if not isinstance(attempt, Mapping):
-            continue
-        claimed_tool_use = attempt.get("native_tool_use_id")
-        if claimed_tool_use and tool_use_id and claimed_tool_use != tool_use_id:
-            continue
-        return copy.deepcopy(dict(candidate)), copy.deepcopy(dict(attempt))
-    return None, None
+    tool_name = _tool_name(value)
+    bound_record, role = bound
+    records = [bound_record]
+    if bound_record.id == "fc-system":
+        records = ledger.list_records(limit=0)
+    for record in records:
+        protocol = _protocol(record.fc or {})
+        for candidate in (protocol.get("actions") or {}).values():
+            if (
+                not isinstance(candidate, Mapping)
+                or candidate.get("state") != "issuing"
+                or candidate.get("executor") != role
+            ):
+                continue
+            if str(candidate.get("tool")) != tool_name:
+                continue
+            attempts = candidate.get("attempts")
+            if not isinstance(attempts, list) or not attempts:
+                continue
+            attempt = attempts[-1]
+            if not isinstance(attempt, Mapping):
+                continue
+            claimed_tool_use = attempt.get("native_tool_use_id")
+            if claimed_tool_use and tool_use_id and claimed_tool_use != tool_use_id:
+                continue
+            return (
+                record,
+                copy.deepcopy(dict(candidate)),
+                copy.deepcopy(dict(attempt)),
+            )
+    return None
 
 
 def _arguments_match(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:

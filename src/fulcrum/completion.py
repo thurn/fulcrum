@@ -1641,6 +1641,19 @@ def _release_desktop_assignment(
     )
     desktop["assignment_history"] = history[-20:]
     fc["desktop"] = desktop
+    if assignment.get("capacity_class") == "recovery":
+        fence = fc.pop("recovery_fence", None)
+        recovery_history = list(fc.get("recovery_history") or [])
+        if isinstance(fence, Mapping):
+            recovery_history.append(
+                {
+                    **dict(fence),
+                    "state": "released",
+                    "released_at": utc_now(),
+                    "release_reason": "accepted outcome and native completion",
+                }
+            )
+            fc["recovery_history"] = recovery_history[-20:]
     owner = "SYSTEM" if current.status == "closed" else "STEWARD"
     fc["owner"] = owner
     fc["role"] = None

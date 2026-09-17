@@ -278,7 +278,7 @@ class WorkService:
         limit = int(request.arguments.get("limit", 20))
         rows: list[dict[str, Any]] = []
         for record in ledger.list_records(limit=0):
-            if record.kind in {"control", "task", "memory", "analytics", "operation"}:
+            if record.kind in {"control", "task", "analytics", "operation"}:
                 continue
             view = work_view(ledger, record)
             if (
@@ -1140,8 +1140,11 @@ def _resolve_native_project(request: ParsedRequest, record: LedgerRecord) -> str
 
 def _marshal_or_human(ledger: Ledger) -> str:
     control = ledger.show("fc-system")
-    if control and control.fc and isinstance(control.fc.get("marshal_thread"), str):
-        return str(control.fc["marshal_thread"])
+    desktop = (control.fc or {}).get("desktop") if control is not None else None
+    standing = desktop.get("standing") if isinstance(desktop, Mapping) else None
+    marshal = standing.get("marshal") if isinstance(standing, Mapping) else None
+    if isinstance(marshal, Mapping) and isinstance(marshal.get("task_id"), str):
+        return str(marshal["task_id"])
     return "HUMAN"
 
 

@@ -85,7 +85,6 @@ TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "submit_candidate": {
         "source": {"type": "string"},
-        "deadline_seconds": {"type": "integer", "minimum": 1},
     },
     "wait_for_ci_results": {"candidate_id": {"type": "string"}},
     "finish": {
@@ -157,6 +156,8 @@ def _schema(name: str) -> dict[str, Any]:
                 "task_id",
                 "session_id",
             ],
+            "register_worker": ["session_id", "turn_id"],
+            "marshal_decide": ["turn_id"],
             "report_progress": ["kind", "summary", "evidence"],
             "submit_candidate": ["source"],
             "wait_for_ci_results": ["candidate_id"],
@@ -225,6 +226,14 @@ class FreshCli:
         arguments = dict(supplied)
         request_id = arguments.pop("request_id", None)
         task_id = arguments.pop("task_id", None) or os.environ.get("CODEX_THREAD_ID")
+        environment_task_id = os.environ.get("CODEX_THREAD_ID")
+        supplied_task_id = supplied.get("task_id")
+        if (
+            environment_task_id
+            and supplied_task_id
+            and str(supplied_task_id) != environment_task_id
+        ):
+            raise ValueError("task_id does not match the current native task")
         host_id = arguments.pop("host_id", None)
         turn_id = arguments.pop("turn_id", None)
         payload = arguments.pop("input", {})
@@ -289,7 +298,8 @@ class FreshCli:
                 "wait_id": waiting.get("wait_id"),
                 "kind": waiting.get("kind"),
                 "interval_seconds": 30 if is_ci else 15,
-                "remaining_seconds": 1800 if is_ci else 3600,
+                "remaining_seconds": max(1, int(waiting.get("remaining_seconds") or 1))
+                + 60,
             },
         )
         _log(name, started, result)

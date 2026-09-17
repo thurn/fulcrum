@@ -136,9 +136,7 @@ class ServiceService:
                 exit_code=4,
             )
         started = [_start(services[name]) for name in ("dolt", "broker")]
-        return CommandResult.query(
-            {"services": started, "shared_runtime_stopped": False}
-        )
+        return CommandResult.query({"services": started})
 
     def stop(self, request: ParsedRequest) -> CommandResult:
         services = _services(request.instance.instance_root)
@@ -171,7 +169,6 @@ class ServiceService:
                 "broker": _stop(broker),
                 "admission_paused": True,
                 "dolt_stopped": False,
-                "shared_runtime_stopped": False,
             }
         )
 

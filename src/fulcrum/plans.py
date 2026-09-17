@@ -1471,7 +1471,10 @@ def _authorize_approver(request: ParsedRequest, ledger: Ledger) -> str:
     if request.actor.kind == "human":
         return "human"
     control = ledger.show("fc-system")
-    vizier = control.fc.get("vizier_thread") if control and control.fc else None
+    desktop = (control.fc or {}).get("desktop") if control is not None else None
+    standing = desktop.get("standing") if isinstance(desktop, Mapping) else None
+    binding = standing.get("vizier") if isinstance(standing, Mapping) else None
+    vizier = binding.get("task_id") if isinstance(binding, Mapping) else None
     if (
         request.actor.kind == "task"
         and request.actor.task_id == vizier

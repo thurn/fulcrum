@@ -11,7 +11,7 @@ from fulcrum.desktop_setup import (
     REQUIRED_ACCEPTANCE,
     REQUIRED_NATIVE_TOOLS,
 )
-from tests.support import MemoryLedger, request
+from tests.support import MemoryLedger, observe_action_prompt, request
 
 
 def bootstrap_request(root: Path, **payload):
@@ -55,6 +55,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         }
         assert set(actions) == {"steward", "marshal", "vizier"}
         for role, action in actions.items():
+            observe_action_prompt(
+                service._ledger_override,
+                action,
+                task_id=f"{role}-task",
+                session_id=f"{role}-session",
+                instance=root / "instance",
+            )
             service.register_standing(
                 replace(
                     bootstrap_request(root),

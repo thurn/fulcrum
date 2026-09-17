@@ -243,15 +243,6 @@ class Tollgate:
             mutating=True,
         )
 
-    def decode_approval_stream(
-        self, output: str, repository_id: str, candidate_id: str
-    ) -> dict[str, Any]:
-        """Normalize retained legacy wait output without invoking a blocking wait."""
-
-        result = _parse_approval_stream(output, repository_id, candidate_id)
-        assert isinstance(result, dict)
-        return result
-
     def diagnose(self, repository_id: str, candidate_id: str) -> dict[str, Any]:
         """Read retained failure evidence without requesting a replay."""
 
@@ -282,93 +273,3 @@ def _is_structured_rejection(value: str) -> bool:
     except json.JSONDecodeError:
         return False
     return isinstance(payload, dict) and isinstance(payload.get("error"), dict)
-
-
-_APPROVAL_SUCCESS_STATES: set[str] = {"promoted", "externally-integrated"}
-_TERMINAL_STATES: set[str] = _APPROVAL_SUCCESS_STATES | {
-    "failed",
-    "merge-conflict",
-    "dependency-failed",
-    "canceled",
-    "superseded",
-    "infrastructure-exhausted",
-    "check-passed",
-    "check-failed",
-}
-
-
-def _parse_approval_stream(
-    output: str, repository_id: str, candidate_id: str
-) -> dict[str, Any]:
-    """Decode the JSON Lines contract emitted by ``tg approve --wait``."""
-
-    lines = output.splitlines()
-    if len(lines) < 2:
-        raise ValueError("approval stream omitted its authorization or wait status")
-
-    documents: list[dict[str, Any]] = []
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            raise ValueError(f"approval stream line {line_number} is empty")
-        try:
-            document = json.loads(line)
-        except json.JSONDecodeError as error:
-            raise ValueError(
-                f"approval stream line {line_number} is not JSON"
-            ) from error
-        if not isinstance(document, dict):
-            raise ValueError(f"approval stream line {line_number} is not an object")
-        documents.append(document)
-
-    authorization = documents[0]
-    already_authorized = authorization.get("already_authorized")
-    authorized_item_ids = authorization.get("authorized_item_ids")
-    if authorization.get("item_id") != candidate_id:
-        raise ValueError("approval authorization identifies a different candidate")
-    if not isinstance(already_authorized, bool):
-        raise ValueError("approval authorization omitted its authorization state")
-    if not isinstance(authorized_item_ids, list) or not all(
-        isinstance(item_id, str) for item_id in authorized_item_ids
-    ):
-        raise ValueError("approval authorization omitted its candidate set")
-    if not already_authorized and candidate_id not in authorized_item_ids:
-        raise ValueError("approval authorization excludes the requested candidate")
-
-    wait_statuses = documents[1:]
-    for index, status in enumerate(wait_statuses, start=2):
-        item = status.get("item")
-        if not isinstance(item, dict):
-            raise ValueError(f"approval wait status on line {index} omitted its item")
-        if item.get("id") != candidate_id:
-            raise ValueError(
-                f"approval wait status on line {index} identifies a different candidate"
-            )
-        if item.get("repository_id") != repository_id:
-            raise ValueError(
-                f"approval wait status on line {index} identifies a different repository"
-            )
-        if not isinstance(item.get("state"), str):
-            raise ValueError(f"approval wait status on line {index} omitted its state")
-        if not isinstance(status.get("repository_execution_state"), str):
-            raise ValueError(
-                f"approval wait status on line {index} omitted repository execution state"
-            )
-        if not isinstance(status.get("block_reasons"), list):
-            raise ValueError(
-                f"approval wait status on line {index} omitted repository block reasons"
-            )
-
-    terminal = wait_statuses[-1]["item"]["state"]
-    if terminal not in _APPROVAL_SUCCESS_STATES:
-        raise ValueError(
-            "successful approval stream did not end in a promoted candidate"
-        )
-    if any(
-        status["item"]["state"] in _TERMINAL_STATES for status in wait_statuses[:-1]
-    ):
-        raise ValueError("approval stream continued after a terminal candidate status")
-
-    return {
-        "authorization": authorization,
-        "wait_statuses": wait_statuses,
-    }

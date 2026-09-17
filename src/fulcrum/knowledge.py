@@ -527,7 +527,15 @@ def _authorize_publication(
         return
     control = ledger.show("fc-system")
     control_fc = control.fc if control is not None and control.fc else {}
-    if actor in {control_fc.get("marshal_thread"), control_fc.get("vizier_thread")}:
+    desktop = control_fc.get("desktop")
+    standing = desktop.get("standing") if isinstance(desktop, Mapping) else None
+    leaders = {
+        binding.get("task_id")
+        for role in ("marshal", "vizier")
+        if isinstance(standing, Mapping)
+        and isinstance((binding := standing.get(role)), Mapping)
+    }
+    if actor in leaders:
         return
     raise FulcrumError(
         "OWNERSHIP_CONFLICT",
@@ -540,7 +548,10 @@ def _authorize_config_publication(request: ParsedRequest, ledger: Ledger) -> Non
     if request.actor.kind in {"human", "system"}:
         return
     control = ledger.show("fc-system")
-    vizier = (control.fc or {}).get("vizier_thread") if control is not None else None
+    desktop = (control.fc or {}).get("desktop") if control is not None else None
+    standing = desktop.get("standing") if isinstance(desktop, Mapping) else None
+    binding = standing.get("vizier") if isinstance(standing, Mapping) else None
+    vizier = binding.get("task_id") if isinstance(binding, Mapping) else None
     actor = request.thread_id or request.actor.task_id
     if request.actor.kind == "task" and actor == vizier:
         return

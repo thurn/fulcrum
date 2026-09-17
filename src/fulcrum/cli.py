@@ -432,7 +432,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "evidence",
         "native_result",
     },
-    ("instruction", "wait"): {"turn_id", "loop_id", "idle_seconds"},
+    ("instruction", "wait"): {"turn_id", "loop_id"},
     ("worker", "register"): {
         "bead",
         "assignment_token",
@@ -448,13 +448,12 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "bead",
         "assignment_token",
         "source",
-        "deadline_seconds",
     },
     ("ci", "wait"): {"bead", "candidate_id", "assignment_token", "turn_id"},
     ("pause",): {"reason"},
     ("resume",): {"reason"},
     ("marshal", "check"): {"turn_id", "trigger", "schedule_id"},
-    ("marshal", "apply"): {"decision_id", "decisions"},
+    ("marshal", "apply"): {"decision_id", "decisions", "turn_id"},
     ("incident", "report"): {
         "bead",
         "incident_key",
@@ -463,7 +462,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "evidence",
     },
     ("repair", "record"): {"bead", "incident_key", "outcome", "evidence"},
-    ("recovery", "prepare"): {"bead", "incident_key", "scope", "target"},
+    ("recovery", "prepare"): {"bead", "incident_key", "scope"},
     ("decision", "respond"): {
         "bead",
         "decision_id",
@@ -611,7 +610,6 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
 
 
 DIRECT_INPUTS: dict[tuple[str, ...], dict[str, str]] = {
-    ("enter",): {"description": "description", "bead": "bead"},
     ("finish",): {"outcome": "outcome", "bead": "bead"},
     ("progress",): {
         "kind": "kind",
@@ -735,16 +733,33 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     )
     environment_task = os.environ.get("CODEX_THREAD_ID")
     explicit_actor = values.get("actor")
-    thread_id = values.get("thread_id") or (
-        None
-        if explicit_actor == "human" or command in {("setup",), ("bootstrap",)}
-        else environment_task
-    )
-    actor_text = values.get("actor") or (
-        "human"
-        if command in {("setup",), ("bootstrap",)}
-        else f"task:{thread_id}" if thread_id else "human"
-    )
+    bootstrap_authority = command in {("setup",), ("bootstrap",)}
+    if environment_task and not bootstrap_authority:
+        if values.get("thread_id") not in {
+            None,
+            environment_task,
+        } or explicit_actor not in {
+            None,
+            f"task:{environment_task}",
+        }:
+            raise FulcrumError(
+                "AUTHORITY_MISMATCH",
+                "a native task cannot claim another task or human identity",
+                exit_code=5,
+            )
+        thread_id = environment_task
+        actor_text = f"task:{environment_task}"
+    else:
+        thread_id = values.get("thread_id") or (
+            None
+            if explicit_actor == "human" or bootstrap_authority
+            else environment_task
+        )
+        actor_text = values.get("actor") or (
+            "human"
+            if bootstrap_authority
+            else f"task:{thread_id}" if thread_id else "human"
+        )
     actor = ActorContext.parse(actor_text)
     common = {
         "_command_path",
@@ -828,7 +843,6 @@ def _exit_code(result: dict[str, Any]) -> int:
     }:
         return 5
     if result.get("state") == "uncertain" or code in {
-        "CONTROLLER_UNAVAILABLE",
         "WRITER_BUSY",
         "CAPABILITY_UNAVAILABLE",
         "CONFIG_NOT_FOUND",

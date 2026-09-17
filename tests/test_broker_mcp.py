@@ -13,6 +13,37 @@ from fulcrum.mcp_server import FreshCli, McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mcp_wait_uses_policy_deadline_plus_wrapper_margin(self):
+        captured = {}
+
+        async def fresh(argv, stdin):
+            return {
+                "ok": True,
+                "state": "running",
+                "result": {
+                    "transport_wait": {
+                        "kind": "instruction",
+                        "wait_id": "wait-policy",
+                        "remaining_seconds": 7,
+                    }
+                },
+            }
+
+        async def broker(path, payload):
+            captured.update(payload)
+            return {"ok": True, "state": "completed"}
+
+        cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
+        with (
+            patch("fulcrum.broker.run_fresh", fresh),
+            patch("fulcrum.mcp_server.broker_request", broker),
+        ):
+            await cli.run(
+                "wait_for_instructions",
+                {"request_id": "89170642-a734-4735-a272-7b0d41e006d8"},
+            )
+        self.assertEqual(captured["remaining_seconds"], 67)
+
     async def test_transcript_change_wakes_wait_before_timer(self):
         with tempfile.TemporaryDirectory() as directory:
             transcript = Path(directory) / "rollout.jsonl"

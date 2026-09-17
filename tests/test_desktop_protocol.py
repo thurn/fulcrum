@@ -9,7 +9,13 @@ from unittest.mock import patch
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError
 from fulcrum.completion import settle_native_completion
 from fulcrum.desktop_protocol import DesktopProtocolService
-from tests.support import MemoryLedger, record, request
+from tests.support import (
+    MemoryLedger,
+    observe_action_prompt,
+    record,
+    request,
+    seed_action,
+)
 
 
 def mutation(command, *, actor="human", arguments=None, payload=None, request_id=None):
@@ -29,17 +35,16 @@ def registered_service(*work):
     service = DesktopProtocolService(
         ledger, now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc)
     )
-    action = service.queue_action(
-        mutation(
-            ("action", "queue"),
-            payload={
-                "executor": "bootstrap",
-                "tool": "create_thread",
-                "arguments": {"prompt": "register steward"},
-                "purpose": "bootstrap_steward",
-            },
-        )
-    ).result["action"]
+    action = seed_action(
+        ledger,
+        {
+            "executor": "bootstrap",
+            "tool": "create_thread",
+            "arguments": {"prompt": "register steward"},
+            "purpose": "bootstrap_steward",
+        },
+    )
+    observe_action_prompt(ledger, action, task_id="steward-1", session_id="s1")
     service.register_standing(
         mutation(
             ("register", "standing"),
@@ -55,18 +60,17 @@ def registered_service(*work):
 
 
 def test_equal_action_claim_replays_without_authorizing_second_invocation():
-    service, _ = registered_service()
-    queued = service.queue_action(
-        mutation(
-            ("action", "queue"),
-            payload={
-                "record_id": "fc-system",
-                "executor": "steward",
-                "tool": "send_message_to_thread",
-                "arguments": {"threadId": "worker-1", "prompt": "continue"},
-            },
-        )
-    ).result["action"]
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    queued = seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "send_message_to_thread",
+            "arguments": {"threadId": "worker-1", "prompt": "continue"},
+        },
+    )
     request_id = str(uuid.uuid4())
     claim = mutation(
         ("action", "claim"),
@@ -88,36 +92,61 @@ def test_equal_action_claim_replays_without_authorizing_second_invocation():
         raise AssertionError("changed request input was accepted")
 
 
-def test_managed_task_cannot_inject_native_action():
-    service, _ = registered_service()
+def test_registration_requires_and_consumes_trusted_prompt_handshake():
+    ledger = MemoryLedger()
+    service = DesktopProtocolService(ledger)
+    action = seed_action(
+        ledger,
+        {
+            "executor": "bootstrap",
+            "tool": "create_thread",
+            "arguments": {"prompt": "register steward"},
+            "purpose": "bootstrap_steward",
+        },
+    )
+    registration = mutation(
+        ("register", "standing"),
+        payload={
+            "role": "steward",
+            "task_id": "steward-1",
+            "session_id": "session-1",
+            "action_id": action["action_id"],
+        },
+    )
     with unittest.TestCase().assertRaises(FulcrumError) as raised:
-        service.queue_action(
-            mutation(
-                ("action", "queue"),
-                actor="task:steward-1",
-                payload={
-                    "executor": "steward",
-                    "tool": "create_thread",
-                    "arguments": {"prompt": "unauthorized"},
-                },
-            )
-        )
-    assert raised.exception.code == "AUTHORITY_MISMATCH"
+        service.register_standing(registration)
+    assert raised.exception.code == "REGISTRATION_OBSERVATION_REQUIRED"
+    observe_action_prompt(
+        ledger,
+        action,
+        task_id="steward-1",
+        session_id="session-1",
+    )
+    service.register_standing(registration)
+    handshake = next(
+        iter((ledger.show("fc-system").fc or {})["desktop"]["handshakes"].values())
+    )
+    assert handshake["disposition"] == "registered"
+    assert handshake["consumed_at"]
+
+
+def test_production_service_has_no_action_injection_api():
+    service, _ = registered_service()
+    assert not hasattr(service, "queue_action")
 
 
 def test_successful_creation_compiles_exact_title_normalization():
-    service, _ = registered_service()
-    action = service.queue_action(
-        mutation(
-            ("action", "queue"),
-            payload={
-                "executor": "steward",
-                "tool": "create_thread",
-                "arguments": {"prompt": "work", "title": "EXECUTOR fc-a"},
-                "purpose": "test_creation",
-            },
-        )
-    ).result["action"]
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "work", "title": "EXECUTOR fc-a"},
+            "purpose": "test_creation",
+        },
+    )
     service.claim_action(
         mutation(
             ("action", "claim"),
@@ -143,7 +172,7 @@ def test_successful_creation_compiles_exact_title_normalization():
         mutation(
             ("instruction", "wait"),
             actor="task:steward-1",
-            payload={"loop_id": "titles"},
+            payload={"loop_id": "titles", "turn_id": "turn-titles"},
         )
     )
     assert result.result["action"]["tool"] == "set_thread_title"
@@ -167,7 +196,7 @@ def test_closed_settled_worker_compiles_archive_action():
         mutation(
             ("instruction", "wait"),
             actor="task:steward-1",
-            payload={"loop_id": "archive"},
+            payload={"loop_id": "archive", "turn_id": "turn-archive"},
         )
     )
     assert result.result["action"]["tool"] == "set_thread_archived"
@@ -178,17 +207,15 @@ def test_closed_settled_worker_compiles_archive_action():
 def test_steward_selects_ready_action_without_marshal_and_pause_holds_it():
     work = record("fc-a", phase="ready", priority=1)
     service, ledger = registered_service(work)
-    service.queue_action(
-        mutation(
-            ("action", "queue"),
-            payload={
-                "record_id": "fc-a",
-                "executor": "steward",
-                "tool": "create_thread",
-                "arguments": {"prompt": "implement"},
-                "assignment_token": "assignment-1",
-            },
-        )
+    seed_action(
+        ledger,
+        {
+            "record_id": "fc-a",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "implement"},
+            "assignment_token": "assignment-1",
+        },
     )
     wait_request = mutation(
         ("instruction", "wait"),
@@ -226,7 +253,9 @@ def test_ci_wait_is_transport_state_and_keeps_assignment_active():
             },
         },
     )
-    service = DesktopProtocolService(MemoryLedger(work))
+    service = DesktopProtocolService(
+        MemoryLedger(work), now=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc)
+    )
     with patch(
         "fulcrum.delivery_service.DeliveryService.validation_show",
         return_value=CommandResult.query({"state": "running"}),
@@ -253,6 +282,7 @@ def test_ci_wait_recovers_candidate_created_by_finish_validation():
         delivery={
             "source_oid": "abc",
             "provider_handle": "provider-1",
+            "ci_deadline": "2026-09-16T00:30:00Z",
             "validation": {"state": "pending", "facts": {"handle": "provider-1"}},
         },
         desktop={
@@ -364,17 +394,25 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
         "fc-a",
         phase="ready",
         requested_role="executor",
-        worktree={"path": "/tmp/managed-worktree"},
+        worktree={"path": "/tmp/managed-worktree", "branch": "fc-a"},
         codex_project_id="project-1",
+        models={"executor": {"model": "gpt-6-astra", "effort": "xhigh"}},
     )
     service, _ = registered_service(work)
     service.resume(mutation(("resume",), payload={"reason": "acceptance"}))
     result = service.wait_for_instructions(
-        mutation(("instruction", "wait"), actor="task:steward-1")
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "dispatch", "turn_id": "turn-dispatch"},
+        )
     )
     assert result.result["kind"] == "action"
     assert result.result["action"]["arguments"]["prompt"].startswith("Fulcrum-Action:")
     assert "/tmp/managed-worktree" in result.result["action"]["arguments"]["prompt"]
+    assert "$fulcrum-executor" in result.result["action"]["arguments"]["prompt"]
+    assert result.result["action"]["arguments"]["model"] == "gpt-6-astra"
+    assert result.result["action"]["arguments"]["thinking"] == "xhigh"
 
 
 def test_assignment_releases_only_after_exact_native_completion():
@@ -447,11 +485,10 @@ def test_assignment_history_uses_completing_native_turn():
             },
         )
     )
-    assert settle_native_completion(
+    assert not settle_native_completion(
         replace(request(), input={"turn_id": "turn-real"}), ledger, "fc-a"
     )
-    history = (ledger.show("fc-a").fc or {})["desktop"]["assignment_history"]
-    assert history[-1]["turn_id"] == "turn-real"
+    assert "assignment_history" not in (ledger.show("fc-a").fc or {})["desktop"]
 
 
 def test_recovery_slot_releases_after_finish_and_native_completion():
@@ -505,21 +542,106 @@ def test_transition_limit_fences_new_mutation():
     retained = {
         str(uuid.uuid4()): {"state": "completed", "result": {}} for _ in range(128)
     }
-    ledger = MemoryLedger(record("fc-a", desktop={"requests": retained}))
+    ledger = MemoryLedger(
+        record(
+            "fc-system",
+            kind="control",
+            desktop={"run_control": "running", "requests": retained},
+        )
+    )
     service = DesktopProtocolService(ledger)
     with unittest.TestCase().assertRaises(FulcrumError) as raised:
-        service.queue_action(
+        service.pause(mutation(("pause",), payload={"reason": "test"}))
+    assert raised.exception.code == "TRANSITION_STORAGE_BLOCKED"
+
+
+def test_projected_request_journal_prunes_locally_and_replays_durably():
+    ledger = MemoryLedger(
+        record(
+            "fc-system",
+            kind="control",
+            desktop={"run_control": "running", "requests": {}},
+        )
+    )
+    service = DesktopProtocolService(ledger)
+    first = mutation(("pause",), payload={"reason": "cycle-0"})
+    expected = service.pause(first)
+    for index in range(1, 140):
+        service.pause(mutation(("pause",), payload={"reason": f"cycle-{index}"}))
+    protocol = (ledger.show("fc-system").fc or {})["desktop"]
+    assert len(protocol["requests"]) <= 33
+    assert first.request_id not in protocol["requests"]
+    replayed = service.pause(first)
+    assert replayed.result == expected.result
+
+
+def test_steward_must_settle_granted_action_before_next_wait():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "send_message_to_thread",
+            "arguments": {"threadId": "worker-1", "prompt": "continue"},
+        },
+    )
+    service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "loop-1", "turn_id": "turn-1"},
+        )
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.wait_for_instructions(
             mutation(
-                ("action", "queue"),
+                ("instruction", "wait"),
+                actor="task:steward-1",
+                payload={"loop_id": "loop-1", "turn_id": "turn-1"},
+            )
+        )
+    assert raised.exception.code == "ACTION_RESULT_REQUIRED"
+
+
+def test_create_result_requires_native_identity_evidence():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-system",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "work"},
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "attempt-invalid-result"},
+        )
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.report_action_result(
+            mutation(
+                ("action", "result"),
+                actor="task:steward-1",
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": action["action_id"],
+                },
                 payload={
-                    "record_id": "fc-a",
-                    "executor": "steward",
-                    "tool": "read_thread",
-                    "arguments": {"threadId": "worker-1"},
+                    "attempt_id": "attempt-invalid-result",
+                    "outcome": "succeeded",
+                    "native_result": {},
                 },
             )
         )
-    assert raised.exception.code == "TRANSITION_STORAGE_BLOCKED"
+    assert raised.exception.code == "RESULT_EVIDENCE_REQUIRED"
 
 
 def test_dispatch_blocks_overlapping_active_work():
@@ -547,7 +669,11 @@ def test_dispatch_blocks_overlapping_active_work():
     service, _ = registered_service(active, candidate)
     service.resume(mutation(("resume",), payload={"reason": "test"}))
     result = service.wait_for_instructions(
-        mutation(("instruction", "wait"), actor="task:steward-1")
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "overlap", "turn_id": "turn-overlap"},
+        )
     )
     assert result.state.value == "running"
     assert result.result["transport_wait"]["kind"] == "instruction"
@@ -578,7 +704,11 @@ def test_dispatch_blocks_disabled_project():
         manager.return_value.load.return_value = ({}, None)
         manager.return_value.effective.return_value = config
         result = service.wait_for_instructions(
-            mutation(("instruction", "wait"), actor="task:steward-1")
+            mutation(
+                ("instruction", "wait"),
+                actor="task:steward-1",
+                payload={"loop_id": "disabled", "turn_id": "turn-disabled"},
+            )
         )
     assert result.state.value == "running"
 
@@ -596,19 +726,17 @@ def test_claim_supersedes_dispatch_when_admission_is_paused():
         },
     )
     service, ledger = registered_service(work)
-    action = service.queue_action(
-        mutation(
-            ("action", "queue"),
-            payload={
-                "record_id": "fc-a",
-                "executor": "steward",
-                "tool": "create_thread",
-                "arguments": {"prompt": "work"},
-                "assignment_token": "assignment-1",
-                "purpose": "routine_dispatch",
-            },
-        )
-    ).result["action"]
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-a",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "work"},
+            "assignment_token": "assignment-1",
+            "purpose": "routine_dispatch",
+        },
+    )
     with unittest.TestCase().assertRaises(FulcrumError) as raised:
         service.claim_action(
             mutation(
@@ -624,8 +752,11 @@ def test_claim_supersedes_dispatch_when_admission_is_paused():
 
 
 class DesktopProtocolTests(unittest.TestCase):
+    def test_registration_requires_trusted_handshake(self):
+        test_registration_requires_and_consumes_trusted_prompt_handshake()
+
     def test_managed_task_cannot_inject_action(self):
-        test_managed_task_cannot_inject_native_action()
+        test_production_service_has_no_action_injection_api()
 
     def test_creation_normalizes_title(self):
         test_successful_creation_compiles_exact_title_normalization()
@@ -654,7 +785,7 @@ class DesktopProtocolTests(unittest.TestCase):
     def test_native_completion_releases_assignment(self):
         test_assignment_releases_only_after_exact_native_completion()
 
-    def test_native_completion_retains_actual_turn(self):
+    def test_native_completion_rejects_another_turn(self):
         test_assignment_history_uses_completing_native_turn()
 
     def test_native_completion_releases_recovery_slot(self):
@@ -662,6 +793,15 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_transition_limit_blocks_new_mutation(self):
         test_transition_limit_fences_new_mutation()
+
+    def test_projected_journal_prunes_and_replays(self):
+        test_projected_request_journal_prunes_locally_and_replays_durably()
+
+    def test_steward_settles_before_next_wait(self):
+        test_steward_must_settle_granted_action_before_next_wait()
+
+    def test_create_result_requires_identity(self):
+        test_create_result_requires_native_identity_evidence()
 
     def test_dispatch_blocks_overlapping_work(self):
         test_dispatch_blocks_overlapping_active_work()

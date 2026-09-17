@@ -32,6 +32,7 @@ from fulcrum.ledger import (
     utc_now,
 )
 from fulcrum.tollgate import Tollgate, TollgateError
+from fulcrum.desktop_protocol import _protocol, require_run_control
 
 T = TypeVar("T")
 TERMINAL_STATES = {"completed", "failed", "uncertain", "cancelled"}
@@ -43,6 +44,7 @@ class DeliveryService:
     def worktree_prepare(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
+        require_run_control(ledger, "workspace preparation")
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
@@ -101,6 +103,7 @@ class DeliveryService:
     def worktree_cleanup(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
+        require_run_control(ledger, "workspace cleanup")
         _require_cleanup_settled(work)
         operation, reused = ledger.create_operation(
             request,
@@ -228,6 +231,7 @@ class DeliveryService:
     def validation_start(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
+        require_run_control(ledger, "provider validation submission")
         source_oid = str(request.arguments["source"])
         reference = _work_ref(request, work, project, _workspace_operation(work))
         source = SourceRef(reference, source_oid)
@@ -458,6 +462,7 @@ class DeliveryService:
     def promotion_start(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize_warden(ledger, request, work)
+        require_run_control(ledger, "promotion")
         source, handle = _retained_delivery_source(request, work, project)
         requested_source = str(request.arguments["source"])
         if requested_source != source.oid:
@@ -549,6 +554,7 @@ class DeliveryService:
     def source_sync(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
+        require_run_control(ledger, "source synchronization")
         source, handle = _retained_delivery_source(request, work, project)
         operation, reused = ledger.create_operation(
             request,
@@ -924,7 +930,15 @@ def _authorize(ledger: Ledger, request: ParsedRequest, work: LedgerRecord) -> No
         return
     fc = work.fc or {}
     control = ledger.show("fc-system")
-    marshal = str(control.fc.get("marshal_thread")) if control and control.fc else None
+    standing = (
+        _protocol(control.fc or {}).get("standing") if control is not None else None
+    )
+    marshal_binding = standing.get("marshal") if isinstance(standing, Mapping) else None
+    marshal = (
+        str(marshal_binding.get("task_id"))
+        if isinstance(marshal_binding, Mapping) and marshal_binding.get("task_id")
+        else None
+    )
     if request.thread_id == marshal:
         return
     if (

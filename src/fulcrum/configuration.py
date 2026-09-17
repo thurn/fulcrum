@@ -338,6 +338,18 @@ class ConfigurationManager:
         _known(timing, set(default_config(brain_root)["timing"]), "timing")
         for key, value in timing.items():
             _positive_number(value, f"timing.{key}")
+        minimum_tool_timeout = (
+            max(
+                float(timing["instruction_idle_seconds"]),
+                float(timing["ci_deadline_seconds"]),
+            )
+            + 60
+        )
+        if float(timing["mcp_tool_timeout_seconds"]) < minimum_tool_timeout:
+            raise _invalid(
+                "timing.mcp_tool_timeout_seconds",
+                "must exceed the longest application wait by at least 60 seconds",
+            )
         diagnostics = _mapping(effective["diagnostics"], "diagnostics")
         _known(
             diagnostics, set(default_config(brain_root)["diagnostics"]), "diagnostics"
@@ -514,9 +526,9 @@ class ConfigurationService:
                 "path": str(manager.path),
                 "changed_fields": changed,
                 "restart_required": _restart_required(changed),
-                "publication": {"state": "pending", "capability": "not_implemented"},
+                "publication": {"state": "pending"},
             },
-            next_action="Publish the selected configuration path when the publication adapter is available.",
+            next_action="Run config sync to publish the selected configuration path.",
         )
         return _operation_command_result(operation)
 
@@ -724,10 +736,14 @@ def _require_config_authority(request: ParsedRequest, ledger: Ledger) -> None:
     if request.actor.kind == "task" and request.actor.task_id:
         control = ledger.show("fc-system")
         fc = control.fc if control else None
+        desktop = fc.get("desktop") if isinstance(fc, Mapping) else None
+        standing = desktop.get("standing") if isinstance(desktop, Mapping) else None
+        binding = standing.get("vizier") if isinstance(standing, Mapping) else None
         if (
             fc
             and fc.get("kind") == "control"
-            and fc.get("vizier_thread") == request.actor.task_id
+            and isinstance(binding, Mapping)
+            and binding.get("task_id") == request.actor.task_id
         ):
             return
     raise FulcrumError(

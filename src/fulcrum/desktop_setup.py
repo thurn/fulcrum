@@ -70,7 +70,7 @@ STANDING = {
         "title": "🧭 MARSHAL 🧭",
         "model": "gpt-5.6-sol",
         "prompt": (
-            "First call register_standing with role `marshal` and the action_id from "
+            "$fulcrum-marshal\nFirst call register_standing with role `marshal` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id. On scheduled prompts call "
             "marshal_check, settle only the returned bounded curation or recovery scope, and "
@@ -81,7 +81,7 @@ STANDING = {
         "title": "🔮 VIZIER 🔮",
         "model": "gpt-5.6-sol",
         "prompt": (
-            "First call register_standing with role `vizier` and the action_id from "
+            "$fulcrum-vizier\nFirst call register_standing with role `vizier` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id. Present exact retained human "
             "decisions and record only the authority the human explicitly grants."
@@ -178,7 +178,12 @@ def prepare_bootstrap_primitives(request: ParsedRequest) -> dict[str, Any]:
 
 
 def install_codex_mcp_config(
-    path: Path, *, instance: Path, config: Path, executable: Path
+    path: Path,
+    *,
+    instance: Path,
+    config: Path,
+    executable: Path,
+    tool_timeout_seconds: int,
 ) -> dict[str, Any]:
     """Install one owned TOML block while preserving unrelated Codex settings."""
 
@@ -200,7 +205,7 @@ def install_codex_mcp_config(
         f"command = {escaped_command}\n"
         f'args = ["--instance", {escaped_instance}, "--config", {escaped_config}]\n'
         "startup_timeout_sec = 10\n"
-        "tool_timeout_sec = 3900\n"
+        f"tool_timeout_sec = {tool_timeout_seconds}\n"
         "required = true\n"
         'default_tools_approval_mode = "auto"\n'
         f"{end}"
@@ -237,7 +242,7 @@ class DesktopSetupService(DesktopProtocolService):
             seed_bundled_rates(ledger)
         system = self._system(ledger)
         protocol = _protocol(system.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
         instance = request.instance.instance_root.resolve(strict=False)
@@ -259,6 +264,9 @@ class DesktopSetupService(DesktopProtocolService):
             instance=instance,
             config=request.instance.config_path,
             executable=executable,
+            tool_timeout_seconds=self._timing_seconds(
+                request, "mcp_tool_timeout_seconds", 3900
+            ),
         )
         skills = reconcile_skills(
             instance,
@@ -305,19 +313,42 @@ class DesktopSetupService(DesktopProtocolService):
             else set()
         )
         missing_tools = sorted(REQUIRED_NATIVE_TOOLS.difference(available_tools))
+        configured_models: Mapping[str, Any] = {}
+        try:
+            manager = ConfigurationManager(request.instance.config_path)
+            document, _ = manager.load()
+            configured_models = manager.effective(document)["models"]
+        except FulcrumError:
+            pass
+
+        def role_model(role: str, definition: Mapping[str, Any]) -> tuple[str, str]:
+            selected = configured_models.get(role)
+            model = (
+                selected.get("model")
+                if isinstance(selected, Mapping)
+                else definition["model"]
+            )
+            effort = (
+                selected.get("effort")
+                if isinstance(selected, Mapping)
+                else request.input.get(f"{role}_thinking", "high")
+            )
+            return str(model), str(effort)
+
         model_support = request.input.get("model_support")
         missing_models: list[str] = []
         if isinstance(model_support, Mapping):
             for role, definition in STANDING.items():
-                efforts = model_support.get(definition["model"])
-                if (
-                    not isinstance(efforts, list)
-                    or request.input.get(f"{role}_thinking", "high") not in efforts
-                ):
-                    missing_models.append(str(definition["model"]))
+                model, effort = role_model(role, definition)
+                efforts = model_support.get(model)
+                if not isinstance(efforts, list) or effort not in efforts:
+                    missing_models.append(model)
         else:
             missing_models = sorted(
-                {str(value["model"]) for value in STANDING.values()}
+                {
+                    role_model(role, definition)[0]
+                    for role, definition in STANDING.items()
+                }
             )
         setup = dict(protocol.get("setup") or {})
         setup.update(
@@ -365,6 +396,7 @@ class DesktopSetupService(DesktopProtocolService):
             )
             if existing_recovery is None:
                 definition = STANDING[role]
+                model, effort = role_model(role, definition)
                 action_id = _opaque("action")
                 actions[action_id] = {
                     "action_id": action_id,
@@ -374,8 +406,8 @@ class DesktopSetupService(DesktopProtocolService):
                     "arguments": {
                         "prompt": definition["prompt"],
                         "title": definition["title"],
-                        "model": definition["model"],
-                        "thinking": request.input.get(f"{role}_thinking", "high"),
+                        "model": model,
+                        "thinking": effort,
                         "target": {"type": "projectless"},
                     },
                     "expected_result": {"threadId": f"replacement {role}"},
@@ -404,6 +436,7 @@ class DesktopSetupService(DesktopProtocolService):
             ):
                 continue
             action_id = _opaque("action")
+            model, effort = role_model(role, definition)
             actions[action_id] = {
                 "action_id": action_id,
                 "record_id": system.id,
@@ -412,8 +445,8 @@ class DesktopSetupService(DesktopProtocolService):
                 "arguments": {
                     "prompt": definition["prompt"],
                     "title": definition["title"],
-                    "model": definition["model"],
-                    "thinking": request.input.get(f"{role}_thinking", "high"),
+                    "model": model,
+                    "thinking": effort,
                     "target": {"type": "projectless"},
                 },
                 "expected_result": {"threadId": f"registered {role}"},
@@ -618,7 +651,7 @@ class DesktopSetupService(DesktopProtocolService):
             "mcp": mcp,
             "hooks": skills.get("hook"),
         }
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
         if ready:
             fence = instance / "maintenance-fence.json"

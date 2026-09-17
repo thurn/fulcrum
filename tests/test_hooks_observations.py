@@ -11,7 +11,13 @@ from fulcrum.contracts import ActorContext
 from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.hooks import HookService
 from fulcrum.observations import read_transcript
-from tests.support import MemoryLedger, request
+from tests.support import (
+    MemoryLedger,
+    observe_action_prompt,
+    record,
+    request,
+    seed_action,
+)
 
 
 class ObservationTests(unittest.TestCase):
@@ -34,21 +40,115 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
-    def test_registered_transcript_collects_delayed_writes(self):
-        ledger = MemoryLedger()
+    def test_steward_hook_claim_is_resolved_on_owning_work_record(self):
+        ledger = MemoryLedger(record("fc-work"))
         desktop = DesktopProtocolService(ledger)
-        action = desktop.queue_action(
+        registration = seed_action(
+            ledger,
+            {
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register steward"},
+                "purpose": "bootstrap_steward",
+            },
+        )
+        observe_action_prompt(
+            ledger,
+            registration,
+            task_id="steward-1",
+            session_id="session-1",
+        )
+        desktop.register_standing(
             replace(
-                request(("action", "queue")),
+                request(("register", "standing")),
                 input={
-                    "executor": "bootstrap",
-                    "tool": "create_thread",
-                    "arguments": {"prompt": "register steward"},
-                    "purpose": "bootstrap_steward",
+                    "role": "steward",
+                    "task_id": "steward-1",
+                    "session_id": "session-1",
+                    "action_id": registration["action_id"],
                 },
                 request_id=str(uuid.uuid4()),
             )
-        ).result["action"]
+        )
+        desktop.resume(
+            replace(
+                request(("resume",)),
+                input={"reason": "test"},
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        action = seed_action(
+            ledger,
+            {
+                "record_id": "fc-work",
+                "executor": "steward",
+                "tool": "send_message_to_thread",
+                "arguments": {"threadId": "worker-1", "prompt": "continue"},
+            },
+        )
+        desktop.claim_action(
+            replace(
+                request(("action", "claim")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                arguments={
+                    "record_id": "fc-work",
+                    "action_id": action["action_id"],
+                },
+                input={"attempt_id": "attempt-1"},
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        hook = HookService(ledger)
+        common = {
+            "tool_name": "mcp__codex_app__send_message_to_thread",
+            "tool_input": {
+                "threadId": "worker-1",
+                "prompt": "Fulcrum-Action: {}\ncontinue",
+            },
+            "tool_use_id": "tool-1",
+        }
+        pre = hook.handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={"hook_event_name": "PreToolUse", **common},
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertNotIn("hookSpecificOutput", pre.result)
+        hook.handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={
+                    "hook_event_name": "PostToolUse",
+                    **common,
+                    "tool_response": {"isError": False, "messageId": "message-1"},
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        retained = (ledger.show("fc-work").fc or {})["desktop"]["actions"]
+        self.assertEqual(retained[action["action_id"]]["state"], "succeeded")
+
+    def test_registered_transcript_collects_delayed_writes(self):
+        ledger = MemoryLedger()
+        desktop = DesktopProtocolService(ledger)
+        action = seed_action(
+            ledger,
+            {
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register steward"},
+                "purpose": "bootstrap_steward",
+            },
+        )
+        observe_action_prompt(
+            ledger, action, task_id="steward-1", session_id="session-1"
+        )
         desktop.register_standing(
             replace(
                 request(("register", "standing")),
@@ -102,19 +202,22 @@ class HookTests(unittest.TestCase):
         desktop = DesktopProtocolService(ledger)
         bindings = {}
         for role in ("steward", "marshal"):
-            action = desktop.queue_action(
-                replace(
-                    request(("action", "queue")),
-                    input={
-                        "executor": "bootstrap",
-                        "tool": "create_thread",
-                        "arguments": {"prompt": f"register {role}"},
-                        "purpose": f"bootstrap_{role}",
-                    },
-                    request_id=str(uuid.uuid4()),
-                )
-            ).result["action"]
+            action = seed_action(
+                ledger,
+                {
+                    "executor": "bootstrap",
+                    "tool": "create_thread",
+                    "arguments": {"prompt": f"register {role}"},
+                    "purpose": f"bootstrap_{role}",
+                },
+            )
             task_id = f"{role}-1"
+            observe_action_prompt(
+                ledger,
+                action,
+                task_id=task_id,
+                session_id=f"session-{role}",
+            )
             desktop.register_standing(
                 replace(
                     request(("register", "standing")),
@@ -185,18 +288,18 @@ class HookTests(unittest.TestCase):
     def test_pre_tool_rejects_unclaimed_native_effect(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)
-        action = desktop.queue_action(
-            replace(
-                request(("action", "queue")),
-                input={
-                    "executor": "bootstrap",
-                    "tool": "create_thread",
-                    "arguments": {"prompt": "register steward"},
-                    "purpose": "bootstrap_steward",
-                },
-                request_id=str(uuid.uuid4()),
-            )
-        ).result["action"]
+        action = seed_action(
+            ledger,
+            {
+                "executor": "bootstrap",
+                "tool": "create_thread",
+                "arguments": {"prompt": "register steward"},
+                "purpose": "bootstrap_steward",
+            },
+        )
+        observe_action_prompt(
+            ledger, action, task_id="steward-1", session_id="session-1"
+        )
         desktop.register_standing(
             replace(
                 request(("register", "standing")),

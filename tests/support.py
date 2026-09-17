@@ -24,7 +24,7 @@ def request(command=("work", "update"), **changes):
             instance_root=Path("/unused/instance"),
             config_path=Path("/unused/brain/fulcrum.yaml"),
             brain_root=BRAIN,
-            socket_path=Path("/unused/instance/controller.sock"),
+            socket_path=Path("/unused/instance/broker.sock"),
             lock_path=Path("/unused/brain/.lock"),
             explicit_selection=True,
         ),
@@ -115,3 +115,79 @@ class MemoryLedger(Ledger):
         row = self.rows[arguments[1]]
         self.rows[row.id] = replace(row, status="closed")
         return CommandObservation(None, 0, "", "", False)
+
+
+def observe_action_prompt(
+    ledger,
+    action,
+    *,
+    task_id,
+    session_id,
+    turn_id="turn-registration",
+    instance="/unused/instance",
+):
+    """Record the trusted prompt callback required by managed registration."""
+
+    from fulcrum.desktop_protocol import action_marker
+    from fulcrum.hooks import HookService
+
+    HookService(ledger).handle(
+        replace(
+            request(("hook", "handle")),
+            actor=ActorContext.parse(f"task:{task_id}"),
+            thread_id=task_id,
+            input={
+                "hook_event_name": "UserPromptSubmit",
+                "event_id": str(uuid.uuid4()),
+                "thread_id": task_id,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "prompt": action_marker(
+                    str(instance),
+                    str(action["record_id"]),
+                    str(action["action_id"]),
+                    action.get("assignment_token"),
+                ),
+            },
+            request_id=str(uuid.uuid4()),
+        )
+    )
+
+
+def seed_action(ledger, payload):
+    """Install a native action fixture without exposing a production queue API."""
+
+    record_id = str(payload.get("record_id") or "fc-system")
+    current = ledger.show(record_id)
+    if current is None:
+        current = ledger.create_record(
+            record_id=record_id,
+            kind="control" if record_id == "fc-system" else "work",
+            title=record_id,
+            description="test fixture",
+            owner="SYSTEM",
+            fc={"kind": "control", "owner": "SYSTEM", "desktop": {}},
+        )
+    fc = dict(current.fc or {})
+    desktop = dict(fc.get("desktop") or {})
+    actions = dict(desktop.get("actions") or {})
+    action_id = f"action-{uuid.uuid4()}"
+    action = {
+        "action_id": action_id,
+        "record_id": record_id,
+        "executor": payload["executor"],
+        "tool": payload["tool"],
+        "arguments": deepcopy(dict(payload["arguments"])),
+        "expected_result": deepcopy(payload.get("expected_result") or {}),
+        "reporting": deepcopy(payload.get("reporting") or {}),
+        "assignment_token": payload.get("assignment_token"),
+        "state": "pending",
+        "attempts": [],
+        "created_at": "2026-09-16T00:00:00Z",
+        "purpose": payload.get("purpose"),
+    }
+    actions[action_id] = action
+    desktop["actions"] = actions
+    fc["desktop"] = desktop
+    ledger.update_fc(record_id, fc)
+    return deepcopy(action)

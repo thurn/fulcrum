@@ -6,8 +6,10 @@ import copy
 import json
 import socket
 from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.coordination import coordinated, external_effect
 from fulcrum.desktop_protocol import (
@@ -21,6 +23,8 @@ from fulcrum.desktop_protocol import (
     _utc_now,
     _with_protocol,
     action_marker,
+    require_run_control,
+    _positive_native_completion,
 )
 
 
@@ -52,19 +56,45 @@ class DesktopLeadershipService(DesktopProtocolService):
         binding = self._standing_actor(ledger, "marshal", request)
         system = self._system(ledger)
         protocol = _protocol(system.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             from fulcrum.desktop_protocol import _replay
 
             return _replay(saved, request)
         current = protocol.get("marshal_decision")
         if isinstance(current, Mapping) and current.get("state") == "active":
+            same_turn = request.input.get("turn_id") == current.get("turn_id")
+            if not same_turn and not _positive_native_completion(protocol, current):
+                value = {
+                    "decision": copy.deepcopy(dict(current)),
+                    "joined": False,
+                    "deferred": True,
+                    "brief": {
+                        "reason": "the prior Marshal turn is not positively complete",
+                        "incidents": [],
+                        "ready": [],
+                        "omitted": {},
+                    },
+                }
+                _save_request(protocol, request, value, ledger=ledger)
+                ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
+                return _result(request, value)
+            if not same_turn:
+                history = list(protocol.get("marshal_decision_history") or [])
+                history.append(copy.deepcopy(dict(current)))
+                protocol["marshal_decision_history"] = history[-20:]
+                current = {
+                    **dict(current),
+                    "turn_id": request.input.get("turn_id"),
+                    "recovered_at": _utc_now(),
+                }
+                protocol["marshal_decision"] = current
             value = {
                 "decision": copy.deepcopy(dict(current)),
                 "joined": True,
                 "brief": {"incidents": [], "ready": [], "omitted": {}},
             }
-            _save_request(protocol, request, value)
+            _save_request(protocol, request, value, ledger=ledger)
             ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
             return _result(request, value)
         records = ledger.list_records(limit=0)
@@ -73,6 +103,53 @@ class DesktopLeadershipService(DesktopProtocolService):
         for record in records:
             fc = record.fc or {}
             desktop = _protocol(fc)
+            assignment = desktop.get("assignment")
+            ci_waiting = any(
+                isinstance(wait, Mapping) and wait.get("state") == "waiting"
+                for wait in (desktop.get("ci_waits") or {}).values()
+            )
+            if (
+                isinstance(assignment, Mapping)
+                and assignment.get("state") == "active"
+                and not ci_waiting
+            ):
+                last = fc.get("last_progress_at") or assignment.get("registered_at")
+                try:
+                    observed = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    observed = self.now() - timedelta(days=1)
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+                if self.now() - observed >= timedelta(minutes=30):
+                    retained = dict(desktop.get("incidents") or {})
+                    incident = dict(retained.get("missing-progress") or {})
+                    incident.update(
+                        {
+                            "incident_id": incident.get("incident_id")
+                            or _opaque("incident"),
+                            "incident_key": "missing-progress",
+                            "state": "open",
+                            "scope": "registered worker progress",
+                            "required_decision": "Inspect the exact native task before recovery.",
+                            "evidence": [
+                                {
+                                    "task_id": assignment.get("task_id"),
+                                    "turn_id": assignment.get("turn_id"),
+                                    "last_progress_at": last,
+                                }
+                            ],
+                            "updated_at": _utc_now(),
+                            "repair_cycles": int(incident.get("repair_cycles", 0)),
+                            "justiciar_interventions": int(
+                                incident.get("justiciar_interventions", 0)
+                            ),
+                        }
+                    )
+                    retained["missing-progress"] = incident
+                    desktop["incidents"] = retained
+                    ledger.update_fc(
+                        record.id, _with_protocol(record.fc or {}, desktop)
+                    )
             for incident in (desktop.get("incidents") or {}).values():
                 if (
                     isinstance(incident, Mapping)
@@ -187,7 +264,7 @@ class DesktopLeadershipService(DesktopProtocolService):
                 ),
             },
         }
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
         self._write_event(
             request,
@@ -204,7 +281,7 @@ class DesktopLeadershipService(DesktopProtocolService):
         self._standing_actor(ledger, "marshal", request)
         system = self._system(ledger)
         system_protocol = _protocol(system.fc or {})
-        saved = _saved_request(system_protocol, request)
+        saved = _saved_request(system_protocol, request, ledger=ledger)
         if saved:
             from fulcrum.desktop_protocol import _replay
 
@@ -219,6 +296,12 @@ class DesktopLeadershipService(DesktopProtocolService):
         if request.input.get("decision_id") != operation.get("decision_id"):
             raise FulcrumError(
                 "STALE_DECISION", "decision operation changed", exit_code=5
+            )
+        if request.input.get("turn_id") != operation.get("turn_id"):
+            raise FulcrumError(
+                "STALE_DECISION",
+                "decision belongs to another Marshal turn",
+                exit_code=5,
             )
         decisions = request.input.get("decisions")
         if not isinstance(decisions, list):
@@ -275,7 +358,7 @@ class DesktopLeadershipService(DesktopProtocolService):
         }
         system_protocol["marshal_decision"] = completed
         value = {"decision": completed, "accepted": accepted, "stale": stale}
-        _save_request(system_protocol, request, value)
+        _save_request(system_protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, system_protocol))
         self._write_event(
             request,
@@ -298,7 +381,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             ledger, record, request, standing_roles={"marshal", "vizier"}
         )
         protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             from fulcrum.desktop_protocol import _replay
 
@@ -362,7 +445,7 @@ class DesktopLeadershipService(DesktopProtocolService):
         }
         value["alert"] = alert
         value["decision"] = decision
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         return _result(request, value)
 
@@ -377,7 +460,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             ledger, record, request, standing_roles={"marshal", "vizier"}
         )
         protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             from fulcrum.desktop_protocol import _replay
 
@@ -391,14 +474,15 @@ class DesktopLeadershipService(DesktopProtocolService):
         outcome = str(request.input.get("outcome") or "")
         if outcome == "failed":
             cycles = int(incident.get("repair_cycles", 0)) + 1
-            if cycles > 3:
+            allowance = 3 + int(incident.get("additional_repair_cycles", 0))
+            if cycles > allowance:
                 raise FulcrumError(
                     "REPAIR_LIMIT",
-                    "three ordinary repair cycles are exhausted",
+                    "the authorized ordinary repair cycles are exhausted",
                     exit_code=5,
                 )
             incident["repair_cycles"] = cycles
-            if cycles == 3:
+            if cycles == allowance:
                 incident["repair_hold"] = True
                 incident["required_decision"] = (
                     "Marshal may authorize one Justiciar intervention."
@@ -437,7 +521,7 @@ class DesktopLeadershipService(DesktopProtocolService):
                 ledger, record.id, protocol, incident
             )
         value = {"incident": incident, "alert": alert, "decision": decision}
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         return _result(request, value)
 
@@ -532,24 +616,36 @@ class DesktopLeadershipService(DesktopProtocolService):
     def recovery_prepare(self, request: ParsedRequest) -> CommandResult:
         ledger = self._ledger(request)
         self._standing_actor(ledger, "marshal", request)
+        require_run_control(ledger, "Justiciar creation")
         bead = str(request.arguments.get("bead") or request.input.get("bead") or "")
         record = ledger.show(bead)
         if record is None:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead}")
         system = self._system(ledger)
         system_protocol = _protocol(system.fc or {})
-        saved = _saved_request(system_protocol, request)
+        saved = _saved_request(system_protocol, request, ledger=ledger)
         if saved:
             from fulcrum.desktop_protocol import _replay
 
             return _replay(saved, request)
         slot = system_protocol.get("recovery_slot")
-        if isinstance(slot, Mapping) and slot.get("state") in {
-            "reserved",
-            "issuing",
-            "active",
-            "uncertain",
-        }:
+        matching_slot = (
+            isinstance(slot, Mapping)
+            and slot.get("state") in {"reserved", "issuing", "active", "uncertain"}
+            and slot.get("request_id") == request.request_id
+            and slot.get("accepted_input") == _request_input(request)
+        )
+        if (
+            isinstance(slot, Mapping)
+            and slot.get("state")
+            in {
+                "reserved",
+                "issuing",
+                "active",
+                "uncertain",
+            }
+            and not matching_slot
+        ):
             raise FulcrumError(
                 "RECOVERY_CAPACITY",
                 "the additional recovery slot is occupied",
@@ -562,46 +658,142 @@ class DesktopLeadershipService(DesktopProtocolService):
         if not isinstance(current, Mapping):
             raise FulcrumError.invalid("INCIDENT_NOT_FOUND", "unknown incident")
         incident = dict(current)
+        if matching_slot:
+            action_id = str(slot.get("action_id") or "")
+            retained_action = (protocol.get("actions") or {}).get(action_id)
+            if isinstance(retained_action, Mapping) and incident.get(
+                "recovery_id"
+            ) == slot.get("recovery_id"):
+                value = {
+                    "recovery_id": slot.get("recovery_id"),
+                    "bead": bead,
+                    "incident_key": key,
+                    "action_id": action_id,
+                    "action": self._action_response(request, retained_action),
+                }
+                _save_request(system_protocol, request, value, ledger=ledger)
+                ledger.update_fc(
+                    system.id, _with_protocol(system.fc or {}, system_protocol)
+                )
+                return _result(request, value)
+        assignment = protocol.get("assignment")
+        if isinstance(assignment, Mapping) and assignment.get("state") in {
+            "reserved",
+            "issuing",
+            "active",
+            "uncertain",
+        }:
+            raise FulcrumError(
+                "RECOVERY_CONFLICT",
+                "work already has an active or unresolved writer",
+                exit_code=5,
+            )
         if int(incident.get("justiciar_interventions", 0)) >= 1:
             raise FulcrumError(
                 "INTERVENTION_LIMIT",
                 "this incident already used its Justiciar intervention",
                 exit_code=5,
             )
-        recovery_id = _opaque("recovery")
-        action_id = _opaque("action")
-        assignment_token = _opaque("assignment")
+        if int(incident.get("repair_cycles", 0)) > 0 and not incident.get(
+            "repair_hold"
+        ):
+            raise FulcrumError(
+                "RECOVERY_NOT_AUTHORIZED",
+                "ordinary repair allowance is not exhausted",
+                exit_code=5,
+            )
+        fc = dict(record.fc or {})
+        delivery = fc.get("delivery")
+        worktree = fc.get("worktree")
+        workspace = fc.get("workspace")
+        if not workspace and isinstance(delivery, Mapping):
+            workspace = delivery.get("workspace")
+        if not workspace and isinstance(worktree, Mapping):
+            workspace = worktree.get("path")
+        source = fc.get("source")
+        if not source and isinstance(delivery, Mapping):
+            source = delivery.get("source_oid")
+        if not source and isinstance(worktree, Mapping):
+            source = worktree.get("head_oid")
+        branch = worktree.get("branch") if isinstance(worktree, Mapping) else None
+        project = str(fc.get("project") or "")
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        config = manager.effective(document)
+        project_config = (config.get("projects") or {}).get(project)
+        if not isinstance(project_config, Mapping):
+            raise FulcrumError(
+                "PROJECT_NOT_CONFIGURED",
+                "recovery requires the work's configured Desktop project",
+                exit_code=5,
+            )
+        codex_project = project_config.get("codex_project_id")
+        if not isinstance(workspace, str) or not workspace or not codex_project:
+            raise FulcrumError(
+                "RECOVERY_WORKSPACE_REQUIRED",
+                "recovery requires the retained workspace and saved Desktop project",
+                exit_code=5,
+            )
+        role_models = fc.get("models")
+        model_config = (
+            role_models.get("justiciar") if isinstance(role_models, Mapping) else None
+        )
+        project_models = project_config.get("models")
+        if not isinstance(model_config, Mapping) and isinstance(
+            project_models, Mapping
+        ):
+            model_config = project_models.get("justiciar")
+        if not isinstance(model_config, Mapping):
+            model_config = (config.get("models") or {}).get("justiciar")
+        recovery_id = (
+            str(slot.get("recovery_id")) if matching_slot else _opaque("recovery")
+        )
+        action_id = str(slot.get("action_id")) if matching_slot else _opaque("action")
+        assignment_token = (
+            str(slot.get("assignment_token"))
+            if matching_slot
+            else _opaque("assignment")
+        )
         slot = {
             "recovery_id": recovery_id,
             "bead": bead,
             "incident_key": key,
+            "action_id": action_id,
+            "assignment_token": assignment_token,
+            "request_id": request.request_id,
+            "accepted_input": _request_input(request),
             "state": "reserved",
             "reserved_at": _utc_now(),
         }
         system_protocol["recovery_slot"] = slot
-        value = {
-            "recovery_id": recovery_id,
-            "bead": bead,
-            "incident_key": key,
-            "action_id": action_id,
-        }
-        _save_request(system_protocol, request, value)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, system_protocol))
+        scope = request.input.get("scope") or incident.get("scope")
         prompt = (
-            f"Register as Justiciar for {bead}. Assignment token: {assignment_token}.\n"
-            f"Incident: {incident.get('incident_id')}\nScope: {request.input.get('scope') or incident.get('scope')}\n"
+            f"$fulcrum-justiciar\nRegister as Justiciar for {bead} before editing. "
+            f"Work only in {workspace}. Assignment token: {assignment_token}.\n"
+            f"Incident: {incident.get('incident_id')}\nScope: {scope}\n"
+            f"Current source: {source or 'not retained'}\n"
             "Act only within this recovery scope and reconcile every native effect."
         )
+        native_arguments: dict[str, Any] = {
+            "prompt": prompt,
+            "title": f"⚖️ JUSTICIAR {bead} ⚖️",
+            "target": {
+                "type": "project",
+                "projectId": codex_project,
+                "environment": {"type": "local"},
+            },
+        }
+        if isinstance(model_config, Mapping) and model_config.get("model"):
+            native_arguments["model"] = model_config["model"]
+        if isinstance(model_config, Mapping) and model_config.get("effort"):
+            native_arguments["thinking"] = model_config["effort"]
         action = {
             "action_id": action_id,
             "record_id": bead,
             "executor": "marshal",
             "tool": "create_thread",
-            "arguments": {
-                "prompt": prompt,
-                "title": f"⚖️ JUSTICIAR {bead} ⚖️",
-                "target": copy.deepcopy(request.input.get("target") or {}),
-            },
+            "arguments": native_arguments,
             "expected_result": {"threadId": "native task identity"},
             "reporting": {"register": "register_worker"},
             "assignment_token": assignment_token,
@@ -616,18 +808,38 @@ class DesktopLeadershipService(DesktopProtocolService):
         protocol["assignment"] = {
             "assignment_token": assignment_token,
             "role": "justiciar",
-            "scope": request.input.get("scope") or incident.get("scope"),
+            "workspace": workspace,
+            "source": source,
+            "project": project,
+            "branch": branch,
+            "scope": scope,
             "capacity_class": "recovery",
             "state": "reserved",
             "recovery_id": recovery_id,
         }
         incident["justiciar_interventions"] = 1
         incident["recovery_id"] = recovery_id
+        incident["repair_hold"] = True
         incidents[key] = incident
         protocol["incidents"] = incidents
-        ledger.update_fc(
-            record.id, _with_protocol(record.fc or {}, protocol), assignee="MARSHAL"
-        )
+        fc["recovery_fence"] = {
+            "state": "active",
+            "operation_id": recovery_id,
+            "recovery_id": recovery_id,
+            "incident_id": incident.get("incident_id"),
+            "incident_key": key,
+            "scope": scope,
+            "workspace": workspace,
+            "source": source,
+            "created_at": _utc_now(),
+        }
+        ledger.update_fc(record.id, _with_protocol(fc, protocol), assignee="MARSHAL")
+        value = {
+            "recovery_id": recovery_id,
+            "bead": bead,
+            "incident_key": key,
+            "action_id": action_id,
+        }
         value["action"] = {
             **action,
             "arguments": {
@@ -642,19 +854,25 @@ class DesktopLeadershipService(DesktopProtocolService):
                 + prompt,
             },
         }
+        _save_request(system_protocol, request, value, ledger=ledger)
+        ledger.update_fc(system.id, _with_protocol(system.fc or {}, system_protocol))
         return _result(request, value)
 
     @coordinated
     def decision_respond(self, request: ParsedRequest) -> CommandResult:
         ledger = self._ledger(request)
         if request.actor.kind != "human":
-            self._standing_actor(ledger, "vizier", request)
+            raise FulcrumError(
+                "HUMAN_DECISION_REQUIRED",
+                "only an explicit human response can extend repair authority",
+                exit_code=5,
+            )
         bead = str(request.arguments.get("bead") or request.input.get("bead") or "")
         record = ledger.show(bead)
         if record is None:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead}")
         protocol = _protocol(record.fc or {})
-        saved = _saved_request(protocol, request)
+        saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             from fulcrum.desktop_protocol import _replay
 
@@ -666,18 +884,50 @@ class DesktopLeadershipService(DesktopProtocolService):
             raise FulcrumError(
                 "DECISION_NOT_OPEN", "human decision is not open", exit_code=5
             )
+        additional = int(request.input.get("additional_repair_cycles") or 0)
+        if additional < 0:
+            raise FulcrumError.invalid(
+                "INVALID_REPAIR_ALLOWANCE",
+                "additional_repair_cycles cannot be negative",
+            )
         decision = {
             **dict(current),
             "state": "resolved",
             "answer": copy.deepcopy(request.input.get("answer")),
-            "additional_repair_cycles": int(
-                request.input.get("additional_repair_cycles") or 0
-            ),
+            "additional_repair_cycles": additional,
             "resolved_at": _utc_now(),
         }
         decisions[decision_id] = decision
         protocol["human_decisions"] = decisions
+        incident_id = current.get("incident_id")
+        incidents = dict(protocol.get("incidents") or {})
+        matching_key = next(
+            (
+                key
+                for key, value in incidents.items()
+                if isinstance(value, Mapping)
+                and value.get("incident_id") == incident_id
+            ),
+            None,
+        )
+        if matching_key is None:
+            raise FulcrumError(
+                "INCIDENT_NOT_FOUND",
+                "the decision's incident is no longer retained",
+                exit_code=5,
+            )
+        incident = dict(incidents[matching_key])
+        incident["additional_repair_cycles"] = (
+            int(incident.get("additional_repair_cycles", 0)) + additional
+        )
+        if additional > 0:
+            incident["repair_hold"] = False
+            incident["required_decision"] = None
+        incident["human_decision_id"] = decision_id
+        incident["updated_at"] = _utc_now()
+        incidents[matching_key] = incident
+        protocol["incidents"] = incidents
         value = {"decision": decision}
-        _save_request(protocol, request, value)
+        _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         return _result(request, value)
