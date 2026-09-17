@@ -597,6 +597,10 @@ class DesktopSetupService(DesktopProtocolService):
         value = {
             "state": setup["state"],
             "admission": protocol.get("run_control", "paused"),
+            "configuration": {
+                "path": str(request.instance.config_path),
+                "brain_root": str(request.instance.brain_root),
+            },
             "standing": copy_mapping(standing),
             "schedule": copy_mapping(schedule),
             "pending_actions": pending_actions,

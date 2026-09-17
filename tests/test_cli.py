@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stdout
 from io import StringIO
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from fulcrum.application import Application
 from fulcrum.cli import COMMANDS, _build_request, _execute, build_parser
+from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.instance import WriterLock, resolve_instance
 from tests.support import request
@@ -62,6 +64,46 @@ class CliTests(unittest.TestCase):
             parsed = _build_request(parser.parse_args(["bootstrap"]))
         self.assertEqual(parsed.actor.kind, "human")
         self.assertIsNone(parsed.thread_id)
+
+    def test_bootstrap_initializes_missing_authoritative_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            brain = root / "brain"
+            config = brain / "fulcrum.yaml"
+            instance = root / "instance"
+            checkout = root / "checkout"
+            payload = root / "bootstrap.json"
+            payload.write_text(
+                json.dumps(
+                    {
+                        "configuration": {
+                            "policy": {"automatic_capacity": 2},
+                        }
+                    }
+                )
+            )
+            parser = build_parser()
+            with patch("fulcrum.install.master_source_root", return_value=checkout):
+                parsed = _build_request(
+                    parser.parse_args(
+                        [
+                            "bootstrap",
+                            "--instance",
+                            str(instance),
+                            "--config",
+                            str(config),
+                            "--input",
+                            str(payload),
+                        ]
+                    )
+                )
+
+            document, _ = ConfigurationManager(config).load()
+            effective = ConfigurationManager(config).effective(document)
+            self.assertEqual(parsed.instance.brain_root, brain.resolve())
+            self.assertEqual(effective["policy"]["automatic_capacity"], 2)
+            self.assertEqual(effective["source"]["repository"], str(checkout.resolve()))
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
     def test_each_cli_invocation_dispatches_in_its_fresh_operation_process(self):
         pending = request(("work", "create"))

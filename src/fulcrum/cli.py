@@ -519,6 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     ("bootstrap",): {
         "codex_root",
+        "configuration",
         "native_tools",
         "model_support",
         "steward_thinking",
@@ -868,6 +869,26 @@ def _build_request(namespace: argparse.Namespace) -> ParsedRequest:
     timeout = float(values.get("timeout", 30.0))
     if timeout <= 0:
         raise FulcrumError.invalid("INVALID_TIMEOUT", "timeout must be positive")
+    if command == ("bootstrap",):
+        configuration = payload.get("configuration", {})
+        if not isinstance(configuration, Mapping):
+            raise FulcrumError.invalid(
+                "INVALID_INPUT", "configuration must be a JSON object"
+            )
+        provisional = resolve_instance(
+            instance=values.get("instance"),
+            config=values.get("config"),
+            allow_broken_config=True,
+        )
+        if provisional.brain_root is None:
+            from fulcrum.configuration import initialize_bootstrap_configuration
+            from fulcrum.install import master_source_root
+
+            initialize_bootstrap_configuration(
+                provisional.config_path,
+                configuration,
+                source_repository=master_source_root(),
+            )
     allow_broken = command in BROKEN_CONFIG_COMMANDS
     instance = resolve_instance(
         instance=values.get("instance"),

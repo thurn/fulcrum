@@ -32,6 +32,23 @@ if ! command -v "$python_command" >/dev/null 2>&1; then
   exit 2
 fi
 
+expected_root=$HOME/fulcrum
+if [ "$repo_root" != "$expected_root" ]; then
+  echo "fulcrum setup: clone the authoritative checkout at $expected_root" >&2
+  exit 2
+fi
+
+missing_commands=
+for command_name in git bd dolt tg; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    missing_commands="$missing_commands $command_name"
+  fi
+done
+if [ -n "$missing_commands" ]; then
+  echo "fulcrum setup: required commands are unavailable:$missing_commands" >&2
+  exit 2
+fi
+
 if [ ! -x "$repo_root/.venv/bin/python" ]; then
   "$python_command" -m venv "$repo_root/.venv"
 fi
@@ -40,4 +57,21 @@ fi
   --requirement "$repo_root/requirements-dev.lock"
 "$repo_root/.venv/bin/python" -m pip install --disable-pip-version-check \
   --no-deps --editable "$repo_root"
+
+launcher_root=$HOME/.local/bin
+launcher=$launcher_root/fulcrum
+launcher_source=$repo_root/.venv/bin/fulcrum
+mkdir -p "$launcher_root"
+if [ -L "$launcher" ]; then
+  if [ "$(readlink "$launcher")" != "$launcher_source" ]; then
+    echo "fulcrum setup: refusing to replace foreign launcher $launcher" >&2
+    exit 2
+  fi
+elif [ -e "$launcher" ]; then
+  echo "fulcrum setup: refusing to replace user file $launcher" >&2
+  exit 2
+else
+  ln -s "$launcher_source" "$launcher"
+fi
+
 exec "$repo_root/.venv/bin/fulcrum" bootstrap "$@"

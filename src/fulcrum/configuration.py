@@ -104,6 +104,82 @@ def default_config(brain_root: Path) -> dict[str, Any]:
     }
 
 
+def initialize_bootstrap_configuration(
+    path: Path,
+    configuration: Mapping[str, Any],
+    *,
+    source_repository: Path,
+) -> bool:
+    """Create the authoritative configuration once for a fresh installation.
+
+    Bootstrap may establish this one prerequisite before the Beads ledger exists.
+    Existing configuration remains authoritative and is never rewritten here.
+    """
+
+    manager = ConfigurationManager(path)
+    brain_root = manager.path.parent
+    document = default_config(brain_root)
+    _merge(document, _plain(configuration))
+    configured_source = document["source"].get("repository")
+    expected_source = str(source_repository.resolve(strict=False))
+    if configured_source not in {None, expected_source}:
+        raise FulcrumError.invalid(
+            "SOURCE_ROOT_MISMATCH",
+            "source.repository must name the canonical Fulcrum checkout",
+            details={
+                "source.repository": configured_source,
+                "expected": expected_source,
+            },
+        )
+    document["source"]["repository"] = expected_source
+    manager.validate_document(document)
+
+    if manager.path.exists() or manager.path.is_symlink():
+        existing, _ = manager.load()
+        effective = manager.effective(existing)
+        conflicts = _projection_conflicts(effective, configuration)
+        if conflicts:
+            raise FulcrumError(
+                "CONFIG_CONFLICT",
+                "bootstrap configuration differs from the authoritative file",
+                exit_code=5,
+                details={"path": str(manager.path), "fields": conflicts},
+            )
+        return False
+
+    manager.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stream = io.StringIO()
+    manager.yaml().dump(document, stream)
+    rendered = stream.getvalue().encode("utf-8")
+    try:
+        descriptor = os.open(
+            manager.path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+    except FileExistsError:
+        existing, _ = manager.load()
+        conflicts = _projection_conflicts(manager.effective(existing), configuration)
+        if conflicts:
+            raise FulcrumError(
+                "CONFIG_CONFLICT",
+                "concurrent bootstrap created different authoritative configuration",
+                exit_code=5,
+                details={"path": str(manager.path), "fields": conflicts},
+            )
+        return False
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(rendered)
+        handle.flush()
+        os.fsync(handle.fileno())
+    directory = os.open(manager.path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return True
+
+
 class ConfigurationManager:
     def __init__(
         self,
@@ -1164,6 +1240,23 @@ def _changed_paths(before: Any, after: Any, prefix: str = "") -> list[str]:
                 paths.extend(_changed_paths(before[key], after[key], child))
         return paths
     return [] if before == after else [prefix]
+
+
+def _projection_conflicts(current: Any, requested: Any, prefix: str = "") -> list[str]:
+    """Return explicit requested fields that differ from retained authority."""
+
+    if isinstance(requested, Mapping):
+        if not isinstance(current, Mapping):
+            return [prefix]
+        conflicts: list[str] = []
+        for key, value in requested.items():
+            child = f"{prefix}.{key}" if prefix else str(key)
+            if key not in current:
+                conflicts.append(child)
+            else:
+                conflicts.extend(_projection_conflicts(current[key], value, child))
+        return conflicts
+    return [] if current == requested else [prefix]
 
 
 def _redact(value: Any) -> Any:
