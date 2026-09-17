@@ -118,24 +118,6 @@ TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
         "source": {"type": "string"},
     },
     "wait_for_ci_results": {"candidate_id": {"type": "string"}},
-    "marshal_check": {
-        "trigger": {
-            "type": "string",
-            "enum": ["heartbeat"],
-            "description": "Use heartbeat only for the scheduled Marshal delivery.",
-        },
-    },
-    "marshal_decide": {
-        "decision_id": {
-            "type": "string",
-            "description": "Exact decision_id returned by marshal_check.",
-        },
-        "decisions": {
-            "type": "array",
-            "description": "Targeted curation rows, or an empty array for a no-op check.",
-            "items": {"type": "object", "additionalProperties": True},
-        },
-    },
     "finish": {
         "outcome": {
             "type": "string",
@@ -184,6 +166,33 @@ def _schema(name: str) -> dict[str, Any]:
         "marshal_decide",
     }:
         properties["turn_id"] = {"type": "string"}
+    if name == "marshal_check":
+        properties["input"] = {
+            "type": "object",
+            "properties": {
+                "trigger": {"type": "string", "enum": ["heartbeat"]},
+            },
+            "additionalProperties": False,
+        }
+    if name == "marshal_decide":
+        properties["input"] = {
+            "type": "object",
+            "properties": {
+                "decision_id": {
+                    "type": "string",
+                    "description": "Exact decision_id returned by marshal_check.",
+                },
+                "decisions": {
+                    "type": "array",
+                    "description": (
+                        "Targeted curation rows, or an empty array for a no-op check."
+                    ),
+                    "items": {"type": "object", "additionalProperties": True},
+                },
+            },
+            "required": ["decision_id", "decisions"],
+            "additionalProperties": False,
+        }
     if name in {"claim_action", "report_action_result"}:
         properties.update(
             {"record_id": {"type": "string"}, "action_id": {"type": "string"}}
@@ -223,7 +232,7 @@ def _schema(name: str) -> dict[str, Any]:
                 "session_id",
             ],
             "register_worker": ["session_id", "turn_id"],
-            "marshal_decide": ["decision_id", "decisions"],
+            "marshal_decide": ["turn_id", "input"],
             "report_action_result": ["attempt_id", "outcome", "native_result"],
             "report_progress": ["kind", "summary", "evidence"],
             "submit_candidate": ["source"],
@@ -285,13 +294,14 @@ def tool_descriptions() -> list[dict[str, Any]]:
         ),
         "marshal_check": (
             "Marshal only: open or resume one bounded decision. For the scheduled "
-            "delivery pass trigger=heartbeat. Fulcrum resolves the current native "
-            "turn from retained transcript evidence."
+            "delivery pass input.trigger=heartbeat. Fulcrum resolves the current "
+            "native turn from retained transcript evidence."
         ),
         "marshal_decide": (
             "Marshal only: complete the exact decision returned by marshal_check. "
-            "Pass its decision_id and targeted decisions, using an empty decisions "
-            "array when no changes are required. Do not inspect implementation source."
+            "Pass its returned turn_id and input containing its decision_id plus "
+            "targeted decisions; use an empty decisions array when no changes are "
+            "required. Do not inspect implementation source."
         ),
     }
     return [

@@ -228,11 +228,13 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("session_id", registration["required"])
         self.assertIn("turn_id", registration["properties"])
         marshal_check = tools["marshal_check"]["inputSchema"]
-        self.assertIn("trigger", marshal_check["properties"])
+        self.assertIn("trigger", marshal_check["properties"]["input"]["properties"])
         marshal_decide = tools["marshal_decide"]["inputSchema"]
-        self.assertIn("decision_id", marshal_decide["required"])
-        self.assertIn("decisions", marshal_decide["required"])
-        self.assertNotIn("turn_id", marshal_decide["required"])
+        self.assertIn("turn_id", marshal_decide["required"])
+        self.assertIn("input", marshal_decide["required"])
+        decide_input = marshal_decide["properties"]["input"]
+        self.assertIn("decision_id", decide_input["required"])
+        self.assertIn("decisions", decide_input["required"])
         finish = tools["finish"]["inputSchema"]
         self.assertIn("outcome", finish["required"])
         self.assertEqual(

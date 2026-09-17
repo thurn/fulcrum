@@ -132,10 +132,11 @@ scheduled delivery is monitored asynchronously.
 Do not wait for a heartbeat, keep Marshal busy across a guessed schedule boundary,
 or manufacture an overlap test. Native task turns are serialized, so a controlled
 Marshal turn can defer the heartbeat it is intended to observe. The first genuine
-heartbeat calls `marshal_check` with `trigger` set to `heartbeat`, settles the
-returned bounded brief, and completes it with `marshal_decide`; Fulcrum records
-the exact observed native turn for that delivery. The Marshal must not inspect
-implementation source or invent a turn identifier to discover this call shape.
+heartbeat calls `marshal_check` with `input.trigger` set to `heartbeat`, settles the
+returned bounded brief, and completes it with `marshal_decide` using the returned
+turn and decision identifiers; Fulcrum records the exact observed native turn for
+that delivery. The Marshal must not inspect implementation source or invent an
+identifier to discover this call shape.
 `fulcrum doctor` reports the loop as `initializing` until
 the first delivery, `running` while a delivered cycle is still within its bounded
 completion window, `healthy` only after a recent completed cycle, and `degraded`
