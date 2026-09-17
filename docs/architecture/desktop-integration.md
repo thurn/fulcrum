@@ -1025,10 +1025,11 @@ asking repeatedly. A ready socket alone is not successful setup.
    idempotent, inspected filesystem/service operations, not a second journal.
 2. Once Beads is available, retain one setup operation before native effects.
    Provision source-following launchers, broker, and thin MCP definitions. Set
-   the specified instruction/CI wait budgets. Preserve unrelated configuration; an
-   initial in-app MCP Restart is exceptional setup, never an ordinary editing
-   step. A fresh bootstrap call after that restart rebinds pending setup actions
-   to the new native task.
+   the specified instruction/CI wait budgets. Preserve unrelated configuration.
+   Because an existing task retains the MCP catalog with which it started, an
+   initial MCP configuration change creates one bounded continuation task in the
+   saved Fulcrum project. Its fresh bootstrap call rebinds pending setup actions
+   to the new native task. No Desktop process restart is part of setup.
 3. Install/trust the six scoped command hooks and verify actual callback paths
    for projectless standing tasks and saved-project workers. Check native task
    tools, model/effort support, workspace access, transcript observation, and
@@ -1072,7 +1073,7 @@ the protocol and current-state calls; role details come from fresh CLI context.
 Preserve the role-title formatter and existing worker emoji/bead-ID conventions.
 Use fixed standing titles `🧰 STEWARD 🧰`, `🧭 MARSHAL 🧭`, and `🔮 VIZIER 🔮`.
 Creation-time `title` normalization may require an exact `set_thread_title`
-correction after binding. Verify titles after first turn and Desktop restart;
+correction after binding. Verify titles after first turn and MCP continuation;
 rename is a recorded native effect, never a reason to replace a task. `$bead`
 reporting must not rename the reporting conversation.
 

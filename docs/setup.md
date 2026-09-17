@@ -80,13 +80,16 @@ and focused acceptance is explicitly recorded. Acceptance is an evidence map wit
 `task_targeting`, and `schedule_overlap`; each value must be true. Bootstrap creates
 the heartbeat paused and returns a separate activation action only after that
 evidence is supplied. A ready socket alone is not setup.
-When the initial MCP configuration changes, open Desktop Settings, select MCP
-servers, and select Restart. This is the in-app restart required by the official
-Codex MCP setup flow; it does not require quitting the entire macOS app when that
-control is available. Then invoke `$fulcrum-bootstrap` again. The fresh bootstrap
-call rebinds retained pending actions to the new task, and retained action IDs and
-registered task identities make the rerun resumable rather than duplicative.
-Ordinary committed edits never require this restart.
+An existing task does not acquire MCP tools added after it started. When the
+initial MCP configuration changes, the bootstrap skill creates exactly one new
+task in the saved `~/fulcrum` project, using the retained checkout directly rather
+than a worktree. That continuation invokes `$fulcrum-bootstrap` with a new request
+ID, receives the current MCP tool catalog, and rebinds retained pending actions to
+itself. The current Desktop UI lists servers under Settings > Plugins > MCPs and
+does not expose the former Restart control; do not toggle the server or quit the
+app. Retained action IDs and registered task identities make the continuation
+resumable rather than duplicative. Ordinary committed edits never require a new
+task or restart.
 
 ## Services and source
 
