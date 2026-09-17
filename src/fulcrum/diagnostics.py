@@ -33,7 +33,7 @@ from fulcrum.ledger import (
 from fulcrum.work import work_view
 
 DEFAULT_LIMIT = 20
-NON_FAILURE_HEALTH_STATES = {"healthy", "initializing", "paused"}
+NON_FAILURE_HEALTH_STATES = {"healthy", "initializing", "running", "paused"}
 DEFAULT_CHUNK_BYTES = 256 * 1024
 _SECRET_KEY: re.Pattern[str] = re.compile(
     r"(?:token|secret|password|passwd|credential|authorization|api[_-]?key|cookie)",
@@ -1501,8 +1501,14 @@ def _loop_health(
         last_delivery_at = _parse_health_time(
             schedule.get("last_delivery_at") if isinstance(schedule, Mapping) else None
         )
+        last_cycle_completed_at = _parse_health_time(
+            schedule.get("last_cycle_completed_at")
+            if isinstance(schedule, Mapping)
+            else None
+        )
         interval = timedelta(minutes=15)
         first_delivery_grace = timedelta(minutes=20)
+        cycle_grace = timedelta(minutes=10)
         stale_after = timedelta(minutes=35)
         if intentionally_paused:
             state = "paused"
@@ -1512,8 +1518,17 @@ def _loop_health(
             and schedule_status == "ACTIVE"
         ):
             state = "unavailable"
-        elif last_delivery_at is not None:
-            state = "healthy" if now - last_delivery_at <= stale_after else "degraded"
+        elif last_delivery_at is not None and (
+            last_cycle_completed_at is None
+            or last_cycle_completed_at < last_delivery_at
+        ):
+            state = "running" if now - last_delivery_at <= cycle_grace else "degraded"
+        elif last_cycle_completed_at is not None:
+            state = (
+                "healthy"
+                if now - last_cycle_completed_at <= stale_after
+                else "degraded"
+            )
         elif activated_at is not None and now - activated_at <= first_delivery_grace:
             state = "initializing"
         else:
@@ -1527,6 +1542,7 @@ def _loop_health(
                     "first_delivery_grace_seconds": int(
                         first_delivery_grace.total_seconds()
                     ),
+                    "cycle_grace_seconds": int(cycle_grace.total_seconds()),
                     "stale_after_seconds": int(stale_after.total_seconds()),
                     "schedule": schedule,
                     "run_control": run_control,
@@ -1541,8 +1557,8 @@ def _loop_health(
                     else [["fulcrum", "bootstrap", "--json"]]
                 ),
                 last_success_at=(
-                    last_delivery_at.isoformat().replace("+00:00", "Z")
-                    if last_delivery_at is not None
+                    last_cycle_completed_at.isoformat().replace("+00:00", "Z")
+                    if last_cycle_completed_at is not None
                     else None
                 ),
             )

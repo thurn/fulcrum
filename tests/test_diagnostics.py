@@ -109,7 +109,7 @@ def test_active_heartbeat_without_delivery_becomes_degraded():
     assert health[0]["last_success_at"] is None
 
 
-def test_recent_heartbeat_delivery_is_healthy():
+def test_delivered_heartbeat_is_running_until_cycle_completes():
     ledger = MemoryLedger(
         record(
             "fc-system",
@@ -131,7 +131,36 @@ def test_recent_heartbeat_delivery_is_healthy():
         health = _loop_health(
             request(("doctor",)),
             None,
+            datetime(2026, 9, 17, 0, 35, tzinfo=timezone.utc),
+        )
+    assert health[0]["state"] == "running"
+    assert health[0]["last_success_at"] is None
+
+
+def test_recent_completed_heartbeat_cycle_is_healthy():
+    ledger = MemoryLedger(
+        record(
+            "fc-system",
+            kind="control",
+            desktop={
+                "run_control": "running",
+                "marshal_schedule": {
+                    "state": "succeeded",
+                    "status": "ACTIVE",
+                    "activated_at": "2026-09-17T00:00:00Z",
+                    "last_delivery_at": "2026-09-17T00:30:00Z",
+                    "last_cycle_completed_at": "2026-09-17T00:31:00Z",
+                    "automation_id": "marshal-check",
+                    "target_task_id": "marshal-1",
+                },
+            },
+        )
+    )
+    with patch("fulcrum.diagnostics._ledger", return_value=ledger):
+        health = _loop_health(
+            request(("doctor",)),
+            None,
             datetime(2026, 9, 17, 0, 45, tzinfo=timezone.utc),
         )
     assert health[0]["state"] == "healthy"
-    assert health[0]["last_success_at"] == "2026-09-17T00:30:00Z"
+    assert health[0]["last_success_at"] == "2026-09-17T00:31:00Z"

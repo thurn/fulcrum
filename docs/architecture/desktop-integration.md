@@ -427,6 +427,9 @@ brief/context conventions. Urgent recovery precedes ordinary grooming. Marshal
 may examine relevant evidence and apply independent curation decisions, but does
 not monitor every worker or wait for CI/Justiciar completion. It ends when its
 bounded work is done; there is no universal one-native-action-per-turn allowance.
+Heartbeat health distinguishes delivery from successful settlement: a delivered
+cycle remains running until `marshal_decide` completes its exact decision, and
+only that completion advances the loop's last-success timestamp.
 
 Only the current bound Marshal may own its decision operation. Record the exact
 native turn and accepted input; overlapping triggers join or defer to that

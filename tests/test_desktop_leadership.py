@@ -91,13 +91,23 @@ class LeadershipTests(unittest.TestCase):
             "target_task_id": "marshal-1",
             "activated_at": "2026-09-17T00:00:00Z",
         }
+        desktop["observations"] = {
+            "lifecycle": {
+                "heartbeat-start": {
+                    "type": "task_started",
+                    "task_id": "marshal-1",
+                    "turn_id": "heartbeat-turn",
+                    "time": "2026-09-17T00:01:00Z",
+                }
+            }
+        }
         self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
 
         checked = self.service.marshal_check(
             call(
                 ("marshal", "check"),
                 actor="task:marshal-1",
-                payload={"turn_id": "heartbeat-turn", "trigger": "heartbeat"},
+                payload={"trigger": "heartbeat"},
             )
         )
 
@@ -109,6 +119,31 @@ class LeadershipTests(unittest.TestCase):
             "heartbeat-turn",
         )
         self.assertEqual(checked.result["decision"]["turn_id"], "heartbeat-turn")
+
+        decided = self.service.marshal_decide(
+            call(
+                ("marshal", "apply"),
+                actor="task:marshal-1",
+                payload={
+                    "decision_id": checked.result["decision"]["decision_id"],
+                    "decisions": [],
+                },
+            )
+        )
+        self.assertEqual(decided.result["decision"]["state"], "completed")
+        retained = self.ledger.show("fc-system").fc["desktop"]
+        self.assertEqual(retained["marshal_schedule"]["completed_cycle_count"], 1)
+        self.assertEqual(
+            retained["marshal_schedule"]["last_cycle_turn_id"], "heartbeat-turn"
+        )
+
+    def test_marshal_check_does_not_create_decision_without_turn_evidence(self):
+        with self.assertRaisesRegex(FulcrumError, "native turn has not been observed"):
+            self.service.marshal_check(
+                call(("marshal", "check"), actor="task:marshal-1")
+            )
+        system = self.ledger.show("fc-system")
+        self.assertNotIn("marshal_decision", system.fc["desktop"])
 
     def test_stale_marshal_row_does_not_overwrite_current_fact(self):
         checked = self.service.marshal_check(

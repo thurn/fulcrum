@@ -118,6 +118,24 @@ TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
         "source": {"type": "string"},
     },
     "wait_for_ci_results": {"candidate_id": {"type": "string"}},
+    "marshal_check": {
+        "trigger": {
+            "type": "string",
+            "enum": ["heartbeat"],
+            "description": "Use heartbeat only for the scheduled Marshal delivery.",
+        },
+    },
+    "marshal_decide": {
+        "decision_id": {
+            "type": "string",
+            "description": "Exact decision_id returned by marshal_check.",
+        },
+        "decisions": {
+            "type": "array",
+            "description": "Targeted curation rows, or an empty array for a no-op check.",
+            "items": {"type": "object", "additionalProperties": True},
+        },
+    },
     "finish": {
         "outcome": {
             "type": "string",
@@ -205,7 +223,7 @@ def _schema(name: str) -> dict[str, Any]:
                 "session_id",
             ],
             "register_worker": ["session_id", "turn_id"],
-            "marshal_decide": ["turn_id"],
+            "marshal_decide": ["decision_id", "decisions"],
             "report_action_result": ["attempt_id", "outcome", "native_result"],
             "report_progress": ["kind", "summary", "evidence"],
             "submit_candidate": ["source"],
@@ -265,6 +283,16 @@ def tool_descriptions() -> list[dict[str, Any]]:
             "uses approved; code outcomes also supply source_oid, exact check objects, "
             "and evidence references."
         ),
+        "marshal_check": (
+            "Marshal only: open or resume one bounded decision. For the scheduled "
+            "delivery pass trigger=heartbeat. Fulcrum resolves the current native "
+            "turn from retained transcript evidence."
+        ),
+        "marshal_decide": (
+            "Marshal only: complete the exact decision returned by marshal_check. "
+            "Pass its decision_id and targeted decisions, using an empty decisions "
+            "array when no changes are required. Do not inspect implementation source."
+        ),
     }
     return [
         {
@@ -318,7 +346,10 @@ class FreshCli:
         if host_id is not None:
             payload.setdefault("host_id", host_id)
         if turn_id is not None:
-            payload.setdefault("turn_id", turn_id)
+            nested_turn_id = payload.get("turn_id")
+            if nested_turn_id not in {None, turn_id}:
+                raise ValueError("turn_id conflicts with input.turn_id")
+            payload["turn_id"] = turn_id
         argv = [
             str(self.executable),
             *command,

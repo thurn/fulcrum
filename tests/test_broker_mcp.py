@@ -227,6 +227,12 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_id", registration["required"])
         self.assertIn("session_id", registration["required"])
         self.assertIn("turn_id", registration["properties"])
+        marshal_check = tools["marshal_check"]["inputSchema"]
+        self.assertIn("trigger", marshal_check["properties"])
+        marshal_decide = tools["marshal_decide"]["inputSchema"]
+        self.assertIn("decision_id", marshal_decide["required"])
+        self.assertIn("decisions", marshal_decide["required"])
+        self.assertNotIn("turn_id", marshal_decide["required"])
         finish = tools["finish"]["inputSchema"]
         self.assertIn("outcome", finish["required"])
         self.assertEqual(
@@ -268,6 +274,30 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("task:thread-1", argv)
         self.assertEqual(json.loads(stdin)["session_id"], "session-1")
+
+    def test_explicit_turn_identity_cannot_be_nullified_by_nested_input(self):
+        cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
+        _, stdin = cli.invocation(
+            "marshal_decide",
+            {
+                "turn_id": "turn-1",
+                "decision_id": "decision-1",
+                "decisions": [],
+                "input": {"turn_id": None},
+            },
+        )
+        self.assertEqual(json.loads(stdin)["turn_id"], "turn-1")
+
+        with self.assertRaisesRegex(ValueError, "turn_id conflicts"):
+            cli.invocation(
+                "marshal_decide",
+                {
+                    "turn_id": "turn-1",
+                    "decision_id": "decision-1",
+                    "decisions": [],
+                    "input": {"turn_id": "turn-2"},
+                },
+            )
 
     def test_mcp_generates_new_request_attempt_and_wait_identities(self):
         cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))

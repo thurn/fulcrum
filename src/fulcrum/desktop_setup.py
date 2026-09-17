@@ -52,9 +52,11 @@ REQUIRED_ACCEPTANCE = {
 }
 PRE_ACTIVATION_ACCEPTANCE: set[str] = set(REQUIRED_ACCEPTANCE)
 MARSHAL_HEARTBEAT_PROMPT = (
-    "This is the scheduled Fulcrum heartbeat. Call marshal_check with input "
-    '`{"trigger":"heartbeat"}`, settle the bounded brief, and end quietly when '
-    "no action is required."
+    "This is the scheduled Fulcrum heartbeat. Call marshal_check with "
+    '`trigger="heartbeat"`. Settle only its bounded brief, then call '
+    "marshal_decide with the returned decision_id and targeted decisions, using "
+    "an empty decisions array for a no-op. Do not inspect implementation source. "
+    "End quietly when no action is required."
 )
 STANDING = {
     "steward": {

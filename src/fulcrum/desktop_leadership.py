@@ -49,6 +49,74 @@ def _active_broker_wait_ids(request: ParsedRequest) -> set[str]:
     }
 
 
+def _current_native_turn(protocol: Mapping[str, Any], task_id: Any) -> str | None:
+    """Return the newest observed nonterminal native turn for one task."""
+
+    observations = protocol.get("observations")
+    lifecycle = (
+        observations.get("lifecycle") if isinstance(observations, Mapping) else None
+    )
+    if (
+        not isinstance(task_id, str)
+        or not task_id
+        or not isinstance(lifecycle, Mapping)
+    ):
+        return None
+    terminal_kinds = {
+        "task_complete",
+        "task_completed",
+        "turn_complete",
+        "turn_completed",
+    }
+    terminal = {
+        str(event.get("turn_id"))
+        for event in lifecycle.values()
+        if isinstance(event, Mapping)
+        and event.get("task_id") == task_id
+        and event.get("type") in terminal_kinds
+        and event.get("turn_id")
+    }
+    candidates = [
+        event
+        for event in lifecycle.values()
+        if isinstance(event, Mapping)
+        and event.get("task_id") == task_id
+        and event.get("type") in {"task_started", "turn_context"}
+        and isinstance(event.get("turn_id"), str)
+        and event.get("turn_id") not in terminal
+    ]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda event: str(event.get("time") or ""))
+    return str(newest["turn_id"])
+
+
+def _marshal_turn_id(
+    protocol: Mapping[str, Any], binding: Mapping[str, Any], request: ParsedRequest
+) -> str:
+    supplied = request.input.get("turn_id")
+    if supplied is not None and (not isinstance(supplied, str) or not supplied):
+        raise FulcrumError.invalid(
+            "IDENTITY_REQUIRED", "Marshal turn_id must be a nonempty string"
+        )
+    observed = _current_native_turn(protocol, binding.get("task_id"))
+    if isinstance(supplied, str):
+        if observed is not None and supplied != observed:
+            raise FulcrumError(
+                "STALE_DECISION",
+                "Marshal turn_id does not match the active native turn",
+                exit_code=5,
+            )
+        return supplied
+    if observed is not None:
+        return observed
+    raise FulcrumError(
+        "IDENTITY_REQUIRED",
+        "current Marshal native turn has not been observed yet",
+        exit_code=5,
+    )
+
+
 class DesktopLeadershipService(DesktopProtocolService):
     @coordinated
     def marshal_check(self, request: ParsedRequest) -> CommandResult:
@@ -61,6 +129,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             from fulcrum.desktop_protocol import _replay
 
             return _replay(saved, request)
+        turn_id = _marshal_turn_id(protocol, binding, request)
         if request.input.get("trigger") == "heartbeat":
             schedule = protocol.get("marshal_schedule")
             if (
@@ -80,19 +149,19 @@ class DesktopLeadershipService(DesktopProtocolService):
                 {
                     "delivered_at": delivered_at,
                     "task_id": binding.get("task_id"),
-                    "turn_id": request.input.get("turn_id"),
+                    "turn_id": turn_id,
                 }
             )
             protocol["marshal_schedule"] = {
                 **dict(schedule),
                 "last_delivery_at": delivered_at,
-                "last_delivery_turn_id": request.input.get("turn_id"),
+                "last_delivery_turn_id": turn_id,
                 "delivery_count": int(schedule.get("delivery_count") or 0) + 1,
                 "deliveries": deliveries[-20:],
             }
         current = protocol.get("marshal_decision")
         if isinstance(current, Mapping) and current.get("state") == "active":
-            same_turn = request.input.get("turn_id") == current.get("turn_id")
+            same_turn = turn_id == current.get("turn_id")
             if not same_turn and not _positive_native_completion(protocol, current):
                 value = {
                     "decision": copy.deepcopy(dict(current)),
@@ -114,7 +183,7 @@ class DesktopLeadershipService(DesktopProtocolService):
                 protocol["marshal_decision_history"] = history[-20:]
                 current = {
                     **dict(current),
-                    "turn_id": request.input.get("turn_id"),
+                    "turn_id": turn_id,
                     "recovered_at": _utc_now(),
                 }
                 protocol["marshal_decision"] = current
@@ -219,8 +288,11 @@ class DesktopLeadershipService(DesktopProtocolService):
             "decision_id": _opaque("decision"),
             "state": "active",
             "task_id": binding["task_id"],
-            "turn_id": request.input.get("turn_id"),
-            "accepted_input": _request_input(request),
+            "turn_id": turn_id,
+            "accepted_input": {
+                **_request_input(request),
+                "input": {**dict(request.input), "turn_id": turn_id},
+            },
             "started_at": _utc_now(),
         }
         protocol["marshal_decision"] = decision
@@ -307,7 +379,7 @@ class DesktopLeadershipService(DesktopProtocolService):
     @coordinated
     def marshal_decide(self, request: ParsedRequest) -> CommandResult:
         ledger = self._ledger(request)
-        self._standing_actor(ledger, "marshal", request)
+        binding = self._standing_actor(ledger, "marshal", request)
         system = self._system(ledger)
         system_protocol = _protocol(system.fc or {})
         saved = _saved_request(system_protocol, request, ledger=ledger)
@@ -315,6 +387,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             from fulcrum.desktop_protocol import _replay
 
             return _replay(saved, request)
+        turn_id = _marshal_turn_id(system_protocol, binding, request)
         operation = system_protocol.get("marshal_decision")
         if not isinstance(operation, Mapping) or operation.get("state") != "active":
             raise FulcrumError(
@@ -326,7 +399,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             raise FulcrumError(
                 "STALE_DECISION", "decision operation changed", exit_code=5
             )
-        if request.input.get("turn_id") != operation.get("turn_id"):
+        if turn_id != operation.get("turn_id"):
             raise FulcrumError(
                 "STALE_DECISION",
                 "decision belongs to another Marshal turn",
@@ -414,6 +487,35 @@ class DesktopLeadershipService(DesktopProtocolService):
             "stale": stale,
         }
         system_protocol["marshal_decision"] = completed
+        accepted_input = operation.get("accepted_input")
+        accepted_payload = (
+            accepted_input.get("input") if isinstance(accepted_input, Mapping) else None
+        )
+        if (
+            isinstance(accepted_payload, Mapping)
+            and accepted_payload.get("trigger") == "heartbeat"
+        ):
+            schedule = system_protocol.get("marshal_schedule")
+            if isinstance(schedule, Mapping):
+                cycles = list(schedule.get("completed_cycles") or [])
+                cycle = {
+                    "decision_id": completed["decision_id"],
+                    "turn_id": completed["turn_id"],
+                    "completed_at": completed["completed_at"],
+                    "accepted_count": len(accepted),
+                    "stale_count": len(stale),
+                }
+                cycles.append(cycle)
+                system_protocol["marshal_schedule"] = {
+                    **dict(schedule),
+                    "last_cycle_completed_at": completed["completed_at"],
+                    "last_cycle_turn_id": completed["turn_id"],
+                    "completed_cycle_count": int(
+                        schedule.get("completed_cycle_count") or 0
+                    )
+                    + 1,
+                    "completed_cycles": cycles[-20:],
+                }
         value = {"decision": completed, "accepted": accepted, "stale": stale}
         _save_request(system_protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, system_protocol))
