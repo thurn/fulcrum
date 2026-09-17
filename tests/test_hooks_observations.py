@@ -106,10 +106,18 @@ class HookTests(unittest.TestCase):
                 )
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertEqual(set(protocol["transcripts"]), {"steward-1", "marshal-1"})
+        observed_roles = {}
         for analytics in ledger.list_records(kind="analytics", limit=0):
+            observed_roles[(analytics.fc or {})["thread_id"]] = (analytics.fc or {})[
+                "role"
+            ]
             self.assertNotIn(
                 "terminal_lifecycle_missing", (analytics.fc or {})["missing_reasons"]
             )
+        self.assertEqual(
+            observed_roles,
+            {"steward-1": "steward", "marshal-1": "marshal"},
+        )
 
     def test_pre_tool_rejects_unclaimed_native_effect(self):
         ledger = MemoryLedger()

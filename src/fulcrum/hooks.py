@@ -288,14 +288,19 @@ class HookService:
         }
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-        if usage:
+        task_usage = [
+            value
+            for value in usage.values()
+            if isinstance(value, Mapping) and value.get("task_id") == task_id
+        ]
+        if task_usage:
             from fulcrum.analytics import record_desktop_usage
 
             record_desktop_usage(
                 ledger,
                 record,
                 role,
-                [value for value in usage.values() if isinstance(value, Mapping)],
+                task_usage,
                 [value for value in lifecycle.values() if isinstance(value, Mapping)],
             )
         from fulcrum.completion import settle_native_completion
