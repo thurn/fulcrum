@@ -413,6 +413,57 @@ class HookTests(unittest.TestCase):
         self.assertEqual(desktop["standing"]["steward"]["state"], "interrupt_observed")
         self.assertEqual(result.result["watch_paths"], [str(transcript)])
 
+    def test_standing_transcript_discovery_reads_only_a_bounded_recent_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "steward.jsonl"
+            prefix = (
+                json.dumps({"type": "response_item", "payload": "x" * 1000}) + "\n"
+            ) * 700
+            terminal = (
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-09-18T00:00:00Z",
+                        "payload": {
+                            "type": "turn_aborted",
+                            "turn_id": "steward-turn",
+                            "reason": "interrupted",
+                        },
+                    }
+                )
+                + "\n"
+            )
+            transcript.write_text(prefix + terminal, encoding="utf-8")
+            ledger = MemoryLedger(
+                record(
+                    "fc-system",
+                    kind="control",
+                    desktop={
+                        "standing": {
+                            "steward": {
+                                "role": "steward",
+                                "task_id": "steward-1",
+                                "state": "registered",
+                            }
+                        }
+                    },
+                )
+            )
+            with patch(
+                "fulcrum.hooks._discover_native_transcript",
+                return_value=str(transcript),
+            ):
+                DesktopProtocolService(ledger).transport_snapshot(
+                    request(("transport", "snapshot"))
+                )
+
+        desktop = (ledger.show("fc-system").fc or {})["desktop"]
+        retained = desktop["transcripts"]["steward-1"]
+        self.assertEqual(desktop["standing"]["steward"]["state"], "interrupt_observed")
+        self.assertEqual(retained["history_scope"], "recent_tail")
+        self.assertGreater(retained["history_start_cursor"], 0)
+        self.assertEqual(retained["cursor"], len((prefix + terminal).encode()))
+
     def test_active_assignment_paths_omit_completed_and_standing_tasks(self):
         with tempfile.TemporaryDirectory() as directory:
             active = Path(directory) / "active.jsonl"

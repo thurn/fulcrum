@@ -154,6 +154,69 @@ class LeadershipTests(unittest.TestCase):
         system = self.ledger.show("fc-system")
         self.assertNotIn("marshal_decision", system.fc["desktop"])
 
+    def test_completed_turn_replaces_unsettled_marshal_decision_with_fresh_brief(self):
+        first = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "turn-1"},
+            )
+        )
+        self.ledger.rows["fc-fresh"] = record(
+            "fc-fresh", owner="marshal-1", phase="ready", priority=0
+        )
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        observations = dict(desktop.get("observations") or {})
+        observations["lifecycle"] = {
+            "turn-1-complete": {
+                "type": "turn_complete",
+                "task_id": "marshal-1",
+                "turn_id": "turn-1",
+            }
+        }
+        desktop["observations"] = observations
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+
+        second = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "turn-2"},
+            )
+        )
+
+        self.assertFalse(second.result["joined"])
+        self.assertNotEqual(
+            first.result["decision"]["decision_id"],
+            second.result["decision"]["decision_id"],
+        )
+        self.assertEqual(second.result["brief"]["ready"][0]["bead"], "fc-fresh")
+        history = self.ledger.show("fc-system").fc["desktop"][
+            "marshal_decision_history"
+        ]
+        self.assertEqual(history[-1]["state"], "superseded")
+
+    def test_same_turn_rejoins_unsettled_marshal_decision_with_its_brief(self):
+        first = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "turn-1"},
+            )
+        )
+
+        second = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "turn-1"},
+            )
+        )
+
+        self.assertTrue(second.result["joined"])
+        self.assertEqual(second.result["brief"], first.result["brief"])
+
     def test_scheduled_marshal_delivery_uses_authenticated_request_identity_without_turn_hook(
         self,
     ):

@@ -47,6 +47,8 @@ MANAGED_NATIVE_TOOLS = {
     "set_thread_title",
 }
 
+DISCOVERED_TRANSCRIPT_TAIL_BYTES = 512 * 1024
+
 
 def _discover_native_transcript(task_id: str) -> str | None:
     """Locate one local Codex transcript by its retained native task identity."""
@@ -56,6 +58,24 @@ def _discover_native_transcript(task_id: str) -> str | None:
     if len(matches) != 1:
         return None
     return str(matches[0].resolve(strict=False))
+
+
+def _recent_transcript_cursor(path: Path) -> int:
+    """Start legacy transcript discovery at a bounded complete-line boundary."""
+
+    try:
+        size = path.stat().st_size
+        if size <= DISCOVERED_TRANSCRIPT_TAIL_BYTES:
+            return 0
+        with path.open("rb") as stream:
+            stream.seek(size - DISCOVERED_TRANSCRIPT_TAIL_BYTES)
+            stream.readline()
+            cursor = stream.tell()
+    except OSError:
+        return 0
+    # A single oversized trailing row may contain the only terminal event. In
+    # that unusual case correctness outranks the bounded legacy bootstrap.
+    return 0 if cursor >= size else cursor
 
 
 class HookService:
@@ -489,10 +509,13 @@ class HookService:
                 else None
             )
             transcript = retained.get("path") if isinstance(retained, Mapping) else None
+            discovery_cursor: int | None = None
             if not isinstance(task_id, str) or not task_id:
                 continue
             if not isinstance(transcript, str) or not Path(transcript).is_absolute():
                 transcript = _discover_native_transcript(task_id)
+                if transcript is not None:
+                    discovery_cursor = _recent_transcript_cursor(Path(transcript))
             if transcript is None:
                 continue
             paths.add(transcript)
@@ -504,6 +527,7 @@ class HookService:
                 task_id,
                 transcript,
                 assignment.get("turn_id"),
+                discovery_cursor=discovery_cursor,
             )
         return sorted(paths)
 
@@ -530,8 +554,11 @@ class HookService:
                 transcripts.get(task_id) if isinstance(transcripts, Mapping) else None
             )
             transcript = retained.get("path") if isinstance(retained, Mapping) else None
+            discovery_cursor: int | None = None
             if not isinstance(transcript, str) or not Path(transcript).is_absolute():
                 transcript = _discover_native_transcript(task_id)
+                if transcript is not None:
+                    discovery_cursor = _recent_transcript_cursor(Path(transcript))
             if transcript is None:
                 continue
             current = ledger.show("fc-system")
@@ -546,6 +573,7 @@ class HookService:
                 task_id,
                 transcript,
                 binding.get("turn_id"),
+                discovery_cursor=discovery_cursor,
             )
         return sorted(paths)
 
@@ -601,11 +629,17 @@ class HookService:
         task_id: str,
         transcript: str,
         turn_id: Any,
+        *,
+        discovery_cursor: int | None = None,
     ) -> None:
         protocol = _protocol(record.fc or {})
         transcripts = dict(protocol.get("transcripts") or {})
         current = transcripts.get(task_id)
-        cursor = int(current.get("cursor", 0)) if isinstance(current, Mapping) else 0
+        cursor = (
+            int(current.get("cursor", 0))
+            if isinstance(current, Mapping)
+            else int(discovery_cursor or 0)
+        )
         page = read_transcript(Path(transcript), cursor)
         retained_gaps = (
             list(current.get("gaps") or []) if isinstance(current, Mapping) else []
@@ -691,11 +725,24 @@ class HookService:
         observations["lifecycle"] = lifecycle
         observations["usage"] = usage
         protocol["observations"] = observations
-        transcripts[task_id] = {
+        retained_transcript = {
             "path": transcript,
             "cursor": page.cursor,
             "gaps": page_gaps,
         }
+        history_start_cursor = (
+            current.get("history_start_cursor")
+            if isinstance(current, Mapping)
+            else cursor if cursor > 0 else None
+        )
+        if isinstance(history_start_cursor, int) and history_start_cursor > 0:
+            retained_transcript.update(
+                {
+                    "history_scope": "recent_tail",
+                    "history_start_cursor": history_start_cursor,
+                }
+            )
+        transcripts[task_id] = retained_transcript
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         self._cancel_waits_for_terminal_events(ledger, request, task_id, page.lifecycle)

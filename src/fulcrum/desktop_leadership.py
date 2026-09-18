@@ -181,22 +181,28 @@ class DesktopLeadershipService(DesktopProtocolService):
                 return _result(request, value)
             if not same_turn:
                 history = list(protocol.get("marshal_decision_history") or [])
-                history.append(copy.deepcopy(dict(current)))
+                history.append(
+                    {
+                        **copy.deepcopy(dict(current)),
+                        "state": "superseded",
+                        "superseded_at": _utc_now(),
+                        "superseded_reason": "native_turn_completed_without_decision",
+                    }
+                )
                 protocol["marshal_decision_history"] = history[-20:]
-                current = {
-                    **dict(current),
-                    "turn_id": turn_id,
-                    "recovered_at": _utc_now(),
+            else:
+                value = {
+                    "decision": copy.deepcopy(dict(current)),
+                    "joined": True,
+                    "brief": copy.deepcopy(
+                        current.get("brief")
+                        if isinstance(current.get("brief"), Mapping)
+                        else {"incidents": [], "ready": [], "omitted": {}}
+                    ),
                 }
-                protocol["marshal_decision"] = current
-            value = {
-                "decision": copy.deepcopy(dict(current)),
-                "joined": True,
-                "brief": {"incidents": [], "ready": [], "omitted": {}},
-            }
-            _save_request(protocol, request, value, ledger=ledger)
-            ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
-            return _result(request, value)
+                _save_request(protocol, request, value, ledger=ledger)
+                ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
+                return _result(request, value)
         records = ledger.list_records(limit=0)
         incidents: list[dict[str, Any]] = []
         recoveries: list[dict[str, Any]] = []
@@ -468,28 +474,29 @@ class DesktopLeadershipService(DesktopProtocolService):
                 }
                 actions[action_id] = recovery_action
                 protocol["actions"] = actions
+        brief = {
+            "purpose": "recovery" if incidents else "curation",
+            "steward_health": steward_health,
+            "incidents": incidents[:20],
+            "recoveries": recoveries[:20],
+            "ready": sorted(ready, key=lambda row: (row["priority"], row["bead"]))[:20],
+            "omitted": {
+                "incidents": max(0, len(incidents) - 20),
+                "recoveries": max(0, len(recoveries) - 20),
+                "ready": max(0, len(ready) - 20),
+            },
+            "recovery_action": (
+                self._action_response(request, recovery_action)
+                if recovery_action is not None
+                else None
+            ),
+        }
+        decision["brief"] = copy.deepcopy(brief)
+        protocol["marshal_decision"] = decision
         value = {
             "decision": decision,
             "joined": False,
-            "brief": {
-                "purpose": "recovery" if incidents else "curation",
-                "steward_health": steward_health,
-                "incidents": incidents[:20],
-                "recoveries": recoveries[:20],
-                "ready": sorted(ready, key=lambda row: (row["priority"], row["bead"]))[
-                    :20
-                ],
-                "omitted": {
-                    "incidents": max(0, len(incidents) - 20),
-                    "recoveries": max(0, len(recoveries) - 20),
-                    "ready": max(0, len(ready) - 20),
-                },
-                "recovery_action": (
-                    self._action_response(request, recovery_action)
-                    if recovery_action is not None
-                    else None
-                ),
-            },
+            "brief": brief,
         }
         _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
