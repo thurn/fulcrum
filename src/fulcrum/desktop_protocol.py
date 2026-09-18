@@ -61,6 +61,12 @@ TASK_ARCHIVE_DELAY = timedelta(minutes=10)
 def _positive_native_completion(
     protocol: Mapping[str, Any], assignment: Mapping[str, Any]
 ) -> bool:
+    if (
+        assignment.get("capacity_class") == "entry"
+        and assignment.get("state") == "finished"
+        and assignment.get("released_at")
+    ):
+        return True
     observations = protocol.get("observations")
     lifecycle = (
         observations.get("lifecycle") if isinstance(observations, Mapping) else None

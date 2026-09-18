@@ -110,7 +110,10 @@ STANDING = {
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id. Omit request_id for new Fulcrum calls; "
             "the MCP server generates valid UUIDs. Then call wait_for_instructions "
-            "without inventing loop or turn IDs. "
+            "without inventing loop or turn IDs. Run each blocking wait in one "
+            'functions.exec cell beginning `// @exec: {"yield_time_ms": 3900000, '
+            '"max_output_tokens": 10000}`, await the MCP result in that cell, and '
+            "never poll it with functions.wait. "
             "For each returned action, claim it, invoke its exact native tool and arguments "
             "once, report the actual result, and immediately wait again. Do not choose "
             "priorities, invent prompts, retry uncertain effects, or poll tasks. Treat an "

@@ -822,6 +822,58 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert "$weaver" not in role_title("executor", "fc-a", "$weaver `run`")
 
 
+def test_released_same_task_weaver_does_not_block_executor_dispatch():
+    work = record(
+        "fc-entry-complete",
+        phase="ready",
+        requested_role="executor",
+        worktree={"path": "/tmp/managed-worktree", "branch": "fc-entry-complete"},
+        codex_project_id="project-1",
+        scope={
+            "summary": "Update README.md",
+            "acceptance": ["README.md is updated"],
+            "finish_operation": "fc-op-scope",
+        },
+        desktop={
+            "assignment_history": [
+                {
+                    "assignment_token": "entry-assignment",
+                    "task_id": "weaver-1",
+                    "turn_id": "logical-protocol-turn",
+                    "role": "weaver",
+                    "state": "finished",
+                    "capacity_class": "entry",
+                    "entry_mode": "same_task",
+                    "released_at": "2026-09-16T00:01:00Z",
+                }
+            ],
+            "observations": {
+                "lifecycle": {
+                    "done": {
+                        "type": "task_complete",
+                        "task_id": "weaver-1",
+                        "turn_id": "native-codex-turn",
+                    }
+                }
+            },
+        },
+    )
+    service, _ = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "entry-finished", "turn_id": "steward-turn"},
+        )
+    )
+
+    assert result.result["kind"] == "action"
+    assert result.result["action"]["tool"] == "create_thread"
+    assert result.result["action"]["record_id"] == "fc-entry-complete"
+
+
 def test_worker_registration_derives_native_identity_from_creation_result():
     work = record(
         "fc-derived",
