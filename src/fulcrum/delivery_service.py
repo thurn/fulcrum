@@ -285,6 +285,10 @@ class DeliveryService:
                 ),
             )
             return _operation_result(operation)
+        from fulcrum.scenario_delivery import wait_for_scenario_admission
+
+        with external_effect():
+            admission = wait_for_scenario_admission(request, ledger, work, source)
         try:
             with external_effect():
                 facts = _call(provider.submit(source))
@@ -305,7 +309,10 @@ class DeliveryService:
                 "promotion": {"state": "not_started"},
                 "synchronization": {"state": "pending"},
                 "cleanup": {"state": "pending"},
-                "evidence": {"validation": facts.evidence},
+                "evidence": {
+                    "validation": facts.evidence,
+                    **({"admission_barrier": admission} if admission else {}),
+                },
             },
             operation.id,
         )
@@ -326,6 +333,7 @@ class DeliveryService:
                 "provider": "tollgate",
                 "repository_id": source.work.repository_id,
                 "handle": facts.handle,
+                **({"admission_barrier": admission} if admission else {}),
             },
             result={"validation": facts.to_dict()},
             next_action="Inspect validation; pending/running work remains provider-owned.",
