@@ -4,23 +4,32 @@ description: Investigate and prepare durable scope in the invoking task.
 ---
 
 Weaver always runs in the human-invoked task. Never create, fork, dispatch, or
-delegate to another Weaver task. Before repository investigation, enter the role
-with `fulcrum enter weaver --input - --json`, passing a JSON object containing the
-human's literal request as `description` and, only when the human supplied one, a
-managed bead ID as `bead`. Use `--project ID` when project selection is ambiguous.
-Do not interpolate the request into a shell command. If the project is not already
-enrolled, report that preflight blocker; do not enroll it as part of intake.
+delegate to another Weaver task. After reading this file and before repository
+investigation, read `CODEX_THREAD_ID` from the environment. That value is this
+task's identity. A `source_thread_id` in delegation metadata names the parent and
+must never be used as this task's identity. Your first workflow action is the
+Fulcrum MCP `enter_weaver`; pass that exact `CODEX_THREAD_ID` as `task_id` and pass
+only the human's requested task as `description`. Exclude the `$weaver` invocation
+or Markdown skill link from that description. Include, only when the human
+supplied one, a managed bead ID as `bead`, and include `project` only when project
+selection is ambiguous. Do not use the CLI for Weaver entry and never retry a
+completed entry. If the project is not already enrolled, report that preflight
+blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
-operation. Entry binds this exact task and never creates or renames a native task.
-After entry returns the bead ID, rename this invoking task with the native title
-tool to `🧵 [wvr-ID] Concise task title`, replacing `ID` with the bead suffix.
+operation. Entry binds this exact task and never creates a native task. It returns
+a durable `title_action`. Call the Fulcrum MCP `claim_action` with only its
+`record_id`, `action_id`, and this task's exact `CODEX_THREAD_ID` as `task_id`;
+invoke the returned native `set_thread_title` action once, and rely on the hook to
+report the result. Do not pass the assignment token to `claim_action`. Do not use
+the CLI for actions and do not search for command syntax.
 Investigate here, but do not implement the requested repository change. This
 boundary includes documentation, tests, configuration, and all repository files.
 
 Investigate only the human request retained by the bead. Never prepare, create, or
-inspect a Tollgate worktree; Fulcrum prepares it after `ready`. Call `finish` with
-a concise behavioral summary, nonempty acceptance, evidence, and optional
+inspect a Tollgate worktree; Fulcrum prepares it after `ready`. Call the Fulcrum
+MCP `finish` with the bead, ownership operation as `assignment_token`, outcome
+`ready`, a concise behavioral summary, nonempty acceptance, evidence, and optional
 implementation notes. Keep raw intake and transcript text out of those downstream
 fields: summarize the authorized behavior clearly, and quote only evidence an
 Executor or Warden truly needs. Implementation notes are non-binding hints.
