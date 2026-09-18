@@ -564,6 +564,13 @@ class HookService:
             *(dict(item) for item in page.gaps),
         ][-20:]
         if page.cursor == cursor and page_gaps == retained_gaps:
+            # Native action results may settle after the terminal transcript was
+            # already consumed. Completion is idempotent and must be retried even
+            # when no new transcript bytes arrived, or a finished worker can keep
+            # capacity forever solely because its last action result won the race.
+            from fulcrum.completion import settle_native_completion
+
+            settle_native_completion(request, ledger, record.id)
             return
         observations = dict(protocol.get("observations") or {})
         lifecycle = dict(observations.get("lifecycle") or {})

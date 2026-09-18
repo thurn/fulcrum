@@ -21,9 +21,11 @@ Follow the returned instructions and keep the returned bead and ownership
 operation. Entry binds this exact task and never creates a native task. It returns
 a durable `title_action`. Call the Fulcrum MCP `claim_action` with only its
 `record_id`, `action_id`, and this task's exact `CODEX_THREAD_ID` as `task_id`;
-invoke the returned native `set_thread_title` action once, and rely on the hook to
-report the result. Do not pass the assignment token to `claim_action`. Do not use
-the CLI for actions and do not search for command syntax.
+invoke the returned native `set_thread_title` action once, then immediately call
+`report_action_result` with the returned attempt ID, outcome `succeeded`, and the
+actual native result. App MCP calls do not emit the shell post-tool hook, so never
+leave the title action pending or issuing. Do not pass the assignment token to
+`claim_action`. Do not use the CLI for actions and do not search for command syntax.
 Investigate here, but do not implement the requested repository change. This
 boundary includes documentation, tests, configuration, and all repository files.
 

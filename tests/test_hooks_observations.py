@@ -158,6 +158,67 @@ class HookTests(unittest.TestCase):
         self.assertEqual(protocol["assignment_history"][-1]["turn_id"], "native-turn")
         self.assertEqual(retained.assignee, "STEWARD")
 
+    def test_collection_retries_completion_without_new_transcript_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.jsonl"
+            row = {
+                "type": "event_msg",
+                "payload": {"type": "task_complete", "turn_id": "native-turn"},
+            }
+            content = json.dumps(row) + "\n"
+            path.write_text(content, encoding="utf-8")
+            ledger = MemoryLedger(
+                record(
+                    "fc-work",
+                    owner="STEWARD",
+                    phase="ready",
+                    role=None,
+                    ownership_operation="assignment-1",
+                    desktop={
+                        "assignment": {
+                            "assignment_token": "assignment-1",
+                            "role": "weaver",
+                            "task_id": "worker-1",
+                            "turn_id": "native-turn",
+                            "state": "active",
+                            "finish_operation": "finish-1",
+                        },
+                        "actions": {
+                            "title-1": {
+                                "action_id": "title-1",
+                                "executor": "weaver",
+                                "assignment_token": "assignment-1",
+                                "state": "succeeded",
+                            }
+                        },
+                        "observations": {
+                            "lifecycle": {
+                                "done": {
+                                    "type": "task_complete",
+                                    "task_id": "worker-1",
+                                    "turn_id": "native-turn",
+                                }
+                            }
+                        },
+                        "transcripts": {
+                            "worker-1": {
+                                "path": str(path),
+                                "cursor": len(content.encode()),
+                                "gaps": [],
+                            }
+                        },
+                    },
+                )
+            )
+
+            watched = HookService(ledger).collect_active_assignments(request())
+
+        retained = ledger.show("fc-work")
+        protocol = (retained.fc or {})["desktop"]
+        self.assertEqual(watched, [str(path)])
+        self.assertNotIn("assignment", protocol)
+        self.assertEqual(protocol["assignment_history"][-1]["state"], "finished")
+
     def test_active_assignment_collection_omits_inactive_transcripts(self):
         with tempfile.TemporaryDirectory() as directory:
             active = Path(directory) / "active.jsonl"

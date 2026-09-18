@@ -114,6 +114,28 @@ def test_weaver_entry_binds_invoking_task_without_native_creation():
         request_id=str(uuid.uuid4()),
     )
     with patch("fulcrum.completion._ledger", return_value=ledger):
+        with unittest.TestCase().assertRaises(FulcrumError) as raised:
+            CompletionService().finish(finished)
+    assert raised.exception.code == "ACTION_RESULT_REQUIRED"
+
+    reported = replace(
+        entered,
+        command=("action", "result"),
+        arguments={
+            "record_id": payload["bead_id"],
+            "action_id": payload["title_action"]["action_id"],
+        },
+        input={
+            "attempt_id": "title-attempt",
+            "outcome": "succeeded",
+            "native_result": payload["title_action"]["expected_result"],
+        },
+        ownership_operation=None,
+        request_id=str(uuid.uuid4()),
+    )
+    DesktopProtocolService(ledger).report_action_result(reported)
+
+    with patch("fulcrum.completion._ledger", return_value=ledger):
         completion = CompletionService().finish(finished)
     retained = ledger.show(payload["bead_id"])
     assignment = retained.fc["desktop"]["assignment"]

@@ -718,6 +718,36 @@ class CompletionService:
     def _weaver_ready(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
     ) -> CommandResult:
+        desktop = (work.fc or {}).get("desktop")
+        assignment = desktop.get("assignment") if isinstance(desktop, Mapping) else None
+        actions = desktop.get("actions") if isinstance(desktop, Mapping) else None
+        unresolved_title = next(
+            (
+                action
+                for action in (actions or {}).values()
+                if isinstance(action, Mapping)
+                and action.get("executor") == "weaver"
+                and action.get("assignment_token")
+                == (
+                    assignment.get("assignment_token")
+                    if isinstance(assignment, Mapping)
+                    else None
+                )
+                and action.get("state") != "succeeded"
+            ),
+            None,
+        )
+        if isinstance(unresolved_title, Mapping):
+            raise FulcrumError(
+                "ACTION_RESULT_REQUIRED",
+                "report the Weaver title action result before finishing intake",
+                exit_code=5,
+                details={
+                    "record_id": work.id,
+                    "action_id": unresolved_title.get("action_id"),
+                    "state": unresolved_title.get("state"),
+                },
+            )
         summary, _ = _weaver_payload(request, evidence_required=False)
         acceptance = request.input.get("acceptance")
         implementation_notes = request.input.get("implementation_notes", [])
