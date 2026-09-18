@@ -2551,6 +2551,26 @@ class DesktopProtocolService:
         )
         return candidates
 
+    def _has_foreground_work(self, ledger: Ledger) -> bool:
+        for record in ledger.list_records(limit=0):
+            if record.id == "fc-system" or record.status == "closed":
+                continue
+            fc = record.fc or {}
+            assignment = _protocol(fc).get("assignment")
+            if isinstance(assignment, Mapping) and assignment.get("state") in {
+                "reserved",
+                "issuing",
+                "active",
+                "uncertain",
+            }:
+                return True
+            if (
+                str(fc.get("phase") or "") in {"ready", "implementation_ready"}
+                and str(fc.get("requested_role") or "") in DISPATCHABLE_ROLES
+            ):
+                return True
+        return False
+
     def _compile_ready_assignment(
         self, ledger: Ledger, request: ParsedRequest
     ) -> tuple[LedgerRecord, dict[str, Any]] | None:
@@ -3039,7 +3059,7 @@ class DesktopProtocolService:
             compiled = self._compile_ready_assignment(ledger, request)
             if compiled is not None:
                 candidates = [compiled]
-        if not candidates:
+        if not candidates and not self._has_foreground_work(ledger):
             candidates = background
         if not candidates and protocol.get("run_control", "paused") != "paused":
             lifecycle = self._compile_lifecycle_action(ledger, request)

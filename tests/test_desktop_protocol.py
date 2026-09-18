@@ -775,6 +775,54 @@ def test_closed_settled_worker_archives_only_after_ten_minutes():
     assert result.result["action"]["arguments"]["archived"] is True
 
 
+def test_steward_defers_archival_while_foreground_work_is_active():
+    archived = record(
+        "fc-archived",
+        status="closed",
+        phase="done",
+        desktop={
+            "actions": {
+                "action-archive": {
+                    "action_id": "action-archive",
+                    "record_id": "fc-archived",
+                    "executor": "steward",
+                    "tool": "set_thread_archived",
+                    "arguments": {"threadId": "old-worker", "archived": True},
+                    "state": "pending",
+                    "purpose": "archive_task:old-worker",
+                }
+            }
+        },
+    )
+    active = record(
+        "fc-active",
+        phase="ready",
+        requested_role="executor",
+        desktop={
+            "assignment": {
+                "assignment_token": "weaver-assignment",
+                "role": "weaver",
+                "task_id": "weaver-1",
+                "state": "active",
+                "entry_mode": "same_task",
+            }
+        },
+    )
+    service, _ = registered_service(archived, active)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "foreground", "turn_id": "turn-foreground"},
+        )
+    )
+
+    assert result.state.value == "running"
+    assert result.result["transport_wait"]["state"] == "waiting"
+
+
 def test_steward_selects_ready_action_without_marshal_and_pause_holds_it():
     work = record("fc-a", phase="ready", priority=1)
     service, ledger = registered_service(work)
