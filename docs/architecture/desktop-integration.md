@@ -136,7 +136,8 @@ problem, evidence, required change, acceptance checks, dependencies, and origin.
 Deduplicate exact retries by `report_key`; reject changed input under that key.
 Return the actual bead ID and filing state without a native handoff by the caller.
 An implementation-ready report may enter ready backlog after deterministic
-validation; incomplete scope remains unready for Weaver preparation.
+validation; incomplete scope remains unready until a human invokes `$weaver` in
+the task where the request was made. Automatic selection never creates a Weaver.
 
 Weaver's accepted `ready` outcome makes ordinary work eligible for automatic
 selection, subject to current holds, dependencies, capacity, and source/overlap
@@ -147,13 +148,11 @@ works whether there are two beads or two hundred. Explicit future plans and
 human/Vizier scope-approval requirements still need their recorded authorization.
 
 Keep plan drafting, approved scope, stable child keys, refinement, dependencies,
-future activation, and mechanical parent completion. Remove the independent
-plan-review subsystem. Instead, Weaver's prompt says to run a native subagent to
-review a substantial plan with its relevant requirements and address the findings.
-There are no dedicated `plan review` commands, review-task registrations,
-perspective-specific receipts, review-capacity reservations, or waiver gates.
-Human/Vizier scope approval no longer depends on those review records. Prompt-level
-subagents do not become another class of Fulcrum workers or double-counted usage.
+future activation, and mechanical parent completion. There is no independent
+plan-review subsystem and no delegated Weaver. The human-invoked Weaver owns its
+investigation and scope until it finishes. There are no dedicated `plan review`
+commands, review-task registrations, perspective-specific receipts,
+review-capacity reservations, or waiver gates.
 
 Other explicit cuts:
 

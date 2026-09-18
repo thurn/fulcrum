@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fulcrum.diagnostics import DiagnosticService, _doctor_result, _loop_health
 from tests.support import MemoryLedger, record, request
@@ -37,6 +37,78 @@ def test_status_surfaces_accounting_gaps_in_overall_health():
             "missing_reasons": ["terminal_lifecycle_missing"],
         }
     ]
+
+
+def test_trace_joins_action_task_lifecycle_and_registration_recovery():
+    ledger = MemoryLedger(
+        record(
+            "fc-work",
+            phase="ready",
+            desktop={
+                "actions": {
+                    "action-create": {
+                        "action_id": "action-create",
+                        "tool": "create_thread",
+                        "state": "succeeded",
+                        "purpose": "routine_dispatch",
+                        "assignment_token": "assignment-1",
+                        "native_result": {"threadId": "worker-1"},
+                        "attempts": [{"attempt_id": "attempt-1"}],
+                    }
+                },
+                "assignment_history": [
+                    {
+                        "assignment_token": "assignment-1",
+                        "creation_action_id": "action-create",
+                        "task_id": "worker-1",
+                        "role": "executor",
+                        "state": "registration_failed",
+                    }
+                ],
+                "observations": {
+                    "lifecycle": {
+                        "stop-1": {
+                            "event_id": "stop-1",
+                            "type": "turn_aborted",
+                            "task_id": "worker-1",
+                            "turn_id": "turn-1",
+                            "reason": "interrupted",
+                        }
+                    }
+                },
+                "registration_failures": [
+                    {
+                        "task_id": "worker-1",
+                        "role": "executor",
+                        "assignment_token": "assignment-1",
+                        "creation_action_id": "action-create",
+                        "recorded_at": "2026-09-17T00:00:00Z",
+                        "terminal_event": {
+                            "type": "turn_aborted",
+                            "turn_id": "turn-1",
+                            "reason": "interrupted",
+                        },
+                    }
+                ],
+            },
+        )
+    )
+    log = MagicMock()
+    log.read.return_value = {"items": [], "gaps": [], "next_cursor": None}
+    log.files.return_value = ["events.jsonl"]
+    with (
+        patch("fulcrum.diagnostics._ledger", return_value=ledger),
+        patch("fulcrum.diagnostics.DiagnosticLog.from_request", return_value=log),
+    ):
+        result = DiagnosticService().trace(
+            request(("trace",), arguments={"bead": "fc-work", "limit": 0})
+        )
+    rows = {item["id"]: item for item in result.result["items"]}
+    assert rows["action-create"]["attempt_id"] == "attempt-1"
+    assert rows["action-create"]["task_id"] == "worker-1"
+    assert rows["stop-1"]["outcome"] == "interrupted"
+    assert rows["fc-work:registration-failure:0"]["outcome"] == "capacity_released"
+    assert result.result["gaps"] == []
 
 
 def test_intentionally_paused_bootstrap_heartbeat_is_reported_paused():

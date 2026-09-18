@@ -139,20 +139,13 @@ accepted input, planned work, recovery checkpoints, and timestamps; they are not
 repeated in normal command output. Receipt results describe the achieved state at
 that operation, not a live status query; use `context`/`work show` for current state.
 
-Weaver `ready` retains scope and observable acceptance for Marshal's decision
-brief and stale-decision comparison. It proposes Executor review/dispatch but
-never authorizes it. Reconciliation discovers unapproved backlog, coalesces
-attention, and starts a Marshal review turn when leadership is available and idle.
-Successful finish reports discovery eligibility, not notification. Failed review
-requests remain eligible for bounded retries; uncertain requests require inspection.
-Missing leadership explicitly leaves HUMAN responsible. Only a subsequent Marshal
-decision records dispatch authorization; capacity/dependencies still gate launch.
-Dispatch authorization copies that exact scope revision into the dispatch receipt.
-Executor and Warden compilation uses only its summary, acceptance, and evidence;
-the original intake remains provenance for Weaver and Marshal and is not worker
-instruction text. A later scope change makes the authorization stale.
-Long prepared scope is excerpted with an explicit `complete: false` and `work show`
-continuation; Marshal must inspect that full scope before deciding.
+Weaver `ready` retains scope and observable acceptance, then proposes Executor as
+the next role. Reconciliation may dispatch it only after the Weaver assignment's
+native turn ends and ordinary capacity/dependency/source checks pass. Executor and
+Warden compilation uses only the retained scope summary, acceptance, evidence, and
+non-binding implementation notes. Original intake, context, and transcript text
+remain provenance and are not worker instructions. Contract strings are serialized
+as escaped inert data beneath dominant role instructions.
 
 When the caller omits a request ID, generate it before contacting the controller
 and print it to stderr so a lost response is still retryable. Structured callers
@@ -242,22 +235,12 @@ project-specific command. Setup writes absolute executable paths for services.
 | `finish --bead ID --outcome OUTCOME --input FILE` | Role-specific finish described below |
 | `report --input FILE` | File an incidental follow-up without changing the reporting task's role |
 
-`enter` roles are exactly vizier, marshal, weaver, executor, warden, sage, mason,
-and justiciar. Task titles follow the exact table in
-[design.md](design.md#persistent-bead-identity-and-visible-task-names); format them
-as `<emoji>[<role-code>-<full-bead-suffix>] <bead-title>`, with the two fixed
-leadership exceptions. Existing leadership receives only explicit human entry requests;
-`enter vizier --origin dispatch` is rejected without starting a turn. Every explicit human role entry bypasses ordinary admission; the existing
-leader receives leadership requests in its own task. If dependencies
-are physically unavailable, start whatever useful work the current task can do
-and return truthful degraded instructions, rather than pretending work started.
-
-A terminal worker call without `--thread-id` creates or safely reuses its native
-task; leadership entry instead routes to the standing leader. A call from an
-already-active human task binds that task and returns instructions; it does not
-send a redundant turn into itself. A role change owns the same bead unless a
-different bead is explicitly provided. Entry returns `bead_id`, `thread_id`,
-`role`, `ownership_operation`, `instructions`, and any outstanding operation ID.
+`enter` accepts only `weaver` and requires the invoking native task identity. It
+binds that task, returns instructions, and never creates, forks, renames, or sends
+a turn to another task. Executor, Warden, Sage, Mason, and Justiciar are created
+only from durable downstream authorization. Their titles use
+`<emoji> [<role-code>-<full-bead-suffix>] <concise-authorized-summary>`; for example,
+`⚒️ [exe-cdf5657c] Add newline to README.md`.
 
 One non-leadership task actively executes one work bead at a time. Entry into a
 different bead checkpoints its prior unfinished work and returns that work to
@@ -275,8 +258,8 @@ that already shipped. Entry on unfinished Warden work returns it to Warden revie
 through Marshal afterward, not to a new Executor implementation.
 
 `work create` accepts `title`, `outcome`, optional `project`, `acceptance` (array of
-strings), `requested_role` (default weaver for incomplete requests, executor when
-explicitly supplied), `priority` (0–4, default 2), `context` (array of references),
+strings), `requested_role` (default executor; Weaver is rejected), `priority` (0–4,
+default 2), `context` (array of references),
 optional `intake` (`benefit`, `uncertainties`), optional `models` keyed by role to
 `{model, effort}`, and optional `children`. A graph child has a caller-local `key` and the same task
 fields; `depends_on` contains child keys or existing bead IDs. Persist the planned

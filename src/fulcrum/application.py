@@ -103,6 +103,7 @@ class Application:
         self.register(("rates", "add"), analytics.rates_add)
         self.register(("usage", "reconcile"), analytics.reconcile)
         work = WorkService()
+        self.register(("enter",), work.enter)
         self.register(("work", "create"), work.create)
         self.register(("work", "show"), work.show)
         self.register(("work", "list"), work.list)

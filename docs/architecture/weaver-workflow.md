@@ -3,8 +3,10 @@
 Weaver answers questions, prepares implementation scope, and authors future plans.
 It does not implement repository changes. This includes documentation, tests, and
 configuration. Plan artifacts use Fulcrum's plan commands; investigation and scope
-use ledger fields. The initial skill establishes this boundary before registration
-so the first user-facing update can accurately promise investigation or scoping.
+use ledger fields. Weaver is entered in the human-invoked task and is never created
+by Steward or delegated to another task. The initial skill establishes this boundary
+before repository investigation so the first user-facing update can accurately
+promise investigation or scoping.
 
 ## Proportionate authoring
 
@@ -39,24 +41,14 @@ This example is historical evidence, not an instruction to repeat that deletion.
 
 `answered` closes a resolved question with evidence. `planned` retains a published
 future plan without activating it. `ready` stores implementation-ready `scope`,
-replaces placeholder acceptance, proposes Executor as the next role, transfers
-ownership to Marshal (or HUMAN if no Marshal is registered), and clears dispatch.
-It proves **scope awaiting review**, not implementation, notification, or delivery.
-`blocked` records the impediment, attempts, and required action for the next actor.
+replaces placeholder acceptance, proposes Executor as the next role, and returns
+ownership to Steward. It proves **scope ready for admission**, not implementation
+or delivery. `blocked` records the impediment, attempts, and required action.
 
-After `ready`, reconciliation discovers unapproved backlog. It observes standing
-leadership, coalesces review events, and creates a `marshal.request` receipt.
-Active leadership, pressure pauses, durable deferrals, or an outstanding request
-can delay review. The resident schedules bounded background jobs; finish does not
-send a synchronous notification. A successful native review-turn start is separate
-evidence. Marshal's decision brief now includes the prepared scope and acceptance,
-and those facts participate in stale-decision checks. Long scope has a bounded
-excerpt plus an explicit full-work continuation; review must inspect that scope.
-
-Only an explicit Marshal decision supplies the `dispatch` mapping. The supervisor
-then checks dependencies, capacity, pauses, and reservations before invoking the
-authorized role. No small-request shortcut bypasses Marshal. HUMAN fallback says
-who must arrange review and does not pretend that a leader was notified.
+After the Weaver turn ends, reconciliation checks dependencies, capacity, pauses,
+workspace/source facts, and overlap reservations before creating an Executor. The
+Executor contract is compiled only from the retained `scope`; original outcome,
+context, and transcript text remain provenance and are never replayed downstream.
 
 After transfer, Weaver can answer follow-up questions read-only. `context` reports
 current ownership and does not return the prior owner's stale cooked prompt.
@@ -65,12 +57,11 @@ reclaiming the bead or submitting another finish.
 
 ## Recovery and command results
 
-Role entry accepts a literal `--description` or a JSON `description` through
-`--input`. Use safe quoting or JSON for multiline/shell-sensitive text; no shell
-evaluation or paraphrase is needed. Degraded entry explicitly lacks registration
-and ownership. Inspect the retained operation before retrying. An exact replay
-uses the same request ID and payload; a repaired definitive failure needs a new
-request, using the retained bead rather than creating duplicate work.
+Weaver entry accepts a literal `--description` or a JSON `description` through
+`--input`. Use JSON for multiline or shell-sensitive text; never interpolate the
+request into a shell command. Entry binds the invoking task and does not create or
+rename a native task. Project enrollment is a separate preflight and must not be
+performed as an intake side effect. Inspect a retained operation before retrying.
 
 Entry and finish return compact results with relevant IDs, achieved step,
 role-specific facts, instructions once where applicable, next action, and an
@@ -221,9 +212,9 @@ measurement is needed before additional latency claims or policy changes.
 
 The operational-test postmortem produced the following enforced workflow:
 
-1. A prepared scope cannot be dispatched to another Weaver unless a Marshal
-   records a nonempty material clarification question. The guard also applies to
-   direct human authorization and previously persisted stale authorizations.
+1. Weaver is never dispatchable. `$weaver` binds the human-invoked task, and every
+   work-creation, adoption, selection, and worker-registration boundary rejects a
+   request to create another Weaver task.
 2. Executor admission prepares an owned, clean worktree before role entry.
    Executor and Warden task roots are that worktree, never the live project root.
    The live project config runs `scripts/prepare-check` during preparation, so the

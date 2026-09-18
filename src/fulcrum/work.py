@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from fulcrum.coordination import coordinated
 
 from collections.abc import Mapping, Sequence
@@ -45,6 +48,167 @@ PROGRESS_KINDS: set[str] = {"investigation", "source", "validation", "blocker"}
 
 
 class WorkService:
+    @coordinated
+    def enter(self, request: ParsedRequest) -> CommandResult:
+        """Bind the invoking task as Weaver; this command never creates a task."""
+
+        role = str(request.arguments.get("role") or "")
+        if role != "weaver":
+            raise FulcrumError(
+                "ROLE_NOT_ENTERABLE",
+                "only Weaver may be entered directly; downstream roles are dispatched from approved bead scope",
+                exit_code=5,
+            )
+        task_id = request.actor.task_id or request.thread_id
+        if request.actor.kind != "task" or not task_id:
+            raise FulcrumError(
+                "SAME_TASK_REQUIRED",
+                "Weaver entry requires the invoking native task identity",
+                exit_code=5,
+            )
+        description = request.input.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise _invalid("description", "is required")
+        ledger = _ledger(request)
+        supplied = request.input.get("bead")
+        existing = ledger.show(str(supplied)) if supplied else None
+        if supplied and (
+            existing is None or existing.kind != "work" or not existing.fc
+        ):
+            raise FulcrumError.invalid("NOT_FOUND", f"unknown managed work {supplied}")
+        if existing is not None:
+            project = str((existing.fc or {}).get("project") or "")
+            _project_from_request(request, {"project": project})
+            bead_id = existing.id
+        else:
+            project = _project_for_entry(request)
+            bead_id = _unique_id(ledger)
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=bead_id,
+            planned={
+                "bead_id": bead_id,
+                "role": "weaver",
+                "task_id": task_id,
+                "project": project,
+                "creates_native_task": False,
+            },
+            next_action="Bind the invoking task as the only Weaver for this work.",
+        )
+        if reused and operation.operation.get("state") in {
+            "completed",
+            "failed",
+            "uncertain",
+            "cancelled",
+        }:
+            return _operation_result(operation)
+        for candidate in ledger.list_records(kind="work", limit=0):
+            assignment = ((candidate.fc or {}).get("desktop") or {}).get("assignment")
+            if (
+                isinstance(assignment, Mapping)
+                and assignment.get("task_id") == task_id
+                and candidate.id != bead_id
+                and assignment.get("state")
+                in {"reserved", "issuing", "active", "uncertain"}
+            ):
+                raise FulcrumError(
+                    "OWNERSHIP_CONFLICT",
+                    "the invoking task already owns different Fulcrum work",
+                    exit_code=5,
+                    details={"bead_id": candidate.id, "task_id": task_id},
+                )
+        if existing is None:
+            title = " ".join(description.strip().splitlines()[0].split())[:120]
+            spec = _work_spec(
+                {
+                    "title": title or "Prepare implementation scope",
+                    "outcome": description,
+                    "acceptance": [],
+                    "requested_role": "executor",
+                },
+                project=project,
+                key="entry",
+            )
+            existing = self._create_planned_work(
+                ledger,
+                operation,
+                bead_id,
+                spec,
+                owner=str(task_id),
+                workflow_root=bead_id,
+                parent=None,
+                issue_type="task",
+                request=request,
+                check_existing=reused,
+            )
+        assert existing.fc is not None
+        fc = dict(existing.fc)
+        desktop = dict(fc.get("desktop") or {})
+        retained = desktop.get("assignment")
+        if isinstance(retained, Mapping):
+            raise FulcrumError(
+                "OWNERSHIP_CONFLICT",
+                "work already has an active assignment",
+                exit_code=5,
+                details={"bead_id": bead_id, "assignment": dict(retained)},
+            )
+        manager = ConfigurationManager(request.instance.config_path)
+        document, _ = manager.load()
+        project_config = manager.effective(document)["projects"][project]
+        workspace = str(project_config["root"])
+        assignment = {
+            "assignment_token": operation.id,
+            "role": "weaver",
+            "task_id": str(task_id),
+            "session_id": os.environ.get("CODEX_SESSION_ID"),
+            "workspace": workspace,
+            "project": project,
+            "capacity_class": "entry",
+            "entry_mode": "same_task",
+            "state": "active",
+            "registered_at": utc_now(),
+        }
+        desktop["assignment"] = assignment
+        fc.update(
+            {
+                "desktop": desktop,
+                "owner": str(task_id),
+                "role": "weaver",
+                "ownership_operation": operation.id,
+                "phase": "working",
+                "requested_role": "executor",
+                "next_action": "Investigate and finish with ready, answered, planned, or blocked.",
+                "last_transition": operation.id,
+            }
+        )
+        entered = ledger.update_fc(
+            bead_id, fc, assignee=str(task_id), status="in_progress"
+        )
+        instructions = (
+            f"You are the Weaver for {bead_id} in this existing task. Do not create or "
+            "delegate to another Weaver. Investigate the human request, but do not "
+            "implement repository changes. Retain a concise behavioral summary, "
+            "observable acceptance checks, evidence, and optional implementation notes "
+            "with Fulcrum finish. Use ownership operation "
+            f"{operation.id} for later mutations."
+        )
+        operation = ledger.update_operation(
+            operation,
+            state="completed",
+            step="same_task_weaver_entered",
+            result={
+                "bead_id": bead_id,
+                "role": "weaver",
+                "task_id": task_id,
+                "ownership_operation": operation.id,
+                "native_task_created": False,
+                "instructions": instructions,
+                "work": work_view(ledger, entered),
+            },
+            next_action="Investigate in the invoking task and finish the Weaver responsibility.",
+        )
+        return _operation_result(operation)
+
     @coordinated
     def create(self, request: ParsedRequest) -> CommandResult:
         payload = dict(request.input)
@@ -270,15 +434,18 @@ class WorkService:
             raise FulcrumError.invalid(
                 "NOT_FOUND", f"unknown work {request.arguments['id']}"
             )
-        return CommandResult.query(work_view(ledger, record))
+        return CommandResult.query(_authorized_work_view(ledger, record, request))
 
     @coordinated
     def list(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
+        downstream = _downstream_assignment(ledger, request)
         limit = int(request.arguments.get("limit", 20))
         rows: list[dict[str, Any]] = []
         for record in ledger.list_records(limit=0):
             if record.kind in {"control", "task", "analytics", "operation"}:
+                continue
+            if downstream is not None and record.id != downstream[0]:
                 continue
             view = work_view(ledger, record)
             if (
@@ -303,7 +470,7 @@ class WorkService:
                 and view.get("phase") != request.arguments["phase"]
             ):
                 continue
-            rows.append(view)
+            rows.append(_authorized_work_view(ledger, record, request))
             if limit and len(rows) >= limit:
                 break
         return CommandResult.query({"items": rows, "next_cursor": None})
@@ -312,13 +479,24 @@ class WorkService:
     def children(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         bead_id = str(request.arguments["id"])
+        downstream = _downstream_assignment(ledger, request)
+        if downstream is not None:
+            raise FulcrumError(
+                "AUTHORITY_MISMATCH",
+                "downstream workers may inspect only their assigned work contract",
+                exit_code=5,
+                details={"assigned_bead": downstream[0]},
+            )
         parent = ledger.show(bead_id)
         if parent is None:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
         return CommandResult.query(
             {
                 "bead_id": bead_id,
-                "items": [work_view(ledger, item) for item in ledger.children(bead_id)],
+                "items": [
+                    _authorized_work_view(ledger, item, request)
+                    for item in ledger.children(bead_id)
+                ],
                 "next_cursor": None,
             }
         )
@@ -343,6 +521,12 @@ class WorkService:
         role = str(request.arguments.get("role", "weaver"))
         if role not in ROLES:
             raise _invalid("role", "is not a Fulcrum role")
+        if role == "weaver":
+            raise FulcrumError(
+                "WEAVER_TASK_FORBIDDEN",
+                "adopt through `fulcrum enter weaver --bead ID` in the invoking task; Fulcrum never creates Weaver tasks",
+                exit_code=5,
+            )
         operation, reused = ledger.create_operation(
             request,
             bead_id=bead_id,
@@ -619,6 +803,12 @@ class WorkService:
         }:
             return _operation_result(operation)
         role = request.arguments.get("role")
+        if role == "weaver":
+            raise FulcrumError(
+                "WEAVER_TASK_FORBIDDEN",
+                "reopen the bead without a role, then enter Weaver from the invoking task",
+                exit_code=5,
+            )
         owner = (
             request.thread_id
             if role and request.thread_id
@@ -822,9 +1012,7 @@ class WorkService:
                 "title": payload["title"],
                 "outcome": payload["required_change"],
                 "acceptance": acceptance,
-                "requested_role": (
-                    "executor" if payload.get("implementation_ready") else "weaver"
-                ),
+                "requested_role": "executor",
                 "priority": 2,
                 "context": payload.get("context", []),
                 "intake": payload.get("intake"),
@@ -887,11 +1075,22 @@ class WorkService:
         record = ledger.show(str(bead_id))
         if record is None:
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
-        view = work_view(ledger, record)
+        view = _authorized_work_view(ledger, record, request)
+        downstream = _downstream_assignment(ledger, request)
+        assignment = downstream[1] if downstream is not None else None
         return CommandResult.query(
             {
                 "work": view,
-                "instructions": record.native.get("description"),
+                "instructions": (
+                    "Use only the retained authorized assignment contract. Raw intake is withheld."
+                    if downstream
+                    else record.native.get("description")
+                ),
+                "contract": (
+                    assignment.get("scope")
+                    if isinstance(assignment, Mapping) and downstream
+                    else None
+                ),
                 "ownership_operation": view.get("ownership_operation"),
             }
         )
@@ -944,6 +1143,81 @@ def work_view(ledger: Ledger, record: LedgerRecord) -> dict[str, Any]:
         "next_commands": [["fulcrum", "work", "show", record.id, "--json"]],
         "ownership_conflict": ownership_conflict,
     }
+
+
+def _authorized_work_view(
+    ledger: Ledger, record: LedgerRecord, request: ParsedRequest
+) -> dict[str, Any]:
+    view = work_view(ledger, record)
+    downstream = _downstream_assignment(ledger, request)
+    if downstream is None:
+        return view
+    assigned_bead, assignment = downstream
+    if record.id != assigned_bead:
+        raise FulcrumError(
+            "AUTHORITY_MISMATCH",
+            "downstream workers may inspect only their assigned work contract",
+            exit_code=5,
+            details={"assigned_bead": assigned_bead},
+        )
+    fc = record.fc or {}
+    contract = assignment.get("scope")
+    if not isinstance(contract, Mapping):
+        contract = {}
+    behavioral = str(contract.get("behavioral_outcome") or "Authorized work")
+    safe_fc = {
+        key: fc.get(key)
+        for key in (
+            "kind",
+            "project",
+            "owner",
+            "role",
+            "ownership_operation",
+            "phase",
+            "requested_role",
+            "workflow_root",
+            "next_action",
+            "waiting",
+            "worktree",
+            "source",
+            "delivery",
+        )
+    }
+    safe_fc.update(
+        {
+            "summary": behavioral,
+            "outcome": behavioral,
+            "acceptance": list(contract.get("acceptance") or []),
+            "context": list(contract.get("evidence") or []),
+            "scope": dict(contract),
+        }
+    )
+    return {
+        **view,
+        "title": behavioral,
+        "description": behavioral,
+        "acceptance_criteria": list(contract.get("acceptance") or []),
+        "fc": safe_fc,
+    }
+
+
+def _downstream_assignment(
+    ledger: Ledger, request: ParsedRequest
+) -> tuple[str, Mapping[str, Any]] | None:
+    task_id = request.actor.task_id or request.thread_id
+    if request.actor.kind != "task" or not task_id:
+        return None
+    for candidate in ledger.list_records(kind="work", limit=0):
+        desktop = (candidate.fc or {}).get("desktop")
+        assignment = desktop.get("assignment") if isinstance(desktop, Mapping) else None
+        if (
+            isinstance(assignment, Mapping)
+            and assignment.get("task_id") == task_id
+            and assignment.get("state") == "active"
+            and assignment.get("role") in {"executor", "warden"}
+        ):
+            return candidate.id, assignment
+    return None
 
 
 def _initial_fc(
@@ -1015,9 +1289,16 @@ def _work_spec(payload: Mapping[str, Any], *, project: str, key: str) -> dict[st
         or not 0 <= priority <= 4
     ):
         raise _invalid(f"{key}.priority", "must be an integer from zero through four")
-    requested_role = payload.get("requested_role", "weaver")
+    requested_role = payload.get("requested_role", "executor")
     if requested_role not in ROLES:
         raise _invalid(f"{key}.requested_role", "is not a Fulcrum role")
+    if requested_role == "weaver":
+        raise FulcrumError(
+            "WEAVER_TASK_FORBIDDEN",
+            "work creation cannot request Weaver dispatch; enter Weaver in the invoking task",
+            exit_code=5,
+            details={"field": f"{key}.requested_role"},
+        )
     for field in ("context", "overlap_tags", "depends_on"):
         value = payload.get(field, [])
         if not isinstance(value, list) or not all(
@@ -1108,6 +1389,38 @@ def _project_from_request(request: ParsedRequest, payload: Mapping[str, Any]) ->
             exit_code=5,
         )
     return project
+
+
+def _project_for_entry(request: ParsedRequest) -> str:
+    if request.project:
+        return _project_from_request(request, {"project": request.project})
+    manager = ConfigurationManager(request.instance.config_path)
+    document, _ = manager.load()
+    projects = manager.effective(document)["projects"]
+    enabled = {
+        str(key): value
+        for key, value in projects.items()
+        if isinstance(value, Mapping) and value.get("enabled", True)
+    }
+    cwd = Path.cwd().resolve(strict=False)
+    matches: list[tuple[int, str]] = []
+    for key, value in enabled.items():
+        root_value = value.get("root")
+        if not isinstance(root_value, str):
+            continue
+        root = Path(root_value).resolve(strict=False)
+        if cwd == root or root in cwd.parents:
+            matches.append((len(root.parts), key))
+    if matches:
+        matches.sort(reverse=True)
+        if len(matches) == 1 or matches[0][0] > matches[1][0]:
+            return matches[0][1]
+    if len(enabled) == 1:
+        return next(iter(enabled))
+    raise _invalid(
+        "project",
+        "is required because the current directory does not identify one enrolled project",
+    )
 
 
 def _resolve_native_project(request: ParsedRequest, record: LedgerRecord) -> str:

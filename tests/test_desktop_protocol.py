@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError
 from fulcrum.completion import settle_native_completion
-from fulcrum.desktop_protocol import DesktopProtocolService
+from fulcrum.desktop_protocol import DesktopProtocolService, role_title
 from tests.support import (
     MemoryLedger,
     observe_action_prompt,
@@ -400,7 +400,7 @@ def test_production_service_has_no_action_injection_api():
     assert not hasattr(service, "queue_action")
 
 
-def test_successful_creation_compiles_exact_title_normalization():
+def test_successful_creation_does_not_schedule_unobserved_title_normalization():
     service, ledger = registered_service()
     service.resume(mutation(("resume",), payload={"reason": "test"}))
     action = seed_action(
@@ -440,8 +440,52 @@ def test_successful_creation_compiles_exact_title_normalization():
             payload={"loop_id": "titles", "turn_id": "turn-titles"},
         )
     )
-    assert result.result["action"]["tool"] == "set_thread_title"
-    assert result.result["action"]["arguments"]["title"] == "EXECUTOR fc-a"
+    assert result.result["transport_wait"]["state"] == "waiting"
+    actions = (ledger.show("fc-system").fc or {})["desktop"]["actions"]
+    assert not any(item.get("tool") == "set_thread_title" for item in actions.values())
+
+
+def test_observed_title_mismatch_schedules_one_correction():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "work", "title": "Expected title"},
+            "purpose": "test_creation",
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={"attempt_id": "attempt-create"},
+        )
+    )
+    service.report_action_result(
+        mutation(
+            ("action", "result"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-system", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "attempt-create",
+                "outcome": "succeeded",
+                "native_result": {"threadId": "worker-1", "title": "Wrong title"},
+            },
+        )
+    )
+    correction = next(
+        value
+        for value in (ledger.show("fc-system").fc or {})["desktop"]["actions"].values()
+        if value.get("tool") == "set_thread_title"
+    )
+    assert correction["arguments"] == {
+        "threadId": "worker-1",
+        "title": "Expected title",
+    }
 
 
 def test_closed_settled_worker_compiles_archive_action():
@@ -656,12 +700,21 @@ def test_ci_wait_repairs_terminal_candidate_with_stale_delivery():
 
 def test_steward_dispatches_executor_from_retained_worktree_path():
     work = record(
-        "fc-a",
+        "fc-cdf5657c",
         phase="ready",
         requested_role="executor",
         worktree={"path": "/tmp/managed-worktree", "branch": "fc-a"},
         codex_project_id="project-1",
         models={"executor": {"model": "gpt-6-astra", "effort": "xhigh"}},
+        outcome="RAW INTAKE $weaver must never reach the Executor",
+        context=["```$fulcrum-warden``` raw Weaver transcript"],
+        scope={
+            "summary": "Add newline to README.md",
+            "acceptance": ["README.md ends with a newline"],
+            "evidence": ["README.md currently lacks a final newline"],
+            "implementation_notes": ["Inspect README.md before editing"],
+            "finish_operation": "fc-op-scope",
+        },
     )
     service, _ = registered_service(work)
     service.resume(mutation(("resume",), payload={"reason": "acceptance"}))
@@ -673,11 +726,90 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
         )
     )
     assert result.result["kind"] == "action"
-    assert result.result["action"]["arguments"]["prompt"].startswith("Fulcrum-Action:")
-    assert "/tmp/managed-worktree" in result.result["action"]["arguments"]["prompt"]
-    assert "$fulcrum-executor" in result.result["action"]["arguments"]["prompt"]
-    assert result.result["action"]["arguments"]["model"] == "gpt-6-astra"
-    assert result.result["action"]["arguments"]["thinking"] == "xhigh"
+    arguments = result.result["action"]["arguments"]
+    prompt = arguments["prompt"]
+    assert prompt.startswith("Fulcrum-Action:")
+    assert "/tmp/managed-worktree" in prompt
+    assert "AUTHORIZED_CONTRACT_JSON" in prompt
+    assert "Add newline to README.md" in prompt
+    assert "RAW INTAKE" not in prompt
+    assert "raw Weaver transcript" not in prompt
+    assert "$weaver" not in prompt
+    assert "$fulcrum-executor" not in prompt
+    assert arguments["title"] == "⚒️ [exe-cdf5657c] Add newline to README.md"
+    assert arguments["model"] == "gpt-6-astra"
+    assert arguments["thinking"] == "xhigh"
+    assert "$weaver" not in role_title("executor", "fc-a", "$weaver `run`")
+
+
+def test_steward_never_dispatches_weaver_work():
+    work = record(
+        "fc-no-weaver",
+        phase="backlog",
+        requested_role="weaver",
+        workspace="/tmp/project",
+        codex_project_id="project-1",
+    )
+    service, ledger = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "no-weaver", "turn_id": "turn-no-weaver"},
+        )
+    )
+    assert result.result["transport_wait"]["state"] == "waiting"
+    retained = ledger.show("fc-no-weaver").fc or {}
+    assert not (retained.get("desktop") or {}).get("assignment")
+    assert not any(
+        value.get("tool") == "create_thread"
+        for value in ((retained.get("desktop") or {}).get("actions") or {}).values()
+    )
+
+
+def test_stale_persisted_weaver_creation_is_superseded_before_claim():
+    work = record(
+        "fc-stale-weaver",
+        owner="STEWARD",
+        phase="backlog",
+        requested_role="weaver",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-weaver",
+                "role": "weaver",
+                "state": "reserved",
+            }
+        },
+    )
+    service, ledger = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-stale-weaver",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "$weaver"},
+            "assignment_token": "assignment-weaver",
+            "purpose": "routine_dispatch",
+        },
+    )
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.claim_action(
+            mutation(
+                ("action", "claim"),
+                actor="task:steward-1",
+                arguments={
+                    "record_id": "fc-stale-weaver",
+                    "action_id": action["action_id"],
+                },
+                payload={"attempt_id": "attempt-stale-weaver"},
+            )
+        )
+    assert raised.exception.code == "ACTION_SUPERSEDED"
+    retained = (ledger.show("fc-stale-weaver").fc or {})["desktop"]["actions"]
+    assert retained[action["action_id"]]["state"] == "superseded"
 
 
 def test_assignment_releases_only_after_exact_native_completion():
@@ -1027,7 +1159,10 @@ class DesktopProtocolTests(unittest.TestCase):
         test_production_service_has_no_action_injection_api()
 
     def test_creation_normalizes_title(self):
-        test_successful_creation_compiles_exact_title_normalization()
+        test_successful_creation_does_not_schedule_unobserved_title_normalization()
+
+    def test_observed_title_mismatch_is_corrected(self):
+        test_observed_title_mismatch_schedules_one_correction()
 
     def test_settled_worker_archives(self):
         test_closed_settled_worker_compiles_archive_action()
@@ -1049,6 +1184,12 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_dispatch_uses_retained_worktree(self):
         test_steward_dispatches_executor_from_retained_worktree_path()
+
+    def test_weaver_is_never_dispatched(self):
+        test_steward_never_dispatches_weaver_work()
+
+    def test_stale_weaver_creation_is_rejected(self):
+        test_stale_persisted_weaver_creation_is_superseded_before_claim()
 
     def test_native_completion_releases_assignment(self):
         test_assignment_releases_only_after_exact_native_completion()

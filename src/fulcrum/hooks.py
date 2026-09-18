@@ -208,6 +208,19 @@ class HookService:
         if bound is None:
             return {}
         tool_name = _tool_name(request.input)
+        bound_record, _ = bound
+        assignment = _protocol(bound_record.fc or {}).get("assignment")
+        task_id = request.actor.task_id or request.thread_id
+        if (
+            bound_record.id != "fc-system"
+            and isinstance(assignment, Mapping)
+            and assignment.get("state") in {"reserved", "issuing", "uncertain"}
+            and (not assignment.get("task_id") or assignment.get("task_id") == task_id)
+            and tool_name != "register_worker"
+        ):
+            return _deny(
+                "worker registration must succeed before any repository or native tool use"
+            )
         if tool_name not in MANAGED_NATIVE_TOOLS:
             return {}
         located = _issuing_action_for_actor(ledger, bound, request.input)
@@ -292,6 +305,27 @@ class HookService:
             "turn_id": request.input.get("turn_id"),
             "reason": request.input.get("reason"),
         }
+        assignment = protocol.get("assignment")
+        if isinstance(assignment, Mapping):
+            if (
+                assignment.get("entry_mode") == "same_task"
+                and not assignment.get("turn_id")
+                and event.get("turn_id")
+            ):
+                assignment = {
+                    **dict(assignment),
+                    "turn_id": event.get("turn_id"),
+                    "turn_bound_at": _utc_now(),
+                }
+                protocol["assignment"] = assignment
+            event.update(
+                {
+                    "assignment_token": assignment.get("assignment_token"),
+                    "creation_action_id": assignment.get("creation_action_id"),
+                    "task_id": assignment.get("task_id"),
+                    "role": assignment.get("role"),
+                }
+            )
         if not any(item.get("event_id") == event["event_id"] for item in events):
             events.append(event)
             protocol["hook_events"] = events[-128:]
@@ -306,6 +340,12 @@ class HookService:
                 }
                 protocol["standing"] = standing
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        if event_name == "Stop":
+            _release_unregistered_assignment(
+                ledger,
+                task_id=str(event.get("task_id") or request.actor.task_id or ""),
+                terminal_event=event,
+            )
 
     def _collect_transcript(
         self,
@@ -420,6 +460,26 @@ class HookService:
             and value.get("turn_id")
             and value.get("model")
         }
+        assignment = protocol.get("assignment")
+        if (
+            isinstance(assignment, Mapping)
+            and assignment.get("entry_mode") == "same_task"
+            and not assignment.get("turn_id")
+        ):
+            current_turn = next(
+                (
+                    item.get("turn_id")
+                    for item in reversed(page.lifecycle)
+                    if item.get("type") == "turn_context" and item.get("turn_id")
+                ),
+                None,
+            )
+            if current_turn:
+                protocol["assignment"] = {
+                    **dict(assignment),
+                    "turn_id": current_turn,
+                    "turn_bound_at": _utc_now(),
+                }
         for item in page.lifecycle:
             normalized = dict(item)
             normalized["task_id"] = normalized.get("task_id") or task_id
@@ -487,6 +547,9 @@ class HookService:
         )
         if terminal is None:
             return
+        _release_unregistered_assignment(
+            ledger, task_id=task_id, terminal_event=terminal
+        )
         interrupted = terminal.get("type") in {
             "turn_interrupted",
             "turn_aborted",
@@ -594,6 +657,121 @@ def _binding_for_task(ledger: Ledger, task_id: str) -> tuple[LedgerRecord, str] 
                 if isinstance(retained, Mapping) and retained.get("task_id") == task_id:
                     return record, str(retained.get("role") or "worker")
     return None
+
+
+def _release_unregistered_assignment(
+    ledger: Ledger,
+    *,
+    task_id: str,
+    terminal_event: Mapping[str, Any],
+) -> None:
+    """Release capacity when a created worker terminates before registration."""
+
+    if not task_id:
+        return
+    for record in ledger.list_records(kind="work", limit=0):
+        fc = dict(record.fc or {})
+        protocol = _protocol(fc)
+        assignment = protocol.get("assignment")
+        if (
+            not isinstance(assignment, Mapping)
+            or assignment.get("task_id") != task_id
+            or assignment.get("state") not in {"reserved", "issuing", "uncertain"}
+        ):
+            continue
+        released = {
+            **dict(assignment),
+            "state": "registration_failed",
+            "released_at": _utc_now(),
+            "terminal_event": copy.deepcopy(dict(terminal_event)),
+        }
+        history = list(protocol.get("assignment_history") or [])
+        history.append(released)
+        protocol["assignment_history"] = history[-20:]
+        protocol.pop("assignment", None)
+        failures = list(protocol.get("registration_failures") or [])
+        failures.append(
+            {
+                "task_id": task_id,
+                "role": assignment.get("role"),
+                "assignment_token": assignment.get("assignment_token"),
+                "creation_action_id": assignment.get("creation_action_id"),
+                "terminal_event": copy.deepcopy(dict(terminal_event)),
+                "recorded_at": _utc_now(),
+            }
+        )
+        protocol["registration_failures"] = failures[-20:]
+        exhausted = len(failures) >= 2
+        incidents = dict(protocol.get("incidents") or {})
+        incident_key = f"registration:{assignment.get('assignment_token')}"
+        incidents[incident_key] = {
+            "incident_id": incident_key,
+            "incident_key": incident_key,
+            "state": "open" if exhausted else "resolved",
+            "scope": "downstream worker registration",
+            "required_decision": (
+                "Inspect repeated worker startup failures before another dispatch."
+                if exhausted
+                else None
+            ),
+            "evidence": {
+                "task_id": task_id,
+                "role": assignment.get("role"),
+                "assignment_token": assignment.get("assignment_token"),
+                "creation_action_id": assignment.get("creation_action_id"),
+                "terminal_event": copy.deepcopy(dict(terminal_event)),
+            },
+            "recovery": {
+                "assignment_released": True,
+                "capacity_released": True,
+                "task_archival_queued": True,
+                "automatic_retry_available": not exhausted,
+            },
+            "updated_at": _utc_now(),
+        }
+        protocol["incidents"] = incidents
+        actions = dict(protocol.get("actions") or {})
+        purpose = f"archive_unregistered_task:{task_id}"
+        if not any(
+            isinstance(value, Mapping) and value.get("purpose") == purpose
+            for value in actions.values()
+        ):
+            action_id = f"action-{uuid.uuid4()}"
+            actions[action_id] = {
+                "action_id": action_id,
+                "record_id": record.id,
+                "executor": "steward",
+                "tool": "set_thread_archived",
+                "arguments": {"threadId": task_id, "archived": True},
+                "expected_result": {"threadId": task_id, "archived": True},
+                "reporting": {"registration_failure": True},
+                "assignment_token": assignment.get("assignment_token"),
+                "state": "pending",
+                "attempts": [],
+                "created_at": _utc_now(),
+                "purpose": purpose,
+            }
+        protocol["actions"] = actions
+        fc.update(
+            {
+                "desktop": protocol,
+                "owner": "HUMAN" if exhausted else "STEWARD",
+                "role": None,
+                "ownership_operation": None,
+                "next_action": (
+                    "Inspect repeated worker startup failures before authorizing another dispatch."
+                    if exhausted
+                    else "Archive the unregistered task, then retry downstream dispatch once."
+                ),
+            }
+        )
+        if exhausted:
+            fc["blocked"] = {
+                "reason": "worker_registration_failed_repeatedly",
+                "incident_id": incident_key,
+                "failure_count": len(failures),
+            }
+        ledger.update_fc(record.id, fc, assignee=str(fc["owner"]))
 
 
 def _binding_for_session(

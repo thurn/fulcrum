@@ -109,6 +109,7 @@ COMMANDS = (
         ("service", "status"), "inspect broker and Dolt service artifacts"
     ),
     CommandDefinition(("skills", "reconcile"), "repair owned role skill links"),
+    CommandDefinition(("enter",), "enter Weaver in the invoking task"),
     CommandDefinition(("work", "create"), "create a work root or graph"),
     CommandDefinition(("work", "show"), "show work"),
     CommandDefinition(("work", "list"), "list work"),
@@ -254,6 +255,10 @@ def _add_command_options(
     elif path == ("service", "update"):
         _option(parser, "--maintenance", action="store_true")
         _option(parser, "--retry", action="store_true")
+    elif path == ("enter",):
+        parser.add_argument("role", choices=("weaver",))
+        _option(parser, "--description")
+        _option(parser, "--bead")
     elif path == ("work", "list"):
         _option(parser, "--role", choices=ROLES)
         _option(parser, "--owner")
@@ -416,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
+    ("enter",): {"description", "bead"},
     ("bootstrap",): {
         "codex_root",
         "configuration",
@@ -627,6 +633,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
 
 
 DIRECT_INPUTS: dict[tuple[str, ...], dict[str, str]] = {
+    ("enter",): {"description": "description", "bead": "bead"},
     ("finish",): {"outcome": "outcome", "bead": "bead"},
     ("progress",): {
         "kind": "kind",

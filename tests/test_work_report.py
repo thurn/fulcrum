@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import replace
 import uuid
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from fulcrum.contracts import FulcrumError
-from fulcrum.work import WorkService
-from tests.support import MemoryLedger, request
+from fulcrum.contracts import ActorContext, FulcrumError
+from fulcrum.work import WorkService, _work_spec
+from tests.support import MemoryLedger, record, request
 
 
 def report_request(report_key: str, **changes):
@@ -42,3 +42,96 @@ def test_report_key_replays_equal_input_and_rejects_changed_input():
                 report_request("finding-1", required_change="Different change")
             )
         assert raised.exception.code == "REQUEST_CONFLICT"
+
+
+def test_weaver_entry_binds_invoking_task_without_native_creation():
+    ledger = MemoryLedger()
+    manager = MagicMock()
+    manager.load.return_value = ({}, None)
+    manager.effective.return_value = {"projects": {"toy": {"root": "/tmp/toy"}}}
+    entered = replace(
+        request(("enter",)),
+        arguments={"role": "weaver"},
+        input={"description": "Add newline to README.md"},
+        actor=ActorContext.parse("task:human-task"),
+        thread_id="human-task",
+        request_id=str(uuid.uuid4()),
+    )
+    with (
+        patch("fulcrum.work._ledger", return_value=ledger),
+        patch("fulcrum.work._project_from_request", return_value="toy"),
+        patch("fulcrum.work.ConfigurationManager", return_value=manager),
+    ):
+        result = WorkService().enter(entered)
+    payload = result.result["result"]
+    assert payload["native_task_created"] is False
+    work = ledger.show(payload["bead_id"])
+    assignment = work.fc["desktop"]["assignment"]
+    assert assignment["entry_mode"] == "same_task"
+    assert assignment["task_id"] == "human-task"
+    assert work.fc["role"] == "weaver"
+    assert work.fc["requested_role"] == "executor"
+
+
+def test_work_creation_cannot_request_weaver_dispatch():
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        _work_spec(
+            {
+                "title": "Bad dispatch",
+                "outcome": "Do not create another Weaver",
+                "requested_role": "weaver",
+            },
+            project="toy",
+            key="root",
+        )
+    assert raised.exception.code == "WEAVER_TASK_FORBIDDEN"
+
+
+def test_downstream_work_view_withholds_raw_intake():
+    ledger = MemoryLedger(
+        record(
+            "fc-work",
+            owner="executor-1",
+            role="executor",
+            outcome="RAW $weaver intake",
+            context=["raw transcript"],
+            desktop={
+                "assignment": {
+                    "task_id": "executor-1",
+                    "role": "executor",
+                    "state": "active",
+                    "scope": {
+                        "behavioral_outcome": "Add newline to README.md",
+                        "acceptance": ["README.md ends in a newline"],
+                        "evidence": ["README.md lacks the newline"],
+                    },
+                }
+            },
+        )
+    )
+    show = replace(
+        request(("work", "show")),
+        arguments={"id": "fc-work"},
+        actor=ActorContext.parse("task:executor-1"),
+        thread_id="executor-1",
+    )
+    with patch("fulcrum.work._ledger", return_value=ledger):
+        result = WorkService().show(show)
+    assert "RAW" not in str(result.result)
+    assert "$weaver" not in str(result.result)
+    assert "raw transcript" not in str(result.result)
+    assert result.result["fc"]["outcome"] == "Add newline to README.md"
+
+
+class WorkReportTests(unittest.TestCase):
+    def test_report_replay(self):
+        test_report_key_replays_equal_input_and_rejects_changed_input()
+
+    def test_weaver_entry_is_same_task(self):
+        test_weaver_entry_binds_invoking_task_without_native_creation()
+
+    def test_weaver_dispatch_is_rejected(self):
+        test_work_creation_cannot_request_weaver_dispatch()
+
+    def test_raw_intake_is_withheld_downstream(self):
+        test_downstream_work_view_withholds_raw_intake()

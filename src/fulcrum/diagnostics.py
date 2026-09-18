@@ -875,6 +875,7 @@ class DiagnosticService:
         if record is None or record.kind != "work":
             raise FulcrumError.invalid("NOT_FOUND", f"unknown work {bead_id}")
         items: list[dict[str, Any]] = []
+        durable_gaps: list[dict[str, Any]] = []
         operations = [
             OperationRecord.from_record(candidate)
             for candidate in ledger.list_records(kind="operation", limit=0)
@@ -1032,6 +1033,155 @@ class DiagnosticService:
             active = desktop.get("assignment")
             if isinstance(active, Mapping):
                 assignment_rows.append(active)
+            assignments_by_token = {
+                str(item.get("assignment_token")): item
+                for item in assignment_rows
+                if item.get("assignment_token")
+            }
+            lifecycle_rows: list[Mapping[str, Any]] = []
+            observations = desktop.get("observations")
+            lifecycle = (
+                observations.get("lifecycle")
+                if isinstance(observations, Mapping)
+                else None
+            )
+            if isinstance(lifecycle, Mapping):
+                lifecycle_rows.extend(
+                    value for value in lifecycle.values() if isinstance(value, Mapping)
+                )
+            lifecycle_rows.extend(
+                value
+                for value in (desktop.get("hook_events") or [])
+                if isinstance(value, Mapping)
+            )
+            lifecycle_tasks = {
+                str(value.get("task_id"))
+                for value in lifecycle_rows
+                if value.get("task_id")
+            }
+            for index, event in enumerate(lifecycle_rows):
+                items.append(
+                    {
+                        "time": event.get("time") or event.get("recorded_at"),
+                        "id": event.get("event_id") or f"{record.id}:lifecycle:{index}",
+                        "bead_id": bead_id,
+                        "task_id": event.get("task_id"),
+                        "turn_id": event.get("turn_id"),
+                        "operation_id": None,
+                        "action_id": event.get("creation_action_id"),
+                        "assignment_token": event.get("assignment_token"),
+                        "transition": "native_lifecycle",
+                        "effect": event.get("type") or event.get("event"),
+                        "outcome": event.get("reason") or event.get("type"),
+                        "evidence": [],
+                        "source_oid": None,
+                        "source_oids": [],
+                        "parent_operation_ids": [],
+                        "child_operation_ids": [],
+                        "provider_handles": [],
+                    }
+                )
+            for action in (desktop.get("actions") or {}).values():
+                if not isinstance(action, Mapping):
+                    continue
+                attempts = [
+                    value
+                    for value in (action.get("attempts") or [])
+                    if isinstance(value, Mapping)
+                ]
+                latest = attempts[-1] if attempts else {}
+                task_id = _trace_native_identifier(action.get("native_result"))
+                assignment = assignments_by_token.get(
+                    str(action.get("assignment_token") or "")
+                )
+                if not task_id and isinstance(assignment, Mapping):
+                    task_id = assignment.get("task_id")
+                items.append(
+                    {
+                        "time": action.get("completed_at")
+                        or action.get("claimed_at")
+                        or action.get("created_at"),
+                        "id": action.get("action_id"),
+                        "bead_id": bead_id,
+                        "task_id": task_id,
+                        "turn_id": (
+                            assignment.get("turn_id")
+                            if isinstance(assignment, Mapping)
+                            else None
+                        ),
+                        "operation_id": None,
+                        "action_id": action.get("action_id"),
+                        "attempt_id": latest.get("attempt_id"),
+                        "assignment_token": action.get("assignment_token"),
+                        "transition": "native_action",
+                        "effect": action.get("tool"),
+                        "outcome": action.get("state"),
+                        "evidence": action.get("purpose"),
+                        "compiled_contract": (
+                            assignment.get("scope")
+                            if isinstance(assignment, Mapping)
+                            else None
+                        ),
+                        "source_oid": None,
+                        "source_oids": [],
+                        "parent_operation_ids": [],
+                        "child_operation_ids": [],
+                        "provider_handles": [],
+                    }
+                )
+                if action.get("tool") != "create_thread" or action.get("state") not in {
+                    "succeeded",
+                    "uncertain",
+                }:
+                    continue
+                if not task_id:
+                    durable_gaps.append(
+                        {
+                            "component": "native_task",
+                            "action_id": action.get("action_id"),
+                            "reason": "created task identity is not joined",
+                        }
+                    )
+                elif str(task_id) not in lifecycle_tasks:
+                    durable_gaps.append(
+                        {
+                            "component": "native_lifecycle",
+                            "action_id": action.get("action_id"),
+                            "task_id": task_id,
+                            "reason": "created task lifecycle has not been observed",
+                        }
+                    )
+            for index, failure in enumerate(
+                value
+                for value in (desktop.get("registration_failures") or [])
+                if isinstance(value, Mapping)
+            ):
+                terminal = failure.get("terminal_event")
+                items.append(
+                    {
+                        "time": failure.get("recorded_at"),
+                        "id": f"{record.id}:registration-failure:{index}",
+                        "bead_id": bead_id,
+                        "task_id": failure.get("task_id"),
+                        "turn_id": (
+                            terminal.get("turn_id")
+                            if isinstance(terminal, Mapping)
+                            else None
+                        ),
+                        "operation_id": None,
+                        "action_id": failure.get("creation_action_id"),
+                        "assignment_token": failure.get("assignment_token"),
+                        "transition": "registration_failed",
+                        "effect": failure.get("role"),
+                        "outcome": "capacity_released",
+                        "evidence": terminal or {},
+                        "source_oid": None,
+                        "source_oids": [],
+                        "parent_operation_ids": [],
+                        "child_operation_ids": [],
+                        "provider_handles": [],
+                    }
+                )
         for index, assignment in enumerate(assignment_rows):
             items.append(
                 {
@@ -1136,7 +1286,7 @@ class DiagnosticService:
             if selected and start + len(selected) < len(items)
             else None
         )
-        gaps = [*log_result["gaps"], *event_gaps]
+        gaps = [*durable_gaps, *log_result["gaps"], *event_gaps]
         pruning = retained_log.read(limit=0)
         for event in pruning["items"]:
             if event.get("event") == "logs_pruned" and event.get("removed_files"):
@@ -1234,6 +1384,26 @@ def _trace_operation_mentions_bead(operation: Mapping[str, Any], bead_id: str) -
         )
 
     return visit(operation)
+
+
+def _trace_native_identifier(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    pending: list[Mapping[str, Any]] = [value]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        for field in ("threadId", "thread_id", "id", "clientThreadId"):
+            candidate = current.get(field)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+        for child in current.values():
+            if isinstance(child, Mapping):
+                pending.append(child)
+    return None
 
 
 def _trace_child_operation_ids(operation: Mapping[str, Any]) -> list[str]:
@@ -1642,6 +1812,7 @@ def _capacity(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
     limit = int(config["policy"]["automatic_capacity"])
     active: list[dict[str, Any]] = []
     recovery: list[dict[str, Any]] = []
+    same_task_entries: list[dict[str, Any]] = []
     for record in ledger.list_records(limit=0):
         desktop = (record.fc or {}).get("desktop")
         assignment = desktop.get("assignment") if isinstance(desktop, Mapping) else None
@@ -1653,13 +1824,18 @@ def _capacity(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
         }:
             continue
         row = {"bead": record.id, **dict(assignment)}
-        (recovery if assignment.get("capacity_class") == "recovery" else active).append(
-            row
-        )
+        capacity_class = assignment.get("capacity_class")
+        if capacity_class == "recovery":
+            recovery.append(row)
+        elif capacity_class == "entry":
+            same_task_entries.append(row)
+        else:
+            active.append(row)
     return {
         "limit": limit,
         "used": len(active),
         "available": max(0, limit - len(active)),
         "active": active,
+        "same_task_entries": same_task_entries,
         "recovery_slots": {"limit": 1, "used": len(recovery), "active": recovery},
     }

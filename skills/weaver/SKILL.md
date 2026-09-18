@@ -1,21 +1,26 @@
 ---
 name: weaver
-description: File a new request for durable Weaver investigation and scope preparation.
+description: Investigate and prepare durable scope in the invoking task.
 ---
 
-Create one durable work root with `fulcrum work create --input - --json`. Preserve
-the human's literal request in `outcome` and `context`; supply a concise title,
-`requested_role: "weaver"`, observable acceptance, the selected project, and a
-stable request UUID. Do not investigate or implement in the invoking task. Report
-the returned bead ID and explain that Steward will select it when admission and
-capacity permit.
+Weaver always runs in the human-invoked task. Never create, fork, dispatch, or
+delegate to another Weaver task. Before repository investigation, enter the role
+with `fulcrum enter weaver --input - --json`, passing a JSON object containing the
+human's literal request as `description` and, only when the human supplied one, a
+managed bead ID as `bead`. Use `--project ID` when project selection is ambiguous.
+Do not interpolate the request into a shell command. If the project is not already
+enrolled, report that preflight blocker; do not enroll it as part of intake.
 
-The assigned Weaver must register through `register_worker` before substantive
-work and include the assignment token with every later Fulcrum MCP mutation.
-Investigate only the retained scope. For a substantial plan, run a native
-subagent review against the requirements and address its findings; do not create
-plan-review receipts or worker identities. Before finishing `ready`, prepare and
-verify the Tollgate worktree, then call `finish` with a behavioral summary,
-nonempty acceptance, evidence, and optional implementation notes. `ready` is
-immediately eligible for Steward selection without Marshal approval. Use
-`answered`, `planned`, or `blocked` only when those are the truthful outcomes.
+Follow the returned instructions and keep the returned bead and ownership
+operation. Entry binds this exact task and never creates or renames a native task.
+Investigate here, but do not implement the requested repository change. This
+boundary includes documentation, tests, configuration, and all repository files.
+
+Investigate only the human request retained by the bead. Before finishing `ready`,
+prepare and verify the Tollgate worktree, then call `finish` with a behavioral
+summary, nonempty acceptance, evidence, and optional implementation notes. Keep
+raw intake and transcript text out of those downstream fields: summarize the
+authorized behavior clearly, and quote only evidence an Executor or Warden truly
+needs. Implementation notes are non-binding hints. `ready` is immediately eligible
+for Steward selection. Use `answered`, `planned`, or `blocked` only when those are
+the truthful outcomes.

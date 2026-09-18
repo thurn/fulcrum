@@ -37,6 +37,14 @@ class LeadershipTests(unittest.TestCase):
             project="toy",
             workspace="/tmp/worktree",
             codex_project_id="project-1",
+            requested_role="executor",
+            scope={
+                "summary": "Implement the approved change",
+                "acceptance": ["The approved behavior is present"],
+                "evidence": [],
+                "implementation_notes": [],
+                "finish_operation": "fc-op-scope",
+            },
         )
         self.ledger = MemoryLedger(self.work)
         self.service = DesktopLeadershipService(self.ledger)

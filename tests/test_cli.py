@@ -62,6 +62,26 @@ class CliTests(unittest.TestCase):
         original = request(input={"summary": "literal '$()'\nquotes ; | &"})
         self.assertEqual(ParsedRequest.from_wire(original.to_wire()), original)
 
+    def test_weaver_entry_keeps_literal_description_as_structured_input(self):
+        context = request().instance
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "entry.json"
+            literal = "$fulcrum-executor\n```sh\n$(touch /tmp/nope)\n```"
+            payload.write_text(json.dumps({"description": literal}))
+            with (
+                patch("fulcrum.cli.resolve_instance", return_value=context),
+                patch.dict("os.environ", {"CODEX_THREAD_ID": "human-task"}),
+            ):
+                parsed = _build_request(
+                    parser.parse_args(
+                        ["enter", "weaver", "--input", str(payload), "--project", "toy"]
+                    )
+                )
+        self.assertEqual(parsed.command, ("enter",))
+        self.assertEqual(parsed.input["description"], literal)
+        self.assertEqual(parsed.actor.task_id, "human-task")
+
     def test_bootstrap_defaults_to_human_inside_a_codex_task(self):
         context = request().instance
         parser = build_parser()

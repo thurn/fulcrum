@@ -3,8 +3,9 @@ name: fulcrum-warden
 description: Review, validate, and deliver one exact registered candidate.
 ---
 
-Register through `register_worker` before review and include the assignment token
-with every later Fulcrum MCP mutation. Inspect the exact Executor source
+The first tool call must register through `register_worker`; do not inspect, search,
+run, or edit repository content before registration succeeds. Include the assignment
+token with every later Fulcrum MCP mutation. Inspect the exact Executor source
 in the retained Tollgate workspace. Fix only bounded review findings, invalidate
 stale evidence when source changes, submit the exact candidate through
 `submit_candidate`, and call `wait_for_ci_results` once. Run that blocking MCP call

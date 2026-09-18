@@ -2,7 +2,7 @@
 
 **Incident date:** 2026-09-17 PDT (UTC-07:00)
 
-**Status:** Unresolved; the bead remained open and stranded at evidence collection
+**Status:** Resolved in local master; the incident bead itself was stranded at evidence collection
 
 **Severity:** Catastrophic workflow-test failure; no requested README change was delivered
 
@@ -14,7 +14,7 @@
 
 **Regression introduced by:** `53a9e7b75e72422c08cc742c7230f4baafcfa70c` (`feat: complete stock desktop cutover`)
 
-**Delivered revision:** None
+**Delivered revision:** The subsequent `fix: enforce weaver and worker boundaries` change
 
 ## Investigation boundary
 
@@ -230,22 +230,22 @@ field provenance instead of prompt text.
 
 ## Corrective actions
 
-No corrective action has been implemented as part of this read-only
-investigation. Current master still contains the defects below.
+The investigation itself was read-only. The subsequent remediation implemented
+the actions below in local master.
 
 | Status | Action | Failure prevented or detected | Proof required |
 | --- | --- | --- | --- |
-| Required — P0 | Restore same-task Weaver entry. `$weaver` must bind the invoking native task to the bead and return its scoped instructions. | #1–#3 | Live test shows the invoking task as owner/Weaver and zero `create_thread` actions with role Weaver. |
-| Required — P0 | Make Weaver creation structurally impossible: remove Weaver from automatic worker dispatch and reject any Steward `create_thread` action whose assigned role is Weaver. Do not retain a compatibility path. | #1, #3 | Unit and state-transition tests reject all attempted Weaver creation, including stale persisted requests. |
-| Required — P0 | Compile Executor and Warden prompts only from the accepted scope revision: behavioral outcome, acceptance, evidence, optional notes, workspace/source, and ownership facts. Raw intake remains provenance and never enters downstream prompts. | #5–#8 | Adversarial tests put `$weaver`, skill links, role names, Markdown, newlines, code fences, and instruction text in every intake field; downstream prompts contain none of that raw text. |
-| Required — P0 | Restore an explicit dominant-role/inert-data boundary using structured serialization, not unescaped prose interpolation. Managed worker prompts must not invoke role skills. | #4–#7 | Native prompt fixture proves payload data cannot trigger a skill or role change; role mismatch is rejected by protocol. |
-| Required — P0 | Restore exact native role-title compilation from the bead title. For this bead the Executor title must be `⚒️ [exe-cdf5657c] Add newline to README.md`. | #12 | Exact-string unit test and live native observation. |
-| Required — P0 | Make registration a real admission gate. Before successful `register_worker`, managed tasks may not inspect or mutate the assigned repository. | #9–#11 | Hook/integration test rejects pre-registration commands and allows them after exact task/assignment registration. |
-| Required — P0 | Treat native creation as provisional until registration and the initial turn are observed. An interrupted or terminal unregistered task must fence/release the assignment, restore actionable backlog state, record an incident, and release capacity without blind recreation. | #13 | Integration test interrupts the initial turn and observes bounded automatic recovery with no leaked slot. |
-| Required — P1 | Remove unconditional title normalization. Normalize only after an observed mismatch and correlate that observation in the same action trace. | #14 | Create call with matching title emits no second action; mismatched observation emits one idempotent correction. |
-| Required — P1 | Separate project enrollment from ordinary Weaver intake. Preflight enrollment before accepting the request, return one explicit human/Vizier action when missing, and disclose or avoid all repository file changes. | #15 | Clean-repository test proves enrollment either preserves the tree or returns an exact declared diff; normal `$weaver` does no setup work. |
-| Required — P1 | Add the complete native lifecycle and recovery joins to bead trace, and report missing joins as gaps. | #16 | One trace shows origin turn, action/attempt, created task/turn, registration, interruption, recovery, title, and capacity release. |
-| Required — P1 | Replace the current tests that assert active skill tokens and generic titles with invariant tests for the correct role boundary and exact title. Reinstate the prior adversarial prompt-contract cases. | Regression prevention | `scripts/check` passes and fails when any removed guard is deliberately disabled. |
+| Implemented — P0 | Restore same-task Weaver entry. `$weaver` binds the invoking native task to the bead and returns its scoped instructions. | #1–#3 | Tests show same-task ownership and `native_task_created: false`. |
+| Implemented — P0 | Make Weaver creation structurally impossible: remove Weaver from automatic dispatch and reject work creation, adoption, stale dispatch, and worker registration paths that request it. | #1, #3 | Unit and state-transition tests reject attempted Weaver creation. |
+| Implemented — P0 | Compile Executor and Warden prompts only from accepted scope fields and keep raw intake as provenance. | #5–#8 | Adversarial prompt test proves raw outcome/context and active skill tokens are absent. |
+| Implemented — P0 | Restore a dominant-role/inert-data boundary with escaped deterministic JSON and no role-skill invocation. | #4–#7 | Prompt fixture asserts the structured boundary and escaped syntax. |
+| Implemented — P0 | Restore exact native role-title compilation. | #12 | Exact-string test asserts `⚒️ [exe-cdf5657c] Add newline to README.md`. |
+| Implemented — P0 | Enforce registration before any repository or native tool call. | #9–#11 | Hook test rejects repository access and permits only registration. |
+| Implemented — P0 | Release and record terminal unregistered assignments, queue archival, and stop automatic retry after the second failure. | #13 | Lifecycle test observes capacity release, history, incident, and archival action. |
+| Implemented — P1 | Remove unconditional title normalization. | #14 | Matching/unreported titles emit no correction; only an explicit mismatch can emit one. |
+| Implemented — P1 | Separate enrollment from Weaver entry and initialize Beads in stealth mode. | #15 | Entry reports missing enrollment without setup; enrollment test requires `--stealth`; incident `.gitignore` pollution was removed. |
+| Implemented — P1 | Join actions, attempts, tasks, lifecycle, registration failure, and capacity release in bead trace; report missing created-task lifecycle as a gap. | #16 | Trace regression test covers the joined interrupted-registration path. |
+| Implemented — P1 | Replace tests that asserted active skill tokens and generic titles with the correct invariants. | Regression prevention | The complete repository check covers the new boundaries. |
 
 ## Evidence quality and final assessment
 

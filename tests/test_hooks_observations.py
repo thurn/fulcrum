@@ -46,6 +46,120 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_unregistered_worker_is_blocked_then_released_on_stop(self):
+        ledger = MemoryLedger(
+            record(
+                "fc-work",
+                owner="STEWARD",
+                phase="ready",
+                requested_role="executor",
+                desktop={
+                    "assignment": {
+                        "assignment_token": "assignment-1",
+                        "role": "executor",
+                        "task_id": "worker-1",
+                        "creation_action_id": "action-create",
+                        "state": "issuing",
+                    },
+                    "actions": {},
+                },
+            )
+        )
+        hook = HookService(ledger)
+        blocked = hook.handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:worker-1"),
+                thread_id="worker-1",
+                input={
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "exec_command",
+                    "tool_input": {"cmd": "git status"},
+                    "tool_use_id": "tool-read",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertEqual(
+            blocked.result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        allowed = hook.handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:worker-1"),
+                thread_id="worker-1",
+                input={
+                    "hook_event_name": "PreToolUse",
+                    "tool_name": "mcp__fulcrum__register_worker",
+                    "tool_input": {"bead": "fc-work"},
+                    "tool_use_id": "tool-register",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertNotIn("hookSpecificOutput", allowed.result)
+        hook.handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:worker-1"),
+                thread_id="worker-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-1",
+                    "turn_id": "turn-1",
+                    "reason": "interrupted",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        retained = ledger.show("fc-work").fc or {}
+        protocol = retained["desktop"]
+        self.assertNotIn("assignment", protocol)
+        self.assertEqual(
+            protocol["assignment_history"][-1]["state"], "registration_failed"
+        )
+        self.assertEqual(retained["owner"], "STEWARD")
+        archival = next(
+            value
+            for value in protocol["actions"].values()
+            if value.get("purpose") == "archive_unregistered_task:worker-1"
+        )
+        self.assertEqual(archival["tool"], "set_thread_archived")
+
+        work = ledger.show("fc-work")
+        fc = dict(work.fc or {})
+        protocol = dict(fc["desktop"])
+        protocol["assignment"] = {
+            "assignment_token": "assignment-2",
+            "role": "executor",
+            "task_id": "worker-2",
+            "creation_action_id": "action-create-2",
+            "state": "issuing",
+        }
+        fc["desktop"] = protocol
+        fc["owner"] = "STEWARD"
+        ledger.update_fc("fc-work", fc, assignee="STEWARD")
+        hook.handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:worker-2"),
+                thread_id="worker-2",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-2",
+                    "turn_id": "turn-2",
+                    "reason": "interrupted",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        exhausted = ledger.show("fc-work").fc or {}
+        self.assertEqual(exhausted["owner"], "HUMAN")
+        self.assertEqual(
+            exhausted["blocked"]["reason"],
+            "worker_registration_failed_repeatedly",
+        )
+
     def test_session_only_hook_identity_binds_registered_standing_task(self):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)

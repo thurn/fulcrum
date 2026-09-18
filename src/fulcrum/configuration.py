@@ -656,6 +656,11 @@ class ProjectService:
             result={
                 "project_id": project_id,
                 "project": project,
+                "repository_effects": {
+                    "mode": "stealth",
+                    "tracked_worktree": "preserved",
+                    "local_paths": [".beads/", ".git/info/exclude"],
+                },
                 "publication": {"state": "pending"},
             },
             next_action="No further action is required for local enrollment.",
@@ -785,6 +790,7 @@ def _enroll_project_beads(
             "--non-interactive",
             "--skip-agents",
             "--skip-hooks",
+            "--stealth",
         ]
         completed = subprocess.run(
             command, cwd=root, capture_output=True, text=True, check=False, timeout=30

@@ -79,9 +79,9 @@ A timeout means the detached operation or native effect may still complete; insp
 its durable locator before doing anything else.
 
 Plan drafting, approval, publication, refinement, future activation, and mechanical
-parent completion remain. A substantial plan is reviewed by a native subagent in
-the Weaver turn, not by a separate Fulcrum review subsystem. Manual `ledger sync`
-and `config sync` remain; automatic publication and curated memory do not.
+parent completion remain. Weaver investigation always stays in the invoking task;
+Fulcrum never creates another Weaver task. Manual `ledger sync` and `config sync`
+remain; automatic publication and curated memory do not.
 
 ## Validation
 
