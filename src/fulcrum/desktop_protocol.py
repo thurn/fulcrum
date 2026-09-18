@@ -52,7 +52,7 @@ ROLE_TITLES: Mapping[str, tuple[str, str]] = {
     "justiciar": ("🔥", "jus"),
 }
 MAX_UNPROJECTED_TRANSITIONS = 128
-RETAINED_PROJECTED_REQUESTS = 32
+RETAINED_PROJECTED_REQUESTS = 0
 REQUEST_PROJECTION_NAMESPACE = uuid.UUID("40d1f5df-973e-47fd-bd90-407f55ab9514")
 WORKSPACE_ADMISSION_NAMESPACE = uuid.UUID("d61fc47b-a024-4bd4-b196-64a24aaaf79d")
 TASK_ARCHIVE_DELAY = timedelta(minutes=10)
@@ -715,9 +715,9 @@ def _save_request(
                 description="Durable replay projection for one accepted Desktop request.",
                 owner="SYSTEM",
                 fc=projection_fc,
+                status="closed",
                 external_ref=f"fulcrum:request:{_request_id(request)}",
             )
-            ledger.update_fc(projection_id, projection_fc, status="closed")
         else:
             projected_transition = (projected.fc or {}).get("request_transition")
             if projected_transition != retained:

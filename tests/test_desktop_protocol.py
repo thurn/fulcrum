@@ -1513,7 +1513,7 @@ def test_projected_request_journal_prunes_locally_and_replays_durably():
     for index in range(1, 140):
         service.pause(mutation(("pause",), payload={"reason": f"cycle-{index}"}))
     protocol = (ledger.show("fc-system").fc or {})["desktop"]
-    assert len(protocol["requests"]) <= 33
+    assert len(protocol["requests"]) == 1
     assert first.request_id not in protocol["requests"]
     replayed = service.pause(first)
     assert replayed.result == expected.result

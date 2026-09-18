@@ -726,28 +726,13 @@ class Ledger:
                     fc[key] = value
             if state in {"completed", "failed", "cancelled"}:
                 fc["completed_at"] = utc_now()
-            updated = self.update_fc(record_id, fc)
-            if (
-                state in {"completed", "failed", "cancelled"}
-                and updated.status != "closed"
-            ):
-                close_observation: CommandObservation | None = None
-                try:
-                    close_observation = self.run(
-                        ("close", record_id, "--reason", f"operation {state}"),
-                        mutating=True,
-                    )
-                except LedgerFailure:
-                    observed = self.show(record_id)
-                    if observed is None or observed.status != "closed":
-                        raise
-                    updated = observed
-                if close_observation is not None:
-                    updated = (
-                        _record_from_value(close_observation.value, record_id)
-                        or self.show(record_id)
-                        or updated
-                    )
+            updated = self.update_fc(
+                record_id,
+                fc,
+                status=(
+                    "closed" if state in {"completed", "failed", "cancelled"} else None
+                ),
+            )
             return OperationRecord.from_record(updated)
 
 
