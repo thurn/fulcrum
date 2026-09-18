@@ -483,9 +483,49 @@ class DesktopSetupService(DesktopProtocolService):
                     "standing replacement requires the exact old task and positive terminal or loss evidence",
                     exit_code=5,
                 )
+            for candidate in ledger.list_records(limit=0):
+                candidate_protocol = (
+                    protocol
+                    if candidate.id == system.id
+                    else _protocol(candidate.fc or {})
+                )
+                waits = dict(candidate_protocol.get("instruction_waits") or {})
+                changed = False
+                for wait_id, retained in tuple(waits.items()):
+                    if (
+                        isinstance(retained, Mapping)
+                        and retained.get("task_id") == old_task_id
+                        and retained.get("state") == "waiting"
+                    ):
+                        waits[wait_id] = {
+                            **dict(retained),
+                            "state": "cancelled",
+                            "resolved_at": _utc_now(),
+                            "response": {
+                                "kind": "stop",
+                                "reason": "standing_replaced",
+                                "wait_id": wait_id,
+                                "retained_obligation": False,
+                            },
+                        }
+                        changed = True
+                if not changed:
+                    continue
+                candidate_protocol["instruction_waits"] = waits
+                if candidate.id == system.id:
+                    protocol = candidate_protocol
+                else:
+                    ledger.update_fc(
+                        candidate.id,
+                        _with_protocol(candidate.fc or {}, candidate_protocol),
+                    )
             unresolved = []
             for candidate in ledger.list_records(limit=0):
-                candidate_protocol = _protocol(candidate.fc or {})
+                candidate_protocol = (
+                    protocol
+                    if candidate.id == system.id
+                    else _protocol(candidate.fc or {})
+                )
                 for action in (candidate_protocol.get("actions") or {}).values():
                     if (
                         isinstance(action, Mapping)

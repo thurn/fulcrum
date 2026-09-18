@@ -251,6 +251,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             "native_result": {"threadId": "steward-task"},
         }
         desktop["actions"] = actions
+        desktop["instruction_waits"] = {
+            "old-wait": {
+                "wait_id": "old-wait",
+                "task_id": "steward-task",
+                "state": "waiting",
+            }
+        }
         service._ledger_override.update_fc(
             "fc-system", {**system.fc, "desktop": desktop}
         )
@@ -279,6 +286,10 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert len(recoveries) == 1
         assert recoveries[0]["action_id"] != "old-recovery"
         assert replacing.result["standing"]["steward"]["state"] == "replacement_pending"
+        system = service._ledger_override.show("fc-system")
+        old_wait = system.fc["desktop"]["instruction_waits"]["old-wait"]
+        assert old_wait["state"] == "cancelled"
+        assert old_wait["response"]["reason"] == "standing_replaced"
 
 
 def test_bootstrap_preserves_unrelated_codex_configuration():
