@@ -453,6 +453,57 @@ def test_replacement_steward_registration_cancels_previous_instruction_wait():
     assert cancelled["response"]["reason"] == "standing_replaced"
 
 
+def test_new_steward_wait_recovers_action_granted_after_previous_turn_ended():
+    service, ledger = registered_service(record("fc-a", phase="ready"))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-a",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {"prompt": "authorized work"},
+            "purpose": "routine_dispatch",
+        },
+    )
+    work = ledger.show("fc-a")
+    fc = dict(work.fc or {})
+    desktop = dict(fc.get("desktop") or {})
+    actions = dict(desktop.get("actions") or {})
+    actions[action["action_id"]] = {
+        **actions[action["action_id"]],
+        "granted_wait_id": "wait-old",
+    }
+    desktop["actions"] = actions
+    fc["desktop"] = desktop
+    ledger.update_fc(work.id, fc)
+    system = ledger.show("fc-system")
+    system_fc = dict(system.fc or {})
+    system_desktop = dict(system_fc.get("desktop") or {})
+    system_desktop["instruction_waits"] = {
+        "wait-old": {
+            "wait_id": "wait-old",
+            "task_id": "steward-1",
+            "state": "resolved",
+        }
+    }
+    system_fc["desktop"] = system_desktop
+    ledger.update_fc(system.id, system_fc)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "new-loop", "turn_id": "new-turn"},
+        )
+    )
+
+    assert result.result["kind"] == "action"
+    assert result.result["action"]["action_id"] == action["action_id"]
+    retained = (ledger.show("fc-a").fc or {})["desktop"]["actions"]
+    assert retained[action["action_id"]]["granted_wait_id"] != "wait-old"
+
+
 def test_production_service_has_no_action_injection_api():
     service, _ = registered_service()
     assert not hasattr(service, "queue_action")
@@ -1283,7 +1334,7 @@ def test_projected_request_journal_prunes_locally_and_replays_durably():
     assert replayed.result == expected.result
 
 
-def test_steward_must_settle_granted_action_before_next_wait():
+def test_steward_repeats_unclaimed_grant_on_next_wait():
     service, ledger = registered_service()
     service.resume(mutation(("resume",), payload={"reason": "test"}))
     seed_action(
@@ -1295,22 +1346,22 @@ def test_steward_must_settle_granted_action_before_next_wait():
             "arguments": {"threadId": "worker-1", "prompt": "continue"},
         },
     )
-    service.wait_for_instructions(
+    first = service.wait_for_instructions(
         mutation(
             ("instruction", "wait"),
             actor="task:steward-1",
             payload={"loop_id": "loop-1", "turn_id": "turn-1"},
         )
     )
-    with unittest.TestCase().assertRaises(FulcrumError) as raised:
-        service.wait_for_instructions(
-            mutation(
-                ("instruction", "wait"),
-                actor="task:steward-1",
-                payload={"loop_id": "loop-1", "turn_id": "turn-1"},
-            )
+    repeated = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "loop-2", "turn_id": "turn-2"},
         )
-    assert raised.exception.code == "ACTION_RESULT_REQUIRED"
+    )
+    assert repeated.result["kind"] == "action"
+    assert repeated.result["action"]["action_id"] == first.result["action"]["action_id"]
 
 
 def test_create_result_requires_native_identity_evidence():
@@ -1523,8 +1574,8 @@ class DesktopProtocolTests(unittest.TestCase):
     def test_projected_journal_prunes_and_replays(self):
         test_projected_request_journal_prunes_locally_and_replays_durably()
 
-    def test_steward_settles_before_next_wait(self):
-        test_steward_must_settle_granted_action_before_next_wait()
+    def test_steward_repeats_unclaimed_grant(self):
+        test_steward_repeats_unclaimed_grant_on_next_wait()
 
     def test_create_result_requires_identity(self):
         test_create_result_requires_native_identity_evidence()

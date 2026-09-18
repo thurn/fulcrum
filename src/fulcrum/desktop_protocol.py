@@ -2346,6 +2346,35 @@ class DesktopProtocolService:
                     return record, value
         return None
 
+    def _recover_abandoned_wait_grant(
+        self,
+        ledger: Ledger,
+        waits: Mapping[str, Any],
+        task_id: str,
+    ) -> tuple[LedgerRecord, Mapping[str, Any]] | None:
+        abandoned = {
+            wait_id
+            for wait_id, retained in waits.items()
+            if isinstance(retained, Mapping)
+            and retained.get("task_id") == task_id
+            and retained.get("state") != "waiting"
+        }
+        if not abandoned:
+            return None
+        for record in ledger.list_records(limit=0):
+            actions = _protocol(record.fc or {}).get("actions")
+            if not isinstance(actions, Mapping):
+                continue
+            for value in actions.values():
+                if (
+                    isinstance(value, Mapping)
+                    and value.get("executor") == "steward"
+                    and value.get("state") == "pending"
+                    and value.get("granted_wait_id") in abandoned
+                ):
+                    return record, value
+        return None
+
     def _eligible_actions(
         self, ledger: Ledger, *, paused: bool
     ) -> list[tuple[LedgerRecord, dict[str, Any]]]:
@@ -2761,6 +2790,15 @@ class DesktopProtocolService:
         matching_wait_id = (
             matching.get("wait_id") if isinstance(matching, Mapping) else None
         )
+
+        reclaimable_wait_ids = {
+            wait_id
+            for wait_id, retained_wait in waits.items()
+            if isinstance(retained_wait, Mapping)
+            and retained_wait.get("state") != "waiting"
+            and retained_wait.get("task_id") == binding["task_id"]
+        }
+
         for candidate_record in ledger.list_records(limit=0):
             candidate_actions = _protocol(candidate_record.fc or {}).get("actions")
             if not isinstance(candidate_actions, Mapping):
@@ -2774,6 +2812,10 @@ class DesktopProtocolService:
                     and value.get("granted_wait_id")
                     and value.get("granted_wait_id") != matching_wait_id
                     and value.get("state") in {"pending", "issuing"}
+                    and not (
+                        value.get("state") == "pending"
+                        and value.get("granted_wait_id") in reclaimable_wait_ids
+                    )
                 ),
                 None,
             )
@@ -2814,7 +2856,9 @@ class DesktopProtocolService:
             protocol["instruction_waits"] = waits
             ledger.update_fc(system.id, _with_protocol(system.fc or {}, protocol))
 
-        recovered = self._recover_wait_grant(ledger, wait_id)
+        recovered = self._recover_wait_grant(
+            ledger, wait_id
+        ) or self._recover_abandoned_wait_grant(ledger, waits, str(binding["task_id"]))
         candidates = self._eligible_actions(
             ledger, paused=protocol.get("run_control", "paused") == "paused"
         )
@@ -2879,7 +2923,7 @@ class DesktopProtocolService:
 
         record, selected_action = selected
         action = copy.deepcopy(dict(selected_action))
-        if not action.get("granted_wait_id"):
+        if action.get("granted_wait_id") != wait_id:
             action["granted_wait_id"] = wait_id
             actions = dict(_protocol(record.fc or {}).get("actions") or {})
             actions[str(action["action_id"])] = action
