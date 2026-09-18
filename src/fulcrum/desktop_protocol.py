@@ -2032,8 +2032,66 @@ class DesktopProtocolService:
     ) -> tuple[LedgerRecord, dict[str, Any]] | None:
         records = ledger.list_records(limit=0)
         for record in sorted(records, key=lambda item: item.id):
-            protocol = _protocol(record.fc or {})
+            fc = record.fc or {}
+            protocol = _protocol(fc)
             actions = dict(protocol.get("actions") or {})
+            assignment = protocol.get("assignment")
+            if (
+                record.id != "fc-system"
+                and isinstance(assignment, Mapping)
+                and assignment.get("role") == "weaver"
+            ):
+                task_id = str(assignment.get("task_id") or "")
+                retired = {
+                    **dict(assignment),
+                    "state": "retired_forbidden_role",
+                    "released_at": _utc_now(),
+                    "release_reason": "Weaver must be the invoking task",
+                }
+                history = list(protocol.get("assignment_history") or [])
+                history.append(retired)
+                protocol["assignment_history"] = history[-20:]
+                protocol.pop("assignment", None)
+                migrations = list(protocol.get("role_migrations") or [])
+                migrations.append(
+                    {
+                        "role": "weaver",
+                        "task_id": task_id or None,
+                        "assignment_token": assignment.get("assignment_token"),
+                        "state": "retired",
+                        "capacity_released": True,
+                        "recorded_at": _utc_now(),
+                    }
+                )
+                protocol["role_migrations"] = migrations[-20:]
+                archive = None
+                if task_id:
+                    archive = self._append_action(
+                        protocol,
+                        record_id=record.id,
+                        executor="steward",
+                        tool="set_thread_archived",
+                        arguments={"threadId": task_id, "archived": True},
+                        purpose=f"archive_task:{task_id}",
+                        expected_result={"threadId": task_id, "archived": True},
+                        assignment_token=str(assignment.get("assignment_token") or ""),
+                        reporting={"forbidden_weaver_migration": True},
+                    )
+                updated = {
+                    **_with_protocol(fc, protocol),
+                    "owner": "HUMAN",
+                    "role": None,
+                    "ownership_operation": None,
+                    "requested_role": "executor",
+                    "next_action": (
+                        "Invoke the Weaver skill from the human task with this bead "
+                        "before implementation."
+                    ),
+                }
+                ledger.update_fc(record.id, updated, assignee="HUMAN")
+                if archive is not None:
+                    return self._record(ledger, record.id), archive
+                continue
             for original in actions.values():
                 if (
                     not isinstance(original, Mapping)

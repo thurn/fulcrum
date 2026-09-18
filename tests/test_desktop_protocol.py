@@ -812,6 +812,61 @@ def test_stale_persisted_weaver_creation_is_superseded_before_claim():
     assert retained[action["action_id"]]["state"] == "superseded"
 
 
+def test_stale_persisted_weaver_assignment_is_retired_and_archived():
+    work = record(
+        "fc-stale-weaver",
+        owner="STEWARD",
+        phase="backlog",
+        requested_role="weaver",
+        role="weaver",
+        ownership_operation="assignment-weaver",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-weaver",
+                "task_id": "worker-weaver",
+                "role": "weaver",
+                "state": "issuing",
+                "capacity_class": "ordinary",
+            }
+        },
+    )
+    service, ledger = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "retire-weaver", "turn_id": "turn-retire-weaver"},
+        )
+    )
+
+    assert result.result["kind"] == "action"
+    action = result.result["action"]
+    assert action["tool"] == "set_thread_archived"
+    assert action["arguments"] == {"threadId": "worker-weaver", "archived": True}
+    assert action["reporting"]["forbidden_weaver_migration"] is True
+
+    retained = ledger.show("fc-stale-weaver")
+    assert retained.assignee == "HUMAN"
+    fc = retained.fc or {}
+    assert fc["owner"] == "HUMAN"
+    assert fc["role"] is None
+    assert fc["ownership_operation"] is None
+    assert fc["requested_role"] == "executor"
+    assert "$weaver" not in fc["next_action"]
+    desktop = fc["desktop"]
+    assert "assignment" not in desktop
+    assert desktop["assignment_history"][-1]["state"] == "retired_forbidden_role"
+    assert desktop["role_migrations"][-1] == {
+        "role": "weaver",
+        "task_id": "worker-weaver",
+        "assignment_token": "assignment-weaver",
+        "state": "retired",
+        "capacity_released": True,
+        "recorded_at": desktop["role_migrations"][-1]["recorded_at"],
+    }
+
+
 def test_assignment_releases_only_after_exact_native_completion():
     assignment = {
         "assignment_token": "assignment-1",
@@ -1190,6 +1245,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_stale_weaver_creation_is_rejected(self):
         test_stale_persisted_weaver_creation_is_superseded_before_claim()
+
+    def test_stale_weaver_assignment_is_retired(self):
+        test_stale_persisted_weaver_assignment_is_retired_and_archived()
 
     def test_native_completion_releases_assignment(self):
         test_assignment_releases_only_after_exact_native_completion()
