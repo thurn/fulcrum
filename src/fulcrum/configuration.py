@@ -60,6 +60,8 @@ def default_config(brain_root: Path) -> dict[str, Any]:
         role: {"model": "gpt-5.6-sol", "effort": "high"} for role in ROLES
     }
     model_defaults["steward"] = {"model": "gpt-5.6-luna", "effort": "high"}
+    for role in ("weaver", "executor", "warden"):
+        model_defaults[role] = {"model": "gpt-5.6-luna", "effort": "low"}
     return {
         "delivery": {"kind": "tollgate", "executable": shutil.which("tg")},
         "beads": {

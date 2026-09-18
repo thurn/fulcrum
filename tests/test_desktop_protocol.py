@@ -755,10 +755,68 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert "raw Weaver transcript" not in prompt
     assert "$weaver" not in prompt
     assert "$fulcrum-executor" not in prompt
+    assert "Omit task_id, session_id, turn_id, and host_id" in prompt
+    assert "checks proportional to the change" in prompt
+    assert "exactly one task commit" in prompt
     assert arguments["title"] == "⚒️ [exe-cdf5657c] Add newline to README.md"
     assert arguments["model"] == "gpt-6-astra"
     assert arguments["thinking"] == "xhigh"
     assert "$weaver" not in role_title("executor", "fc-a", "$weaver `run`")
+
+
+def test_worker_registration_derives_native_identity_from_creation_result():
+    work = record(
+        "fc-derived",
+        owner="STEWARD",
+        phase="executing",
+        requested_role="executor",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-derived",
+                "role": "executor",
+                "workspace": "/tmp/managed-worktree",
+                "source": None,
+                "project": "toy",
+                "branch": "codex/fc-derived",
+                "state": "reserved",
+            },
+            "actions": {
+                "action-derived": {
+                    "action_id": "action-derived",
+                    "record_id": "fc-derived",
+                    "executor": "steward",
+                    "tool": "create_thread",
+                    "assignment_token": "assignment-derived",
+                    "state": "succeeded",
+                    "native_result": {
+                        "threadId": "worker-derived",
+                        "hostId": "local",
+                    },
+                }
+            },
+        },
+    )
+    service, ledger = registered_service(work)
+
+    result = service.register_worker(
+        mutation(
+            ("worker", "register"),
+            arguments={"bead": "fc-derived"},
+            payload={
+                "assignment_token": "assignment-derived",
+                "workspace": "/tmp/managed-worktree",
+                "git_root": "/tmp/managed-worktree",
+                "branch": "codex/fc-derived",
+            },
+        )
+    )
+
+    assignment = result.result["assignment"]
+    assert assignment["task_id"] == "worker-derived"
+    assert assignment["session_id"] == "worker-derived"
+    assert assignment["turn_id"] == "action-derived"
+    assert assignment["host_id"] == "local"
+    assert ledger.show("fc-derived").assignee == "worker-derived"
 
 
 def test_steward_never_dispatches_weaver_work():

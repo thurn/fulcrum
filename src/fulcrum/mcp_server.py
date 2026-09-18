@@ -231,7 +231,7 @@ def _schema(name: str) -> dict[str, Any]:
                 "task_id",
                 "session_id",
             ],
-            "register_worker": ["session_id", "turn_id"],
+            "register_worker": [],
             "marshal_decide": ["turn_id", "input"],
             "report_action_result": ["attempt_id", "outcome", "native_result"],
             "report_progress": ["kind", "summary", "evidence"],
@@ -282,8 +282,10 @@ def tool_descriptions() -> list[dict[str, Any]]:
             "attempt_id returned by claim_action."
         ),
         "register_worker": (
-            "Bind this native task to its reserved assignment before editing. "
-            "Supply the exact workspace, Git root, and observed source when assigned."
+            "Bind this native task to its reserved assignment before editing. Supply "
+            "the exact workspace, Git root, and observed source when assigned. Omit "
+            "task, session, turn, and host identity on the first call; Fulcrum derives "
+            "them from the retained creation result and returns assignment.task_id."
         ),
         "report_progress": (
             "Record substantive assigned-work progress with a supported kind, summary, "

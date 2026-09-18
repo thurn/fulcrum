@@ -79,7 +79,9 @@ retained IDs and postconditions instead of recreating tasks.
 The fixed identities are `🧰 STEWARD 🧰` on `gpt-5.6-luna` and `🧭 MARSHAL 🧭`
 plus `🔮 VIZIER 🔮` on `gpt-5.6-sol`. One heartbeat targets the registered Marshal
 every 15 minutes and stays quiet on healthy no-op runs. There is no Steward
-heartbeat or hourly recovery task.
+heartbeat or hourly recovery task. Short-lived Weaver, Executor, and Warden work
+defaults to Luna with low reasoning effort; project or work-specific configuration
+may override that choice.
 
 Admission opens only after the broker answers, required native tools and model
 efforts are observed, all three tasks register, the schedule result is retained,

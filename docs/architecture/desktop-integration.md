@@ -625,7 +625,10 @@ ordinary handler edits require neither reinstall nor re-trust.
 Only bound instances/tasks receive role context. Unknown tasks are untouched,
 except for prospective identity evidence tied to an exact retained creation
 marker or registration invocation. `register_worker` still validates ownership
-and workspace before edits. Incidental `report` filing needs no managed binding.
+and workspace before edits. For a newly created worker, it derives task, session,
+turn, and host identity from the retained successful creation result when the
+first registration call omits them; the returned task binding is required on
+later worker calls. Incidental `report` filing needs no managed binding.
 Raw intake, tool output, and arbitrary markers remain data, not developer policy.
 After accepted worker finish, restored context permits reporting/reconciliation,
 not renewed editing without a fresh assignment.

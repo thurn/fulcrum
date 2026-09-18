@@ -318,6 +318,14 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task:thread-1", argv)
         self.assertEqual(json.loads(stdin)["session_id"], "session-1")
 
+    async def test_worker_registration_schema_derives_native_identity(self):
+        tools = {item["name"]: item for item in tool_descriptions()}
+        required = tools["register_worker"]["inputSchema"]["required"]
+        self.assertNotIn("session_id", required)
+        self.assertNotIn("turn_id", required)
+        self.assertNotIn("task_id", required)
+        self.assertNotIn("host_id", required)
+
     def test_explicit_turn_identity_cannot_be_nullified_by_nested_input(self):
         cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
         _, stdin = cli.invocation(
