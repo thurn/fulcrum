@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -24,6 +25,7 @@ class ActivationTests(unittest.TestCase):
                     "fulcrum.bootstrap.fresh_selection",
                     side_effect=RuntimeError(BROKER_HANDOFF_REASON),
                 ),
+                patch.dict(os.environ, {"FULCRUM_OPERATION_SOURCE": ""}),
                 redirect_stdout(output),
             ):
                 code = bootstrap_main(

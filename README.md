@@ -11,7 +11,7 @@ Operational guidance is in [setup](docs/setup.md), [operations](docs/operations.
 [performance tracing](docs/performance.md), [hooks](docs/hooks.md), and
 [validation](docs/validation.md).
 
-## Control plane
+## Control flow
 
 Three visible standing tasks are retained:
 
