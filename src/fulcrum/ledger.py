@@ -179,6 +179,15 @@ class Ledger:
         self.timeout = timeout
         self.dolt_auto_commit = dolt_auto_commit
         self._observed: dict[str, dict[str, Any]] = {}
+        self._listed_records: list[LedgerRecord] | None = None
+
+    def _remember_record(self, record: LedgerRecord) -> None:
+        self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
+        if self._listed_records is None:
+            return
+        retained = [item for item in self._listed_records if item.id != record.id]
+        retained.append(copy.deepcopy(record))
+        self._listed_records = retained
 
     def _lock_for(self, bead_id: str | None) -> ProcessLock:
         return ProcessLock(self.workspace / ".fulcrum-locks" / "state")
@@ -306,17 +315,20 @@ class Ledger:
             raise
         if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
             record = LedgerRecord.from_native(value[0])
-            self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
+            self._remember_record(record)
             return record
         if isinstance(value, dict):
             record = LedgerRecord.from_native(value)
-            self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
+            self._remember_record(record)
             return record
         return None
 
     def list_records(
         self, *, kind: str | None = None, limit: int = 20
     ) -> list[LedgerRecord]:
+        if limit == 0 and self._listed_records is not None:
+            records = copy.deepcopy(self._listed_records)
+            return [record for record in records if kind is None or record.kind == kind]
         arguments = ["list", "--all", "--flat", "--limit", str(limit)]
         if kind is not None:
             arguments.extend(("--label", f"fc:{kind}"))
@@ -330,6 +342,8 @@ class Ledger:
             records = [record for record in records if record.kind == kind]
         for record in records:
             self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
+        if limit == 0 and kind is None:
+            self._listed_records = copy.deepcopy(records)
         return records
 
     def create_record(
@@ -407,6 +421,7 @@ class Ledger:
                 retryable=True,
                 uncertain=True,
             )
+        self._remember_record(created)
         if parent is not None:
             created = self.set_parent(record_id, parent)
         return created
@@ -497,6 +512,7 @@ class Ledger:
                     retryable=True,
                     uncertain=True,
                 )
+            self._remember_record(observed)
             return observed
 
     def add_labels(self, record_id: str, labels: Sequence[str]) -> LedgerRecord:
@@ -516,6 +532,7 @@ class Ledger:
                 retryable=True,
                 uncertain=True,
             )
+        self._remember_record(observed)
         return observed
 
     def dependencies(self, record_id: str) -> list[str]:

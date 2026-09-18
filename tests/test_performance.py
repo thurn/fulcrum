@@ -8,6 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from fulcrum.ledger import CommandObservation, Ledger
 from fulcrum.performance import analyze, chrome_trace, load_spans
 from fulcrum.timing import span, stage_name
 
@@ -73,6 +74,32 @@ class PerformanceTracingTests(unittest.TestCase):
         self.assertEqual(value, "application.command.work_create_private_value")
 
 
+class LedgerReadCacheTests(unittest.TestCase):
+    def test_full_list_is_reused_and_refreshed_by_show(self) -> None:
+        initial = _native_record("open")
+        refreshed = _native_record("closed")
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory), executable="/usr/bin/true")
+            with patch.object(
+                ledger,
+                "run",
+                side_effect=(
+                    CommandObservation([initial], 1, "", "", False),
+                    CommandObservation(refreshed, 1, "", "", False),
+                ),
+            ) as run:
+                first = ledger.list_records(limit=0)
+                cached = ledger.list_records(limit=0)
+                shown = ledger.show("fc-a")
+                updated = ledger.list_records(kind="work", limit=0)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(first[0].status, "open")
+        self.assertEqual(cached[0].status, "open")
+        self.assertIsNotNone(shown)
+        self.assertEqual(updated[0].status, "closed")
+
+
 def _row(
     span_id: str,
     stage: str,
@@ -93,6 +120,16 @@ def _row(
         "outcome": "ok",
         "label": "test",
         "sample": "1",
+    }
+
+
+def _native_record(status: str) -> dict[str, object]:
+    return {
+        "id": "fc-a",
+        "title": "A",
+        "status": status,
+        "assignee": "HUMAN",
+        "metadata": {"fc": {"kind": "work", "phase": "ready"}},
     }
 
 
