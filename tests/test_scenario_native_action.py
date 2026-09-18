@@ -28,7 +28,7 @@ class ScenarioNativeActionTests(unittest.TestCase):
                     "id": "scenario-4",
                     "mode": mode,
                     "project_id": "project-1",
-                    "prompt_contains": "Recovery fixture",
+                    "title_contains": "Recovery fixture",
                 }
             ),
             encoding="utf-8",
@@ -47,6 +47,7 @@ class ScenarioNativeActionTests(unittest.TestCase):
             "purpose": "routine_dispatch",
             "arguments": {
                 "prompt": "Add a Recovery fixture sentence.",
+                "title": "Executor: Recovery fixture",
                 "target": {"type": "project", "projectId": "project-1"},
             },
         }

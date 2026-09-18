@@ -1,7 +1,7 @@
 """Narrow, file-activated native-action faults for live validation.
 
 The production command surface intentionally exposes no fault controls.  A live
-validation campaign may opt in by placing an exact project/prompt-bound control
+validation campaign may opt in by placing an exact project/native-action-bound control
 document in the instance root.  The one-shot document records the injected
 boundary so provider truth and recovery timing remain auditable.
 """
@@ -177,14 +177,16 @@ def _matches(
     project_id = target.get("projectId") if isinstance(target, Mapping) else None
     if document.get("project_id") != project_id:
         return False
+    criteria: list[bool] = []
     prompt_contains = document.get("prompt_contains")
-    prompt = arguments.get("prompt")
-    return bool(
-        isinstance(prompt_contains, str)
-        and prompt_contains
-        and isinstance(prompt, str)
-        and prompt_contains in prompt
-    )
+    if isinstance(prompt_contains, str) and prompt_contains:
+        prompt = arguments.get("prompt")
+        criteria.append(isinstance(prompt, str) and prompt_contains in prompt)
+    title_contains = document.get("title_contains")
+    if isinstance(title_contains, str) and title_contains:
+        title = arguments.get("title")
+        criteria.append(isinstance(title, str) and title_contains in title)
+    return bool(criteria) and all(criteria)
 
 
 def _update_matching_state(
