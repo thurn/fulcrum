@@ -9,7 +9,7 @@ import uuid
 
 from fulcrum.contracts import ActorContext
 from fulcrum.desktop_protocol import DesktopProtocolService
-from fulcrum.hooks import HookService
+from fulcrum.hooks import HookService, _arguments_match
 from fulcrum.observations import read_transcript
 from tests.support import (
     MemoryLedger,
@@ -46,6 +46,71 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_create_thread_allows_paraphrase_with_exact_action_marker(self):
+        action = {
+            "action_id": "action-1",
+            "record_id": "fc-work",
+            "assignment_token": "assignment-1",
+            "tool": "create_thread",
+        }
+        expected = {
+            "prompt": "Register and perform the retained assignment.",
+            "title": "worker",
+            "target": {"type": "project", "projectId": "project-1"},
+        }
+        actual = {
+            **expected,
+            "prompt": (
+                'Fulcrum-Action: {"instance":"/instance","record_id":"fc-work",'
+                '"action_id":"action-1","assignment_token":"assignment-1"}\n'
+                "Register first, then carry out the assignment returned by Fulcrum."
+            ),
+        }
+
+        self.assertTrue(
+            _arguments_match(action, expected, actual, instance="/instance")
+        )
+
+    def test_create_thread_rejects_paraphrase_with_wrong_action_marker(self):
+        action = {
+            "action_id": "action-1",
+            "record_id": "fc-work",
+            "assignment_token": "assignment-1",
+            "tool": "create_thread",
+        }
+        expected = {"prompt": "Register.", "title": "worker"}
+        actual = {
+            "prompt": (
+                'Fulcrum-Action: {"instance":"/instance","record_id":"fc-work",'
+                '"action_id":"action-other","assignment_token":"assignment-1"}\n'
+                "Register."
+            ),
+            "title": "worker",
+        }
+
+        self.assertFalse(
+            _arguments_match(action, expected, actual, instance="/instance")
+        )
+
+    def test_non_prompt_create_thread_arguments_remain_exact(self):
+        action = {
+            "action_id": "action-1",
+            "record_id": "fc-work",
+            "tool": "create_thread",
+        }
+        expected = {"prompt": "Register.", "title": "worker"}
+        actual = {
+            "prompt": (
+                'Fulcrum-Action: {"instance":"/instance","record_id":"fc-work",'
+                '"action_id":"action-1"}\nRegister.'
+            ),
+            "title": "different worker",
+        }
+
+        self.assertFalse(
+            _arguments_match(action, expected, actual, instance="/instance")
+        )
+
     def test_active_assignment_collection_releases_completed_worker(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "worker.jsonl"

@@ -242,7 +242,12 @@ class HookService:
         protocol = _protocol(record.fc or {})
         expected = dict(action.get("arguments") or {})
         actual = request.input.get("tool_input") or request.input.get("toolInput")
-        if not isinstance(actual, Mapping) or not _arguments_match(expected, actual):
+        if not isinstance(actual, Mapping) or not _arguments_match(
+            action,
+            expected,
+            actual,
+            instance=str(request.instance.instance_root),
+        ):
             return _deny("native tool arguments differ from the claimed action")
         tool_use_id = request.input.get("tool_use_id") or request.input.get("toolUseId")
         attempt["native_tool_use_id"] = tool_use_id
@@ -1034,17 +1039,53 @@ def _issuing_action_for_actor(
     return None
 
 
-def _arguments_match(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> bool:
+def _arguments_match(
+    action: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    instance: str,
+) -> bool:
     # One-shot task/message prompts include the immutable marker in the issued
-    # action. Persistent automation prompts do not, so exact equality also passes.
+    # action. A model may harmlessly paraphrase a create-thread prompt while
+    # copying it into the native call. Worker registration supplies the retained
+    # authoritative contract, so the marker and structural arguments are the
+    # security boundary for that call, not byte-for-byte prose reproduction.
     for key, value in expected.items():
         observed = actual.get(key)
         if key in {"prompt", "text"} and isinstance(value, str):
-            if not isinstance(observed, str) or not observed.endswith(value):
+            if action.get("tool") == "create_thread":
+                if not _create_thread_marker_matches(
+                    action, observed, instance=instance
+                ):
+                    return False
+            elif not isinstance(observed, str) or not observed.endswith(value):
                 return False
         elif observed != value:
             return False
     return set(actual).issuperset(expected)
+
+
+def _create_thread_marker_matches(
+    action: Mapping[str, Any], observed: Any, *, instance: str
+) -> bool:
+    if not isinstance(observed, str):
+        return False
+    match = MARKER.match(observed)
+    if match is None:
+        return False
+    try:
+        marker = json.loads(match.group("value"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    expected = {
+        "instance": instance,
+        "record_id": str(action.get("record_id") or ""),
+        "action_id": str(action.get("action_id") or ""),
+    }
+    if action.get("assignment_token"):
+        expected["assignment_token"] = str(action["assignment_token"])
+    return marker == expected
 
 
 def _replace_attempt(
