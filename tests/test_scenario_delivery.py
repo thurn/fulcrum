@@ -211,8 +211,6 @@ def test_scenario_barrier_rejects_repair_that_discards_promoted_outcome():
                 )
             except FulcrumError as error:
                 assert error.code == "SCENARIO_REPAIR_INCOMPLETE"
-                assert error.details.get("expected_line") == (
-                    "Entries: [Alpha, Beta]"
-                )
+                assert error.details.get("expected_line") == ("Entries: [Alpha, Beta]")
             else:
                 raise AssertionError("incomplete conflict repair was admitted")
