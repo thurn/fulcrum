@@ -2,14 +2,77 @@ from __future__ import annotations
 
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 import uuid
 
 from fulcrum.completion import CompletionService
-from fulcrum.contracts import ActorContext, FulcrumError
+from fulcrum.contracts import ActorContext, CommandResult, FulcrumError
 from tests.support import MemoryLedger, record, request
 
 
 class CompletionRecoveryTests(unittest.TestCase):
+    def test_warden_refreshes_settled_delivery_before_requiring_workspace(self):
+        source = "a" * 40
+        integration = "b" * 40
+        pending_delivery = {
+            "source_oid": source,
+            "validation": {"state": "passed"},
+            "approved_source": {"oid": source},
+            "promotion": {"state": "pending"},
+            "synchronization": {"state": "pending"},
+            "cleanup": {"state": "pending"},
+        }
+        settled_delivery = {
+            **pending_delivery,
+            "promotion": {
+                "state": "observed",
+                "integration_oid": integration,
+            },
+            "synchronization": {
+                "state": "observed",
+                "integration_oid": integration,
+            },
+            "cleanup": {"state": "observed"},
+        }
+        work = record("fc-a", role="warden", delivery=pending_delivery)
+        ledger = MemoryLedger(work)
+        call = replace(
+            request(("finish",)),
+            arguments={"bead": "fc-a"},
+            input={
+                "summary": "approved",
+                "source_oid": source,
+                "evidence": ["provider receipt"],
+                "checks": [
+                    {
+                        "name": "CI",
+                        "status": "passed",
+                        "evidence": "retained result",
+                    }
+                ],
+            },
+            request_id=str(uuid.uuid4()),
+        )
+        with (
+            patch("fulcrum.completion.DeliveryService") as service,
+            patch("fulcrum.completion._inspect_clean_source") as inspect,
+            patch(
+                "fulcrum.completion._accept_warden_finish",
+                return_value=CommandResult.query({"accepted": True}),
+            ) as accept,
+        ):
+            service.return_value.promotion_show.return_value = CommandResult.query(
+                {"delivery": settled_delivery}
+            )
+            result = CompletionService()._warden_finish(call, ledger, work)
+
+        self.assertTrue(result.ok)
+        inspect.assert_not_called()
+        accept.assert_called_once()
+        self.assertEqual(
+            ledger.show("fc-a").fc["delivery"]["cleanup"]["state"], "observed"
+        )
+
     def test_changed_justiciar_source_requires_settled_delivery(self):
         source = "a" * 40
         work = record(

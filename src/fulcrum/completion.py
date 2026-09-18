@@ -16,7 +16,7 @@ from typing import Any
 from fulcrum.analytics import AnalyticsService
 from fulcrum.configuration import ConfigurationManager
 from fulcrum.contracts import CommandResult, CommandState, FulcrumError, ParsedRequest
-from fulcrum.delivery_service import DeliveryService, _context
+from fulcrum.delivery_service import DeliveryService, _context, _retain_delivery
 from fulcrum.ledger import (
     Ledger,
     LedgerRecord,
@@ -1022,18 +1022,42 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
+        children: dict[str, Any] = {}
         settled_delivery = _settled_delivery_for_source(work, payload["source_oid"])
+        if settled_delivery is None and _approved_delivery_for_source(
+            work, payload["source_oid"]
+        ):
+            reconciliation = DeliveryService().promotion_show(
+                _child_request(
+                    request,
+                    operation.id,
+                    "delivery-reconciliation",
+                    ("promotion", "show"),
+                )
+            )
+            children["reconciliation"] = _child_result(reconciliation)
+            observed = reconciliation.result or {}
+            observed_delivery = observed.get("delivery")
+            if reconciliation.state is CommandState.COMPLETED and isinstance(
+                observed_delivery, Mapping
+            ):
+                _retain_delivery(ledger, work, observed_delivery, operation.id)
+                work = _reload_work(ledger, work.id)
+                settled_delivery = _settled_delivery_for_source(
+                    work, payload["source_oid"]
+                )
         if settled_delivery is not None:
-            children = {
-                "reconciliation": {
+            children.setdefault(
+                "reconciliation",
+                {
                     "state": "completed",
                     "ok": True,
                     "result": {
                         "delivery": "already_settled",
                         "source_oid": payload["source_oid"],
                     },
-                }
-            }
+                },
+            )
             return _accept_warden_finish(
                 ledger,
                 work,
@@ -1083,7 +1107,6 @@ class CompletionService:
                 next_action=fc["next_action"],
             )
             return _operation_result(operation)
-        children: dict[str, Any] = {}
         delivery = (work.fc or {}).get("delivery")
         validation = (
             delivery.get("validation") if isinstance(delivery, Mapping) else None
@@ -1291,6 +1314,21 @@ def _settled_delivery_for_source(
     ):
         return None
     return delivery
+
+
+def _approved_delivery_for_source(work: LedgerRecord, source_oid: str) -> bool:
+    """Return whether the exact source already crossed the approval boundary."""
+
+    delivery = (work.fc or {}).get("delivery")
+    approved = (
+        delivery.get("approved_source") if isinstance(delivery, Mapping) else None
+    )
+    return (
+        isinstance(delivery, Mapping)
+        and delivery.get("source_oid") == source_oid
+        and isinstance(approved, Mapping)
+        and approved.get("oid") == source_oid
+    )
 
 
 def _accept_warden_finish(
