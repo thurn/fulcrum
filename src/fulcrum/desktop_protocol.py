@@ -44,6 +44,7 @@ STANDING_ROLES = {"steward", "marshal", "vizier"}
 WORKER_ROLES = {"weaver", "executor", "warden", "sage", "mason", "justiciar"}
 DISPATCHABLE_ROLES = {"executor", "warden", "sage", "mason", "justiciar"}
 ROLE_TITLES: Mapping[str, tuple[str, str]] = {
+    "weaver": ("🧵", "wvr"),
     "executor": ("⚒️", "exe"),
     "warden": ("🛡️", "war"),
     "sage": ("📖", "sge"),
@@ -53,6 +54,8 @@ ROLE_TITLES: Mapping[str, tuple[str, str]] = {
 MAX_UNPROJECTED_TRANSITIONS = 128
 RETAINED_PROJECTED_REQUESTS = 32
 REQUEST_PROJECTION_NAMESPACE = uuid.UUID("40d1f5df-973e-47fd-bd90-407f55ab9514")
+WORKSPACE_ADMISSION_NAMESPACE = uuid.UUID("d61fc47b-a024-4bd4-b196-64a24aaaf79d")
+TASK_ARCHIVE_DELAY = timedelta(minutes=10)
 
 
 def _positive_native_completion(
@@ -90,6 +93,16 @@ def _positive_native_completion(
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_protocol_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _opaque(prefix: str) -> str:
@@ -2160,6 +2173,19 @@ class DesktopProtocolService:
             }
             native_tasks = protocol.get("native_tasks") or {}
             for task_id in sorted(task_ids):
+                completed_times: list[datetime] = []
+                for item in history or []:
+                    if not isinstance(item, Mapping) or item.get("task_id") != task_id:
+                        continue
+                    parsed = _parse_protocol_time(item.get("released_at"))
+                    if parsed is not None:
+                        completed_times.append(parsed)
+                completed_at = max(completed_times, default=None)
+                if (
+                    completed_at is None
+                    or self.now() - completed_at < TASK_ARCHIVE_DELAY
+                ):
+                    continue
                 if isinstance(native_tasks.get(task_id), Mapping):
                     if native_tasks[task_id].get("archived"):
                         continue
@@ -2415,8 +2441,44 @@ class DesktopProtocolService:
                 if isinstance(project_config, Mapping)
                 else fc.get("codex_project_id")
             )
-            if not isinstance(workspace, str) or not workspace or not codex_project:
+            if not codex_project:
                 continue
+            if not isinstance(workspace, str) or not workspace:
+                from fulcrum.delivery_service import DeliveryService
+
+                prepare_request = replace(
+                    request,
+                    command=("worktree", "prepare"),
+                    arguments={"bead": record.id},
+                    input={},
+                    actor=ActorContext(kind="system"),
+                    request_id=str(
+                        uuid.uuid5(
+                            WORKSPACE_ADMISSION_NAMESPACE,
+                            f"{record.id}:{fc.get('last_transition')}",
+                        )
+                    ),
+                    project=project,
+                    thread_id=None,
+                    ownership_operation=None,
+                    wait=False,
+                )
+                prepared = DeliveryService().worktree_prepare(prepare_request)
+                if prepared.state != CommandState.COMPLETED:
+                    continue
+                refreshed = ledger.show(record.id)
+                if refreshed is None or not refreshed.fc:
+                    continue
+                record = refreshed
+                fc = dict(refreshed.fc)
+                protocol = _protocol(fc)
+                workspace = (
+                    fc.get("worktree", {}).get("path")
+                    if isinstance(fc.get("worktree"), Mapping)
+                    else None
+                )
+                if not isinstance(workspace, str) or not workspace:
+                    continue
             candidates.append(record)
         candidates.sort(
             key=lambda item: (int((item.fc or {}).get("priority", 2)), item.id)

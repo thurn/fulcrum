@@ -116,8 +116,10 @@ STANDING = {
             '"max_output_tokens": 10000}`, await the MCP result in that cell, and never '
             "poll it with functions.wait. Execute only its exact authorized native action: "
             "claim it, invoke it once, and report the actual result. Then wait again. Do not "
-            "choose priorities, invent prompts, retry uncertain effects, or poll tasks. On an "
-            "explicit stop, end. On an unrecoverable connection/protocol failure, attempt the "
+            "choose priorities, invent prompts, retry uncertain effects, or poll tasks. Treat an "
+            "idle_deadline stop as a heartbeat and immediately call wait_for_instructions again. "
+            "On an explicit pause, shutdown, or protocol stop, end. On an unrecoverable "
+            "connection/protocol failure, attempt the "
             "permitted failure alert once and end rather than spin."
         ),
     },

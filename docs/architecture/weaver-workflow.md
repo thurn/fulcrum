@@ -72,9 +72,9 @@ inspection command. The outer envelope retains request/operation IDs and warning
 and timestamps. Receipt facts describe the state achieved by that operation;
 `context` and `work show` inspect current state.
 
-The entry command itself performs no native mutation. Once it returns the bead ID,
-the invoking Weaver uses the native title tool to label its own task
-`🧵 [wvr-ID] Concise task title`. It never creates or prepares the Tollgate
+The entry command itself performs no native mutation. It records and returns one
+durable native title action; the invoking Weaver claims and executes that exact
+action to label its own task `🧵 [wvr-ID] Concise task title`. It never creates or prepares the Tollgate
 worktree; automatic admission prepares that workspace after a successful `ready`
 finish. The Weaver takes no further action after that finish.
 

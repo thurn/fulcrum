@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
 import unittest
 from unittest.mock import patch
@@ -488,26 +488,45 @@ def test_observed_title_mismatch_schedules_one_correction():
     }
 
 
-def test_closed_settled_worker_compiles_archive_action():
+def test_closed_settled_worker_archives_only_after_ten_minutes():
+    now = datetime.now(timezone.utc)
     work = record(
         "fc-a",
         status="closed",
         phase="done",
         desktop={
             "assignment_history": [
-                {"task_id": "worker-1", "role": "executor", "state": "finished"}
+                {
+                    "task_id": "worker-1",
+                    "role": "executor",
+                    "state": "finished",
+                    "released_at": (now - timedelta(minutes=9)).isoformat(),
+                }
             ]
         },
     )
-    service, _ = registered_service(work)
+    service, ledger = registered_service(work)
+    service.now = lambda: now
     service.resume(mutation(("resume",), payload={"reason": "test"}))
-    result = service.wait_for_instructions(
-        mutation(
-            ("instruction", "wait"),
-            actor="task:steward-1",
-            payload={"loop_id": "archive", "turn_id": "turn-archive"},
-        )
+    wait_request = mutation(
+        ("instruction", "wait"),
+        actor="task:steward-1",
+        payload={"loop_id": "archive", "turn_id": "turn-archive"},
     )
+    waiting = service.wait_for_instructions(wait_request)
+    assert waiting.result["transport_wait"]["state"] == "waiting"
+    retained = ledger.show("fc-a")
+    fc = dict(retained.fc or {})
+    protocol = dict(fc["desktop"])
+    history = list(protocol["assignment_history"])
+    history[0] = {
+        **history[0],
+        "released_at": (now - timedelta(minutes=10, seconds=1)).isoformat(),
+    }
+    protocol["assignment_history"] = history
+    fc["desktop"] = protocol
+    ledger.update_fc("fc-a", fc)
+    result = service.wait_for_instructions(wait_request)
     assert result.result["action"]["tool"] == "set_thread_archived"
     assert result.result["action"]["arguments"]["threadId"] == "worker-1"
     assert result.result["action"]["arguments"]["archived"] is True
@@ -1256,7 +1275,7 @@ class DesktopProtocolTests(unittest.TestCase):
         test_observed_title_mismatch_schedules_one_correction()
 
     def test_settled_worker_archives(self):
-        test_closed_settled_worker_compiles_archive_action()
+        test_closed_settled_worker_archives_only_after_ten_minutes()
 
     def test_equal_action_claim_is_idempotent(self):
         test_equal_action_claim_replays_without_authorizing_second_invocation()

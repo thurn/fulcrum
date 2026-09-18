@@ -69,6 +69,7 @@ class WorkService:
         description = request.input.get("description")
         if not isinstance(description, str) or not description.strip():
             raise _invalid("description", "is required")
+        title = " ".join(description.strip().splitlines()[0].split())[:120]
         ledger = _ledger(request)
         supplied = request.input.get("bead")
         existing = ledger.show(str(supplied)) if supplied else None
@@ -118,7 +119,6 @@ class WorkService:
                     details={"bead_id": candidate.id, "task_id": task_id},
                 )
         if existing is None:
-            title = " ".join(description.strip().splitlines()[0].split())[:120]
             spec = _work_spec(
                 {
                     "title": title or "Prepare implementation scope",
@@ -169,6 +169,21 @@ class WorkService:
             "registered_at": utc_now(),
         }
         desktop["assignment"] = assignment
+        from fulcrum.desktop_protocol import DesktopProtocolService, role_title
+
+        protocol_service = DesktopProtocolService(ledger)
+        native_title = role_title("weaver", bead_id, title)
+        title_action = protocol_service._append_action(
+            desktop,
+            record_id=bead_id,
+            executor="weaver",
+            tool="set_thread_title",
+            arguments={"threadId": str(task_id), "title": native_title},
+            purpose=f"weaver_title:{operation.id}",
+            expected_result={"threadId": str(task_id), "title": native_title},
+            assignment_token=operation.id,
+            reporting={"kind": "same_task_weaver_title"},
+        )
         fc.update(
             {
                 "desktop": desktop,
@@ -202,6 +217,9 @@ class WorkService:
                 "task_id": task_id,
                 "ownership_operation": operation.id,
                 "native_task_created": False,
+                "title_action": protocol_service._action_response(
+                    request, title_action
+                ),
                 "instructions": instructions,
                 "work": work_view(ledger, entered),
             },

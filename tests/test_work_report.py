@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from fulcrum.contracts import ActorContext, FulcrumError
+from fulcrum.completion import CompletionService
 from fulcrum.work import WorkService, _work_spec
 from tests.support import MemoryLedger, record, request
 
@@ -65,12 +66,40 @@ def test_weaver_entry_binds_invoking_task_without_native_creation():
         result = WorkService().enter(entered)
     payload = result.result["result"]
     assert payload["native_task_created"] is False
+    assert payload["title_action"]["tool"] == "set_thread_title"
+    assert payload["title_action"]["arguments"] == {
+        "threadId": "human-task",
+        "title": f"🧵 [wvr-{payload['bead_id'].removeprefix('fc-')}] Add newline to README.md",
+    }
     work = ledger.show(payload["bead_id"])
     assignment = work.fc["desktop"]["assignment"]
     assert assignment["entry_mode"] == "same_task"
     assert assignment["task_id"] == "human-task"
     assert work.fc["role"] == "weaver"
     assert work.fc["requested_role"] == "executor"
+    action = work.fc["desktop"]["actions"][payload["title_action"]["action_id"]]
+    assert action["executor"] == "weaver"
+    assert action["state"] == "pending"
+
+    finished = replace(
+        entered,
+        command=("finish",),
+        arguments={"bead": payload["bead_id"], "outcome": "ready"},
+        input={
+            "bead": payload["bead_id"],
+            "outcome": "ready",
+            "summary": "README.md ends with a newline.",
+            "acceptance": ["The final byte of README.md is a newline."],
+            "evidence": ["README.md is the requested file."],
+        },
+        ownership_operation=payload["ownership_operation"],
+        request_id=str(uuid.uuid4()),
+    )
+    with patch("fulcrum.completion._ledger", return_value=ledger):
+        completion = CompletionService().finish(finished)
+    retained = ledger.show(payload["bead_id"])
+    assignment = retained.fc["desktop"]["assignment"]
+    assert assignment["finish_operation"] == completion.operation_id
 
 
 def test_work_creation_cannot_request_weaver_dispatch():

@@ -5,16 +5,17 @@ description: Investigate and prepare durable scope in the invoking task.
 
 Weaver always runs in the human-invoked task. Never create, fork, dispatch, or
 delegate to another Weaver task. Before repository investigation, enter the role
-with `fulcrum enter weaver --input - --json`, passing a JSON object containing the
-human's literal request as `description` and, only when the human supplied one, a
-managed bead ID as `bead`. Use `--project ID` when project selection is ambiguous.
+with `fulcrum enter weaver --input - --json`, passing a JSON object containing only
+the human's requested task as `description`. Exclude the `$weaver` invocation or
+Markdown skill link from that description. Include, only when the human supplied
+one, a managed bead ID as `bead`. Use `--project ID` when project selection is ambiguous.
 Do not interpolate the request into a shell command. If the project is not already
 enrolled, report that preflight blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
-operation. Entry binds this exact task and never creates or renames a native task.
-After entry returns the bead ID, rename this invoking task with the native title
-tool to `🧵 [wvr-ID] Concise task title`, replacing `ID` with the bead suffix.
+operation. Entry binds this exact task and never creates a native task. It returns
+a durable `title_action`. Claim that exact action with `claim_action`, invoke its
+returned native `set_thread_title` action once, and rely on the hook to report the result.
 Investigate here, but do not implement the requested repository change. This
 boundary includes documentation, tests, configuration, and all repository files.
 

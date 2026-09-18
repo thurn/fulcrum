@@ -97,7 +97,7 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         fc = dict(work.fc or {})
         fc["phase"] = "done"
         fc["disposition"] = {
@@ -176,7 +176,7 @@ class CompletionService:
                 )
             )
             reports.append(_child_result(report))
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         fc = dict(work.fc or {})
         interrupted = fc.get("interrupted_work")
         investigation = {
@@ -288,7 +288,7 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         marshal = _marshal_or_human(ledger)
         fc = dict(work.fc or {})
         reasons = _waiting_reasons(fc.get("waiting"))
@@ -427,7 +427,7 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         fc = dict(work.fc or {})
         fc["phase"] = "done"
         fc["disposition"] = {
@@ -566,7 +566,7 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         from fulcrum.desktop_protocol import (
             DesktopProtocolService,
             _opaque,
@@ -684,7 +684,7 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         fc = dict(work.fc or {})
         fc["phase"] = "done"
         fc["disposition"] = {
@@ -751,7 +751,7 @@ class CompletionService:
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
         owner = str(operation.operation["planned"]["owner"])
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         fc = dict(work.fc or {})
         fc["summary"] = summary
         fc["acceptance"] = list(acceptance)
@@ -808,7 +808,7 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        _record_task_finish(ledger, work, operation.id)
+        work = _record_task_finish(ledger, work, operation.id)
         owner = _marshal_or_human(ledger)
         current = _reload_work(ledger, work.id)
         fc = dict(current.fc or {})
@@ -1808,7 +1808,9 @@ def _normalize_finding(value: Any, discovered_from: str, index: int) -> dict[str
     }
 
 
-def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -> None:
+def _record_task_finish(
+    ledger: Ledger, work: LedgerRecord, operation_id: str
+) -> LedgerRecord:
     current = ledger.show(work.id)
     if current is None or not current.fc:
         raise FulcrumError.invalid("NOT_FOUND", f"unknown work {work.id}")
@@ -1827,7 +1829,7 @@ def _record_task_finish(ledger: Ledger, work: LedgerRecord, operation_id: str) -
         "finish_recorded_at": utc_now(),
     }
     fc["desktop"] = desktop
-    ledger.update_fc(current.id, fc)
+    return ledger.update_fc(current.id, fc)
 
 
 def _release_desktop_assignment(
