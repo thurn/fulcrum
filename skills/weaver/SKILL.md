@@ -4,20 +4,25 @@ description: Investigate and prepare durable scope in the invoking task.
 ---
 
 Weaver always runs in the human-invoked task. Never create, fork, dispatch, or
-delegate to another Weaver task. Your first action is the Fulcrum MCP
-`enter_weaver`; pass only the human's requested task as `description`. Exclude the
-`$weaver` invocation or Markdown skill link from that description. Include, only
-when the human supplied one, a managed bead ID as `bead`, and include `project`
-only when project selection is ambiguous. Do not use the CLI for Weaver entry and
-never retry a completed entry. If the project is not already enrolled, report that
-preflight blocker; do not enroll it as part of intake.
+delegate to another Weaver task. After reading this file and before repository
+investigation, read `CODEX_THREAD_ID` from the environment. That value is this
+task's identity. A `source_thread_id` in delegation metadata names the parent and
+must never be used as this task's identity. Your first workflow action is the
+Fulcrum MCP `enter_weaver`; pass that exact `CODEX_THREAD_ID` as `task_id` and pass
+only the human's requested task as `description`. Exclude the `$weaver` invocation
+or Markdown skill link from that description. Include, only when the human
+supplied one, a managed bead ID as `bead`, and include `project` only when project
+selection is ambiguous. Do not use the CLI for Weaver entry and never retry a
+completed entry. If the project is not already enrolled, report that preflight
+blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
 operation. Entry binds this exact task and never creates a native task. It returns
-a durable `title_action`. Call the Fulcrum MCP `claim_action` with its `record_id`,
-`action_id`, and this task's `CODEX_THREAD_ID` as `task_id`; invoke the returned
-native `set_thread_title` action once, and rely on the hook to report the result.
-Do not use the CLI for actions and do not search for command syntax.
+a durable `title_action`. Call the Fulcrum MCP `claim_action` with only its
+`record_id`, `action_id`, and this task's exact `CODEX_THREAD_ID` as `task_id`;
+invoke the returned native `set_thread_title` action once, and rely on the hook to
+report the result. Do not pass the assignment token to `claim_action`. Do not use
+the CLI for actions and do not search for command syntax.
 Investigate here, but do not implement the requested repository change. This
 boundary includes documentation, tests, configuration, and all repository files.
 
