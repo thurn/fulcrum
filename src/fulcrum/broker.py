@@ -51,12 +51,24 @@ Runner = Callable[[Sequence[str], str], Awaitable[Mapping[str, Any]]]
 
 
 async def run_fresh(argv: Sequence[str], stdin: str) -> Mapping[str, Any]:
+    environment = dict(os.environ)
+    # The MCP server and broker are connection owners, not operation owners.
+    # They may themselves have started from an immutable snapshot, but every
+    # command they launch is a new operation and must select current master.
+    for name in (
+        "FULCRUM_SOURCE",
+        "FULCRUM_OPERATION_SOURCE",
+        "FULCRUM_COMMIT",
+        "FULCRUM_SOURCE_FD",
+    ):
+        environment.pop(name, None)
     process = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env=environment,
     )
     stdout, stderr = await process.communicate(stdin.encode("utf-8"))
     if not stdout:

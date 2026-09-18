@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -9,11 +10,36 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fulcrum.broker import BrokerServer, Evaluation, PendingBroker
+from fulcrum.broker import BrokerServer, Evaluation, PendingBroker, run_fresh
 from fulcrum.mcp_server import FreshCli, McpServer, tool_descriptions
 
 
 class BrokerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_process_does_not_inherit_connection_source_pin(self):
+        pinned = {
+            "FULCRUM_SOURCE": "/old/source",
+            "FULCRUM_OPERATION_SOURCE": "/old/source",
+            "FULCRUM_COMMIT": "old-commit",
+            "FULCRUM_SOURCE_FD": "99",
+        }
+        captured = {}
+
+        class Process:
+            async def communicate(self, stdin):
+                return b'{"ok":true}', b""
+
+        async def create(*argv, **kwargs):
+            captured.update(kwargs)
+            return Process()
+
+        with (
+            patch.dict(os.environ, pinned),
+            patch("fulcrum.broker.asyncio.create_subprocess_exec", create),
+        ):
+            result = await run_fresh(("fulcrum", "status"), "{}")
+        self.assertEqual(result, {"ok": True})
+        self.assertTrue(all(name not in captured["env"] for name in pinned))
+
     async def test_client_disconnect_cancels_broker_wait(self):
         entered = asyncio.Event()
 
