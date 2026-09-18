@@ -33,6 +33,9 @@ MCP `finish` with the bead, ownership operation as `assignment_token`, outcome
 implementation notes. Keep raw intake and transcript text out of those downstream
 fields: summarize the authorized behavior clearly, and quote only evidence an
 Executor or Warden truly needs. Implementation notes are non-binding hints.
+For a low-risk, one-file mechanical request, use one focused repository inspection
+that confirms the target and affected references, then finish immediately. Do not
+run broad history searches, inspect unrelated files, or add process commentary.
 `ready` is immediately eligible for Steward selection. After a successful finish,
 end the turn without taking another action. Use `answered`, `planned`, or `blocked`
 only when those are the truthful outcomes.

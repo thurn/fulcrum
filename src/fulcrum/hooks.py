@@ -446,7 +446,7 @@ class HookService:
         return sorted(set(paths))
 
     def collect_active_assignments(self, request: ParsedRequest) -> list[str]:
-        """Collect active worker transcripts and return every retained watch path."""
+        """Collect active workers and return only their transcript watch paths."""
 
         ledger = self._ledger(request)
         paths: set[str] = set()
@@ -455,10 +455,6 @@ class HookService:
             transcripts = protocol.get("transcripts")
             if not isinstance(transcripts, Mapping):
                 continue
-            for retained in transcripts.values():
-                path = retained.get("path") if isinstance(retained, Mapping) else None
-                if isinstance(path, str) and Path(path).is_absolute():
-                    paths.add(path)
             assignment = protocol.get("assignment")
             if not isinstance(assignment, Mapping):
                 continue
@@ -472,6 +468,7 @@ class HookService:
                 or not Path(transcript).is_absolute()
             ):
                 continue
+            paths.add(transcript)
             self._collect_transcript_path(
                 ledger,
                 request,

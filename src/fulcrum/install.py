@@ -156,7 +156,7 @@ def install_hook_config(path: Path, command: str) -> None:
         handler = {
             "type": "command",
             "command": command,
-            "timeout": 10,
+            "timeout": 60 if event == "Stop" else 30,
             "statusMessage": f"Fulcrum: recording {event}",
         }
         if event == "SessionStart":

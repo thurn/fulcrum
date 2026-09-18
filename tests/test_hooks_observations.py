@@ -157,6 +157,46 @@ class HookTests(unittest.TestCase):
         self.assertEqual(protocol["assignment_history"][-1]["turn_id"], "native-turn")
         self.assertEqual(retained.assignee, "STEWARD")
 
+    def test_active_assignment_collection_omits_inactive_transcripts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            active = Path(directory) / "active.jsonl"
+            inactive = Path(directory) / "inactive.jsonl"
+            active.write_text("", encoding="utf-8")
+            inactive.write_text("", encoding="utf-8")
+            ledger = MemoryLedger(
+                record(
+                    "fc-work",
+                    owner="worker-1",
+                    phase="working",
+                    role="executor",
+                    desktop={
+                        "assignment": {
+                            "assignment_token": "assignment-1",
+                            "role": "executor",
+                            "task_id": "worker-1",
+                            "turn_id": "turn-1",
+                            "state": "active",
+                        },
+                        "transcripts": {
+                            "worker-1": {
+                                "path": str(active),
+                                "cursor": 0,
+                                "gaps": [],
+                            },
+                            "worker-old": {
+                                "path": str(inactive),
+                                "cursor": 0,
+                                "gaps": [],
+                            },
+                        },
+                    },
+                )
+            )
+
+            watched = HookService(ledger).collect_active_assignments(request())
+
+        self.assertEqual(watched, [str(active)])
+
     def test_session_only_hook_identity_binds_same_task_weaver(self):
         ledger = MemoryLedger(
             record(
