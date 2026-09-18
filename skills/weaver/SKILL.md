@@ -41,7 +41,11 @@ evidence an Executor or Warden truly needs. Implementation notes are non-binding
 The `finish` arguments themselves must contain the top-level `acceptance` list;
 never send `checks` in its place and never nest `acceptance` under another object.
 For a low-risk, one-file mechanical request, use one focused repository inspection
-that confirms the target and affected references, then finish immediately. If that
+that confirms the target and affected references, then finish immediately. When
+the request names an artifact without a path, resolve that artifact by filename
+or other structural identity before reading its contents. Never search generic
+old/new values across the repository, truncate those matches, or use a similarly
+worded occurrence in another file as evidence about the named artifact. If that
 inspection proves the requested state is already present, finish with outcome
 `answered`, concise evidence, and no implementation acceptance; never return
 `ready` for already-satisfied work. Do not run broad history searches, inspect

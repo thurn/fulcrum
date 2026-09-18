@@ -36,6 +36,20 @@ class ProjectWeaverSkillTests(unittest.TestCase):
             skill,
         )
 
+    def test_weaver_resolves_named_artifacts_before_reading_values(self):
+        skill = (ROOT / ".agents" / "skills" / "weaver" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "resolve that artifact by filename\nor other structural identity",
+            skill,
+        )
+        self.assertIn(
+            "Never search generic\nold/new values across the repository",
+            skill,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
