@@ -906,9 +906,49 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     )
 
     assert "passing wait_for_ci_results response is not completion" in prompt
+    assert "derives the exact current HEAD" in prompt
+    assert "do not supply or retype a source OID" in prompt
     assert "Copy candidate.candidate_id" in prompt
     assert "must be finish with outcome approved" in prompt
     assert "Do not send a final answer before finish returns accepted" in prompt
+
+
+def test_warden_submission_derives_source_from_assigned_worktree():
+    work = record(
+        "fc-review",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-review",
+                "task_id": "warden-1",
+                "role": "warden",
+                "state": "active",
+            }
+        },
+    )
+    service = DesktopProtocolService(MemoryLedger(work))
+    source = "a" * 40
+    with (
+        patch(
+            "fulcrum.delivery_service.DeliveryService.worktree_inspect",
+            return_value=CommandResult.query({"workspace": {"head_oid": source}}),
+        ),
+        patch(
+            "fulcrum.delivery_service.DeliveryService.validation_start",
+            return_value=CommandResult.query({"state": "pending"}),
+        ) as validation_start,
+    ):
+        result = service.submit_candidate(
+            mutation(
+                ("candidate", "submit"),
+                actor="task:warden-1",
+                arguments={"bead": "fc-review"},
+                payload={"assignment_token": "assignment-review"},
+            )
+        )
+
+    submitted = validation_start.call_args.args[0]
+    assert submitted.arguments == {"bead": "fc-review", "source": source}
+    assert result.result["candidate"]["source"] == source
 
 
 def test_released_same_task_weaver_does_not_block_executor_dispatch():

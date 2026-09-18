@@ -225,8 +225,10 @@ def _worker_prompt(
             "Perform a concise independent review. Before the first submission, "
             "ensure the complete candidate is exactly one task commit atop the "
             "current release. Do not run the project-wide configured validation "
-            "yourself; submit_candidate runs it, then wait_for_ci_results returns "
-            "the retained result. Copy candidate.candidate_id from the "
+            "yourself; submit_candidate derives the exact current HEAD from the "
+            "assigned worktree and runs validation, so do not supply or retype a "
+            "source OID. wait_for_ci_results returns the retained result. Copy "
+            "candidate.candidate_id from the "
             "submit_candidate result exactly into wait_for_ci_results; never "
             "retype or reconstruct that identifier. If validation fails, repair the real failure, "
             "squash the complete task tree to one commit, resubmit, and wait again. "
@@ -3191,14 +3193,25 @@ class DesktopProtocolService:
             raise FulcrumError(
                 "ASSIGNMENT_MISMATCH", "candidate token does not match", exit_code=5
             )
-        source = request.input.get("source")
+        from fulcrum.delivery_service import DeliveryService
+
+        inspected = DeliveryService().worktree_inspect(
+            replace(
+                request,
+                command=("worktree", "inspect"),
+                arguments={"bead": bead_id},
+                input={},
+            )
+        )
+        workspace = inspected.result.get("workspace")
+        source = workspace.get("head_oid") if isinstance(workspace, Mapping) else None
         if not isinstance(source, str) or not source:
             raise FulcrumError.invalid(
-                "SOURCE_REQUIRED", "candidate submission requires the exact source OID"
+                "SOURCE_REQUIRED",
+                "candidate submission requires an assigned worktree with a current HEAD",
             )
         repair_cycle = self._candidate_repair_cycle(protocol, source)
         deadline_seconds = self._timing_seconds(request, "ci_deadline_seconds", 1800)
-        from fulcrum.delivery_service import DeliveryService
 
         submitted = DeliveryService().validation_start(
             replace(

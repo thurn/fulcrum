@@ -119,9 +119,7 @@ TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
         "summary": {"type": "string"},
         "evidence": {"type": "array", "items": {"type": "string"}},
     },
-    "submit_candidate": {
-        "source": {"type": "string"},
-    },
+    "submit_candidate": {},
     "wait_for_ci_results": {"candidate_id": {"type": "string"}},
     "finish": {
         "outcome": {
@@ -242,7 +240,7 @@ def _schema(name: str) -> dict[str, Any]:
             "marshal_decide": ["turn_id", "input"],
             "report_action_result": ["attempt_id", "outcome", "native_result"],
             "report_progress": ["kind", "summary", "evidence"],
-            "submit_candidate": ["source"],
+            "submit_candidate": [],
             "wait_for_ci_results": ["candidate_id"],
             "finish": ["outcome", "summary"],
         }.get(name, [])
