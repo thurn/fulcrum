@@ -57,7 +57,8 @@ MARSHAL_HEARTBEAT_PROMPT = (
     '`{"trigger":"heartbeat"}`. Settle only its bounded brief. Claim, invoke, and '
     "report any exact recovery action in that brief, then call "
     "marshal_decide with the same task_id, the returned turn_id, and input containing "
-    "the returned decision_id plus targeted decisions and recoveries; use empty arrays for a no-op. "
+    "the returned decision_id plus targeted curation or recovery rows in the decisions "
+    "array; use an empty decisions array for a no-op. "
     "Do not inspect implementation source or invent identifiers. End quietly when "
     "no action is required."
 )
@@ -148,7 +149,8 @@ STANDING = {
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id, and omit request_id for a new registration. On scheduled prompts call "
             "marshal_check, settle only the returned bounded curation or recovery scope, and "
-            "call marshal_decide with both targeted decisions and recoveries. Execute any "
+            "call marshal_decide with all targeted curation or recovery rows in its "
+            "decisions array. Execute any "
             "returned recovery action exactly once and report it before ending quietly."
         ),
     },

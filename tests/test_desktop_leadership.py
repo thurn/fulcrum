@@ -135,7 +135,6 @@ class LeadershipTests(unittest.TestCase):
                 payload={
                     "decision_id": checked.result["decision"]["decision_id"],
                     "decisions": [],
-                    "recoveries": [],
                 },
             )
         )
@@ -300,7 +299,6 @@ class LeadershipTests(unittest.TestCase):
                             "changes": {"priority": 0},
                         }
                     ],
-                    "recoveries": [],
                 },
             )
         )
@@ -331,7 +329,6 @@ class LeadershipTests(unittest.TestCase):
                             "changes": {"dependencies": ["fc-dependency"]},
                         }
                     ],
-                    "recoveries": [],
                 },
             )
         )
@@ -566,8 +563,7 @@ class LeadershipTests(unittest.TestCase):
                 payload={
                     "turn_id": "marshal-recovery-turn",
                     "decision_id": checked.result["decision"]["decision_id"],
-                    "decisions": [],
-                    "recoveries": [
+                    "decisions": [
                         {
                             "bead": "fc-a",
                             "action_id": action["action_id"],
@@ -614,8 +610,7 @@ class LeadershipTests(unittest.TestCase):
                 payload={
                     "turn_id": "marshal-retry-turn",
                     "decision_id": checked.result["decision"]["decision_id"],
-                    "decisions": [],
-                    "recoveries": [
+                    "decisions": [
                         {
                             "bead": "fc-a",
                             "action_id": action["action_id"],

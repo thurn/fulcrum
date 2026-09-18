@@ -557,16 +557,22 @@ class DesktopLeadershipService(DesktopProtocolService):
                 "decision belongs to another Marshal turn",
                 exit_code=5,
             )
-        decisions = request.input.get("decisions")
-        if not isinstance(decisions, list):
+        decision_rows = request.input.get("decisions")
+        if not isinstance(decision_rows, list):
             raise FulcrumError.invalid(
                 "INVALID_DECISIONS", "decisions must be an array"
             )
-        recovery_rows = request.input.get("recoveries")
-        if not isinstance(recovery_rows, list):
-            raise FulcrumError.invalid(
-                "INVALID_RECOVERIES", "recoveries must be an array"
+        decisions: list[Any] = []
+        recovery_rows: list[Any] = []
+        for row in decision_rows:
+            target = (
+                recovery_rows
+                if isinstance(row, Mapping)
+                and row.get("action_id")
+                and row.get("decision")
+                else decisions
             )
+            target.append(row)
         accepted: list[dict[str, Any]] = []
         stale: list[dict[str, Any]] = []
         allowed = {"priority", "holds", "dependencies", "disposition", "owner", "phase"}

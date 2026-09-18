@@ -304,6 +304,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         decide_input = marshal_decide["properties"]["input"]
         self.assertIn("decision_id", decide_input["required"])
         self.assertIn("decisions", decide_input["required"])
+        self.assertNotIn("recoveries", decide_input["properties"])
         finish = tools["finish"]["inputSchema"]
         self.assertIn("outcome", finish["required"])
         self.assertEqual(
@@ -388,7 +389,6 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                 "turn_id": "turn-1",
                 "decision_id": "decision-1",
                 "decisions": [],
-                "recoveries": [],
                 "input": {"turn_id": None},
             },
         )
@@ -401,7 +401,6 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                     "turn_id": "turn-1",
                     "decision_id": "decision-1",
                     "decisions": [],
-                    "recoveries": [],
                     "input": {"turn_id": "turn-2"},
                 },
             )
