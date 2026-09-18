@@ -716,9 +716,9 @@ def _save_request(
                 description="Durable replay projection for one accepted Desktop request.",
                 owner="SYSTEM",
                 fc=projection_fc,
-                status="closed",
                 external_ref=f"fulcrum:request:{_request_id(request)}",
             )
+            ledger.update_fc(projection_id, projection_fc, status="closed")
         else:
             projected_transition = (projected.fc or {}).get("request_transition")
             if projected_transition != retained:
