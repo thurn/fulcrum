@@ -368,6 +368,51 @@ class HookTests(unittest.TestCase):
         self.assertEqual(protocol["assignment_history"][-1]["turn_id"], "native-turn")
         self.assertEqual(result.result["watch_paths"], [])
 
+    def test_transport_snapshot_discovers_and_collects_standing_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "steward.jsonl"
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-09-18T00:00:00Z",
+                        "payload": {
+                            "type": "turn_aborted",
+                            "turn_id": "steward-turn",
+                            "reason": "interrupted",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            ledger = MemoryLedger(
+                record(
+                    "fc-system",
+                    kind="control",
+                    desktop={
+                        "standing": {
+                            "steward": {
+                                "role": "steward",
+                                "task_id": "steward-1",
+                                "state": "registered",
+                            }
+                        }
+                    },
+                )
+            )
+            with patch(
+                "fulcrum.hooks._discover_native_transcript",
+                return_value=str(transcript),
+            ):
+                result = DesktopProtocolService(ledger).transport_snapshot(
+                    request(("transport", "snapshot"))
+                )
+
+        desktop = (ledger.show("fc-system").fc or {})["desktop"]
+        self.assertEqual(desktop["standing"]["steward"]["state"], "interrupt_observed")
+        self.assertEqual(result.result["watch_paths"], [str(transcript)])
+
     def test_active_assignment_paths_omit_completed_and_standing_tasks(self):
         with tempfile.TemporaryDirectory() as directory:
             active = Path(directory) / "active.jsonl"
@@ -593,6 +638,69 @@ class HookTests(unittest.TestCase):
         self.assertEqual(
             exhausted["blocked"]["reason"],
             "worker_registration_failed_repeatedly",
+        )
+
+    def test_uncertain_created_worker_stop_retains_exact_assignment_for_marshal(self):
+        ledger = MemoryLedger(
+            record(
+                "fc-work",
+                owner="STEWARD",
+                phase="ready",
+                requested_role="executor",
+                desktop={
+                    "assignment": {
+                        "assignment_token": "assignment-1",
+                        "role": "executor",
+                        "task_id": "worker-1",
+                        "creation_action_id": "action-create",
+                        "state": "uncertain",
+                    },
+                    "actions": {
+                        "action-create": {
+                            "action_id": "action-create",
+                            "record_id": "fc-work",
+                            "executor": "steward",
+                            "tool": "create_thread",
+                            "purpose": "routine_dispatch",
+                            "state": "uncertain",
+                        }
+                    },
+                    "incidents": {
+                        "native-action:action-create": {
+                            "incident_id": "incident-1",
+                            "incident_key": "native-action:action-create",
+                            "action_id": "action-create",
+                            "state": "open",
+                            "evidence": {},
+                        }
+                    },
+                },
+            )
+        )
+
+        HookService(ledger).handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:worker-1"),
+                thread_id="worker-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-uncertain",
+                    "turn_id": "turn-1",
+                    "reason": "completed",
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+
+        desktop = (ledger.show("fc-work").fc or {})["desktop"]
+        self.assertEqual(desktop["assignment"]["task_id"], "worker-1")
+        self.assertEqual(desktop["assignment"]["state"], "uncertain")
+        self.assertTrue(desktop["assignment"]["awaiting_native_action_recovery"])
+        self.assertNotIn("registration_failures", desktop)
+        evidence = desktop["incidents"]["native-action:action-create"]["evidence"]
+        self.assertEqual(
+            evidence["registration_terminal_event"]["event_id"], "stop-uncertain"
         )
 
     def test_session_only_hook_identity_binds_registered_standing_task(self):

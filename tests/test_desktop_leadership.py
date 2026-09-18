@@ -484,6 +484,13 @@ class LeadershipTests(unittest.TestCase):
         self.assertEqual(resume["arguments"]["threadId"], "steward-1")
         retained = self.ledger.show("fc-a").fc["desktop"]
         self.assertEqual(retained["assignment"]["task_id"], "executor-1")
+        worker_resume = next(
+            item
+            for item in retained["actions"].values()
+            if item.get("purpose") == f"resume_reconciled_worker:{action['action_id']}"
+        )
+        self.assertEqual(worker_resume["executor"], "steward")
+        self.assertEqual(worker_resume["arguments"]["threadId"], "executor-1")
         self.assertEqual(
             retained["incidents"][f"native-action:{action['action_id']}"]["state"],
             "resolved",

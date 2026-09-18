@@ -741,6 +741,41 @@ class DesktopLeadershipService(DesktopProtocolService):
                     }
                 )
                 continue
+            if recovery_decision == "adopt_observed_task" and isinstance(
+                assignment, Mapping
+            ):
+                worker_task_id = str(assignment.get("task_id") or "")
+                assignment_token = str(assignment.get("assignment_token") or "")
+                purpose = f"resume_reconciled_worker:{action_id}"
+                if worker_task_id and not any(
+                    isinstance(item, Mapping)
+                    and item.get("purpose") == purpose
+                    and item.get("state") not in {"rejected", "superseded"}
+                    for item in actions.values()
+                ):
+                    self._append_action(
+                        desktop,
+                        record_id=record.id,
+                        executor="steward",
+                        tool="send_message_to_thread",
+                        arguments={
+                            "threadId": worker_task_id,
+                            "prompt": (
+                                "Fulcrum reconciled your exact retained creation "
+                                f"action for {record.id}. Retry register_worker once "
+                                f"with assignment_token `{assignment_token}` and this "
+                                "same task identity, then continue the original "
+                                "assignment. Do not create or delegate another task."
+                            ),
+                        },
+                        purpose=purpose,
+                        expected_result={"thread_id": worker_task_id},
+                        assignment_token=assignment_token or None,
+                        reporting={
+                            "kind": "reconciled_worker_resumption",
+                            "reconciles": action_id,
+                        },
+                    )
             incident.update(
                 {
                     "state": "resolved",

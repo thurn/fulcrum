@@ -507,6 +507,48 @@ class HookService:
             )
         return sorted(paths)
 
+    def collect_standing(self, request: ParsedRequest) -> list[str]:
+        """Collect standing-role transcripts, discovering legacy paths on demand."""
+
+        ledger = self._ledger(request)
+        system = ledger.show("fc-system")
+        if system is None:
+            return []
+        protocol = _protocol(system.fc or {})
+        standing = protocol.get("standing")
+        transcripts = protocol.get("transcripts")
+        if not isinstance(standing, Mapping):
+            return []
+        paths: set[str] = set()
+        for role, binding in standing.items():
+            if not isinstance(binding, Mapping):
+                continue
+            task_id = binding.get("task_id")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            retained = (
+                transcripts.get(task_id) if isinstance(transcripts, Mapping) else None
+            )
+            transcript = retained.get("path") if isinstance(retained, Mapping) else None
+            if not isinstance(transcript, str) or not Path(transcript).is_absolute():
+                transcript = _discover_native_transcript(task_id)
+            if transcript is None:
+                continue
+            current = ledger.show("fc-system")
+            if current is None:
+                continue
+            paths.add(transcript)
+            self._collect_transcript_path(
+                ledger,
+                request,
+                current,
+                str(role),
+                task_id,
+                transcript,
+                binding.get("turn_id"),
+            )
+        return sorted(paths)
+
     @staticmethod
     def registered_paths(ledger: Ledger) -> list[str]:
         """Return retained transcript paths without parsing transcript content."""
@@ -851,6 +893,53 @@ def _release_unregistered_assignment(
             or assignment.get("task_id") != task_id
             or assignment.get("state") not in {"reserved", "issuing", "uncertain"}
         ):
+            continue
+        creation_action_id = str(assignment.get("creation_action_id") or "")
+        actions = protocol.get("actions")
+        creation_action = (
+            actions.get(creation_action_id)
+            if isinstance(actions, Mapping) and creation_action_id
+            else None
+        )
+        incidents = dict(protocol.get("incidents") or {})
+        native_incident_key = f"native-action:{creation_action_id}"
+        native_incident_value = incidents.get(native_incident_key)
+        if (
+            assignment.get("state") == "uncertain"
+            and isinstance(creation_action, Mapping)
+            and creation_action.get("state") == "uncertain"
+            and isinstance(native_incident_value, Mapping)
+            and native_incident_value.get("state") != "resolved"
+        ):
+            protocol["assignment"] = {
+                **dict(assignment),
+                "state": "uncertain",
+                "registration_terminal_event": copy.deepcopy(dict(terminal_event)),
+                "awaiting_native_action_recovery": True,
+            }
+            native_incident = dict(native_incident_value)
+            evidence = dict(native_incident.get("evidence") or {})
+            evidence["registration_terminal_event"] = copy.deepcopy(
+                dict(terminal_event)
+            )
+            native_incident.update(
+                {
+                    "evidence": evidence,
+                    "updated_at": _utc_now(),
+                }
+            )
+            incidents[native_incident_key] = native_incident
+            protocol["incidents"] = incidents
+            fc.update(
+                {
+                    "desktop": protocol,
+                    "next_action": (
+                        "Retain the exact uncertain worker assignment until Marshal "
+                        "reconciles its native creation action."
+                    ),
+                }
+            )
+            ledger.update_fc(record.id, fc)
             continue
         released = {
             **dict(assignment),
