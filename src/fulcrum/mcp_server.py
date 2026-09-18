@@ -295,9 +295,8 @@ def tool_descriptions() -> list[dict[str, Any]]:
         ),
         "register_worker": (
             "Bind this native task to its reserved assignment before editing. Supply "
-            "the exact workspace, Git root, and observed source when assigned. Omit "
-            "task, session, turn, and host identity on the first call; Fulcrum derives "
-            "them from the retained creation result and returns assignment.task_id."
+            "only the bead and assignment token on the first call; Fulcrum derives "
+            "native identity and source facts and returns the complete assignment."
         ),
         "report_progress": (
             "Record substantive assigned-work progress with a supported kind, summary, "

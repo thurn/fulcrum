@@ -857,14 +857,14 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     arguments = result.result["action"]["arguments"]
     prompt = arguments["prompt"]
     assert prompt.startswith("Fulcrum-Action:")
-    assert "/tmp/managed-worktree" in prompt
-    assert "AUTHORIZED_CONTRACT_JSON" in prompt
-    assert "Add newline to README.md" in prompt
+    assert "/tmp/managed-worktree" not in prompt
+    assert "AUTHORIZED_CONTRACT_JSON" not in prompt
+    assert "Add newline to README.md" not in prompt
     assert "RAW INTAKE" not in prompt
     assert "raw Weaver transcript" not in prompt
     assert "$weaver" not in prompt
     assert "$fulcrum-executor" not in prompt
-    assert "Omit task_id, session_id, turn_id, and host_id" in prompt
+    assert "its scope is the complete authorized contract" in prompt
     assert "checks proportional to the change" in prompt
     assert "exactly one task commit" in prompt
     assert arguments["title"] == "⚒️ [exe-cdf5657c] Add newline to README.md"
@@ -965,9 +965,6 @@ def test_worker_registration_derives_native_identity_from_creation_result():
             arguments={"bead": "fc-derived"},
             payload={
                 "assignment_token": "assignment-derived",
-                "workspace": "/tmp/managed-worktree",
-                "git_root": "/tmp/managed-worktree",
-                "branch": "codex/fc-derived",
             },
         )
     )
@@ -977,6 +974,9 @@ def test_worker_registration_derives_native_identity_from_creation_result():
     assert assignment["session_id"] == "worker-derived"
     assert assignment["turn_id"] is None
     assert assignment["host_id"] == "local"
+    assert assignment["workspace"] == "/tmp/managed-worktree"
+    assert assignment["git_root"] == "/tmp/managed-worktree"
+    assert assignment["branch"] == "codex/fc-derived"
     assert ledger.show("fc-derived").assignee == "worker-derived"
 
 
