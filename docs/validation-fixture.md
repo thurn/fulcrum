@@ -1,1 +1,3 @@
 Validation fixture.
+
+Recovery fixture.
