@@ -151,46 +151,53 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert activating.result["prerequisites"]["acceptance"] is None
         assert activating.result["hooks"]["operational_state"] == "evidence_confirmed"
         assert activating.result["hooks"]["operator_confirmation_required"] is False
-        schedule = next(
-            row
+        schedules = {
+            row["reporting"]["purpose"]: row
             for row in activating.result["pending_actions"]
             if row["tool"] == "automation_update"
-        )
-        assert schedule["arguments"]["status"] == "ACTIVE"
-        assert "scheduled Fulcrum heartbeat" in schedule["arguments"]["prompt"]
-        assert "that exact task_id" in schedule["arguments"]["prompt"]
-        assert not schedule["arguments"]["prompt"].startswith("Fulcrum-Action:")
-        claim = service.claim_action(
-            replace(
-                bootstrap_request(root),
-                command=("action", "claim"),
-                arguments={
-                    "record_id": "fc-system",
-                    "action_id": schedule["action_id"],
-                },
-                input={"attempt_id": "schedule-attempt"},
-            )
-        )
-        assert claim.result["invoke"] is True
-        service.report_action_result(
-            replace(
-                bootstrap_request(root),
-                command=("action", "result"),
-                arguments={
-                    "record_id": "fc-system",
-                    "action_id": schedule["action_id"],
-                },
-                input={
-                    "attempt_id": "schedule-attempt",
-                    "outcome": "succeeded",
-                    "native_result": {
-                        "automationId": "automation-1",
-                        "status": "ACTIVE",
-                        "targetThreadId": "marshal-task",
+        }
+        assert set(schedules) == {"marshal_schedule", "steward_schedule"}
+        marshal_schedule = schedules["marshal_schedule"]
+        steward_schedule = schedules["steward_schedule"]
+        assert "scheduled Fulcrum heartbeat" in marshal_schedule["arguments"]["prompt"]
+        assert "that exact task_id" in marshal_schedule["arguments"]["prompt"]
+        assert steward_schedule["arguments"]["rrule"] == "FREQ=MINUTELY;INTERVAL=1"
+        assert "exactly one returned action" in steward_schedule["arguments"]["prompt"]
+        for index, schedule in enumerate(schedules.values(), start=1):
+            assert schedule["arguments"]["status"] == "ACTIVE"
+            assert not schedule["arguments"]["prompt"].startswith("Fulcrum-Action:")
+            attempt_id = f"schedule-attempt-{index}"
+            claim = service.claim_action(
+                replace(
+                    bootstrap_request(root),
+                    command=("action", "claim"),
+                    arguments={
+                        "record_id": "fc-system",
+                        "action_id": schedule["action_id"],
                     },
-                },
+                    input={"attempt_id": attempt_id},
+                )
             )
-        )
+            assert claim.result["invoke"] is True
+            service.report_action_result(
+                replace(
+                    bootstrap_request(root),
+                    command=("action", "result"),
+                    arguments={
+                        "record_id": "fc-system",
+                        "action_id": schedule["action_id"],
+                    },
+                    input={
+                        "attempt_id": attempt_id,
+                        "outcome": "succeeded",
+                        "native_result": {
+                            "automationId": f"automation-{index}",
+                            "status": "ACTIVE",
+                            "targetThreadId": schedule["arguments"]["targetThreadId"],
+                        },
+                    },
+                )
+            )
         ready = service.bootstrap(
             bootstrap_request(
                 root,
@@ -200,9 +207,80 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert ready.result["state"] == "ready"
         assert ready.result["admission"] == "running"
-        assert ready.result["schedule"]["automation_id"] == "automation-1"
+        assert ready.result["schedule"]["automation_id"] in {
+            "automation-1",
+            "automation-2",
+        }
         assert ready.result["schedule"]["status"] == "ACTIVE"
+        assert ready.result["steward_schedule"]["automation_id"] in {
+            "automation-1",
+            "automation-2",
+        }
+        assert (
+            ready.result["steward_schedule"]["automation_id"]
+            != ready.result["schedule"]["automation_id"]
+        )
+        assert ready.result["steward_schedule"]["status"] == "ACTIVE"
         assert len(ready.result["standing"]) == 3
+
+        system = service._ledger_override.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["steward_schedule"] = {
+            **desktop["steward_schedule"],
+            "prompt": "legacy Steward loop prompt",
+        }
+        service._ledger_override.update_fc(
+            "fc-system", {**system.fc, "desktop": desktop}
+        )
+        steward_repairing = service.bootstrap(
+            bootstrap_request(
+                root,
+                acceptance=acceptance(REQUIRED_ACCEPTANCE),
+                **supplied,
+            )
+        )
+        steward_repair = next(
+            row
+            for row in steward_repairing.result["pending_actions"]
+            if row["reporting"].get("purpose") == "steward_schedule_retarget"
+        )
+        assert (
+            steward_repair["arguments"]["id"]
+            == ready.result["steward_schedule"]["automation_id"]
+        )
+        assert steward_repair["arguments"]["targetThreadId"] == "steward-task"
+        assert steward_repair["arguments"]["rrule"] == "FREQ=MINUTELY;INTERVAL=1"
+        assert "exactly one returned action" in steward_repair["arguments"]["prompt"]
+        service.claim_action(
+            replace(
+                bootstrap_request(root),
+                command=("action", "claim"),
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": steward_repair["action_id"],
+                },
+                input={"attempt_id": "steward-repair-attempt"},
+            )
+        )
+        service.report_action_result(
+            replace(
+                bootstrap_request(root),
+                command=("action", "result"),
+                arguments={
+                    "record_id": "fc-system",
+                    "action_id": steward_repair["action_id"],
+                },
+                input={
+                    "attempt_id": "steward-repair-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {
+                        "automationId": steward_repair["arguments"]["id"],
+                        "status": "ACTIVE",
+                        "targetThreadId": "steward-task",
+                    },
+                },
+            )
+        )
 
         system = service._ledger_override.show("fc-system")
         desktop = dict(system.fc["desktop"])

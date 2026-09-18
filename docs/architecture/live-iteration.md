@@ -61,6 +61,13 @@ action counts, pressure, gaps, and associated work IDs in the diagnostic journal
 This preserves prompt event handling while making idle operation inexpensive and
 the cause of repeated scheduling directly inspectable.
 
+The standing Steward keeps one blocking instruction wait alive. A one-minute
+thread heartbeat is the bounded continuity fallback when its prior model turn has
+ended; each heartbeat processes at most one authorized native action and then
+ends. It does not make policy decisions or replace event-driven wakeups. This
+prevents finite model context or an ordinary completed turn from stranding ready
+work while bounding recovery latency below the admission target.
+
 ## Coordination
 
 Operation locks exclude duplicate execution across CLI processes and background
