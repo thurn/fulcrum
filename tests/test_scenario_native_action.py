@@ -105,6 +105,37 @@ class ScenarioNativeActionTests(unittest.TestCase):
                 inject_claim_fault(supplied, record_id="fc-a", action=action)
             )
 
+    def test_exact_record_binding_does_not_depend_on_generated_prose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            supplied, action, control = self._fixture(
+                directory, "created_response_lost"
+            )
+            control.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "id": "scenario-4",
+                        "mode": "created_response_lost",
+                        "project_id": "project-1",
+                        "record_id": "fc-a",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            action["arguments"]["prompt"] = "Completely different generated text."
+            action["arguments"]["title"] = "Executor: unrelated summary"
+
+            outcome, _, fault = inject_result_fault(
+                supplied,
+                record_id="fc-a",
+                action=action,
+                outcome="succeeded",
+                native_result={"threadId": "executor-1"},
+            )
+
+            self.assertEqual(outcome, "uncertain")
+            self.assertEqual(fault["control_id"], "scenario-4")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -163,7 +163,8 @@ def _matches(
         return False
     if document.get("mode") != mode:
         return False
-    if document.get("record_id") not in {None, record_id}:
+    configured_record_id = document.get("record_id")
+    if configured_record_id not in {None, record_id}:
         return False
     if (
         action.get("tool") != "create_thread"
@@ -186,7 +187,10 @@ def _matches(
     if isinstance(title_contains, str) and title_contains:
         title = arguments.get("title")
         criteria.append(isinstance(title, str) and title_contains in title)
-    return bool(criteria) and all(criteria)
+    record_bound = (
+        isinstance(configured_record_id, str) and configured_record_id == record_id
+    )
+    return all(criteria) and (record_bound or bool(criteria))
 
 
 def _update_matching_state(
