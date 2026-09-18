@@ -1002,6 +1002,8 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     assert "do not supply or retype a source OID" in prompt
     assert "Copy candidate.candidate_id" in prompt
     assert "retain both the current-release outcome and this bead's outcome" in prompt
+    assert "Git rerere may silently populate a resolved file" in prompt
+    assert "retain the ordered union of both sides" in prompt
     assert "one commit atop the current retained base" in prompt
     assert "must be finish with outcome approved" in prompt
     assert "a nonempty top-level evidence array" in prompt

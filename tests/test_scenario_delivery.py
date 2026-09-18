@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from fulcrum.contracts import FulcrumError
 from fulcrum.delivery import SourceRef, WorkRef
 from fulcrum.scenario_delivery import CONTROL_NAME, wait_for_scenario_admission
 from tests.support import MemoryLedger, record, request
@@ -31,6 +32,7 @@ def test_scenario_barrier_releases_same_base_candidates_in_promotion_order():
                 "alpha": "Entries: [Alpha]",
                 "beta": "Entries: [Beta]",
             },
+            "repair_line": "Entries: [Alpha, Beta]",
             "release_order": ["alpha", "beta"],
             "timeout_seconds": 5,
             "poll_seconds": 0.01,
@@ -121,12 +123,16 @@ def test_scenario_barrier_releases_same_base_candidates_in_promotion_order():
                 == "integration"
             )
 
-            repaired = wait_for_scenario_admission(
-                barrier_request,
-                ledger,
-                beta_record,
-                source("fc-beta", "c" * 40),
-            )
+            with patch(
+                "fulcrum.scenario_delivery._fixture_lines",
+                return_value=["Entries: [Alpha, Beta]"],
+            ):
+                repaired = wait_for_scenario_admission(
+                    barrier_request,
+                    ledger,
+                    beta_record,
+                    source("fc-beta", "c" * 40),
+                )
             assert repaired is not None
             assert (
                 repaired["release"]["condition"]
@@ -140,3 +146,73 @@ def test_scenario_barrier_releases_same_base_candidates_in_promotion_order():
             "beta",
         ]
         assert retained["state"]["repairs"][0]["source_oid"] == "c" * 40
+
+
+def test_scenario_barrier_rejects_repair_that_discards_promoted_outcome():
+    with tempfile.TemporaryDirectory(prefix="fulcrum-scenario-repair-") as raw:
+        root = Path(raw)
+        repository = root / "repository"
+        instance = root / "instance"
+        repository.mkdir()
+        instance.mkdir()
+        base = "0" * 40
+        beta_record = record("fc-beta")
+        ledger = MemoryLedger(beta_record)
+        control = {
+            "id": "scenario-2-repair-test",
+            "enabled": True,
+            "repository_id": "repo",
+            "fixture_path": "fixture.md",
+            "expected_base_oid": base,
+            "candidate_lines": {
+                "alpha": "Entries: [Alpha]",
+                "beta": "Entries: [Beta]",
+            },
+            "repair_line": "Entries: [Alpha, Beta]",
+            "release_order": ["alpha", "beta"],
+            "state": {
+                "arrivals": {
+                    "beta": {
+                        "bead_id": "fc-beta",
+                        "source_oid": "b" * 40,
+                    }
+                },
+                "releases": [{"label": "beta", "bead_id": "fc-beta"}],
+            },
+        }
+        (instance / CONTROL_NAME).write_text(json.dumps(control), encoding="utf-8")
+        barrier_request = replace(
+            request(),
+            instance=replace(request().instance, instance_root=instance),
+        )
+        repaired_source = SourceRef(
+            WorkRef(
+                "fc-beta",
+                "project",
+                str(repository),
+                "repo",
+                str(repository),
+                "fc-beta",
+                "main",
+                "prepare",
+                actual_path=str(repository),
+                base_oid=base,
+            ),
+            "c" * 40,
+        )
+
+        with patch(
+            "fulcrum.scenario_delivery._fixture_lines",
+            return_value=["Entries: [Beta]"],
+        ):
+            try:
+                wait_for_scenario_admission(
+                    barrier_request, ledger, beta_record, repaired_source
+                )
+            except FulcrumError as error:
+                assert error.code == "SCENARIO_REPAIR_INCOMPLETE"
+                assert error.details.get("expected_line") == (
+                    "Entries: [Alpha, Beta]"
+                )
+            else:
+                raise AssertionError("incomplete conflict repair was admitted")

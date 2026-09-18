@@ -217,6 +217,28 @@ def _retain_repair_release(
         if matched is None:
             return None
         label, arrival, initial_release = matched
+        expected_repair = current.get("repair_line")
+        if isinstance(expected_repair, str):
+            observed_repair = _fixture_lines(current, source)
+            if observed_repair != [expected_repair]:
+                raise FulcrumError(
+                    "SCENARIO_REPAIR_INCOMPLETE",
+                    "the provider-conflict repair must preserve both candidate outcomes",
+                    exit_code=4,
+                    retryable=False,
+                    details={
+                        "path": str(path),
+                        "label": label,
+                        "fixture_path": _required_string(current, "fixture_path", path),
+                        "expected_line": expected_repair,
+                        "observed_lines": observed_repair,
+                        "next_action": (
+                            "Read the promoted release and original candidate with git show, "
+                            "write the ordered union, create one commit atop the retained base, "
+                            "and submit that new source."
+                        ),
+                    },
+                )
         repairs = list(state.get("repairs") or [])
         repair = next(
             (
@@ -252,14 +274,7 @@ def _retain_repair_release(
 
 
 def _candidate_label(document: Mapping[str, Any], source: SourceRef) -> str | None:
-    path = Path(_required_string(document, "fixture_path", Path(CONTROL_NAME)))
-    if path.is_absolute() or ".." in path.parts:
-        raise _invalid(
-            Path(CONTROL_NAME),
-            "fixture_path must be a repository-relative path without parent traversal",
-        )
-    content = _git(source, "show", f"{source.oid}:{path.as_posix()}")
-    lines = content.splitlines()
+    lines = _fixture_lines(document, source)
     candidates = document.get("candidate_lines")
     if not isinstance(candidates, Mapping):
         raise _invalid(Path(CONTROL_NAME), "candidate_lines must be a mapping")
@@ -267,6 +282,17 @@ def _candidate_label(document: Mapping[str, Any], source: SourceRef) -> str | No
         if isinstance(label, str) and isinstance(expected, str) and lines == [expected]:
             return label
     return None
+
+
+def _fixture_lines(document: Mapping[str, Any], source: SourceRef) -> list[str]:
+    path = Path(_required_string(document, "fixture_path", Path(CONTROL_NAME)))
+    if path.is_absolute() or ".." in path.parts:
+        raise _invalid(
+            Path(CONTROL_NAME),
+            "fixture_path must be a repository-relative path without parent traversal",
+        )
+    content = _git(source, "show", f"{source.oid}:{path.as_posix()}")
+    return content.splitlines()
 
 
 def _source_parent(source: SourceRef) -> str:
@@ -343,6 +369,7 @@ def _assert_same_configuration(
         "fixture_path",
         "expected_base_oid",
         "candidate_lines",
+        "repair_line",
         "release_order",
     ):
         if current.get(key) != initial.get(key):
