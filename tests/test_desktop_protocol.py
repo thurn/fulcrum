@@ -1519,6 +1519,39 @@ def test_projected_request_journal_prunes_locally_and_replays_durably():
     assert replayed.result == expected.result
 
 
+def test_completed_instruction_wait_history_is_bounded():
+    waits = {
+        f"wait-{index}": {
+            "wait_id": f"wait-{index}",
+            "state": "resolved",
+            "registered_at": f"2026-09-18T00:{index:02d}:00Z",
+            "resolved_at": f"2026-09-18T00:{index:02d}:01Z",
+            "response": {"kind": "stop"},
+        }
+        for index in range(20)
+    }
+    waits["wait-active"] = {"wait_id": "wait-active", "state": "waiting"}
+    ledger = MemoryLedger(
+        record(
+            "fc-system",
+            kind="control",
+            desktop={
+                "run_control": "running",
+                "requests": {},
+                "instruction_waits": waits,
+            },
+        )
+    )
+    DesktopProtocolService(ledger).pause(
+        mutation(("pause",), payload={"reason": "compact history"})
+    )
+    retained = (ledger.show("fc-system").fc or {})["desktop"]["instruction_waits"]
+    assert len(retained) == 9
+    assert retained["wait-active"]["state"] == "waiting"
+    assert "wait-19" in retained
+    assert "wait-11" not in retained
+
+
 def test_steward_repeats_unclaimed_grant_on_next_wait():
     service, ledger = registered_service()
     service.resume(mutation(("resume",), payload={"reason": "test"}))
@@ -1822,6 +1855,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_projected_journal_prunes_and_replays(self):
         test_projected_request_journal_prunes_locally_and_replays_durably()
+
+    def test_instruction_wait_history_is_bounded(self):
+        test_completed_instruction_wait_history_is_bounded()
 
     def test_steward_repeats_unclaimed_grant(self):
         test_steward_repeats_unclaimed_grant_on_next_wait()

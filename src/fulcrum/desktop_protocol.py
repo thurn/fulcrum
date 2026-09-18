@@ -53,6 +53,7 @@ ROLE_TITLES: Mapping[str, tuple[str, str]] = {
 }
 MAX_UNPROJECTED_TRANSITIONS = 128
 RETAINED_PROJECTED_REQUESTS = 0
+RETAINED_TERMINAL_INSTRUCTION_WAITS = 8
 REQUEST_PROJECTION_NAMESPACE = uuid.UUID("40d1f5df-973e-47fd-bd90-407f55ab9514")
 WORKSPACE_ADMISSION_NAMESPACE = uuid.UUID("d61fc47b-a024-4bd4-b196-64a24aaaf79d")
 TASK_ARCHIVE_DELAY = timedelta(minutes=10)
@@ -743,6 +744,25 @@ def _save_request(
     for key in projected_keys[RETAINED_PROJECTED_REQUESTS:]:
         requests.pop(key, None)
     protocol["requests"] = requests
+    waits = protocol.get("instruction_waits")
+    if isinstance(waits, Mapping):
+        retained_waits = dict(waits)
+        terminal_wait_ids = [
+            key
+            for key, value in retained_waits.items()
+            if isinstance(value, Mapping) and value.get("state") != "waiting"
+        ]
+        terminal_wait_ids.sort(
+            key=lambda key: str(
+                (retained_waits.get(key) or {}).get("resolved_at")
+                or (retained_waits.get(key) or {}).get("registered_at")
+                or ""
+            ),
+            reverse=True,
+        )
+        for key in terminal_wait_ids[RETAINED_TERMINAL_INSTRUCTION_WAITS:]:
+            retained_waits.pop(key, None)
+        protocol["instruction_waits"] = retained_waits
 
 
 def _replay(saved: Mapping[str, Any], request: ParsedRequest) -> CommandResult:
