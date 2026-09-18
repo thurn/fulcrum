@@ -20,9 +20,12 @@ an earlier scenario's boundary, rerun that earlier scenario before continuing.
 Repeatedly run the current Fulcrum end-to-end scenario, fixing every
 problem found after each iteration and optimizing the critical path once the
 behavior is correct. Create new independent Weaver tasks in the Fulcrum project
-when the scenario calls for them. Invoke the `$weaver` skill and give each Weaver
-only the short single-sentence task specified by the scenario. Do not create a
-worktree for a Weaver task; Fulcrum must prepare worker worktrees itself.
+when the scenario calls for them. Give every new task the exact absolute skill
+reference `[$weaver](/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md)`
+followed by only the short single-sentence task specified by the scenario. Do not
+rely on an unqualified `$weaver` name or a user-level skill with the same name.
+Do not create a worktree for a Weaver task; Fulcrum must prepare worker worktrees
+itself.
 
 I authorize unlimited mutations to Fulcrum's disposable local workflow data and
 to the Fulcrum codebase for this campaign. There is no live Fulcrum workflow data
@@ -133,7 +136,7 @@ the run. Vary the exact wording between iterations so that every run produces a
 real commit. Example:
 
 ```text
-Rename the README heading “Control flow” to “Workflow control”.
+[$weaver](/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md) Rename the README heading “Control flow” to “Workflow control”.
 ```
 
 Reverse the change on the next iteration, or use a similarly bounded heading or
@@ -142,7 +145,9 @@ Weaver prompt.
 
 ### Expected behavior
 
-- A new project-local task invokes `$weaver`; it does not use a Codex worktree.
+- A new project-local task invokes the Weaver skill through the exact absolute
+  path `/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md`; it does not use a
+  Codex worktree.
 - Weaver creates exactly one work bead and renames its own task to a concise title
   such as `🧵 [wvr-1234abcd] Rename the README heading`.
 - Weaver records a proportionate behavioral summary and nonempty observable
@@ -201,26 +206,46 @@ either accepted outcome, duplicating workers, or bypassing review.
 
 ### Fixture and test tasks
 
-Before timing, prepare a checked-in disposable Markdown fixture containing an
-ordered list and an explicit invariant that independently added entries must all
-be preserved. Both tasks must begin from the same integration base and edit the
-same insertion region. Do not pre-resolve the expected merge.
+Before timing, prepare a checked-in disposable Markdown fixture with the exact
+single line `Entries: []`. The correct combined outcome is
+`Entries: [Alpha, Beta]`, in that canonical order. Preflight two disposable
+commits from the same base: one changes the line to `Entries: [Alpha]` and the
+other changes it to `Entries: [Beta]`. Run a real Git merge and record that it
+produces a content conflict on that line. A fixture that Git merges cleanly is
+invalid and must be corrected before a live run.
 
-Create two independent project-local Weaver tasks with only these sentences:
+Enable two worker slots and a scenario-only delivery barrier before starting the
+clock. The barrier must:
+
+1. allow both Executor worktrees and task commits to be prepared from the exact
+   same integration-base OID;
+2. withhold both candidates from provider integration until both same-base task
+   commits exist;
+3. release the Alpha candidate first and wait until its promotion is observed;
+4. then release the Beta candidate against the newer integration base.
+
+The barrier controls provider admission only. It must not modify source, resolve
+the merge, provide extra agent instructions, bypass Fulcrum ownership, or
+manufacture provider evidence. If Fulcrum does not yet expose a safe deterministic
+test barrier, implement one before counting a scenario run.
+
+Create two independent project-local Weaver tasks. Each prompt consists only of
+the absolute skill reference followed by its sentence:
 
 ```text
-Add an “Alpha” entry to the concurrency fixture list.
+[$weaver](/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md) Add “Alpha” to the bracketed Entries value in the concurrency fixture.
 ```
 
 ```text
-Add a “Beta” entry to the concurrency fixture list.
+[$weaver](/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md) Add “Beta” to the bracketed Entries value in the concurrency fixture.
 ```
 
-If the provider merges the two additions automatically, the scenario still tests
-concurrent execution and serialized integration but does not count as a conflict
-run. Adjust only the disposable fixture on the next iteration until the provider
-reliably exposes a real conflict. Do not make the requested outcomes mutually
-exclusive; the correct final document contains both entries exactly once.
+The live run must produce durable evidence of a real Git content conflict after
+Alpha has promoted and Beta is evaluated against the new base. A clean provider
+merge, inferred conflict, synthetic error, or merely stale ancestry makes the run
+invalid. Fix the fixture or barrier and repeat scenario 2; do not credit it as a
+concurrency-only pass. The requested outcomes remain compatible: the resolved
+file must contain Alpha and Beta exactly once.
 
 ### Expected behavior
 
@@ -233,11 +258,11 @@ exclusive; the correct final document contains both entries exactly once.
 - Each Executor creates exactly one commit atop its retained base and ends after
   an accepted `ready_for_review` finish.
 - Steward creates one Warden per bead. Wardens review only their assigned source.
-- Tollgate serializes integration. The first candidate may promote normally. The
-  second must be evaluated against the now-current integration base rather than
-  blindly promoted from stale ancestry.
-- If the second candidate conflicts, that bead remains owned by its existing
-  Warden. The Warden receives actionable retained evidence, resolves the conflict
+- Tollgate serializes integration. Alpha promotes normally. Beta is then evaluated
+  against the now-current integration base and must encounter the preflighted Git
+  content conflict rather than being blindly promoted from stale ancestry.
+- The conflicting Beta bead remains owned by its existing Warden. The Warden
+  receives actionable retained conflict evidence, resolves the conflict
   in the same assigned worktree, preserves both Alpha and Beta, restores exactly
   one task commit atop the current retained base as required, submits a new exact
   source, and waits again.
@@ -251,14 +276,16 @@ exclusive; the correct final document contains both entries exactly once.
 
 ### Evidence and failure signals
 
-Record overlap between Executor turns, both retained bases, provider admission
-order, the changed integration base, conflict evidence, repaired source, both CI
-runs, and remote ancestry. The final file content alone is insufficient.
+Record overlap between Executor turns, proof that both task commits share one
+base, the preflight conflict, barrier releases, provider admission order, the
+changed integration base, live conflict evidence, repaired source, both CI runs,
+and remote ancestry. The final file content alone is insufficient.
 
-Fail the run for lost entries, duplicate entries, duplicate workers, a second
-candidate submitted without reconciling an uncertain first submission, stale
-approval surviving a source change, parallel promotion that violates provider
-serialization, or either bead closing before its own delivery obligations settle.
+Fail the run for no real Git conflict, lost entries, duplicate entries, duplicate
+workers, unequal initial base OIDs, a second candidate submitted without
+reconciling an uncertain first submission, stale approval surviving a source
+change, parallel promotion that violates provider serialization, or either bead
+closing before its own delivery obligations settle.
 
 ## Scenario 3: expected CI failure and same-Warden repair
 
@@ -275,41 +302,58 @@ repair cycle, and ultimately delivers a corrected exact source.
 
 ### Fixture and test task
 
-Use a disposable project fixture with a two-file invariant. The Executor's natural
-focused check must pass after changing the primary file, while the configured
-Tollgate validation deterministically fails until a related generated/manifest
-file is updated. The CI diagnostic must clearly identify the violated invariant.
-Do not add a random failure, a one-shot provider error, or a test that passes on
-an unchanged resubmission: the Warden must make a real source correction.
+Use a disposable project fixture plus a scenario-only Tollgate CI challenge. The
+challenge is stable for the bead but does not exist and cannot be derived before
+the first candidate is submitted. The first CI run must fail and return a bounded
+diagnostic containing the stable challenge and the exact repository acknowledgement
+file that must contain it. A later candidate passes this check only when that file
+is committed with the returned challenge. Resubmitting unchanged source must fail
+again.
 
-Create one project-local Weaver task with only a sentence such as:
+Before timing, prove the challenge contract in an isolated disposable run:
+
+1. an otherwise valid initial candidate without the acknowledgement fails the
+   exact configured Tollgate CI step;
+2. the failure returns the stable challenge and actionable file instruction;
+3. an unchanged resubmission still fails; and
+4. a new source commit containing the acknowledgement passes.
+
+This is a deterministic source invariant, not a random failure, transient provider
+error, or mocked green result. It guarantees that the first live candidate cannot
+pass and that Warden must make a real source correction after observing CI.
+
+Create one project-local Weaver task whose prompt contains only the absolute skill
+reference followed by a sentence such as:
 
 ```text
-Change the CI repair fixture value from “old” to “new”.
+[$weaver](/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md) Change the CI repair fixture value from “old” to “new”.
 ```
 
-Do not tell Weaver or Executor how CI is expected to fail. If Weaver's legitimate
-investigation discovers the invariant and scopes both files, reset the disposable
-fixture and choose another equivalent invariant; do not penalize correct scoping
-or weaken the worker instructions merely to manufacture a failure.
+Do not tell Weaver or Executor about the challenge. Because the challenge does
+not exist until the provider sees the first candidate, correct investigation
+cannot preempt the required first failure. If the first live CI result is anything
+other than the expected terminal failure, the run is invalid; repair the CI
+challenge before repeating the scenario.
 
 ### Expected behavior
 
 - The normal Weaver, Steward, and Executor path occurs once. Executor's submitted
   source is a valid one-commit candidate and its reported focused checks are
-  truthful, even though provider validation will find the additional defect.
+  truthful, but it cannot contain the not-yet-issued challenge.
 - Warden reviews, submits once, and calls the blocking CI wait once for that
   candidate. It remains in the same native turn, assignment, worktree, and worker
   slot while CI is pending. Steward may perform unrelated work; Marshal receives
   no routine status message.
-- The wait returns a terminal failed result with the exact candidate, source,
-  failed check, and bounded diagnostic. Warden does not poll, start a new turn,
-  create a new task, or send the work back to Executor.
+- The first wait must return a terminal failed result with the exact candidate,
+  source, failed check, stable challenge, and bounded acknowledgement diagnostic.
+  Warden does not poll, start a new turn, create a new task, or send the work back
+  to Executor.
 - Fulcrum records one repair cycle from retained failure evidence. Unchanged status,
   transport retries, and local edit/test iterations do not increment that count.
-- Warden repairs the actual two-file invariant, runs a focused local check,
-  rewrites the complete task result to exactly one commit atop the retained base,
-  submits the new exact source, and makes one new blocking wait.
+- Warden writes the returned challenge to the specified acknowledgement file,
+  runs a focused local check, rewrites the complete task result to exactly one
+  commit atop the retained base, submits the new exact source, and makes one new
+  blocking wait.
 - The old failed CI evidence and source remain historical. They cannot approve or
   promote the repaired source.
 - Passing CI on the repaired source is followed immediately by Warden's final
@@ -319,12 +363,13 @@ or weaken the worker instructions merely to manufacture a failure.
 
 ### Evidence and failure signals
 
-Join the two source OIDs, two candidate IDs, both CI results, the repair-cycle
-record, one Warden task/turn/assignment, final approval, promotion, and remote
-commit. Fail the run if the Warden returns `pending` and agent-polls, a second task
-is created, the failed source is promoted, the old approval survives the edit,
-repair count changes for a transport retry, or the task closes without retaining
-the failed diagnostic.
+Join the stable challenge, two source OIDs, two candidate IDs, both CI results,
+the repair-cycle record, one Warden task/turn/assignment, final approval,
+promotion, and remote commit. Fail the run if the first CI result does not fail,
+unchanged source passes, the Warden returns `pending` and agent-polls, a second
+task is created, the failed source is promoted, the old approval survives the
+edit, repair count changes for a transport retry, or the task closes without
+retaining the failed diagnostic.
 
 ## Scenario 4: interrupted Steward action and idempotent recovery
 
@@ -347,7 +392,7 @@ Create a normal, harmless one-file task with a new project-local Weaver, for
 example:
 
 ```text
-Add a short “Recovery fixture” sentence to the validation fixture.
+[$weaver](/Users/dthurn/fulcrum/.agents/skills/weaver/SKILL.md) Add a short “Recovery fixture” sentence to the validation fixture.
 ```
 
 After Weaver finishes and Steward claims the durable Executor-creation action,
