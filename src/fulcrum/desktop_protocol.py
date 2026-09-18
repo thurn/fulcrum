@@ -901,7 +901,9 @@ class DesktopProtocolService:
         ledger = self._ledger(request)
         from fulcrum.hooks import HookService
 
-        collected_paths = HookService.active_assignment_paths(ledger)
+        hooks = HookService(ledger)
+        hooks.collect_active_assignments(request)
+        collected_paths = hooks.active_assignment_paths(ledger)
         waits: list[dict[str, Any]] = []
         watch_paths: set[str] = set(collected_paths)
         reconciliation_errors: list[dict[str, str]] = []
