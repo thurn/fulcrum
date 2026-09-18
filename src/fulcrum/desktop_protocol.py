@@ -1941,6 +1941,26 @@ class DesktopProtocolService:
         normalized_outcome = _validated_action_outcome(
             action, request.input.get("native_result"), outcome
         )
+        if normalized_outcome == "succeeded":
+            from fulcrum.scenario_native_action import inject_result_fault
+
+            injected_outcome, injected_result, scenario_fault = inject_result_fault(
+                request,
+                record_id=record.id,
+                action=action,
+                outcome=normalized_outcome,
+                native_result=request.input.get("native_result"),
+            )
+            if scenario_fault is not None:
+                normalized_outcome = injected_outcome
+                request = replace(
+                    request,
+                    input={
+                        **dict(request.input),
+                        "outcome": injected_outcome,
+                        "native_result": copy.deepcopy(injected_result),
+                    },
+                )
         if action.get("state") == "uncertain" and action.get("scenario_fault"):
             normalized_outcome = "uncertain"
         if action["state"] != "issuing":

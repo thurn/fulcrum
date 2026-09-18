@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import tempfile
 import uuid
 import unittest
 from unittest.mock import patch
@@ -729,6 +732,91 @@ def test_observed_title_mismatch_schedules_one_correction():
         "threadId": "worker-1",
         "title": "Expected title",
     }
+
+
+def test_reported_creation_result_can_inject_exact_record_uncertainty():
+    service, ledger = registered_service(
+        record(
+            "fc-a",
+            owner="STEWARD",
+            phase="ready",
+            requested_role="executor",
+            project="toy",
+            overlap_tags=[],
+            desktop={
+                "assignment": {
+                    "assignment_token": "assignment-a",
+                    "state": "reserved",
+                    "role": "executor",
+                    "capacity_class": "ordinary",
+                }
+            },
+        )
+    )
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-a",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {
+                "prompt": "work",
+                "title": "Generated title",
+                "target": {"type": "project", "projectId": "project-1"},
+            },
+            "purpose": "routine_dispatch",
+            "assignment_token": "assignment-a",
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-a", "action_id": action["action_id"]},
+            payload={"attempt_id": "attempt-create"},
+        )
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        Path(directory, "scenario-native-action-fault.json").write_text(
+            json.dumps(
+                {
+                    "enabled": True,
+                    "id": "scenario-4",
+                    "mode": "created_response_lost",
+                    "project_id": "project-1",
+                    "record_id": "fc-a",
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = mutation(
+            ("action", "result"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-a", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "attempt-create",
+                "outcome": "succeeded",
+                "native_result": {"threadId": "worker-1"},
+            },
+        )
+        result = service.report_action_result(
+            replace(
+                report,
+                instance=replace(
+                    report.instance,
+                    instance_root=Path(directory),
+                ),
+            )
+        )
+
+    assert result.result["state"] == "uncertain"
+    retained = (ledger.show("fc-a").fc or {})["desktop"]
+    retained_action = retained["actions"][action["action_id"]]
+    assert retained_action["state"] == "uncertain"
+    assert retained_action["provider_truth"]["state"] == "created_response_lost"
+    assert retained_action["possible_task_locator"] == {"threadId": "worker-1"}
+    assert f"native-action:{action['action_id']}" in retained["incidents"]
 
 
 def test_closed_settled_worker_archives_only_after_ten_minutes():
