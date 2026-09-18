@@ -1603,8 +1603,16 @@ def test_dispatch_blocks_overlapping_active_work():
         requested_role="executor",
         project="toy",
         overlap_tags=["repository"],
-        workspace="/tmp/worktree",
+        worktree={"path": "/tmp/worktree", "branch": "fc-candidate"},
         codex_project_id="project-1",
+        outcome="Update the fixture",
+        scope={
+            "summary": "Update the fixture",
+            "acceptance": ["The fixture is updated"],
+            "evidence": ["The fixture needs an update"],
+            "implementation_notes": ["Edit only the fixture"],
+            "finish_operation": "fc-scope",
+        },
     )
     service, _ = registered_service(active, candidate)
     service.resume(mutation(("resume",), payload={"reason": "test"}))
@@ -1617,6 +1625,50 @@ def test_dispatch_blocks_overlapping_active_work():
     )
     assert result.state.value == "running"
     assert result.result["transport_wait"]["kind"] == "instruction"
+
+
+def test_closed_assignment_does_not_consume_capacity_or_overlap():
+    closed = record(
+        "fc-closed",
+        status="closed",
+        project="toy",
+        overlap_tags=["repository"],
+        desktop={
+            "assignment": {
+                "assignment_token": "closed-token",
+                "state": "active",
+                "capacity_class": "ordinary",
+            }
+        },
+    )
+    candidate = record(
+        "fc-candidate",
+        phase="ready",
+        requested_role="executor",
+        project="toy",
+        overlap_tags=["repository"],
+        worktree={"path": "/tmp/worktree", "branch": "fc-candidate"},
+        codex_project_id="project-1",
+        outcome="Update the fixture",
+        scope={
+            "summary": "Update the fixture",
+            "acceptance": ["The fixture is updated"],
+            "evidence": ["The fixture needs an update"],
+            "implementation_notes": ["Edit only the fixture"],
+            "finish_operation": "fc-scope",
+        },
+    )
+    service, _ = registered_service(closed, candidate)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "closed", "turn_id": "turn-closed"},
+        )
+    )
+    assert result.result["kind"] == "action"
+    assert result.result["action"]["record_id"] == "fc-candidate"
 
 
 def test_dispatch_blocks_disabled_project():

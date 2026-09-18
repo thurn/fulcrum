@@ -2544,6 +2544,8 @@ class DesktopProtocolService:
         active_by_project: dict[str, int] = {}
         active_overlap_tags: set[str] = set()
         for record in records:
+            if record.status == "closed":
+                continue
             assignment = _protocol(record.fc or {}).get("assignment")
             if not isinstance(assignment, Mapping) or assignment.get("state") not in {
                 "reserved",
