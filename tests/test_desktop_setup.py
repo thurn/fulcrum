@@ -66,7 +66,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert "immediately wait again" in actions["steward"]["arguments"]["prompt"]
         assert (
-            "at most sixteen returned actions"
+            "at most thirty-two returned actions"
             in actions["steward"]["arguments"]["prompt"]
         )
         assert (
@@ -173,7 +173,8 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert "that exact task_id" in marshal_schedule["arguments"]["prompt"]
         assert steward_schedule["arguments"]["rrule"] == "FREQ=MINUTELY;INTERVAL=1"
         assert (
-            "up to sixteen returned actions" in steward_schedule["arguments"]["prompt"]
+            "up to thirty-two returned actions"
+            in steward_schedule["arguments"]["prompt"]
         )
         for index, schedule in enumerate(schedules.values(), start=1):
             assert schedule["arguments"]["status"] == "ACTIVE"
@@ -262,7 +263,9 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert steward_repair["arguments"]["targetThreadId"] == "steward-task"
         assert steward_repair["arguments"]["rrule"] == "FREQ=MINUTELY;INTERVAL=1"
-        assert "up to sixteen returned actions" in steward_repair["arguments"]["prompt"]
+        assert (
+            "up to thirty-two returned actions" in steward_repair["arguments"]["prompt"]
+        )
         service.claim_action(
             replace(
                 bootstrap_request(root),
