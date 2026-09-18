@@ -1314,6 +1314,28 @@ class DesktopProtocolService:
                 "registered_at": _utc_now(),
             }
             protocol["actions"] = actions
+        if replacing and role == "steward":
+            waits = dict(protocol.get("instruction_waits") or {})
+            previous_task_id = current.get("task_id")
+            for wait_id, retained in tuple(waits.items()):
+                if (
+                    isinstance(retained, Mapping)
+                    and retained.get("state") == "waiting"
+                    and retained.get("task_id") == previous_task_id
+                ):
+                    response = {
+                        "kind": "stop",
+                        "reason": "standing_replaced",
+                        "wait_id": wait_id,
+                        "retained_obligation": False,
+                    }
+                    waits[wait_id] = {
+                        **dict(retained),
+                        "state": "cancelled",
+                        "resolved_at": _utc_now(),
+                        "response": response,
+                    }
+            protocol["instruction_waits"] = waits
         standing[role] = binding
         protocol["standing"] = standing
         value = {"standing": binding}

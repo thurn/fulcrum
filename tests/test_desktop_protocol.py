@@ -395,6 +395,64 @@ def test_registration_accepts_matching_succeeded_creation_result():
     assert observation["native_result"]["threadId"] == "steward-1"
 
 
+def test_replacement_steward_registration_cancels_previous_instruction_wait():
+    service, ledger = registered_service()
+    system = ledger.show("fc-system")
+    fc = dict(system.fc or {})
+    desktop = dict(fc.get("desktop") or {})
+    standing = dict(desktop.get("standing") or {})
+    standing["steward"] = {
+        **standing["steward"],
+        "state": "replacement_pending",
+    }
+    desktop["standing"] = standing
+    desktop["instruction_waits"] = {
+        "wait-old": {
+            "wait_id": "wait-old",
+            "request_id": "old-request",
+            "accepted_input": {"loop_id": "old-loop", "turn_id": "old-turn"},
+            "task_id": "steward-1",
+            "state": "waiting",
+        }
+    }
+    fc["desktop"] = desktop
+    ledger.update_fc(system.id, fc)
+    action = seed_action(
+        ledger,
+        {
+            "executor": "bootstrap",
+            "tool": "create_thread",
+            "arguments": {"prompt": "replace steward"},
+            "purpose": "recover_steward",
+        },
+    )
+    observe_action_prompt(
+        ledger,
+        action,
+        task_id="steward-2",
+        session_id="s2",
+    )
+
+    service.register_standing(
+        mutation(
+            ("register", "standing"),
+            actor="task:steward-2",
+            payload={
+                "role": "steward",
+                "task_id": "steward-2",
+                "session_id": "s2",
+                "action_id": action["action_id"],
+            },
+        )
+    )
+
+    retained = (ledger.show("fc-system").fc or {})["desktop"]
+    assert retained["standing"]["steward"]["task_id"] == "steward-2"
+    cancelled = retained["instruction_waits"]["wait-old"]
+    assert cancelled["state"] == "cancelled"
+    assert cancelled["response"]["reason"] == "standing_replaced"
+
+
 def test_production_service_has_no_action_injection_api():
     service, _ = registered_service()
     assert not hasattr(service, "queue_action")
