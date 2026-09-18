@@ -280,6 +280,8 @@ class HookTests(unittest.TestCase):
                 ),
                 record(
                     "fc-completed",
+                    status="closed",
+                    phase="done",
                     desktop={
                         "assignment_history": [{"task_id": "worker-old"}],
                         "transcripts": {

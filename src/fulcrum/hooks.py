@@ -461,6 +461,8 @@ class HookService:
         ledger = self._ledger(request)
         paths: set[str] = set()
         for record in ledger.list_records(limit=0):
+            if record.status == "closed" or (record.fc or {}).get("phase") == "done":
+                continue
             protocol = _protocol(record.fc or {})
             transcripts = protocol.get("transcripts")
             assignment = protocol.get("assignment")
@@ -512,6 +514,8 @@ class HookService:
 
         paths: set[str] = set()
         for record in ledger.list_records(limit=0):
+            if record.status == "closed" or (record.fc or {}).get("phase") == "done":
+                continue
             protocol = _protocol(record.fc or {})
             assignment = protocol.get("assignment")
             transcripts = protocol.get("transcripts")
