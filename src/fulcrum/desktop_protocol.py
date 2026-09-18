@@ -1687,6 +1687,8 @@ class DesktopProtocolService:
         active_in_project = 0
         candidate_tags = {str(value) for value in fc.get("overlap_tags") or []}
         for other in ledger.list_records(limit=0):
+            if other.status == "closed":
+                continue
             other_assignment = _protocol(other.fc or {}).get("assignment")
             if (
                 not isinstance(other_assignment, Mapping)

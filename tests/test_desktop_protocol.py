@@ -1669,6 +1669,18 @@ def test_closed_assignment_does_not_consume_capacity_or_overlap():
     )
     assert result.result["kind"] == "action"
     assert result.result["action"]["record_id"] == "fc-candidate"
+    claimed = service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={
+                "record_id": "fc-candidate",
+                "action_id": result.result["action"]["action_id"],
+            },
+            payload={"attempt_id": "attempt-closed-capacity"},
+        )
+    )
+    assert claimed.result["invoke"] is True
 
 
 def test_dispatch_blocks_disabled_project():
