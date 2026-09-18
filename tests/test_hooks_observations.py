@@ -51,11 +51,6 @@ class HookTests(unittest.TestCase):
             path = Path(directory) / "worker.jsonl"
             rows = [
                 {
-                    "type": "turn_context",
-                    "turn_id": "native-turn",
-                    "model": "gpt-5.6-luna",
-                },
-                {
                     "type": "event_msg",
                     "payload": {
                         "type": "task_complete",
@@ -76,7 +71,7 @@ class HookTests(unittest.TestCase):
                             "assignment_token": "assignment-1",
                             "role": "executor",
                             "task_id": "worker-1",
-                            "turn_id": "native-turn",
+                            "turn_id": None,
                             "state": "active",
                             "finish_operation": "finish-1",
                         },

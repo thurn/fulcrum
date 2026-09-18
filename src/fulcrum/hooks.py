@@ -547,6 +547,13 @@ class HookService:
                     if item.get("type") == "turn_context" and item.get("turn_id")
                 ),
                 None,
+            ) or next(
+                (
+                    item.get("turn_id")
+                    for item in reversed(page.lifecycle)
+                    if item.get("turn_id")
+                ),
+                None,
             )
             if current_turn:
                 protocol["assignment"] = {
