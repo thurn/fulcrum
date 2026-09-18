@@ -217,6 +217,42 @@ class LeadershipTests(unittest.TestCase):
         self.assertTrue(second.result["joined"])
         self.assertEqual(second.result["brief"], first.result["brief"])
 
+    def test_next_heartbeat_replaces_unsettled_heartbeat_without_terminal_hook(self):
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["marshal_schedule"] = {
+            "state": "succeeded",
+            "status": "ACTIVE",
+            "automation_id": "marshal-check",
+            "target_task_id": "marshal-1",
+        }
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+        first = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"trigger": "heartbeat"},
+            )
+        )
+
+        second = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"trigger": "heartbeat"},
+            )
+        )
+
+        self.assertFalse(second.result["joined"])
+        self.assertNotEqual(
+            first.result["decision"]["decision_id"],
+            second.result["decision"]["decision_id"],
+        )
+        history = self.ledger.show("fc-system").fc["desktop"][
+            "marshal_decision_history"
+        ]
+        self.assertEqual(history[-1]["superseded_reason"], "next_serialized_heartbeat")
+
     def test_scheduled_marshal_delivery_uses_authenticated_request_identity_without_turn_hook(
         self,
     ):

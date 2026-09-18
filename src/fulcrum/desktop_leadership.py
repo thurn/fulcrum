@@ -164,7 +164,22 @@ class DesktopLeadershipService(DesktopProtocolService):
         current = protocol.get("marshal_decision")
         if isinstance(current, Mapping) and current.get("state") == "active":
             same_turn = turn_id == current.get("turn_id")
-            if not same_turn and not _positive_native_completion(protocol, current):
+            accepted_input = current.get("accepted_input")
+            accepted_payload = (
+                accepted_input.get("input")
+                if isinstance(accepted_input, Mapping)
+                else None
+            )
+            serialized_heartbeat = (
+                request.input.get("trigger") == "heartbeat"
+                and isinstance(accepted_payload, Mapping)
+                and accepted_payload.get("trigger") == "heartbeat"
+            )
+            if (
+                not same_turn
+                and not serialized_heartbeat
+                and not _positive_native_completion(protocol, current)
+            ):
                 value = {
                     "decision": copy.deepcopy(dict(current)),
                     "joined": False,
@@ -186,7 +201,11 @@ class DesktopLeadershipService(DesktopProtocolService):
                         **copy.deepcopy(dict(current)),
                         "state": "superseded",
                         "superseded_at": _utc_now(),
-                        "superseded_reason": "native_turn_completed_without_decision",
+                        "superseded_reason": (
+                            "next_serialized_heartbeat"
+                            if serialized_heartbeat
+                            else "native_turn_completed_without_decision"
+                        ),
                     }
                 )
                 protocol["marshal_decision_history"] = history[-20:]
