@@ -153,6 +153,31 @@ class LeadershipTests(unittest.TestCase):
         system = self.ledger.show("fc-system")
         self.assertNotIn("marshal_decision", system.fc["desktop"])
 
+    def test_scheduled_marshal_delivery_uses_authenticated_request_identity_without_turn_hook(
+        self,
+    ):
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["marshal_schedule"] = {
+            "state": "succeeded",
+            "status": "ACTIVE",
+            "automation_id": "marshal-check",
+            "target_task_id": "marshal-1",
+        }
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+        heartbeat = call(
+            ("marshal", "check"),
+            actor="task:marshal-1",
+            payload={"trigger": "heartbeat"},
+        )
+
+        checked = self.service.marshal_check(heartbeat)
+
+        self.assertEqual(
+            checked.result["decision"]["turn_id"],
+            f"heartbeat:{heartbeat.request_id}",
+        )
+
     def test_stale_marshal_row_does_not_overwrite_current_fact(self):
         checked = self.service.marshal_check(
             call(
