@@ -138,6 +138,12 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             row["tool"] == "automation_update"
             for row in second.result["pending_actions"]
         )
+        system = service._ledger_override.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["steward_schedule"] = {}
+        service._ledger_override.update_fc(
+            "fc-system", {**system.fc, "desktop": desktop}
+        )
         (root / "instance" / "broker.sock").touch()
         pre_activation = acceptance(PRE_ACTIVATION_ACCEPTANCE)
         activating = service.bootstrap(

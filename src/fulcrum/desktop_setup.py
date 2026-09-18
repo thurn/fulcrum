@@ -744,7 +744,10 @@ class DesktopSetupService(DesktopProtocolService):
         if (
             standing_ready
             and not missing_pre_activation
-            and not isinstance(steward_schedule, Mapping)
+            and (
+                not isinstance(steward_schedule, Mapping)
+                or not steward_schedule.get("action_id")
+            )
         ):
             steward = standing["steward"]
             action_id = _opaque("action")
