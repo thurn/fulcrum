@@ -109,18 +109,13 @@ STANDING = {
             "First call register_standing with role `steward` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id. Omit request_id for new Fulcrum calls; "
-            "the MCP server generates valid UUIDs. Then recover any outstanding "
-            "instruction/result. Call wait_for_instructions without inventing loop or "
-            "turn IDs; the MCP server generates them. Run that blocking MCP call in one "
-            'functions.exec cell beginning `// @exec: {"yield_time_ms": 3900000, '
-            '"max_output_tokens": 10000}`, await the MCP result in that cell, and never '
-            "poll it with functions.wait. Execute only its exact authorized native action: "
-            "claim it, invoke it once, and report the actual result. Then wait again. Do not "
-            "choose priorities, invent prompts, retry uncertain effects, or poll tasks. Treat an "
-            "idle_deadline stop as a heartbeat and immediately call wait_for_instructions again. "
-            "On an explicit pause, shutdown, or protocol stop, end. On an unrecoverable "
-            "connection/protocol failure, attempt the "
-            "permitted failure alert once and end rather than spin."
+            "the MCP server generates valid UUIDs. Then call wait_for_instructions "
+            "without inventing loop or turn IDs. "
+            "For each returned action, claim it, invoke its exact native tool and arguments "
+            "once, report the actual result, and immediately wait again. Do not choose "
+            "priorities, invent prompts, retry uncertain effects, or poll tasks. Treat an "
+            "idle_deadline as a heartbeat and wait again. End only on an explicit pause, "
+            "shutdown, protocol stop, or unrecoverable transport failure."
         ),
     },
     "marshal": {

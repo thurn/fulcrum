@@ -64,11 +64,8 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             "without inventing loop or turn IDs"
             in actions["steward"]["arguments"]["prompt"]
         )
-        assert "yield_time_ms" in actions["steward"]["arguments"]["prompt"]
-        assert (
-            "never poll it with functions.wait"
-            in actions["steward"]["arguments"]["prompt"]
-        )
+        assert "immediately wait again" in actions["steward"]["arguments"]["prompt"]
+        assert "yield-time_ms" not in actions["steward"]["arguments"]["prompt"]
         assert (
             "~/fulcrum/skills/fulcrum-marshal/SKILL.md"
             in actions["marshal"]["arguments"]["prompt"]
