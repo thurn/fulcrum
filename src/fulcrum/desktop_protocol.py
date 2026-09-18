@@ -2878,6 +2878,32 @@ class DesktopProtocolService:
         watch_paths = HookService(ledger).collect_active_assignments(request)
         request_id = _request_id(request)
         waits = dict(protocol.get("instruction_waits") or {})
+        for retained_wait_id, retained_wait in tuple(waits.items()):
+            if (
+                not isinstance(retained_wait, Mapping)
+                or retained_wait.get("state") != "waiting"
+            ):
+                continue
+            try:
+                retained_deadline = datetime.fromisoformat(
+                    str(retained_wait.get("deadline") or "").replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+            if self.now() < retained_deadline:
+                continue
+            waits[retained_wait_id] = {
+                **dict(retained_wait),
+                "state": "expired",
+                "resolved_at": _utc_now(),
+                "response": {
+                    "kind": "stop",
+                    "reason": "idle_deadline",
+                    "wait_id": retained_wait_id,
+                    "retained_obligation": False,
+                },
+            }
+        protocol["instruction_waits"] = waits
         retained = next(
             (
                 value

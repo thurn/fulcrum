@@ -596,6 +596,43 @@ def test_new_steward_wait_recovers_action_granted_after_previous_turn_ended():
     assert retained[action["action_id"]]["granted_wait_id"] != "wait-old"
 
 
+def test_new_steward_wait_expires_disconnected_prior_wait():
+    service, ledger = registered_service()
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    system = ledger.show("fc-system")
+    fc = dict(system.fc or {})
+    desktop = dict(fc.get("desktop") or {})
+    desktop["instruction_waits"] = {
+        "wait-old": {
+            "wait_id": "wait-old",
+            "request_id": "old-request",
+            "accepted_input": {},
+            "task_id": "steward-1",
+            "turn_id": "old-turn",
+            "loop_id": "old-loop",
+            "state": "waiting",
+            "registered_at": "2026-09-15T22:00:00Z",
+            "deadline": "2026-09-15T23:00:00Z",
+        }
+    }
+    fc["desktop"] = desktop
+    ledger.update_fc(system.id, fc)
+
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "new-loop", "turn_id": "new-turn"},
+        )
+    )
+
+    assert result.state.value == "running"
+    retained = (ledger.show("fc-system").fc or {})["desktop"]["instruction_waits"]
+    assert retained["wait-old"]["state"] == "expired"
+    assert retained["wait-old"]["response"]["reason"] == "idle_deadline"
+    assert any(wait["state"] == "waiting" for wait in retained.values())
+
+
 def test_production_service_has_no_action_injection_api():
     service, _ = registered_service()
     assert not hasattr(service, "queue_action")
@@ -1861,6 +1898,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_steward_repeats_unclaimed_grant(self):
         test_steward_repeats_unclaimed_grant_on_next_wait()
+
+    def test_steward_expires_disconnected_wait(self):
+        test_new_steward_wait_expires_disconnected_prior_wait()
 
     def test_create_result_requires_identity(self):
         test_create_result_requires_native_identity_evidence()
