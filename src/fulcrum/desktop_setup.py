@@ -114,11 +114,15 @@ STANDING = {
             'functions.exec cell beginning `// @exec: {"yield_time_ms": 3900000, '
             '"max_output_tokens": 10000}`, await the MCP result in that cell, and '
             "never poll it with functions.wait. "
-            "For each returned action, claim it, invoke its exact native tool and arguments "
-            "once, report the actual result, and immediately wait again. Do not choose "
-            "priorities, invent prompts, retry uncertain effects, or poll tasks. Treat an "
-            "idle_deadline as a heartbeat and wait again. End only on an explicit pause, "
-            "shutdown, protocol stop, or unrecoverable transport failure."
+            "For each returned action, call claim_action with exactly record_id, "
+            "action_id, and task_id set to CODEX_THREAD_ID; do not pass an input object. "
+            "Invoke its exact native tool and arguments once. Then call "
+            "report_action_result with record_id, action_id, attempt_id, task_id set to "
+            "CODEX_THREAD_ID, outcome, native_result, and optional evidence, and "
+            "immediately wait again. Do not choose priorities, invent prompts, retry "
+            "uncertain effects, or poll tasks. Treat an idle_deadline as a heartbeat and "
+            "wait again. End only on an explicit pause, shutdown, protocol stop, or "
+            "unrecoverable transport failure."
         ),
     },
     "marshal": {

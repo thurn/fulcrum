@@ -65,6 +65,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             in actions["steward"]["arguments"]["prompt"]
         )
         assert "immediately wait again" in actions["steward"]["arguments"]["prompt"]
+        assert (
+            "do not pass an input object" in actions["steward"]["arguments"]["prompt"]
+        )
+        assert (
+            "task_id set to CODEX_THREAD_ID"
+            in actions["steward"]["arguments"]["prompt"]
+        )
         assert "yield-time_ms" not in actions["steward"]["arguments"]["prompt"]
         assert (
             "~/fulcrum/skills/fulcrum-marshal/SKILL.md"

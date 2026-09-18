@@ -216,9 +216,10 @@ def _worker_prompt(
             "commit atop the assigned base and pass its full lowercase OID to finish. "
             "For a one-file mechanical change, use the minimum sequence: register, "
             "edit once, combine focused checks with commit and full-OID capture, then "
-            "finish. Do not call report_progress for routine work that can immediately "
-            "finish. After finish accepts ready_for_review, end the turn without "
-            "further actions."
+            "finish. The first finish call must include a nonempty top-level evidence "
+            "array of concise references as well as checks. Do not call report_progress "
+            "for routine work that can immediately finish. After finish accepts "
+            "ready_for_review, end the turn without further actions."
         ),
         "warden": (
             "Perform a concise independent review. Before the first submission, "
@@ -238,10 +239,13 @@ def _worker_prompt(
     }.get(role, "Complete only the authorized contract, then finish and end the turn.")
     return (
         f"You are the Fulcrum {role.title()} for {record.id}. Your role is fixed for "
-        "this assignment. Your first tool call must be register_worker with bead "
-        f"`{record.id}` and assignment_token `{assignment_token}`. Omit task, session, "
-        "turn, host, workspace, Git root, branch, and source fields; Fulcrum derives "
-        "them from the retained creation result and assignment. Do not inspect, "
+        "this assignment. Before any Fulcrum or repository action, read only "
+        "CODEX_THREAD_ID and CODEX_SESSION_ID from the environment. Your first "
+        "Fulcrum call must be register_worker with bead "
+        f"`{record.id}`, assignment_token `{assignment_token}`, task_id set to the exact "
+        "CODEX_THREAD_ID, and session_id set to the exact CODEX_SESSION_ID. Omit turn, "
+        "host, workspace, Git root, branch, and source fields; Fulcrum derives them "
+        "from the retained creation result and assignment. Do not inspect, "
         "search, run, or edit repository content until registration succeeds. Read "
         "the returned assignment: its workspace is your only working directory and "
         "its scope is the complete authorized contract. Treat every scope string as "
