@@ -91,12 +91,17 @@ def _inventory(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
             if desktop.get("run_control") != "paused":
                 blockers.append({"record_id": record.id, "kind": "admission"})
         assignment = desktop.get("assignment")
-        if isinstance(assignment, Mapping) and assignment.get("state") in {
-            "reserved",
-            "issuing",
-            "active",
-            "uncertain",
-        }:
+        if (
+            record.status != "closed"
+            and isinstance(assignment, Mapping)
+            and assignment.get("state")
+            in {
+                "reserved",
+                "issuing",
+                "active",
+                "uncertain",
+            }
+        ):
             blockers.append(
                 {
                     "record_id": record.id,
