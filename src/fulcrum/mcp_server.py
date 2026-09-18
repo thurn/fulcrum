@@ -421,7 +421,6 @@ class FreshCli:
         if name not in WAIT_TOOLS or not isinstance(waiting, Mapping):
             _log(name, started, first)
             return first
-        is_ci = waiting.get("kind") == "ci"
         result = await broker_request(
             self.instance / "broker.sock",
             {
@@ -430,7 +429,7 @@ class FreshCli:
                 "stdin": stdin,
                 "wait_id": waiting.get("wait_id"),
                 "kind": waiting.get("kind"),
-                "interval_seconds": 30 if is_ci else 15,
+                "interval_seconds": 5,
                 "remaining_seconds": max(1, int(waiting.get("remaining_seconds") or 1))
                 + 60,
             },
