@@ -176,6 +176,11 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             "up to thirty-two returned actions"
             in steward_schedule["arguments"]["prompt"]
         )
+        assert 'yield_time_ms": 3900000' in steward_schedule["arguments"]["prompt"]
+        assert (
+            "never poll the cell with functions.wait"
+            in steward_schedule["arguments"]["prompt"]
+        )
         for index, schedule in enumerate(schedules.values(), start=1):
             assert schedule["arguments"]["status"] == "ACTIVE"
             assert not schedule["arguments"]["prompt"].startswith("Fulcrum-Action:")
@@ -266,6 +271,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert (
             "up to thirty-two returned actions" in steward_repair["arguments"]["prompt"]
         )
+        assert 'yield_time_ms": 3900000' in steward_repair["arguments"]["prompt"]
         service.claim_action(
             replace(
                 bootstrap_request(root),

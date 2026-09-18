@@ -62,7 +62,9 @@ MARSHAL_HEARTBEAT_PROMPT = (
 )
 STEWARD_HEARTBEAT_PROMPT = (
     "This is the scheduled Fulcrum Steward heartbeat. Read CODEX_THREAD_ID and "
-    "call wait_for_instructions with that exact task_id. Process up to thirty-two returned "
+    "call wait_for_instructions with that exact task_id through one functions.exec cell "
+    'whose first line is `// @exec: {"yield_time_ms": 3900000}`. Await and emit that '
+    "result directly; never poll the cell with functions.wait. Process up to thirty-two returned "
     "actions in this turn. For each action, claim it with the exact record_id and "
     "action_id, invoke its native tool and arguments once, report the actual result "
     "with the returned attempt_id, and immediately call wait_for_instructions again. "
