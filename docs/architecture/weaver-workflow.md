@@ -6,7 +6,9 @@ configuration. Plan artifacts use Fulcrum's plan commands; investigation and sco
 use ledger fields. Weaver is entered in the human-invoked task and is never created
 by Steward or delegated to another task. The initial skill establishes this boundary
 before repository investigation so the first user-facing update can accurately
-promise investigation or scoping.
+promise investigation or scoping. The repository exposes that skill through
+`.agents/skills` so a fresh task in the saved Fulcrum project can invoke `$weaver`
+without depending on a preloaded user-level skill catalog.
 
 ## Proportionate authoring
 
@@ -69,6 +71,12 @@ inspection command. The outer envelope retains request/operation IDs and warning
 `operation show ID --json` still returns the full durable input, plan, checkpoints,
 and timestamps. Receipt facts describe the state achieved by that operation;
 `context` and `work show` inspect current state.
+
+The entry command itself performs no native mutation. Once it returns the bead ID,
+the invoking Weaver uses the native title tool to label its own task
+`🧵 [wvr-ID] Concise task title`. It never creates or prepares the Tollgate
+worktree; automatic admission prepares that workspace after a successful `ready`
+finish. The Weaver takes no further action after that finish.
 
 The retained scope identifies its finish operation. A retry after transfer can
 complete the receipt without reacquiring work, even if Marshal already advanced
