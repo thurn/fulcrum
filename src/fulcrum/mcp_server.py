@@ -306,8 +306,9 @@ def tool_descriptions() -> list[dict[str, Any]]:
         ),
         "finish": (
             "Seal the active role outcome. Executor uses ready_for_review and Warden "
-            "uses approved; code outcomes also supply source_oid, exact check objects, "
-            "and evidence references."
+            "uses approved. Executor omits source_oid because Fulcrum commits the "
+            "assigned worktree; Warden supplies the reviewed source_oid. Code outcomes "
+            "also supply exact check objects and evidence references."
         ),
         "marshal_check": (
             "Marshal only: open or resume one bounded decision. For the scheduled "

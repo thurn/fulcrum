@@ -1016,6 +1016,8 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert "its scope is the complete authorized contract" in prompt
     assert "checks proportional to the change" in prompt
     assert "exactly one task commit" in prompt
+    assert "Do not run git add or git commit" in prompt
+    assert "Do not supply a source OID" in prompt
     assert "task_id set to the exact CODEX_THREAD_ID" in prompt
     assert "session_id set to the exact CODEX_SESSION_ID" in prompt
     assert "nonempty top-level evidence" in prompt

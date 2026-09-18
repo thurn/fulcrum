@@ -7,10 +7,12 @@ from fulcrum.timing import timed
 from fulcrum.coordination import coordinated, external_effect
 
 import asyncio
+import os
 import subprocess
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from fulcrum.analytics import AnalyticsService
@@ -883,7 +885,7 @@ class CompletionService:
     def _executor_finish(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
     ) -> CommandResult:
-        payload = _finish_payload(request)
+        payload = _executor_finish_payload(request)
         sealed = (work.fc or {}).get("finish")
         if isinstance(sealed, Mapping):
             if sealed.get("request_id") == request.request_id:
@@ -916,10 +918,16 @@ class CompletionService:
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
             return _operation_result(operation)
-        workspace = _inspect_clean_source(request, payload["source_oid"])
+        sealed_source = _commit_executor_source(request, work)
+        payload["source_oid"] = sealed_source["source_oid"]
+        workspace = sealed_source["workspace"]
         local_check_result = DeliveryService().validation_check(
             _child_request(
-                request, operation.id, "local-check", ("validation", "check")
+                request,
+                operation.id,
+                "local-check",
+                ("validation", "check"),
+                source_oid=payload["source_oid"],
             )
         )
         children = {"local_check": _child_result(local_check_result)}
@@ -1736,21 +1744,12 @@ def _without_waiting_kind(value: Any, kind: str) -> dict[str, Any] | None:
     return {"reasons": retained} if retained else None
 
 
-def _finish_payload(request: ParsedRequest) -> dict[str, Any]:
+def _finish_payload_fields(request: ParsedRequest) -> dict[str, Any]:
     summary = request.input.get("summary")
-    source_oid = request.input.get("source_oid")
     checks = request.input.get("checks")
     evidence = request.input.get("evidence")
     if not isinstance(summary, str) or not summary.strip():
         raise FulcrumError.invalid("INVALID_INPUT", "finish requires a summary")
-    if (
-        not isinstance(source_oid, str)
-        or len(source_oid) != 40
-        or any(character not in "0123456789abcdef" for character in source_oid)
-    ):
-        raise FulcrumError.invalid(
-            "INVALID_INPUT", "finish requires a full lowercase source commit OID"
-        )
     if not isinstance(checks, list) or not all(_valid_check(item) for item in checks):
         raise FulcrumError.invalid(
             "INVALID_INPUT",
@@ -1764,10 +1763,33 @@ def _finish_payload(request: ParsedRequest) -> dict[str, Any]:
         )
     return {
         "summary": summary.strip(),
-        "source_oid": source_oid,
         "checks": [dict(item) for item in checks],
         "evidence": list(evidence),
     }
+
+
+def _executor_finish_payload(request: ParsedRequest) -> dict[str, Any]:
+    if request.input.get("source_oid") is not None:
+        raise FulcrumError.invalid(
+            "INVALID_INPUT",
+            "Executor finish must omit source_oid; Fulcrum commits the assigned worktree",
+        )
+    return _finish_payload_fields(request)
+
+
+def _finish_payload(request: ParsedRequest) -> dict[str, Any]:
+    payload = _finish_payload_fields(request)
+    source_oid = request.input.get("source_oid")
+    if (
+        not isinstance(source_oid, str)
+        or len(source_oid) != 40
+        or any(character not in "0123456789abcdef" for character in source_oid)
+    ):
+        raise FulcrumError.invalid(
+            "INVALID_INPUT", "finish requires a full lowercase source commit OID"
+        )
+    payload["source_oid"] = source_oid
+    return payload
 
 
 def _valid_check(value: Any) -> bool:
@@ -1806,13 +1828,170 @@ def _inspect_clean_source(request: ParsedRequest, source_oid: str) -> dict[str, 
     return facts.to_dict()
 
 
+def _commit_executor_source(
+    request: ParsedRequest, work: LedgerRecord
+) -> dict[str, Any]:
+    """Seal one assigned worktree commit outside the worker's Git sandbox."""
+
+    _, _, project, provider = _context(request)
+    from fulcrum.delivery_service import _work_ref
+
+    reference = _work_ref(
+        request, work, project, str((work.fc or {}).get("ownership_operation"))
+    )
+    with external_effect():
+        facts = asyncio.run(provider.inspect_workspace(reference))
+        if (
+            not facts.exists
+            or not facts.owned
+            or not facts.path
+            or not facts.base_oid
+            or not facts.head_oid
+        ):
+            raise FulcrumError(
+                "SOURCE_NOT_READY",
+                "Executor finish requires the exact owned worktree and retained base",
+                exit_code=5,
+                details={"workspace": facts.to_dict()},
+            )
+        path = Path(facts.path)
+        if facts.dirty:
+            if facts.head_oid != facts.base_oid:
+                raise FulcrumError(
+                    "SOURCE_NOT_READY",
+                    "Executor worktree must remain on its retained base before Fulcrum commits it",
+                    exit_code=5,
+                    details={"workspace": facts.to_dict()},
+                )
+            _executor_git(path, "add", "-A")
+            staged = subprocess.run(
+                ["git", "-C", str(path), "diff", "--cached", "--quiet"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            if staged.returncode == 0:
+                raise FulcrumError(
+                    "SOURCE_NOT_READY",
+                    "Executor worktree has no committable changes",
+                    exit_code=5,
+                    details={"workspace": facts.to_dict()},
+                )
+            if staged.returncode != 1:
+                raise _executor_git_error("diff", staged)
+            _executor_git(
+                path,
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-m",
+                f"chore: complete {work.id}",
+            )
+            facts = asyncio.run(provider.inspect_workspace(reference))
+
+        if (
+            not facts.exists
+            or not facts.owned
+            or facts.dirty
+            or not facts.path
+            or not facts.base_oid
+            or not facts.head_oid
+        ):
+            raise FulcrumError(
+                "SOURCE_NOT_READY",
+                "Fulcrum could not seal an exact clean Executor source",
+                exit_code=5,
+                details={"workspace": facts.to_dict()},
+            )
+        ancestor = subprocess.run(
+            [
+                "git",
+                "-C",
+                facts.path,
+                "merge-base",
+                "--is-ancestor",
+                facts.base_oid,
+                facts.head_oid,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        count = _executor_git(
+            Path(facts.path),
+            "rev-list",
+            "--count",
+            f"{facts.base_oid}..{facts.head_oid}",
+        )
+        if ancestor.returncode != 0 or count != "1":
+            raise FulcrumError(
+                "SOURCE_NOT_READY",
+                "Executor source must be exactly one task commit atop the retained base",
+                exit_code=5,
+                details={
+                    "workspace": facts.to_dict(),
+                    "commit_count": count,
+                    "ancestor_returncode": ancestor.returncode,
+                },
+            )
+    return {"source_oid": facts.head_oid, "workspace": facts.to_dict()}
+
+
+def _executor_git(path: Path, *arguments: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={
+                **os.environ,
+                "GIT_EDITOR": "true",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise FulcrumError(
+            "SOURCE_COMMIT_FAILED",
+            f"Executor source Git operation {arguments[0]} was unavailable: {error}",
+            exit_code=4,
+        ) from error
+    if completed.returncode != 0:
+        raise _executor_git_error(arguments[0], completed)
+    return completed.stdout.strip()
+
+
+def _executor_git_error(
+    operation: str, completed: subprocess.CompletedProcess[str]
+) -> FulcrumError:
+    return FulcrumError(
+        "SOURCE_COMMIT_FAILED",
+        f"Executor source Git operation {operation} failed",
+        exit_code=4,
+        details={
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-4000:],
+            "stderr": completed.stderr[-4000:],
+        },
+    )
+
+
 def _child_request(
     request: ParsedRequest,
     parent_operation: str,
     purpose: str,
     command: tuple[str, ...],
+    *,
+    source_oid: str | None = None,
 ) -> ParsedRequest:
-    source_oid = str(request.input["source_oid"])
+    source_oid = source_oid or str(request.input["source_oid"])
     arguments: dict[str, Any] = {
         "bead": request.arguments["bead"],
         "source": source_oid,
