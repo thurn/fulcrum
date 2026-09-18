@@ -428,6 +428,21 @@ class HookService:
                 paths.append(transcript)
         return sorted(set(paths))
 
+    @staticmethod
+    def registered_paths(ledger: Ledger) -> list[str]:
+        """Return retained transcript paths without parsing transcript content."""
+
+        paths: set[str] = set()
+        for record in ledger.list_records(limit=0):
+            transcripts = _protocol(record.fc or {}).get("transcripts")
+            if not isinstance(transcripts, Mapping):
+                continue
+            for retained in transcripts.values():
+                path = retained.get("path") if isinstance(retained, Mapping) else None
+                if isinstance(path, str) and Path(path).is_absolute():
+                    paths.add(path)
+        return sorted(paths)
+
     def _collect_transcript_path(
         self,
         ledger: Ledger,

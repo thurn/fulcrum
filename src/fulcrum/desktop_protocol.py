@@ -831,7 +831,7 @@ class DesktopProtocolService:
         ledger = self._ledger(request)
         from fulcrum.hooks import HookService
 
-        collected_paths = HookService(ledger).collect_registered(request)
+        collected_paths = HookService.registered_paths(ledger)
         waits: list[dict[str, Any]] = []
         watch_paths: set[str] = set(collected_paths)
         reconciliation_errors: list[dict[str, str]] = []
@@ -2687,7 +2687,7 @@ class DesktopProtocolService:
             )
         from fulcrum.hooks import HookService
 
-        watch_paths = HookService(ledger).collect_registered(request)
+        watch_paths = HookService.registered_paths(ledger)
         from fulcrum.completion import settle_native_completion
 
         for candidate_record in ledger.list_records(limit=0):
@@ -3228,7 +3228,7 @@ class DesktopProtocolService:
             )
         from fulcrum.hooks import HookService
 
-        watch_paths = HookService(ledger).collect_registered(request)
+        watch_paths = HookService.registered_paths(ledger)
         supplied_candidate = request.input.get("candidate_id")
         if (
             not isinstance(candidate, Mapping)

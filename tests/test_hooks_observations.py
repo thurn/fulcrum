@@ -418,9 +418,11 @@ class HookTests(unittest.TestCase):
             watched = hook.collect_registered(request())
             writes_after_change = len(ledger.writes)
             watched_again = hook.collect_registered(request())
+            retained_paths = hook.registered_paths(ledger)
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertEqual(watched, [str(path)])
         self.assertEqual(watched_again, [str(path)])
+        self.assertEqual(retained_paths, [str(path)])
         self.assertEqual(len(ledger.writes), writes_after_change)
         self.assertIn("response-delayed", protocol["observations"]["usage"])
         analytics = ledger.list_records(kind="analytics", limit=0)[0]
