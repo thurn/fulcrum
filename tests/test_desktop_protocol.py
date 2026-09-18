@@ -1077,9 +1077,11 @@ def test_warden_submission_derives_source_from_assigned_worktree():
             "fulcrum.delivery_service.DeliveryService.candidate_seal",
             return_value=CommandResult.query(
                 {
-                    "seal": {
-                        "state": "ready",
-                        "workspace": {"head_oid": source},
+                    "result": {
+                        "seal": {
+                            "state": "ready",
+                            "workspace": {"head_oid": source},
+                        }
                     }
                 }
             ),

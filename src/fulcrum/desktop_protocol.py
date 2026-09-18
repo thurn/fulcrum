@@ -3417,7 +3417,12 @@ class DesktopProtocolService:
                     "result": sealed.result,
                 },
             )
-        seal = sealed.result.get("seal")
+        sealed_operation_result = sealed.result.get("result")
+        seal = (
+            sealed_operation_result.get("seal")
+            if isinstance(sealed_operation_result, Mapping)
+            else None
+        )
         if not isinstance(seal, Mapping):
             raise FulcrumError(
                 "SOURCE_NOT_READY",
