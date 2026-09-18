@@ -152,7 +152,7 @@ class BrokerTests(unittest.IsolatedAsyncioTestCase):
                 {"request_id": "89170642-a734-4735-a272-7b0d41e006d8"},
             )
         self.assertEqual(captured["remaining_seconds"], 67)
-        self.assertEqual(captured["interval_seconds"], 5)
+        self.assertEqual(captured["interval_seconds"], 1)
 
     async def test_transcript_change_wakes_wait_before_timer(self):
         with tempfile.TemporaryDirectory() as directory:

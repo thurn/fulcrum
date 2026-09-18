@@ -429,7 +429,7 @@ class FreshCli:
                 "stdin": stdin,
                 "wait_id": waiting.get("wait_id"),
                 "kind": waiting.get("kind"),
-                "interval_seconds": 5,
+                "interval_seconds": 1,
                 "remaining_seconds": max(1, int(waiting.get("remaining_seconds") or 1))
                 + 60,
             },

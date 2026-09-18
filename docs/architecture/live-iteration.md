@@ -55,7 +55,7 @@ resolved; application event batches are acknowledged after processing. Overflow
 is observable and requires reconciliation, never an assumption of success.
 
 Reconciliation is event-driven and also runs at the configured bounded interval
-(5 seconds by default). The resident does not spawn a fresh worker every second.
+(1 second by default). The resident does not spawn a fresh worker every second.
 Every pass records its identifier, start and completion or failure, duration,
 action counts, pressure, gaps, and associated work IDs in the diagnostic journal.
 This preserves prompt event handling while making idle operation inexpensive and
