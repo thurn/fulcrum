@@ -465,6 +465,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
     ("candidate", "submit"): {
         "bead",
         "assignment_token",
+        "repair_confirmed",
         "source",
     },
     ("ci", "wait"): {"bead", "candidate_id", "assignment_token", "turn_id"},

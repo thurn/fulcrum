@@ -82,6 +82,35 @@ class CliTests(unittest.TestCase):
         self.assertEqual(parsed.input["description"], literal)
         self.assertEqual(parsed.actor.task_id, "human-task")
 
+    def test_candidate_submit_accepts_repair_confirmation_input(self):
+        context = request().instance
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "candidate.json"
+            payload.write_text(
+                json.dumps(
+                    {
+                        "assignment_token": "assignment-token",
+                        "repair_confirmed": True,
+                    }
+                )
+            )
+            with patch("fulcrum.cli.resolve_instance", return_value=context):
+                parsed = _build_request(
+                    parser.parse_args(
+                        [
+                            "candidate",
+                            "submit",
+                            "--bead",
+                            "fc-work",
+                            "--input",
+                            str(payload),
+                        ]
+                    )
+                )
+        self.assertTrue(parsed.input["repair_confirmed"])
+        self.assertEqual(parsed.input["assignment_token"], "assignment-token")
+
     def test_bootstrap_defaults_to_human_inside_a_codex_task(self):
         context = request().instance
         parser = build_parser()
