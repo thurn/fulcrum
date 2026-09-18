@@ -901,6 +901,7 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     )
 
     assert "passing wait_for_ci_results response is not completion" in prompt
+    assert "Copy candidate.candidate_id" in prompt
     assert "must be finish with outcome approved" in prompt
     assert "Do not send a final answer before finish returns accepted" in prompt
 
