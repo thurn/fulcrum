@@ -328,6 +328,12 @@ def tool_descriptions() -> list[dict[str, Any]]:
                 name, f"Run the durable Fulcrum {name.replace('_', ' ')} operation."
             ),
             "inputSchema": _schema(name),
+            "annotations": {
+                "readOnlyHint": name in {"status", "trace"},
+                "destructiveHint": False,
+                "idempotentHint": name in {"status", "trace"},
+                "openWorldHint": False,
+            },
         }
         for name in TOOLS
     ]

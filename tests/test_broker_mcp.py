@@ -353,6 +353,16 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task_id", required)
         self.assertNotIn("host_id", required)
 
+    async def test_tool_annotations_describe_closed_local_workflow(self):
+        tools = {item["name"]: item for item in tool_descriptions()}
+
+        for name, tool in tools.items():
+            annotations = tool["annotations"]
+            self.assertFalse(annotations["openWorldHint"])
+            self.assertFalse(annotations["destructiveHint"])
+            self.assertEqual(annotations["readOnlyHint"], name in {"status", "trace"})
+            self.assertEqual(annotations["idempotentHint"], name in {"status", "trace"})
+
     async def test_weaver_entry_is_a_structured_mcp_invocation(self):
         cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
         with patch.dict("os.environ", {"CODEX_THREAD_ID": "weaver-task"}):
