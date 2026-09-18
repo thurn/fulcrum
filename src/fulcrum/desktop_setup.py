@@ -52,10 +52,11 @@ REQUIRED_ACCEPTANCE = {
 }
 PRE_ACTIVATION_ACCEPTANCE: set[str] = set(REQUIRED_ACCEPTANCE)
 MARSHAL_HEARTBEAT_PROMPT = (
-    "This is the scheduled Fulcrum heartbeat. Call marshal_check with input "
+    "This is the scheduled Fulcrum heartbeat. Read CODEX_THREAD_ID and call "
+    "marshal_check with that exact task_id and input "
     '`{"trigger":"heartbeat"}`. Settle only its bounded brief, then call '
-    "marshal_decide with the returned turn_id and input containing the returned "
-    "decision_id plus targeted decisions; use an empty decisions array for a no-op. "
+    "marshal_decide with the same task_id, the returned turn_id, and input containing "
+    "the returned decision_id plus targeted decisions; use an empty decisions array for a no-op. "
     "Do not inspect implementation source or invent identifiers. End quietly when "
     "no action is required."
 )

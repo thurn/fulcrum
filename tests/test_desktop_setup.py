@@ -158,6 +158,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert schedule["arguments"]["status"] == "ACTIVE"
         assert "scheduled Fulcrum heartbeat" in schedule["arguments"]["prompt"]
+        assert "that exact task_id" in schedule["arguments"]["prompt"]
         assert not schedule["arguments"]["prompt"].startswith("Fulcrum-Action:")
         claim = service.claim_action(
             replace(
@@ -233,6 +234,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert repair["arguments"]["id"] == "automation-1"
         assert "scheduled Fulcrum heartbeat" in repair["arguments"]["prompt"]
+        assert "that exact task_id" in repair["arguments"]["prompt"]
         assert not repair["arguments"]["prompt"].startswith("Fulcrum-Action:")
         assert repairing.result["standing"]["marshal"]["state"] == "registered"
         assert "positively_completed_at" not in repairing.result["standing"]["marshal"]
