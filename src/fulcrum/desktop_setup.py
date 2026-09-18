@@ -54,9 +54,10 @@ PRE_ACTIVATION_ACCEPTANCE: set[str] = set(REQUIRED_ACCEPTANCE)
 MARSHAL_HEARTBEAT_PROMPT = (
     "This is the scheduled Fulcrum heartbeat. Read CODEX_THREAD_ID and call "
     "marshal_check with that exact task_id and input "
-    '`{"trigger":"heartbeat"}`. Settle only its bounded brief, then call '
+    '`{"trigger":"heartbeat"}`. Settle only its bounded brief. Claim, invoke, and '
+    "report any exact recovery action in that brief, then call "
     "marshal_decide with the same task_id, the returned turn_id, and input containing "
-    "the returned decision_id plus targeted decisions; use an empty decisions array for a no-op. "
+    "the returned decision_id plus targeted decisions and recoveries; use empty arrays for a no-op. "
     "Do not inspect implementation source or invent identifiers. End quietly when "
     "no action is required."
 )
@@ -147,7 +148,8 @@ STANDING = {
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id, and omit request_id for a new registration. On scheduled prompts call "
             "marshal_check, settle only the returned bounded curation or recovery scope, and "
-            "end quietly when there is no action."
+            "call marshal_decide with both targeted decisions and recoveries. Execute any "
+            "returned recovery action exactly once and report it before ending quietly."
         ),
     },
     "vizier": {

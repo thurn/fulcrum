@@ -952,6 +952,8 @@ class HookTests(unittest.TestCase):
         ]
         self.assertEqual(retained["state"], "cancelled")
         self.assertEqual(retained["terminal_event"]["type"], "turn_aborted")
+        standing = (ledger.show("fc-system").fc or {})["desktop"]["standing"]
+        self.assertEqual(standing["steward"]["state"], "interrupt_observed")
         replayed = desktop.wait_for_instructions(wait_request)
         self.assertEqual(replayed.result["reason"], "native_turn_interrupted")
 

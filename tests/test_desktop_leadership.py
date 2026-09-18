@@ -135,6 +135,7 @@ class LeadershipTests(unittest.TestCase):
                 payload={
                     "decision_id": checked.result["decision"]["decision_id"],
                     "decisions": [],
+                    "recoveries": [],
                 },
             )
         )
@@ -200,6 +201,7 @@ class LeadershipTests(unittest.TestCase):
                             "changes": {"priority": 0},
                         }
                     ],
+                    "recoveries": [],
                 },
             )
         )
@@ -230,6 +232,7 @@ class LeadershipTests(unittest.TestCase):
                             "changes": {"dependencies": ["fc-dependency"]},
                         }
                     ],
+                    "recoveries": [],
                 },
             )
         )
@@ -352,3 +355,173 @@ class LeadershipTests(unittest.TestCase):
         self.assertEqual(
             first.result["alert"]["action_id"], second.result["alert"]["action_id"]
         )
+
+    def _seed_interrupted_creation(self, *, provider_truth, possible_task_locator=None):
+        action = seed_action(
+            self.ledger,
+            {
+                "record_id": "fc-a",
+                "executor": "steward",
+                "tool": "create_thread",
+                "arguments": {
+                    "prompt": "perform retained work",
+                    "target": {"type": "project", "projectId": "project-1"},
+                },
+                "purpose": "routine_dispatch",
+                "assignment_token": "assignment-1",
+            },
+        )
+        work = self.ledger.show("fc-a")
+        desktop = dict((work.fc or {})["desktop"])
+        actions = dict(desktop["actions"])
+        actions[action["action_id"]] = {
+            **actions[action["action_id"]],
+            "state": "uncertain",
+            "attempts": [
+                {
+                    "attempt_id": "attempt-1",
+                    "actor_task_id": "steward-1",
+                    "state": "uncertain",
+                }
+            ],
+            "provider_truth": provider_truth,
+            "possible_task_locator": possible_task_locator,
+        }
+        desktop["actions"] = actions
+        desktop["assignment"] = {
+            "assignment_token": "assignment-1",
+            "role": "executor",
+            "state": "uncertain",
+        }
+        incident_id = "incident-1"
+        desktop["incidents"] = {
+            f"native-action:{action['action_id']}": {
+                "incident_id": incident_id,
+                "incident_key": f"native-action:{action['action_id']}",
+                "action_id": action["action_id"],
+                "state": "open",
+                "scope": "uncertain native worker creation",
+            }
+        }
+        self.ledger.update_fc("fc-a", {**work.fc, "desktop": desktop})
+        system = self.ledger.show("fc-system")
+        system_desktop = dict(system.fc["desktop"])
+        standing = dict(system_desktop["standing"])
+        standing["steward"] = {
+            **standing["steward"],
+            "state": "interrupt_observed",
+        }
+        system_desktop["standing"] = standing
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": system_desktop})
+        return action
+
+    def test_marshal_adopts_exact_observed_task_and_resumes_same_steward(self):
+        action = self._seed_interrupted_creation(
+            provider_truth={"state": "created_response_lost", "invoked": True},
+            possible_task_locator={"threadId": "executor-1"},
+        )
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-recovery-turn"},
+            )
+        )
+        inspection = checked.result["brief"]["recovery_action"]
+        self.assertEqual(inspection["tool"], "read_thread")
+        self.assertEqual(inspection["executor"], "marshal")
+        claimed = self.service.claim_action(
+            call(
+                ("action", "claim"),
+                actor="task:marshal-1",
+                arguments={
+                    "record_id": "fc-a",
+                    "action_id": inspection["action_id"],
+                },
+                payload={"attempt_id": "inspection-attempt"},
+            )
+        )
+        self.assertTrue(claimed.result["invoke"])
+        self.service.report_action_result(
+            call(
+                ("action", "result"),
+                actor="task:marshal-1",
+                arguments={
+                    "record_id": "fc-a",
+                    "action_id": inspection["action_id"],
+                },
+                payload={
+                    "attempt_id": "inspection-attempt",
+                    "outcome": "succeeded",
+                    "native_result": {
+                        "threadId": "executor-1",
+                        "status": "idle",
+                    },
+                },
+            )
+        )
+        decided = self.service.marshal_decide(
+            call(
+                ("marshal", "apply"),
+                actor="task:marshal-1",
+                payload={
+                    "turn_id": "marshal-recovery-turn",
+                    "decision_id": checked.result["decision"]["decision_id"],
+                    "decisions": [],
+                    "recoveries": [
+                        {
+                            "bead": "fc-a",
+                            "action_id": action["action_id"],
+                            "expected_state": "succeeded",
+                            "decision": "adopt_observed_task",
+                        }
+                    ],
+                },
+            )
+        )
+        resume = decided.result["recovery_action"]
+        self.assertEqual(resume["tool"], "send_message_to_thread")
+        self.assertEqual(resume["arguments"]["threadId"], "steward-1")
+        retained = self.ledger.show("fc-a").fc["desktop"]
+        self.assertEqual(retained["assignment"]["task_id"], "executor-1")
+        self.assertEqual(
+            retained["incidents"][f"native-action:{action['action_id']}"]["state"],
+            "resolved",
+        )
+
+    def test_marshal_retries_same_action_only_after_definite_absence(self):
+        action = self._seed_interrupted_creation(
+            provider_truth={"state": "definitely_not_created", "invoked": False}
+        )
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-retry-turn"},
+            )
+        )
+        self.assertIsNone(checked.result["brief"]["recovery_action"])
+        decided = self.service.marshal_decide(
+            call(
+                ("marshal", "apply"),
+                actor="task:marshal-1",
+                payload={
+                    "turn_id": "marshal-retry-turn",
+                    "decision_id": checked.result["decision"]["decision_id"],
+                    "decisions": [],
+                    "recoveries": [
+                        {
+                            "bead": "fc-a",
+                            "action_id": action["action_id"],
+                            "expected_state": "uncertain",
+                            "decision": "retry_same_action",
+                        }
+                    ],
+                },
+            )
+        )
+        retained = self.ledger.show("fc-a").fc["desktop"]
+        self.assertEqual(retained["actions"][action["action_id"]]["state"], "pending")
+        self.assertEqual(len(retained["actions"][action["action_id"]]["attempts"]), 1)
+        self.assertEqual(retained["assignment"]["state"], "reserved")
+        self.assertIsNotNone(decided.result["recovery_action"])

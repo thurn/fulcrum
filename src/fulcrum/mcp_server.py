@@ -201,8 +201,16 @@ def _schema(name: str) -> dict[str, Any]:
                     ),
                     "items": {"type": "object", "additionalProperties": True},
                 },
+                "recoveries": {
+                    "type": "array",
+                    "description": (
+                        "Exact native-action recovery rows from marshal_check, or an "
+                        "empty array when no recovery is required."
+                    ),
+                    "items": {"type": "object", "additionalProperties": True},
+                },
             },
-            "required": ["decision_id", "decisions"],
+            "required": ["decision_id", "decisions", "recoveries"],
             "additionalProperties": False,
         }
     if name in {"claim_action", "report_action_result"}:
@@ -334,8 +342,9 @@ def tool_descriptions() -> list[dict[str, Any]]:
         "marshal_decide": (
             "Marshal only: complete the exact decision returned by marshal_check. "
             "Pass its returned turn_id and input containing its decision_id plus "
-            "targeted decisions; use an empty decisions array when no changes are "
-            "required. Do not inspect implementation source."
+            "targeted decisions and recoveries; use empty arrays when no changes are "
+            "required. Execute and report any recovery action returned by the result. "
+            "Do not inspect implementation source."
         ),
     }
     return [

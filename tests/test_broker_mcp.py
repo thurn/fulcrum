@@ -388,6 +388,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                 "turn_id": "turn-1",
                 "decision_id": "decision-1",
                 "decisions": [],
+                "recoveries": [],
                 "input": {"turn_id": None},
             },
         )
@@ -400,6 +401,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
                     "turn_id": "turn-1",
                     "decision_id": "decision-1",
                     "decisions": [],
+                    "recoveries": [],
                     "input": {"turn_id": "turn-2"},
                 },
             )

@@ -199,6 +199,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             return _result(request, value)
         records = ledger.list_records(limit=0)
         incidents: list[dict[str, Any]] = []
+        recoveries: list[dict[str, Any]] = []
         ready: list[dict[str, Any]] = []
         for record in records:
             fc = record.fc or {}
@@ -256,6 +257,46 @@ class DesktopLeadershipService(DesktopProtocolService):
                     and incident.get("state") != "resolved"
                 ):
                     incidents.append({"bead": record.id, **dict(incident)})
+                    action_id = incident.get("action_id")
+                    action = (desktop.get("actions") or {}).get(action_id)
+                    if str(incident.get("incident_key") or "").startswith(
+                        "native-action:"
+                    ) and isinstance(action, Mapping):
+                        assignment = desktop.get("assignment")
+                        recoveries.append(
+                            {
+                                "bead": record.id,
+                                "incident_id": incident.get("incident_id"),
+                                "action_id": action_id,
+                                "action_state": action.get("state"),
+                                "attempts": len(action.get("attempts") or []),
+                                "expected_result": copy.deepcopy(
+                                    action.get("expected_result") or {}
+                                ),
+                                "possible_task_locator": copy.deepcopy(
+                                    action.get("possible_task_locator")
+                                ),
+                                "provider_truth": copy.deepcopy(
+                                    action.get("provider_truth")
+                                ),
+                                "assignment": (
+                                    {
+                                        "state": assignment.get("state"),
+                                        "task_id": assignment.get("task_id"),
+                                        "assignment_token": assignment.get(
+                                            "assignment_token"
+                                        ),
+                                    }
+                                    if isinstance(assignment, Mapping)
+                                    else None
+                                ),
+                                "allowed_decisions": [
+                                    "adopt_observed_task",
+                                    "retry_same_action",
+                                    "leave_uncertain",
+                                ],
+                            }
+                        )
             if (
                 record.status != "closed"
                 and fc.get("owner") == binding["task_id"]
@@ -283,7 +324,9 @@ class DesktopLeadershipService(DesktopProtocolService):
             if healthy_wait
             else (
                 "stopped"
-                if isinstance(steward, Mapping) and steward.get("state") == "stopped"
+                if isinstance(steward, Mapping)
+                and steward.get("state")
+                in {"stopped", "stop_observed", "interrupt_observed"}
                 else "unknown"
             )
         )
@@ -304,13 +347,91 @@ class DesktopLeadershipService(DesktopProtocolService):
         unsettled = any(
             isinstance(action, Mapping)
             and action.get("state") in {"issuing", "uncertain"}
-            for action in actions.values()
+            for item in records
+            for action in (
+                (_protocol(item.fc or {}).get("actions") or {}).values()
+                if isinstance(_protocol(item.fc or {}).get("actions"), Mapping)
+                else []
+            )
         )
+        if steward_health == "stopped" and recoveries:
+            current_recovery = recoveries[0]
+            recovery_record = ledger.show(str(current_recovery["bead"]))
+            if recovery_record is None:
+                raise FulcrumError(
+                    "RECOVERY_RECORD_MISSING",
+                    "the bounded recovery record disappeared during Marshal check",
+                    exit_code=5,
+                )
+            recovery_protocol = _protocol(recovery_record.fc or {})
+            original = (recovery_protocol.get("actions") or {}).get(
+                current_recovery["action_id"]
+            )
+            provider_truth = (
+                original.get("provider_truth")
+                if isinstance(original, Mapping)
+                else None
+            )
+            if (
+                isinstance(original, Mapping)
+                and original.get("state") == "uncertain"
+                and not (
+                    isinstance(provider_truth, Mapping)
+                    and provider_truth.get("state") == "definitely_not_created"
+                )
+            ):
+                purpose = f"reconcile_action:{original['action_id']}"
+                existing = next(
+                    (
+                        item
+                        for item in (recovery_protocol.get("actions") or {}).values()
+                        if isinstance(item, Mapping)
+                        and item.get("purpose") == purpose
+                        and item.get("state") == "pending"
+                    ),
+                    None,
+                )
+                if isinstance(existing, Mapping):
+                    recovery_action = dict(existing)
+                else:
+                    locator = original.get("possible_task_locator")
+                    task_id = (
+                        locator.get("threadId")
+                        if isinstance(locator, Mapping)
+                        else None
+                    )
+                    if task_id:
+                        recovery_action = self._append_action(
+                            recovery_protocol,
+                            record_id=recovery_record.id,
+                            executor="marshal",
+                            tool="read_thread",
+                            arguments={"threadId": task_id},
+                            purpose=purpose,
+                            expected_result={"threadId": task_id},
+                            reporting={"reconciles": original.get("action_id")},
+                        )
+                    else:
+                        recovery_action = self._append_action(
+                            recovery_protocol,
+                            record_id=recovery_record.id,
+                            executor="marshal",
+                            tool="list_threads",
+                            arguments={"limit": 100},
+                            purpose=purpose,
+                            expected_result={"action_id": original.get("action_id")},
+                            reporting={"reconciles": original.get("action_id")},
+                        )
+                    ledger.update_fc(
+                        recovery_record.id,
+                        _with_protocol(recovery_record.fc or {}, recovery_protocol),
+                    )
         if (
             steward_health == "stopped"
             and isinstance(steward, Mapping)
             and not healthy_wait
             and not unsettled
+            and not recoveries
         ):
             existing = next(
                 (
@@ -354,11 +475,13 @@ class DesktopLeadershipService(DesktopProtocolService):
                 "purpose": "recovery" if incidents else "curation",
                 "steward_health": steward_health,
                 "incidents": incidents[:20],
+                "recoveries": recoveries[:20],
                 "ready": sorted(ready, key=lambda row: (row["priority"], row["bead"]))[
                     :20
                 ],
                 "omitted": {
                     "incidents": max(0, len(incidents) - 20),
+                    "recoveries": max(0, len(recoveries) - 20),
                     "ready": max(0, len(ready) - 20),
                 },
                 "recovery_action": (
@@ -412,6 +535,11 @@ class DesktopLeadershipService(DesktopProtocolService):
         if not isinstance(decisions, list):
             raise FulcrumError.invalid(
                 "INVALID_DECISIONS", "decisions must be an array"
+            )
+        recovery_rows = request.input.get("recoveries")
+        if not isinstance(recovery_rows, list):
+            raise FulcrumError.invalid(
+                "INVALID_RECOVERIES", "recoveries must be an array"
             )
         accepted: list[dict[str, Any]] = []
         stale: list[dict[str, Any]] = []
@@ -482,12 +610,215 @@ class DesktopLeadershipService(DesktopProtocolService):
                 ),
             )
             accepted.append({"bead": bead, "changes": dict(changes)})
+        accepted_recoveries: list[dict[str, Any]] = []
+        stale_recoveries: list[dict[str, Any]] = []
+        for row in recovery_rows:
+            if not isinstance(row, Mapping):
+                continue
+            bead = str(row.get("bead") or "")
+            action_id = str(row.get("action_id") or "")
+            recovery_decision = str(row.get("decision") or "")
+            record = ledger.show(bead)
+            if record is None:
+                stale_recoveries.append(
+                    {"bead": bead, "action_id": action_id, "reason": "missing"}
+                )
+                continue
+            desktop = _protocol(record.fc or {})
+            actions = dict(desktop.get("actions") or {})
+            action_value = actions.get(action_id)
+            if not isinstance(action_value, Mapping):
+                stale_recoveries.append(
+                    {
+                        "bead": bead,
+                        "action_id": action_id,
+                        "reason": "action_missing",
+                    }
+                )
+                continue
+            action = dict(action_value)
+            expected_state = row.get("expected_state")
+            if expected_state != action.get("state"):
+                stale_recoveries.append(
+                    {
+                        "bead": bead,
+                        "action_id": action_id,
+                        "reason": "stale",
+                        "expected_state": expected_state,
+                        "actual_state": action.get("state"),
+                    }
+                )
+                continue
+            incident_key = f"native-action:{action_id}"
+            incidents = dict(desktop.get("incidents") or {})
+            incident_value = incidents.get(incident_key)
+            if (
+                not isinstance(incident_value, Mapping)
+                or incident_value.get("state") == "resolved"
+            ):
+                stale_recoveries.append(
+                    {
+                        "bead": bead,
+                        "action_id": action_id,
+                        "reason": "incident_not_open",
+                    }
+                )
+                continue
+            incident = dict(incident_value)
+            assignment = desktop.get("assignment")
+            if recovery_decision == "adopt_observed_task":
+                if (
+                    action.get("state") != "succeeded"
+                    or not isinstance(assignment, Mapping)
+                    or not assignment.get("task_id")
+                ):
+                    stale_recoveries.append(
+                        {
+                            "bead": bead,
+                            "action_id": action_id,
+                            "reason": "provider_task_not_reconciled",
+                        }
+                    )
+                    continue
+            elif recovery_decision == "retry_same_action":
+                provider_truth = action.get("provider_truth")
+                if (
+                    action.get("state") != "uncertain"
+                    or not isinstance(provider_truth, Mapping)
+                    or provider_truth.get("state") != "definitely_not_created"
+                ):
+                    stale_recoveries.append(
+                        {
+                            "bead": bead,
+                            "action_id": action_id,
+                            "reason": "definite_absence_not_proven",
+                        }
+                    )
+                    continue
+                for field in (
+                    "claimed_at",
+                    "claimed_by",
+                    "completed_at",
+                    "native_result",
+                    "scenario_fault",
+                    "provider_truth",
+                    "possible_task_locator",
+                    "recovery_incident_id",
+                ):
+                    action.pop(field, None)
+                action["state"] = "pending"
+                action["retry_authorized_at"] = _utc_now()
+                action["retry_authorized_by"] = operation.get("decision_id")
+                actions[action_id] = action
+                desktop["actions"] = actions
+                if isinstance(assignment, Mapping):
+                    retried_assignment = dict(assignment)
+                    for field in (
+                        "task_id",
+                        "client_thread_id",
+                        "created_at",
+                        "uncertain_at",
+                    ):
+                        retried_assignment.pop(field, None)
+                    retried_assignment["state"] = "reserved"
+                    retried_assignment["retry_authorized_at"] = _utc_now()
+                    desktop["assignment"] = retried_assignment
+            elif recovery_decision == "leave_uncertain":
+                accepted_recoveries.append(
+                    {
+                        "bead": bead,
+                        "action_id": action_id,
+                        "decision": recovery_decision,
+                    }
+                )
+                continue
+            else:
+                stale_recoveries.append(
+                    {
+                        "bead": bead,
+                        "action_id": action_id,
+                        "reason": "unsupported_recovery_decision",
+                    }
+                )
+                continue
+            incident.update(
+                {
+                    "state": "resolved",
+                    "resolved_at": _utc_now(),
+                    "marshal_decision_id": operation.get("decision_id"),
+                    "resolution": recovery_decision,
+                }
+            )
+            incidents[incident_key] = incident
+            desktop["incidents"] = incidents
+            ledger.update_fc(record.id, _with_protocol(record.fc or {}, desktop))
+            accepted_recoveries.append(
+                {
+                    "bead": bead,
+                    "action_id": action_id,
+                    "decision": recovery_decision,
+                }
+            )
+        recovery_action = None
+        standing = system_protocol.get("standing") or {}
+        steward = standing.get("steward") if isinstance(standing, Mapping) else None
+        unsettled = any(
+            isinstance(action, Mapping)
+            and action.get("state") in {"issuing", "uncertain"}
+            for candidate in ledger.list_records(limit=0)
+            for action in (
+                (_protocol(candidate.fc or {}).get("actions") or {}).values()
+                if isinstance(_protocol(candidate.fc or {}).get("actions"), Mapping)
+                else []
+            )
+        )
+        if (
+            accepted_recoveries
+            and all(row["decision"] != "leave_uncertain" for row in accepted_recoveries)
+            and isinstance(steward, Mapping)
+            and steward.get("state")
+            in {"stopped", "stop_observed", "interrupt_observed"}
+            and not unsettled
+        ):
+            system_actions = dict(system_protocol.get("actions") or {})
+            existing_resume = next(
+                (
+                    item
+                    for item in system_actions.values()
+                    if isinstance(item, Mapping)
+                    and item.get("purpose") == "recover_steward_loop"
+                    and item.get("state") not in {"rejected", "superseded"}
+                ),
+                None,
+            )
+            if isinstance(existing_resume, Mapping):
+                recovery_action = dict(existing_resume)
+            else:
+                recovery_action = self._append_action(
+                    system_protocol,
+                    record_id=system.id,
+                    executor="marshal",
+                    tool="send_message_to_thread",
+                    arguments={
+                        "threadId": steward.get("task_id"),
+                        "prompt": (
+                            "Resume as the existing Steward. Re-read durable Fulcrum "
+                            "state, then call wait_for_instructions and execute only "
+                            "the retained actions it returns."
+                        ),
+                    },
+                    purpose="recover_steward_loop",
+                    expected_result={"thread_id": steward.get("task_id")},
+                    reporting={"purpose": "same_steward_resumption"},
+                )
         completed = {
             **dict(operation),
             "state": "completed",
             "completed_at": _utc_now(),
             "accepted": accepted,
             "stale": stale,
+            "accepted_recoveries": accepted_recoveries,
+            "stale_recoveries": stale_recoveries,
         }
         system_protocol["marshal_decision"] = completed
         accepted_input = operation.get("accepted_input")
@@ -519,7 +850,18 @@ class DesktopLeadershipService(DesktopProtocolService):
                     + 1,
                     "completed_cycles": cycles[-20:],
                 }
-        value = {"decision": completed, "accepted": accepted, "stale": stale}
+        value = {
+            "decision": completed,
+            "accepted": accepted,
+            "stale": stale,
+            "accepted_recoveries": accepted_recoveries,
+            "stale_recoveries": stale_recoveries,
+            "recovery_action": (
+                self._action_response(request, recovery_action)
+                if recovery_action is not None
+                else None
+            ),
+        }
         _save_request(system_protocol, request, value, ledger=ledger)
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, system_protocol))
         self._write_event(

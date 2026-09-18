@@ -289,6 +289,15 @@ class HookService:
             observed = _validated_action_outcome(action, result, observed)
         except FulcrumError:
             observed = "uncertain"
+        from fulcrum.scenario_native_action import inject_result_fault
+
+        observed, result, scenario_fault = inject_result_fault(
+            request,
+            record_id=record.id,
+            action=action,
+            outcome=observed,
+            native_result=result,
+        )
         event_id = _event_id(request.input)
         DesktopProtocolService(ledger).report_action_result(
             replace(
@@ -306,6 +315,11 @@ class HookService:
                     "evidence": {
                         "post_hook_event_id": event_id,
                         "source": "PostToolUse",
+                        **(
+                            {"scenario_fault": copy.deepcopy(scenario_fault)}
+                            if scenario_fault is not None
+                            else {}
+                        ),
                     },
                     "native_result": copy.deepcopy(result),
                 },
@@ -642,7 +656,7 @@ class HookService:
         }
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
-        self._cancel_waits_for_terminal_events(ledger, task_id, page.lifecycle)
+        self._cancel_waits_for_terminal_events(ledger, request, task_id, page.lifecycle)
         task_usage = [
             value
             for value in usage.values()
@@ -665,6 +679,7 @@ class HookService:
     def _cancel_waits_for_terminal_events(
         self,
         ledger: Ledger,
+        request: ParsedRequest,
         task_id: str,
         lifecycle_events: tuple[Mapping[str, Any], ...],
     ) -> None:
@@ -686,6 +701,33 @@ class HookService:
             "turn_aborted",
             "interrupted",
         }
+        if interrupted:
+            system = ledger.show("fc-system")
+            if system is not None:
+                system_protocol = _protocol(system.fc or {})
+                standing = dict(system_protocol.get("standing") or {})
+                changed_standing = False
+                for role, binding in tuple(standing.items()):
+                    if (
+                        isinstance(binding, Mapping)
+                        and binding.get("task_id") == task_id
+                    ):
+                        standing[role] = {
+                            **dict(binding),
+                            "state": "interrupt_observed",
+                            "last_terminal_event": dict(terminal),
+                            "last_turn_ended_at": _utc_now(),
+                        }
+                        changed_standing = True
+                if changed_standing:
+                    system_protocol["standing"] = standing
+                    ledger.update_fc(
+                        system.id,
+                        _with_protocol(system.fc or {}, system_protocol),
+                    )
+            from fulcrum.scenario_native_action import record_steward_interruption
+
+            record_steward_interruption(request, task_id=task_id)
         for candidate in ledger.list_records(limit=0):
             protocol = _protocol(candidate.fc or {})
             changed = False

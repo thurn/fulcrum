@@ -1186,6 +1186,12 @@ class DesktopProtocolService:
             "stop_observed",
             "interrupt_observed",
         }:
+            if role == "steward":
+                raise FulcrumError(
+                    "STANDING_RECOVERY_REQUIRED",
+                    "the positively ended Steward must be resumed through its recorded recovery action",
+                    exit_code=5,
+                )
             revived = {
                 **dict(binding),
                 "state": "registered",
@@ -1562,6 +1568,107 @@ class DesktopProtocolService:
             exit_code=5,
         )
 
+    def _record_uncertain_native_action(
+        self,
+        ledger: Ledger,
+        record: LedgerRecord,
+        protocol: dict[str, Any],
+        action: dict[str, Any],
+    ) -> Mapping[str, Any] | None:
+        if action.get("purpose") not in {"routine_dispatch", "exceptional_recovery"}:
+            return None
+        assignment = protocol.get("assignment")
+        if isinstance(assignment, Mapping) and assignment.get(
+            "assignment_token"
+        ) == action.get("assignment_token"):
+            protocol["assignment"] = {
+                **dict(assignment),
+                "state": "uncertain",
+                "creation_action_id": action.get("action_id"),
+                "uncertain_at": _utc_now(),
+            }
+        incident_key = f"native-action:{action.get('action_id')}"
+        incidents = dict(protocol.get("incidents") or {})
+        retained = incidents.get(incident_key)
+        incident = (
+            dict(retained)
+            if isinstance(retained, Mapping)
+            else {
+                "incident_id": _opaque("incident"),
+                "incident_key": incident_key,
+                "repair_cycles": 0,
+                "justiciar_interventions": 0,
+            }
+        )
+        attempts = action.get("attempts") or []
+        attempt = attempts[-1] if attempts and isinstance(attempts[-1], Mapping) else {}
+        provider_truth = action.get("provider_truth")
+        incident.update(
+            {
+                "state": "open",
+                "scope": "uncertain native worker creation",
+                "required_decision": (
+                    "Reconcile provider truth for the exact retained creation action, "
+                    "then adopt the observed task or retry that same action only after "
+                    "definite absence."
+                ),
+                "action_id": action.get("action_id"),
+                "evidence": {
+                    "attempt_id": attempt.get("attempt_id"),
+                    "pre_hook_event_id": attempt.get("pre_hook_event_id"),
+                    "native_tool_use_id": attempt.get("native_tool_use_id"),
+                    "possible_task_locator": copy.deepcopy(
+                        action.get("possible_task_locator")
+                    ),
+                    "provider_truth": copy.deepcopy(provider_truth),
+                },
+                "updated_at": _utc_now(),
+            }
+        )
+        incidents[incident_key] = incident
+        protocol["incidents"] = incidents
+        action["recovery_incident_id"] = incident["incident_id"]
+        actions = dict(protocol.get("actions") or {})
+        actions[str(action["action_id"])] = action
+        protocol["actions"] = actions
+        purpose = f"incident_alert:{incident['incident_id']}"
+        existing_alert = next(
+            (
+                item
+                for item in actions.values()
+                if isinstance(item, Mapping)
+                and item.get("purpose") == purpose
+                and item.get("state") not in {"rejected", "superseded"}
+            ),
+            None,
+        )
+        if existing_alert is None:
+            system = self._system(ledger)
+            marshal = (_protocol(system.fc or {}).get("standing") or {}).get("marshal")
+            if isinstance(marshal, Mapping) and marshal.get("state") == "registered":
+                self._append_action(
+                    protocol,
+                    record_id=record.id,
+                    executor="steward",
+                    tool="send_message_to_thread",
+                    arguments={
+                        "threadId": marshal.get("task_id"),
+                        "prompt": (
+                            f"Fulcrum recovery incident {incident['incident_id']} affects "
+                            f"{record.id}, exact action {action['action_id']}. Run "
+                            "marshal_check and act only on its current retained facts."
+                        ),
+                    },
+                    purpose=purpose,
+                    expected_result={"thread_id": marshal.get("task_id")},
+                    reporting={
+                        "kind": "recorded_notification",
+                        "target": "marshal",
+                        "recovery_action_id": action.get("action_id"),
+                    },
+                )
+        return incident
+
     @coordinated
     def claim_action(self, request: ParsedRequest) -> CommandResult:
         ledger = self._ledger(request)
@@ -1647,6 +1754,40 @@ class DesktopProtocolService:
                 "attempt_id": attempt_id,
                 "invoke": True,
             }
+            from fulcrum.scenario_native_action import inject_claim_fault
+
+            scenario_fault = inject_claim_fault(
+                request, record_id=record.id, action=action
+            )
+            if scenario_fault is not None:
+                attempt = {
+                    **attempt,
+                    "state": "uncertain",
+                    "outcome": "uncertain",
+                    "completed_at": _utc_now(),
+                    "evidence": {"scenario_fault": copy.deepcopy(scenario_fault)},
+                }
+                action["attempts"][-1] = attempt
+                action["state"] = "uncertain"
+                action["completed_at"] = _utc_now()
+                action["scenario_fault"] = copy.deepcopy(scenario_fault)
+                action["provider_truth"] = copy.deepcopy(
+                    scenario_fault.get("provider_truth")
+                )
+                action["native_result"] = {
+                    "notInvoked": True,
+                    "scenarioFault": copy.deepcopy(scenario_fault),
+                }
+                actions[action_id] = action
+                protocol["actions"] = actions
+                self._record_uncertain_native_action(ledger, record, protocol, action)
+                value = {
+                    "action_id": action_id,
+                    "attempt_id": attempt_id,
+                    "invoke": False,
+                    "state": "uncertain",
+                    "fault": copy.deepcopy(scenario_fault),
+                }
         _save_request(protocol, request, value, ledger=ledger)
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         self._write_event(
@@ -1656,7 +1797,7 @@ class DesktopProtocolService:
             attempt_id=attempt_id,
             bead_id=None if record.id == "fc-system" else record.id,
             tool=action.get("tool"),
-            outcome="issuing",
+            outcome=value.get("state", "issuing"),
             invoke=value["invoke"],
         )
         return _result(request, value)
@@ -1800,6 +1941,8 @@ class DesktopProtocolService:
         normalized_outcome = _validated_action_outcome(
             action, request.input.get("native_result"), outcome
         )
+        if action.get("state") == "uncertain" and action.get("scenario_fault"):
+            normalized_outcome = "uncertain"
         if action["state"] != "issuing":
             if action["state"] != normalized_outcome:
                 raise FulcrumError(
@@ -1861,6 +2004,26 @@ class DesktopProtocolService:
         action["state"] = normalized_outcome
         action["completed_at"] = _utc_now()
         action["native_result"] = copy.deepcopy(request.input.get("native_result"))
+        native_result = request.input.get("native_result")
+        scenario_fault = (
+            native_result.get("scenarioFault")
+            if isinstance(native_result, Mapping)
+            and isinstance(native_result.get("scenarioFault"), Mapping)
+            else None
+        )
+        if isinstance(scenario_fault, Mapping):
+            action["scenario_fault"] = copy.deepcopy(dict(scenario_fault))
+            action["provider_truth"] = copy.deepcopy(
+                scenario_fault.get("provider_truth")
+            )
+        possible_locator = (
+            native_result.get("possibleTaskLocator")
+            if isinstance(native_result, Mapping)
+            and isinstance(native_result.get("possibleTaskLocator"), Mapping)
+            else None
+        )
+        if isinstance(possible_locator, Mapping):
+            action["possible_task_locator"] = copy.deepcopy(dict(possible_locator))
         client_task = _native_identifier(
             request.input.get("native_result"), "clientThreadId", "client_thread_id"
         )
@@ -1869,6 +2032,8 @@ class DesktopProtocolService:
         actions = dict(protocol.get("actions") or {})
         actions[action_id] = action
         protocol["actions"] = actions
+        if normalized_outcome == "uncertain":
+            self._record_uncertain_native_action(ledger, record, protocol, action)
         release_rejected_dispatch = (
             normalized_outcome == "rejected"
             and _release_rejected_dispatch(protocol, action)
@@ -2142,6 +2307,10 @@ class DesktopProtocolService:
                     "resume_action_id": action_id,
                 }
                 protocol["standing"] = standing
+        if normalized_outcome == "succeeded":
+            from fulcrum.scenario_native_action import record_alert_delivered
+
+            record_alert_delivered(request, action=action)
         value = {
             "action_id": action_id,
             "attempt_id": attempt_id,
@@ -2192,6 +2361,11 @@ class DesktopProtocolService:
             task_id = _native_identifier(
                 original.get("native_result"), "threadId", "thread_id", "id"
             )
+            possible_locator = original.get("possible_task_locator")
+            if not task_id and isinstance(possible_locator, Mapping):
+                task_id = _native_identifier(
+                    possible_locator, "threadId", "thread_id", "id"
+                )
             if not task_id and inspection.get("tool") == "list_threads":
                 locator: str | None = _native_identifier(
                     original.get("native_result"),
@@ -2241,7 +2415,12 @@ class DesktopProtocolService:
                 if isinstance(assignment, Mapping) and assignment.get(
                     "assignment_token"
                 ) == original.get("assignment_token"):
-                    protocol["assignment"] = {**dict(assignment), "task_id": task_id}
+                    protocol["assignment"] = {
+                        **dict(assignment),
+                        "task_id": task_id,
+                        "state": "issuing",
+                        "reconciled_at": _utc_now(),
+                    }
         if settled:
             original["state"] = "succeeded"
             original["reconciled_by"] = inspection.get("action_id")
@@ -2325,6 +2504,16 @@ class DesktopProtocolService:
                     continue
                 if original.get("executor") != "steward":
                     continue
+                from fulcrum.scenario_native_action import reconciliation_held
+
+                if reconciliation_held(request, action=original):
+                    continue
+                provider_truth = original.get("provider_truth")
+                if (
+                    isinstance(provider_truth, Mapping)
+                    and provider_truth.get("state") == "definitely_not_created"
+                ):
+                    continue
                 purpose = f"reconcile_action:{original.get('action_id')}"
                 if any(
                     isinstance(item, Mapping)
@@ -2336,13 +2525,27 @@ class DesktopProtocolService:
                 task_id = _native_identifier(
                     original.get("native_result"), "threadId", "thread_id", "id"
                 ) or str((original.get("arguments") or {}).get("threadId") or "")
+                possible_locator = original.get("possible_task_locator")
+                if not task_id and isinstance(possible_locator, Mapping):
+                    task_id = (
+                        _native_identifier(
+                            possible_locator, "threadId", "thread_id", "id"
+                        )
+                        or ""
+                    )
                 if not task_id:
                     locator = _native_identifier(
                         original.get("native_result"),
                         "clientThreadId",
                         "client_thread_id",
                     )
-                    if original.get("tool") != "create_thread" or not locator:
+                    if not locator and isinstance(possible_locator, Mapping):
+                        locator = _native_identifier(
+                            possible_locator,
+                            "clientThreadId",
+                            "client_thread_id",
+                        )
+                    if original.get("tool") != "create_thread":
                         continue
                     inspection = self._append_action(
                         protocol,
@@ -2891,12 +3094,26 @@ class DesktopProtocolService:
     @coordinated
     def wait_for_instructions(self, request: ParsedRequest) -> CommandResult:
         ledger = self._ledger(request)
-        binding = self._standing_actor(ledger, "steward", request)
         system = self._system(ledger)
         protocol = _protocol(system.fc or {})
         saved = _saved_request(protocol, request, ledger=ledger)
         if saved:
             return _replay(saved, request)
+        retained_wait = next(
+            (
+                value
+                for value in (protocol.get("instruction_waits") or {}).values()
+                if isinstance(value, Mapping)
+                and value.get("request_id") == _request_id(request)
+                and value.get("accepted_input") == _request_input(request)
+                and value.get("state") != "waiting"
+                and isinstance(value.get("response"), Mapping)
+            ),
+            None,
+        )
+        if isinstance(retained_wait, Mapping):
+            return _result(request, retained_wait["response"])
+        binding = self._standing_actor(ledger, "steward", request)
         loop_id = request.input.get("loop_id")
         turn_id = request.input.get("turn_id")
         if not isinstance(loop_id, str) or not loop_id:
