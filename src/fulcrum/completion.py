@@ -2031,6 +2031,7 @@ def settle_native_completion(
     )
     if released is not None:
         _release_recovery_slot(ledger, bead_id, released)
+        _wake_broker(request)
     return True
 
 
