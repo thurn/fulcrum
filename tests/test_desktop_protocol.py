@@ -890,6 +890,8 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert "task_id set to the exact CODEX_THREAD_ID" in prompt
     assert "session_id set to the exact CODEX_SESSION_ID" in prompt
     assert "nonempty top-level evidence" in prompt
+    assert "Copy assignment.assignment_token" in prompt
+    assert "never retype or reconstruct that token" in prompt
     assert arguments["title"] == "⚒️ [exe-cdf5657c] Add newline to README.md"
     assert arguments["model"] == "gpt-6-astra"
     assert arguments["thinking"] == "xhigh"
