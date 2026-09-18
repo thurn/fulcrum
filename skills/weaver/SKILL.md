@@ -14,8 +14,9 @@ enrolled, report that preflight blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
 operation. Entry binds this exact task and never creates a native task. It returns
-a durable `title_action`. Claim that exact action with `claim_action`, invoke its
-returned native `set_thread_title` action once, and rely on the hook to report the result.
+a durable `title_action`. Call `claim_action` with only its `record_id` and
+`action_id`, invoke the returned native `set_thread_title` action once, and rely
+on the hook to report the result. Do not search for command syntax.
 Investigate here, but do not implement the requested repository change. This
 boundary includes documentation, tests, configuration, and all repository files.
 

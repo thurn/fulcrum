@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from fulcrum.contracts import ActorContext, FulcrumError
 from fulcrum.completion import CompletionService
+from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.work import WorkService, _work_spec
 from tests.support import MemoryLedger, record, request
 
@@ -80,6 +81,23 @@ def test_weaver_entry_binds_invoking_task_without_native_creation():
     action = work.fc["desktop"]["actions"][payload["title_action"]["action_id"]]
     assert action["executor"] == "weaver"
     assert action["state"] == "pending"
+
+    ledger.rows["fc-system"] = record(
+        "fc-system", kind="system", desktop={"run_control": "active"}
+    )
+    claim = replace(
+        entered,
+        command=("action", "claim"),
+        arguments={
+            "record_id": payload["bead_id"],
+            "action_id": payload["title_action"]["action_id"],
+        },
+        input={"attempt_id": "title-attempt"},
+        ownership_operation=None,
+        request_id=str(uuid.uuid4()),
+    )
+    claimed = DesktopProtocolService(ledger).claim_action(claim)
+    assert claimed.result["invoke"] is True
 
     finished = replace(
         entered,

@@ -1419,7 +1419,17 @@ class DesktopProtocolService:
             self._standing_actor(ledger, executor, request)
             return
         if executor in WORKER_ROLES and record is not None:
-            assignment = self._authorize_work_actor(ledger, record, request)
+            authorized_request = request
+            if (
+                not request.input.get("assignment_token")
+                and not request.ownership_operation
+                and action.get("assignment_token")
+            ):
+                authorized_request = replace(
+                    request,
+                    ownership_operation=str(action["assignment_token"]),
+                )
+            assignment = self._authorize_work_actor(ledger, record, authorized_request)
             if (
                 not isinstance(assignment, Mapping)
                 or assignment.get("role") != executor
