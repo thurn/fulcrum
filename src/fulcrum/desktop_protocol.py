@@ -100,6 +100,43 @@ def _positive_native_completion(
     return False
 
 
+def _release_rejected_dispatch(
+    protocol: dict[str, Any], action: Mapping[str, Any]
+) -> bool:
+    if action.get("purpose") not in {"routine_dispatch", "exceptional_recovery"}:
+        return False
+    assignment = protocol.get("assignment")
+    if not (
+        isinstance(assignment, Mapping)
+        and assignment.get("assignment_token") == action.get("assignment_token")
+    ):
+        return False
+    retired = {
+        **dict(assignment),
+        "state": "dispatch_rejected",
+        "released_at": _utc_now(),
+        "release_reason": "native task creation was rejected",
+        "creation_action_id": action.get("action_id"),
+    }
+    history = list(protocol.get("assignment_history") or [])
+    history.append(retired)
+    protocol["assignment_history"] = history[-20:]
+    protocol.pop("assignment", None)
+    return True
+
+
+def _with_released_dispatch(
+    record: LedgerRecord, protocol: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        **_with_protocol(record.fc or {}, protocol),
+        "owner": "STEWARD",
+        "role": None,
+        "ownership_operation": None,
+        "next_action": "Retry downstream dispatch after the rejected native creation.",
+    }
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -1745,8 +1782,19 @@ class DesktopProtocolService:
                 "reservation_retained": action["state"] == "uncertain",
                 "converged": True,
             }
+            released = normalized_outcome == "rejected" and _release_rejected_dispatch(
+                protocol, action
+            )
             _save_request(protocol, request, value, ledger=ledger)
-            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            ledger.update_fc(
+                record.id,
+                (
+                    _with_released_dispatch(record, protocol)
+                    if released
+                    else _with_protocol(record.fc or {}, protocol)
+                ),
+                assignee="STEWARD" if released else None,
+            )
             return _result(request, value)
         attempt.update(
             {
@@ -1771,25 +1819,9 @@ class DesktopProtocolService:
         actions[action_id] = action
         protocol["actions"] = actions
         release_rejected_dispatch = (
-            action.get("purpose") in {"routine_dispatch", "exceptional_recovery"}
-            and normalized_outcome == "rejected"
+            normalized_outcome == "rejected"
+            and _release_rejected_dispatch(protocol, action)
         )
-        if release_rejected_dispatch:
-            assignment = protocol.get("assignment")
-            if isinstance(assignment, Mapping) and assignment.get(
-                "assignment_token"
-            ) == action.get("assignment_token"):
-                retired = {
-                    **dict(assignment),
-                    "state": "dispatch_rejected",
-                    "released_at": _utc_now(),
-                    "release_reason": "native task creation was rejected",
-                    "creation_action_id": action_id,
-                }
-                history = list(protocol.get("assignment_history") or [])
-                history.append(retired)
-                protocol["assignment_history"] = history[-20:]
-                protocol.pop("assignment", None)
         if action.get("purpose") in {
             "routine_dispatch",
             "exceptional_recovery",
@@ -2007,13 +2039,7 @@ class DesktopProtocolService:
         _save_request(protocol, request, value, ledger=ledger)
         updated_fc = _with_protocol(record.fc or {}, protocol)
         if release_rejected_dispatch:
-            updated_fc = {
-                **updated_fc,
-                "owner": "STEWARD",
-                "role": None,
-                "ownership_operation": None,
-                "next_action": "Retry downstream dispatch after the rejected native creation.",
-            }
+            updated_fc = _with_released_dispatch(record, protocol)
         ledger.update_fc(
             record.id,
             updated_fc,

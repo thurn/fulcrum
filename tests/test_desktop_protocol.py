@@ -279,6 +279,37 @@ def test_rejected_worker_creation_releases_assignment_for_retry():
     assert retained["role"] is None
     assert retained["ownership_operation"] is None
 
+    protocol["assignment"] = {
+        "assignment_token": "assignment-1",
+        "role": "warden",
+        "state": "reserved",
+    }
+    protocol["assignment_history"] = []
+    ledger.update_fc(
+        "fc-work",
+        {
+            **retained,
+            "desktop": protocol,
+            "role": "warden",
+            "ownership_operation": "assignment-1",
+        },
+    )
+    service.report_action_result(
+        mutation(
+            ("action", "result"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-work", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "dispatch-attempt",
+                "outcome": "rejected",
+                "native_result": {"isError": True},
+            },
+        )
+    )
+    repaired = ledger.show("fc-work").fc or {}
+    assert "assignment" not in repaired["desktop"]
+    assert repaired["desktop"]["assignment_history"][-1]["state"] == "dispatch_rejected"
+
 
 def test_automation_update_rejects_a_different_native_identity():
     service, ledger = registered_service()
