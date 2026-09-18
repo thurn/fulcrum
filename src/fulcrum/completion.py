@@ -736,7 +736,7 @@ class CompletionService:
             raise FulcrumError.invalid(
                 "INVALID_INPUT", "implementation_notes must be an array of strings"
             )
-        owner = _marshal_or_human(ledger)
+        owner = "STEWARD"
         operation, reused = ledger.create_operation(
             request,
             bead_id=work.id,
@@ -764,7 +764,7 @@ class CompletionService:
             "finish_operation": operation.id,
         }
         fc["owner"] = owner
-        fc["role"] = "marshal" if owner != "HUMAN" else None
+        fc["role"] = None
         fc["phase"] = "ready"
         fc["dispatch"] = None
         fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")

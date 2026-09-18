@@ -46,6 +46,48 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_session_only_hook_identity_binds_same_task_weaver(self):
+        ledger = MemoryLedger(
+            record(
+                "fc-work",
+                owner="weaver-1",
+                phase="working",
+                role="weaver",
+                desktop={
+                    "assignment": {
+                        "assignment_token": "operation-1",
+                        "role": "weaver",
+                        "task_id": "weaver-1",
+                        "session_id": None,
+                        "state": "active",
+                    }
+                },
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            path.write_text(
+                json.dumps({"type": "turn_context", "turn_id": "turn-1"}) + "\n"
+            )
+            HookService(ledger).handle(
+                replace(
+                    request(("hook", "handle")),
+                    input={
+                        "hook_event_name": "PostToolUse",
+                        "session_id": "weaver-1",
+                        "turn_id": "turn-1",
+                        "transcript_path": str(path),
+                        "tool_name": "mcp__fulcrum__enter_weaver",
+                        "tool_input": {},
+                        "tool_response": {},
+                    },
+                    request_id=str(uuid.uuid4()),
+                )
+            )
+        protocol = (ledger.show("fc-work").fc or {})["desktop"]
+        self.assertEqual(protocol["assignment"]["turn_id"], "turn-1")
+        self.assertIn("weaver-1", protocol["transcripts"])
+
     def test_unregistered_worker_is_blocked_then_released_on_stop(self):
         ledger = MemoryLedger(
             record(

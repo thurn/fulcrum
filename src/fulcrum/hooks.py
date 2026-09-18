@@ -91,7 +91,13 @@ class HookService:
         if bound is None:
             session_id = request.input.get("session_id")
             if isinstance(session_id, str) and session_id:
-                bound = _binding_for_session(ledger, session_id)
+                # Codex hook payloads expose the native thread identity as the
+                # session id, even when they omit thread_id/task_id. Same-task
+                # Weaver entry intentionally records that native thread as the
+                # assignment task before a session-bound hook has run.
+                bound = _binding_for_task(ledger, session_id)
+                if bound is None:
+                    bound = _binding_for_session(ledger, session_id)
                 if bound is not None:
                     task_id = _task_id_for_binding(bound)
         marker = _parse_marker(request.input)

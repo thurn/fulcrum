@@ -254,10 +254,11 @@ class DesktopLeadershipService(DesktopProtocolService):
                     and incident.get("state") != "resolved"
                 ):
                     incidents.append({"bead": record.id, **dict(incident)})
-            if record.status != "closed" and fc.get("phase") in {
-                "ready",
-                "implementation_ready",
-            }:
+            if (
+                record.status != "closed"
+                and fc.get("owner") == binding["task_id"]
+                and fc.get("phase") in {"ready", "implementation_ready"}
+            ):
                 ready.append(
                     {
                         "bead": record.id,
