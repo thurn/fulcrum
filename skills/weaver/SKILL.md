@@ -14,15 +14,17 @@ enrolled, report that preflight blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
 operation. Entry binds this exact task and never creates a native task. It returns
-a durable `title_action`. Call `claim_action` with only its `record_id` and
-`action_id`, invoke the returned native `set_thread_title` action once, and rely
-on the hook to report the result. Do not search for command syntax.
+a durable `title_action`. Call the Fulcrum MCP `claim_action` with its `record_id`,
+`action_id`, and this task's `CODEX_THREAD_ID` as `task_id`; invoke the returned
+native `set_thread_title` action once, and rely on the hook to report the result.
+Do not use the CLI for actions and do not search for command syntax.
 Investigate here, but do not implement the requested repository change. This
 boundary includes documentation, tests, configuration, and all repository files.
 
 Investigate only the human request retained by the bead. Never prepare, create, or
-inspect a Tollgate worktree; Fulcrum prepares it after `ready`. Call `finish` with
-a concise behavioral summary, nonempty acceptance, evidence, and optional
+inspect a Tollgate worktree; Fulcrum prepares it after `ready`. Call the Fulcrum
+MCP `finish` with the bead, ownership operation as `assignment_token`, outcome
+`ready`, a concise behavioral summary, nonempty acceptance, evidence, and optional
 implementation notes. Keep raw intake and transcript text out of those downstream
 fields: summarize the authorized behavior clearly, and quote only evidence an
 Executor or Warden truly needs. Implementation notes are non-binding hints.
