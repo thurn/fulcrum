@@ -219,6 +219,67 @@ def test_automation_success_accepts_native_result_without_target_but_rejects_con
     assert raised.exception.code == "RESULT_CONFLICT"
 
 
+def test_rejected_worker_creation_releases_assignment_for_retry():
+    work = record(
+        "fc-work",
+        owner="STEWARD",
+        phase="ready",
+        requested_role="warden",
+        role="warden",
+        ownership_operation="assignment-1",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-1",
+                "role": "warden",
+                "state": "reserved",
+            }
+        },
+    )
+    service, ledger = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    action = seed_action(
+        ledger,
+        {
+            "record_id": "fc-work",
+            "executor": "steward",
+            "tool": "create_thread",
+            "arguments": {
+                "prompt": "review",
+                "target": {"type": "project", "projectId": "project-1"},
+            },
+            "assignment_token": "assignment-1",
+            "purpose": "routine_dispatch",
+        },
+    )
+    service.claim_action(
+        mutation(
+            ("action", "claim"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-work", "action_id": action["action_id"]},
+            payload={"attempt_id": "dispatch-attempt"},
+        )
+    )
+    service.report_action_result(
+        mutation(
+            ("action", "result"),
+            actor="task:steward-1",
+            arguments={"record_id": "fc-work", "action_id": action["action_id"]},
+            payload={
+                "attempt_id": "dispatch-attempt",
+                "outcome": "rejected",
+                "native_result": {"isError": True},
+            },
+        )
+    )
+
+    retained = ledger.show("fc-work").fc or {}
+    protocol = retained["desktop"]
+    assert "assignment" not in protocol
+    assert protocol["assignment_history"][-1]["state"] == "dispatch_rejected"
+    assert retained["role"] is None
+    assert retained["ownership_operation"] is None
+
+
 def test_automation_update_rejects_a_different_native_identity():
     service, ledger = registered_service()
     service.resume(mutation(("resume",), payload={"reason": "test"}))

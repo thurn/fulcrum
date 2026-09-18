@@ -1770,6 +1770,26 @@ class DesktopProtocolService:
         actions = dict(protocol.get("actions") or {})
         actions[action_id] = action
         protocol["actions"] = actions
+        release_rejected_dispatch = (
+            action.get("purpose") in {"routine_dispatch", "exceptional_recovery"}
+            and normalized_outcome == "rejected"
+        )
+        if release_rejected_dispatch:
+            assignment = protocol.get("assignment")
+            if isinstance(assignment, Mapping) and assignment.get(
+                "assignment_token"
+            ) == action.get("assignment_token"):
+                retired = {
+                    **dict(assignment),
+                    "state": "dispatch_rejected",
+                    "released_at": _utc_now(),
+                    "release_reason": "native task creation was rejected",
+                    "creation_action_id": action_id,
+                }
+                history = list(protocol.get("assignment_history") or [])
+                history.append(retired)
+                protocol["assignment_history"] = history[-20:]
+                protocol.pop("assignment", None)
         if action.get("purpose") in {
             "routine_dispatch",
             "exceptional_recovery",
@@ -1985,7 +2005,20 @@ class DesktopProtocolService:
             "reservation_retained": normalized_outcome == "uncertain",
         }
         _save_request(protocol, request, value, ledger=ledger)
-        ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+        updated_fc = _with_protocol(record.fc or {}, protocol)
+        if release_rejected_dispatch:
+            updated_fc = {
+                **updated_fc,
+                "owner": "STEWARD",
+                "role": None,
+                "ownership_operation": None,
+                "next_action": "Retry downstream dispatch after the rejected native creation.",
+            }
+        ledger.update_fc(
+            record.id,
+            updated_fc,
+            assignee="STEWARD" if release_rejected_dispatch else None,
+        )
         self._write_event(
             request,
             "action_result_recorded",
@@ -2474,7 +2507,8 @@ class DesktopProtocolService:
             )
             if (
                 isinstance(prior, Mapping)
-                and prior.get("state") != "registration_failed"
+                and prior.get("state")
+                not in {"registration_failed", "dispatch_rejected"}
                 and not _positive_native_completion(protocol, prior)
             ):
                 continue
