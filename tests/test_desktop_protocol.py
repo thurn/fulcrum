@@ -82,6 +82,11 @@ def test_equal_action_claim_replays_without_authorizing_second_invocation():
     first = service.claim_action(claim)
     replay = service.claim_action(claim)
     assert first.result["invoke"] is True
+    assert first.result == {
+        "action_id": queued["action_id"],
+        "attempt_id": "attempt-1",
+        "invoke": True,
+    }
     assert replay.result == first.result
     changed = replace(claim, input={"attempt_id": "attempt-2"})
     try:

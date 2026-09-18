@@ -1615,7 +1615,7 @@ class DesktopProtocolService:
                     exit_code=5,
                 )
             value = {
-                "action": self._action_response(request, action),
+                "action_id": action_id,
                 "attempt_id": attempt_id,
                 "invoke": False,
             }
@@ -1640,7 +1640,7 @@ class DesktopProtocolService:
             actions[action_id] = action
             protocol["actions"] = actions
             value = {
-                "action": self._action_response(request, action),
+                "action_id": action_id,
                 "attempt_id": attempt_id,
                 "invoke": True,
             }
