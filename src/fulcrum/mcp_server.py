@@ -18,6 +18,7 @@ from fulcrum.broker import broker_request
 PROTOCOL_VERSION = "2025-06-18"
 
 TOOLS: dict[str, tuple[tuple[str, ...], dict[str, str]]] = {
+    "enter_weaver": (("enter", "weaver"), {}),
     "register_standing": (("register", "standing"), {}),
     "wait_for_instructions": (("instruction", "wait"), {}),
     "claim_action": (
@@ -69,6 +70,10 @@ CHECK_SCHEMA = {
 }
 
 TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
+    "enter_weaver": {
+        "description": {"type": "string"},
+        "bead": {"type": "string"},
+    },
     "register_standing": {
         "role": {
             "type": "string",
@@ -154,6 +159,7 @@ def _schema(name: str) -> dict[str, Any]:
         },
         "task_id": {"type": "string"},
         "host_id": {"type": "string"},
+        "project": {"type": "string"},
         "assignment_token": {"type": "string"},
         "input": {"type": "object", "additionalProperties": True},
     }
@@ -231,6 +237,7 @@ def _schema(name: str) -> dict[str, Any]:
                 "task_id",
                 "session_id",
             ],
+            "enter_weaver": ["description"],
             "register_worker": [],
             "marshal_decide": ["turn_id", "input"],
             "report_action_result": ["attempt_id", "outcome", "native_result"],
@@ -256,6 +263,11 @@ def _schema(name: str) -> dict[str, Any]:
 
 def tool_descriptions() -> list[dict[str, Any]]:
     descriptions = {
+        "enter_weaver": (
+            "Weaver only: create or resume one bead and bind this invoking native "
+            "task as its same-task Weaver. Pass only the human's requested work as "
+            "description, without the skill invocation or Markdown link."
+        ),
         "register_standing": (
             "Bind this standing task using its lowercase role and the action_id "
             "from the Fulcrum-Action marker. Supply this task's CODEX_THREAD_ID as "
@@ -337,6 +349,7 @@ class FreshCli:
         arguments = dict(supplied)
         request_id = arguments.pop("request_id", None)
         task_id = arguments.pop("task_id", None) or os.environ.get("CODEX_THREAD_ID")
+        project = arguments.pop("project", None)
         environment_task_id = os.environ.get("CODEX_THREAD_ID")
         supplied_task_id = supplied.get("task_id")
         if (
@@ -385,6 +398,8 @@ class FreshCli:
             argv.extend(("--request-id", str(uuid.uuid4())))
         if task_id:
             argv.extend(("--thread-id", str(task_id), "--actor", f"task:{task_id}"))
+        if project:
+            argv.extend(("--project", str(project)))
         if assignment_token:
             argv.extend(("--ownership-operation", str(assignment_token)))
         for field, flag in options.items():

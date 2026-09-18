@@ -924,6 +924,7 @@ possible to inspect and repair the installation without a working agent relay.
 | Interface | Contract |
 | --- | --- |
 | `bootstrap` / `register_standing` | Resume deterministic setup and bind the exact Steward/Marshal/Vizier task to its retained creation or recovery action. |
+| `enter_weaver` | Bind the invoking native task as the same-task Weaver and return its bead, ownership token, and exact title action without terminal stdin parsing. |
 | `wait_for_instructions` | Steward only: recover an outstanding response or select/reserve the next routine action; otherwise register a pending response without keeping policy code alive. |
 | `claim_action` / `report_action_result` | Authorize the named executor's one invocation and record its actual outcome. Hook and agent results share this validator. |
 | `marshal_check` / `marshal_decide` | Inspect health/incidents/backlog, own one bounded decision operation, and apply targeted current-state curation. No per-task permission is needed for ordinary ready dispatch. |

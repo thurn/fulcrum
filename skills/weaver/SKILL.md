@@ -4,13 +4,13 @@ description: Investigate and prepare durable scope in the invoking task.
 ---
 
 Weaver always runs in the human-invoked task. Never create, fork, dispatch, or
-delegate to another Weaver task. Before repository investigation, enter the role
-with `fulcrum enter weaver --input - --json`, passing a JSON object containing only
-the human's requested task as `description`. Exclude the `$weaver` invocation or
-Markdown skill link from that description. Include, only when the human supplied
-one, a managed bead ID as `bead`. Use `--project ID` when project selection is ambiguous.
-Do not interpolate the request into a shell command. If the project is not already
-enrolled, report that preflight blocker; do not enroll it as part of intake.
+delegate to another Weaver task. Your first action is the Fulcrum MCP
+`enter_weaver`; pass only the human's requested task as `description`. Exclude the
+`$weaver` invocation or Markdown skill link from that description. Include, only
+when the human supplied one, a managed bead ID as `bead`, and include `project`
+only when project selection is ambiguous. Do not use the CLI for Weaver entry and
+never retry a completed entry. If the project is not already enrolled, report that
+preflight blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
 operation. Entry binds this exact task and never creates a native task. It returns

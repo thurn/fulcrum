@@ -326,6 +326,22 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("task_id", required)
         self.assertNotIn("host_id", required)
 
+    async def test_weaver_entry_is_a_structured_mcp_invocation(self):
+        cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "weaver-task"}):
+            argv, stdin = cli.invocation(
+                "enter_weaver",
+                {
+                    "description": "Update README heading",
+                    "project": "fulcrum",
+                },
+            )
+
+        self.assertEqual(argv[:3], ["/fulcrum", "enter", "weaver"])
+        self.assertIn("task:weaver-task", argv)
+        self.assertEqual(argv[argv.index("--project") + 1], "fulcrum")
+        self.assertEqual(json.loads(stdin), {"description": "Update README heading"})
+
     def test_explicit_turn_identity_cannot_be_nullified_by_nested_input(self):
         cli = FreshCli(Path("/instance"), Path("/config"), Path("/fulcrum"))
         _, stdin = cli.invocation(
