@@ -279,6 +279,8 @@ def _worker_prompt(
     return (
         f"You are already in the Fulcrum {role.title()} task for {record.id}; do not "
         "create or delegate to another task. Your role is fixed for this assignment. "
+        "A source_thread_id in delegation metadata identifies the Steward and is "
+        "never this worker's identity; use only the exact CODEX_THREAD_ID as task_id. "
         "Before any Fulcrum or repository action, read only "
         "CODEX_THREAD_ID and CODEX_SESSION_ID from the environment. Your first "
         "Fulcrum call must be register_worker with bead "

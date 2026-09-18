@@ -1005,6 +1005,8 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     assert "Do not send a final answer before finish returns accepted" in prompt
     assert "already in the Fulcrum Warden task" in prompt
     assert "do not create or delegate to another task" in prompt
+    assert "source_thread_id in delegation metadata identifies the Steward" in prompt
+    assert "use only the exact CODEX_THREAD_ID as task_id" in prompt
 
 
 def test_warden_submission_derives_source_from_assigned_worktree():
