@@ -30,9 +30,9 @@ runs current committed Python policy in a fresh process.
 
 The local `master` branch in `~/fulcrum` is authoritative. Commit ordinary code,
 formula, documentation, or skill changes and the next operation observes them.
-Existing operations keep their pinned source and pending broker connections remain
-intact. Do not install, activate, restart, or wait for a remote push for ordinary
-edits. See [live iteration](docs/architecture/live-iteration.md).
+Fulcrum keeps active operations on their original source.
+Pending broker connections also remain intact. Do not install, activate, restart,
+or wait for a remote push for ordinary edits. See [live iteration](docs/architecture/live-iteration.md).
 
 ## Bootstrap
 
