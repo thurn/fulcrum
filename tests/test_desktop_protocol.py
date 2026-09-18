@@ -867,6 +867,42 @@ def test_stale_persisted_weaver_assignment_is_retired_and_archived():
     }
 
 
+def test_same_task_weaver_assignment_is_preserved():
+    work = record(
+        "fc-same-task-weaver",
+        owner="human-task",
+        phase="working",
+        requested_role="executor",
+        role="weaver",
+        ownership_operation="assignment-weaver",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-weaver",
+                "task_id": "human-task",
+                "role": "weaver",
+                "state": "active",
+                "capacity_class": "entry",
+                "entry_mode": "same_task",
+            }
+        },
+    )
+    service, ledger = registered_service(work)
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "preserve-weaver", "turn_id": "turn-preserve"},
+        )
+    )
+
+    assert result.result["transport_wait"]["state"] == "waiting"
+    retained = ledger.show("fc-same-task-weaver")
+    assert retained.assignee == "human-task"
+    assert retained.fc["desktop"]["assignment"] == work.fc["desktop"]["assignment"]
+    assert "assignment_history" not in retained.fc["desktop"]
+
+
 def test_assignment_releases_only_after_exact_native_completion():
     assignment = {
         "assignment_token": "assignment-1",
@@ -1248,6 +1284,9 @@ class DesktopProtocolTests(unittest.TestCase):
 
     def test_stale_weaver_assignment_is_retired(self):
         test_stale_persisted_weaver_assignment_is_retired_and_archived()
+
+    def test_same_task_weaver_assignment_is_preserved(self):
+        test_same_task_weaver_assignment_is_preserved()
 
     def test_native_completion_releases_assignment(self):
         test_assignment_releases_only_after_exact_native_completion()

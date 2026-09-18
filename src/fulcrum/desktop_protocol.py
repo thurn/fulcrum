@@ -2040,6 +2040,7 @@ class DesktopProtocolService:
                 record.id != "fc-system"
                 and isinstance(assignment, Mapping)
                 and assignment.get("role") == "weaver"
+                and assignment.get("entry_mode") != "same_task"
             ):
                 task_id = str(assignment.get("task_id") or "")
                 retired = {
