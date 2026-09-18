@@ -120,8 +120,9 @@ five trusted required hooks, broker socket, supported models/tools, transcript a
 accounting checks, an active one-minute Steward heartbeat targeted at the retained
 Steward, an active Marshal heartbeat targeted at the retained Marshal, and focused
 acceptance are recorded. The Steward heartbeat maintains one bounded blocking wait
-per turn so a completed or context-exhausted turn cannot strand ready work; it
-processes at most one native action before ending.
+per turn so a completed or context-exhausted turn cannot strand ready work. It
+processes at most eight native actions, returns to the blocking wait after every
+result, and ends on the first idle deadline or protocol stop.
 Record acceptance only from direct evidence:
 
 - `workspace_access`: each retained standing task has its reported workspace and

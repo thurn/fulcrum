@@ -63,10 +63,11 @@ the cause of repeated scheduling directly inspectable.
 
 The standing Steward keeps one blocking instruction wait alive. A one-minute
 thread heartbeat is the bounded continuity fallback when its prior model turn has
-ended; each heartbeat processes at most one authorized native action and then
-ends. It does not make policy decisions or replace event-driven wakeups. This
-prevents finite model context or an ordinary completed turn from stranding ready
-work while bounding recovery latency below the admission target.
+ended. Each heartbeat processes at most eight authorized native actions, returns
+to the blocking wait after every result, and ends on the first idle deadline or
+protocol stop. It does not make policy decisions or replace event-driven wakeups.
+This bounds turn context without letting scheduler cadence or background archival
+work strand foreground delivery.
 
 ## Coordination
 

@@ -66,6 +66,10 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert "immediately wait again" in actions["steward"]["arguments"]["prompt"]
         assert (
+            "at most eight returned actions"
+            in actions["steward"]["arguments"]["prompt"]
+        )
+        assert (
             "do not pass an input object" in actions["steward"]["arguments"]["prompt"]
         )
         assert (
@@ -168,7 +172,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert "scheduled Fulcrum heartbeat" in marshal_schedule["arguments"]["prompt"]
         assert "that exact task_id" in marshal_schedule["arguments"]["prompt"]
         assert steward_schedule["arguments"]["rrule"] == "FREQ=MINUTELY;INTERVAL=1"
-        assert "exactly one returned action" in steward_schedule["arguments"]["prompt"]
+        assert "up to eight returned actions" in steward_schedule["arguments"]["prompt"]
         for index, schedule in enumerate(schedules.values(), start=1):
             assert schedule["arguments"]["status"] == "ACTIVE"
             assert not schedule["arguments"]["prompt"].startswith("Fulcrum-Action:")
@@ -256,7 +260,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         assert steward_repair["arguments"]["targetThreadId"] == "steward-task"
         assert steward_repair["arguments"]["rrule"] == "FREQ=MINUTELY;INTERVAL=1"
-        assert "exactly one returned action" in steward_repair["arguments"]["prompt"]
+        assert "up to eight returned actions" in steward_repair["arguments"]["prompt"]
         service.claim_action(
             replace(
                 bootstrap_request(root),

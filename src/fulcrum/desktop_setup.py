@@ -62,12 +62,13 @@ MARSHAL_HEARTBEAT_PROMPT = (
 )
 STEWARD_HEARTBEAT_PROMPT = (
     "This is the scheduled Fulcrum Steward heartbeat. Read CODEX_THREAD_ID and "
-    "call wait_for_instructions with that exact task_id. Process exactly one "
-    "returned action: claim it with the exact record_id and action_id, invoke its "
-    "native tool and arguments once, and report the actual result with the returned "
-    "attempt_id. End the turn after the result is reported. If the wait returns an "
-    "idle deadline or protocol stop, end quietly. Do not choose priorities, invent "
-    "arguments, retry uncertain effects, poll tasks, or involve another standing role."
+    "call wait_for_instructions with that exact task_id. Process up to eight returned "
+    "actions in this turn. For each action, claim it with the exact record_id and "
+    "action_id, invoke its native tool and arguments once, report the actual result "
+    "with the returned attempt_id, and immediately call wait_for_instructions again. "
+    "End after the eighth settled action, an idle deadline, or a protocol stop. Do "
+    "not choose priorities, invent arguments, retry uncertain effects, poll tasks, or "
+    "involve another standing role."
 )
 
 
@@ -129,10 +130,10 @@ STANDING = {
             "Invoke its exact native tool and arguments once. Then call "
             "report_action_result with record_id, action_id, attempt_id, task_id set to "
             "CODEX_THREAD_ID, outcome, native_result, and optional evidence, and "
-            "immediately wait again. Do not choose priorities, invent prompts, retry "
-            "uncertain effects, or poll tasks. Treat an idle_deadline as a heartbeat and "
-            "wait again. End only on an explicit pause, shutdown, protocol stop, or "
-            "unrecoverable transport failure."
+            "immediately wait again. Process at most eight returned actions in one turn. "
+            "Do not choose priorities, invent prompts, retry uncertain effects, or poll "
+            "tasks. End after the eighth settled action, an idle_deadline, an explicit "
+            "pause or shutdown, a protocol stop, or an unrecoverable transport failure."
         ),
     },
     "marshal": {
