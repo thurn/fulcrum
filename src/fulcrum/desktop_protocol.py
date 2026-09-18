@@ -2815,17 +2815,28 @@ class DesktopProtocolService:
         recovered = self._recover_wait_grant(
             ledger, wait_id
         ) or self._recover_abandoned_wait_grant(ledger, waits, str(binding["task_id"]))
-        candidates = self._eligible_actions(
+        eligible = self._eligible_actions(
             ledger, paused=protocol.get("run_control", "paused") == "paused"
         )
-        if not candidates and protocol.get("run_control", "paused") != "paused":
-            lifecycle = self._compile_lifecycle_action(ledger, request)
-            if lifecycle is not None:
-                candidates = [lifecycle]
+        foreground = [
+            candidate
+            for candidate in eligible
+            if not str(candidate[1].get("purpose") or "").startswith("archive_task:")
+        ]
+        background = [
+            candidate for candidate in eligible if candidate not in foreground
+        ]
+        candidates = foreground
         if not candidates and protocol.get("run_control", "paused") != "paused":
             compiled = self._compile_ready_assignment(ledger, request)
             if compiled is not None:
                 candidates = [compiled]
+        if not candidates:
+            candidates = background
+        if not candidates and protocol.get("run_control", "paused") != "paused":
+            lifecycle = self._compile_lifecycle_action(ledger, request)
+            if lifecycle is not None:
+                candidates = [lifecycle]
         selected = recovered or (candidates[0] if candidates else None)
         if selected is None:
             deadline = datetime.fromisoformat(

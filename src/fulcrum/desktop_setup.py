@@ -511,7 +511,7 @@ class DesktopSetupService(DesktopProtocolService):
                     for action in actions.values()
                     if isinstance(action, Mapping)
                     and action.get("purpose") == f"recover_{role}"
-                    and action.get("state") not in {"rejected", "superseded"}
+                    and action.get("state") in {"pending", "issuing", "uncertain"}
                 ),
                 None,
             )

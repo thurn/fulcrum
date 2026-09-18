@@ -827,6 +827,25 @@ def test_ci_wait_repairs_terminal_candidate_with_stale_delivery():
 
 
 def test_steward_dispatches_executor_from_retained_worktree_path():
+    archived = record(
+        "fc-archived",
+        status="closed",
+        phase="done",
+        priority=0,
+        desktop={
+            "actions": {
+                "action-archive": {
+                    "action_id": "action-archive",
+                    "record_id": "fc-archived",
+                    "executor": "steward",
+                    "tool": "set_thread_archived",
+                    "arguments": {"threadId": "old-worker", "archived": True},
+                    "state": "pending",
+                    "purpose": "archive_task:old-worker",
+                }
+            }
+        },
+    )
     work = record(
         "fc-cdf5657c",
         phase="ready",
@@ -844,7 +863,7 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
             "finish_operation": "fc-op-scope",
         },
     )
-    service, _ = registered_service(work)
+    service, _ = registered_service(archived, work)
     service.resume(mutation(("resume",), payload={"reason": "acceptance"}))
     result = service.wait_for_instructions(
         mutation(
@@ -854,6 +873,7 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
         )
     )
     assert result.result["kind"] == "action"
+    assert result.result["action"]["record_id"] == "fc-cdf5657c"
     arguments = result.result["action"]["arguments"]
     prompt = arguments["prompt"]
     assert prompt.startswith("Fulcrum-Action:")

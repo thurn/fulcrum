@@ -230,6 +230,49 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         assert repairing.result["standing"]["marshal"]["state"] == "registered"
         assert "positively_completed_at" not in repairing.result["standing"]["marshal"]
 
+        system = service._ledger_override.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        actions = dict(desktop["actions"])
+        actions["old-recovery"] = {
+            "action_id": "old-recovery",
+            "record_id": "fc-system",
+            "executor": "bootstrap",
+            "tool": "create_thread",
+            "arguments": {"prompt": "old replacement"},
+            "state": "succeeded",
+            "purpose": "recover_steward",
+            "native_result": {"threadId": "steward-task"},
+        }
+        desktop["actions"] = actions
+        service._ledger_override.update_fc(
+            "fc-system", {**system.fc, "desktop": desktop}
+        )
+        replacing = service.bootstrap(
+            bootstrap_request(
+                root,
+                replacement={
+                    "role": "steward",
+                    "reason": "replace accumulated context",
+                    "confirmed_lost": True,
+                    "old_task_id": "steward-task",
+                    "termination_evidence": {
+                        "threadId": "steward-task",
+                        "status": "archived",
+                    },
+                },
+                **supplied,
+            )
+        )
+        recoveries = [
+            action
+            for action in replacing.result["pending_actions"]
+            if action["tool"] == "create_thread"
+            and action.get("reporting", {}).get("role") == "steward"
+        ]
+        assert len(recoveries) == 1
+        assert recoveries[0]["action_id"] != "old-recovery"
+        assert replacing.result["standing"]["steward"]["state"] == "replacement_pending"
+
 
 def test_bootstrap_preserves_unrelated_codex_configuration():
     with tempfile.TemporaryDirectory() as directory:

@@ -4,17 +4,18 @@ description: Investigate and prepare durable scope in the invoking task.
 ---
 
 Weaver always runs in the human-invoked task. Never create, fork, dispatch, or
-delegate to another Weaver task. After reading this file and before repository
-investigation, read `CODEX_THREAD_ID` from the environment. That value is this
-task's identity. A `source_thread_id` in delegation metadata names the parent and
-must never be used as this task's identity. Your first workflow action is the
-Fulcrum MCP `enter_weaver`; pass that exact `CODEX_THREAD_ID` as `task_id` and pass
-only the human's requested task as `description`. Exclude the `$weaver` invocation
-or Markdown skill link from that description. Include, only when the human
-supplied one, a managed bead ID as `bead`, and include `project` only when project
-selection is ambiguous. Do not use the CLI for Weaver entry and never retry a
-completed entry. If the project is not already enrolled, report that preflight
-blocker; do not enroll it as part of intake.
+delegate to another Weaver task. Load this file by itself: never combine reading
+the skill with a repository command. Immediately read only `CODEX_THREAD_ID` from
+the environment, then call the Fulcrum MCP `enter_weaver` before any repository
+inspection, status check, or other action. That environment value is this task's
+identity. A `source_thread_id` in delegation metadata names the parent and must
+never be used as this task's identity. Pass the exact `CODEX_THREAD_ID` as
+`task_id` and pass only the human's requested task as `description`. Exclude the
+`$weaver` invocation or Markdown skill link from that description. Include, only
+when the human supplied one, a managed bead ID as `bead`, and include `project`
+only when project selection is ambiguous. Do not use the CLI for Weaver entry and
+never retry a completed entry. If the project is not already enrolled, report
+that preflight blocker; do not enroll it as part of intake.
 
 Follow the returned instructions and keep the returned bead and ownership
 operation. Entry binds this exact task and never creates a native task. It returns
