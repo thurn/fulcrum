@@ -60,7 +60,22 @@ class HookTests(unittest.TestCase):
                         "task_id": "weaver-1",
                         "session_id": None,
                         "state": "active",
-                    }
+                    },
+                    "actions": {
+                        "action-title": {
+                            "action_id": "action-title",
+                            "record_id": "fc-work",
+                            "executor": "weaver",
+                            "tool": "set_thread_title",
+                            "arguments": {
+                                "threadId": "weaver-1",
+                                "title": "Weaver title",
+                            },
+                            "assignment_token": "operation-1",
+                            "state": "issuing",
+                            "attempts": [{"attempt_id": "attempt-title"}],
+                        }
+                    },
                 },
             )
         )
@@ -77,15 +92,25 @@ class HookTests(unittest.TestCase):
                         "session_id": "weaver-1",
                         "turn_id": "turn-1",
                         "transcript_path": str(path),
-                        "tool_name": "mcp__fulcrum__enter_weaver",
-                        "tool_input": {},
-                        "tool_response": {},
+                        "tool_name": "mcp__codex_app__set_thread_title",
+                        "tool_input": {
+                            "threadId": "weaver-1",
+                            "title": "Weaver title",
+                        },
+                        "tool_response": {
+                            "isError": False,
+                            "structuredContent": {
+                                "threadId": "weaver-1",
+                                "title": "Weaver title",
+                            },
+                        },
                     },
                     request_id=str(uuid.uuid4()),
                 )
             )
         protocol = (ledger.show("fc-work").fc or {})["desktop"]
         self.assertEqual(protocol["assignment"]["turn_id"], "turn-1")
+        self.assertEqual(protocol["actions"]["action-title"]["state"], "succeeded")
         self.assertIn("weaver-1", protocol["transcripts"])
 
     def test_unregistered_worker_is_blocked_then_released_on_stop(self):

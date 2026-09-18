@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from fulcrum.configuration import ConfigurationManager
-from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
+from fulcrum.contracts import ActorContext, CommandResult, FulcrumError, ParsedRequest
 from fulcrum.coordination import coordinated
 from fulcrum.desktop_protocol import (
     DesktopProtocolService,
@@ -103,6 +103,12 @@ class HookService:
         marker = _parse_marker(request.input)
         if bound is None and marker is not None:
             bound = _prospective_binding(ledger, request, marker)
+        if bound is not None and task_id and request.actor.task_id != task_id:
+            request = replace(
+                request,
+                actor=ActorContext(kind="task", task_id=task_id),
+                thread_id=task_id,
+            )
         response: dict[str, Any] = (
             {} if event_name == "PreToolUse" else {"continue": True}
         )
