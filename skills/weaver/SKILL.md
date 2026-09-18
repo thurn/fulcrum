@@ -33,9 +33,11 @@ Investigate only the human request retained by the bead. Never prepare, create, 
 inspect a Tollgate worktree; Fulcrum prepares it after `ready`. Call the Fulcrum
 MCP `finish` with the bead, ownership operation as `assignment_token`, outcome
 `ready`, a concise behavioral summary, nonempty acceptance, evidence, and optional
-implementation notes. Keep raw intake and transcript text out of those downstream
-fields: summarize the authorized behavior clearly, and quote only evidence an
-Executor or Warden truly needs. Implementation notes are non-binding hints.
+implementation notes. Pass `acceptance`, `evidence`, and `implementation_notes`
+as top-level lists of strings; omit `implementation_notes` instead of passing a
+scalar when there are no notes. Keep raw intake and transcript text out of those
+downstream fields: summarize the authorized behavior clearly, and quote only
+evidence an Executor or Warden truly needs. Implementation notes are non-binding hints.
 The `finish` arguments themselves must contain the top-level `acceptance` list;
 never send `checks` in its place and never nest `acceptance` under another object.
 For a low-risk, one-file mechanical request, use one focused repository inspection

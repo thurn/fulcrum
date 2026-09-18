@@ -25,6 +25,17 @@ class ProjectWeaverSkillTests(unittest.TestCase):
 
         self.assertNotIn("allow_implicit_invocation: false", manifest)
 
+    def test_weaver_finish_fields_have_explicit_list_shapes(self):
+        skill = (ROOT / ".agents" / "skills" / "weaver" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "`acceptance`, `evidence`, and `implementation_notes`\n"
+            "as top-level lists of strings",
+            skill,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
