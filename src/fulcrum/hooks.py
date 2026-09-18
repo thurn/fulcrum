@@ -495,6 +495,26 @@ class HookService:
                     paths.add(path)
         return sorted(paths)
 
+    @staticmethod
+    def active_assignment_paths(ledger: Ledger) -> list[str]:
+        """Return only transcript paths needed to observe active workers."""
+
+        paths: set[str] = set()
+        for record in ledger.list_records(limit=0):
+            protocol = _protocol(record.fc or {})
+            assignment = protocol.get("assignment")
+            transcripts = protocol.get("transcripts")
+            if not isinstance(assignment, Mapping) or not isinstance(
+                transcripts, Mapping
+            ):
+                continue
+            task_id = assignment.get("task_id")
+            retained = transcripts.get(task_id) if isinstance(task_id, str) else None
+            path = retained.get("path") if isinstance(retained, Mapping) else None
+            if isinstance(path, str) and Path(path).is_absolute():
+                paths.add(path)
+        return sorted(paths)
+
     def _collect_transcript_path(
         self,
         ledger: Ledger,

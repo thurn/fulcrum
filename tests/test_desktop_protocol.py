@@ -1177,11 +1177,14 @@ def test_assignment_releases_only_after_exact_native_completion():
     fc["desktop"] = desktop
     ledger.update_fc("fc-a", fc)
 
-    assert settle_native_completion(request(), ledger, "fc-a")
+    assert settle_native_completion(
+        replace(request(), input={"turn_id": "steward-wait-turn"}), ledger, "fc-a"
+    )
     settled = ledger.show("fc-a")
     settled_desktop = (settled.fc or {})["desktop"]
     assert "assignment" not in settled_desktop
     assert settled_desktop["assignment_history"][-1]["state"] == "finished"
+    assert settled_desktop["assignment_history"][-1]["turn_id"] == "turn-1"
 
 
 def test_assignment_history_uses_completing_native_turn():

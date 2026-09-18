@@ -197,6 +197,46 @@ class HookTests(unittest.TestCase):
 
         self.assertEqual(watched, [str(active)])
 
+    def test_active_assignment_paths_omit_completed_and_standing_tasks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            active = Path(directory) / "active.jsonl"
+            completed = Path(directory) / "completed.jsonl"
+            standing = Path(directory) / "standing.jsonl"
+            for path in (active, completed, standing):
+                path.write_text("", encoding="utf-8")
+            ledger = MemoryLedger(
+                record(
+                    "fc-system",
+                    kind="control",
+                    desktop={
+                        "standing": {"steward": {"task_id": "steward-1"}},
+                        "transcripts": {
+                            "steward-1": {"path": str(standing), "cursor": 0}
+                        },
+                    },
+                ),
+                record(
+                    "fc-active",
+                    desktop={
+                        "assignment": {"task_id": "worker-1", "state": "active"},
+                        "transcripts": {"worker-1": {"path": str(active), "cursor": 0}},
+                    },
+                ),
+                record(
+                    "fc-completed",
+                    desktop={
+                        "assignment_history": [{"task_id": "worker-old"}],
+                        "transcripts": {
+                            "worker-old": {"path": str(completed), "cursor": 0}
+                        },
+                    },
+                ),
+            )
+
+            watched = HookService.active_assignment_paths(ledger)
+
+        self.assertEqual(watched, [str(active)])
+
     def test_session_only_hook_identity_binds_same_task_weaver(self):
         ledger = MemoryLedger(
             record(

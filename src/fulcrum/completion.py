@@ -2022,7 +2022,10 @@ def settle_native_completion(
                 "Reconcile the retained cleanup operation; do not repeat an uncertain effect."
             )
             ledger.update_fc(bead_id, fc, status="in_progress")
-    native_turn_id = request.input.get("turn_id")
+    # Reconciliation often runs inside Steward's instruction-wait request. Its
+    # turn_id belongs to Steward, not to the worker being released. The worker's
+    # exact turn was already proven above and retained on the assignment.
+    native_turn_id = assignment.get("turn_id")
     released = _release_desktop_assignment(
         ledger,
         bead_id,

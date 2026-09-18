@@ -806,20 +806,12 @@ class DesktopProtocolService:
         ledger = self._ledger(request)
         from fulcrum.hooks import HookService
 
-        collected_paths = HookService.registered_paths(ledger)
+        collected_paths = HookService.active_assignment_paths(ledger)
         waits: list[dict[str, Any]] = []
         watch_paths: set[str] = set(collected_paths)
         reconciliation_errors: list[dict[str, str]] = []
         for record in ledger.list_records(limit=0):
             protocol = _protocol(record.fc or {})
-            transcripts = protocol.get("transcripts")
-            if isinstance(transcripts, Mapping):
-                for retained in transcripts.values():
-                    path = (
-                        retained.get("path") if isinstance(retained, Mapping) else None
-                    )
-                    if isinstance(path, str) and os.path.isabs(path):
-                        watch_paths.add(path)
             for collection, kind in (
                 (protocol.get("instruction_waits"), "instruction"),
                 (protocol.get("ci_waits"), "ci"),
