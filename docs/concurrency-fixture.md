@@ -1,1 +1,1 @@
-Entries: [Alpha]
+Entries: [Alpha, Beta]
