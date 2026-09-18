@@ -133,6 +133,7 @@ class LeadershipTests(unittest.TestCase):
                 ("marshal", "apply"),
                 actor="task:marshal-1",
                 payload={
+                    "turn_id": checked.result["decision"]["turn_id"],
                     "decision_id": checked.result["decision"]["decision_id"],
                     "decisions": [],
                 },
@@ -251,6 +252,73 @@ class LeadershipTests(unittest.TestCase):
             "marshal_decision_history"
         ]
         self.assertEqual(history[-1]["superseded_reason"], "next_serialized_heartbeat")
+
+    def test_heartbeat_decision_is_stable_when_transcript_observes_current_turn(self):
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["marshal_schedule"] = {
+            "state": "succeeded",
+            "status": "ACTIVE",
+            "automation_id": "marshal-check",
+            "target_task_id": "marshal-1",
+        }
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"trigger": "heartbeat"},
+            )
+        )
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        desktop["observations"] = {
+            "lifecycle": {
+                "current-turn": {
+                    "type": "turn_context",
+                    "task_id": "marshal-1",
+                    "turn_id": "newly-observed-native-turn",
+                }
+            }
+        }
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+
+        decided = self.service.marshal_decide(
+            call(
+                ("marshal", "apply"),
+                actor="task:marshal-1",
+                payload={
+                    "turn_id": checked.result["decision"]["turn_id"],
+                    "decision_id": checked.result["decision"]["decision_id"],
+                    "decisions": [],
+                },
+            )
+        )
+
+        self.assertEqual(decided.result["decision"]["state"], "completed")
+
+    def test_closed_work_does_not_enter_recovery_brief_or_block_steward(self):
+        self._seed_interrupted_creation(
+            provider_truth={"state": "created_response_lost", "invoked": True},
+            possible_task_locator={"threadId": "executor-1"},
+        )
+        work = self.ledger.show("fc-a")
+        self.ledger.update_fc("fc-a", work.fc, status="closed")
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-cleanup-turn"},
+            )
+        )
+
+        self.assertEqual(checked.result["brief"]["incidents"], [])
+        self.assertEqual(checked.result["brief"]["recoveries"], [])
+        self.assertEqual(
+            checked.result["brief"]["recovery_action"]["tool"],
+            "send_message_to_thread",
+        )
 
     def test_scheduled_marshal_delivery_uses_authenticated_request_identity_without_turn_hook(
         self,

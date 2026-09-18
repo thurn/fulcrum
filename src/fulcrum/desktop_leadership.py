@@ -276,7 +276,11 @@ class DesktopLeadershipService(DesktopProtocolService):
                     ledger.update_fc(
                         record.id, _with_protocol(record.fc or {}, desktop)
                     )
-            for incident in (desktop.get("incidents") or {}).values():
+            for incident in (
+                (desktop.get("incidents") or {}).values()
+                if record.status != "closed"
+                else ()
+            ):
                 if (
                     isinstance(incident, Mapping)
                     and incident.get("state") != "resolved"
@@ -373,6 +377,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             isinstance(action, Mapping)
             and action.get("state") in {"issuing", "uncertain"}
             for item in records
+            if item.status != "closed"
             for action in (
                 (_protocol(item.fc or {}).get("actions") or {}).values()
                 if isinstance(_protocol(item.fc or {}).get("actions"), Mapping)
@@ -539,7 +544,6 @@ class DesktopLeadershipService(DesktopProtocolService):
             from fulcrum.desktop_protocol import _replay
 
             return _replay(saved, request)
-        turn_id = _marshal_turn_id(system_protocol, binding, request)
         operation = system_protocol.get("marshal_decision")
         if not isinstance(operation, Mapping) or operation.get("state") != "active":
             raise FulcrumError(
@@ -547,6 +551,22 @@ class DesktopLeadershipService(DesktopProtocolService):
                 "Marshal has no active decision operation",
                 exit_code=5,
             )
+        accepted_input = operation.get("accepted_input")
+        accepted_payload = (
+            accepted_input.get("input") if isinstance(accepted_input, Mapping) else None
+        )
+        if (
+            isinstance(accepted_payload, Mapping)
+            and accepted_payload.get("trigger") == "heartbeat"
+        ):
+            supplied_turn = request.input.get("turn_id")
+            if not isinstance(supplied_turn, str) or not supplied_turn:
+                raise FulcrumError.invalid(
+                    "IDENTITY_REQUIRED", "Marshal turn_id must be a nonempty string"
+                )
+            turn_id = supplied_turn
+        else:
+            turn_id = _marshal_turn_id(system_protocol, binding, request)
         if request.input.get("decision_id") != operation.get("decision_id"):
             raise FulcrumError(
                 "STALE_DECISION", "decision operation changed", exit_code=5
@@ -833,6 +853,7 @@ class DesktopLeadershipService(DesktopProtocolService):
             isinstance(action, Mapping)
             and action.get("state") in {"issuing", "uncertain"}
             for candidate in ledger.list_records(limit=0)
+            if candidate.status != "closed"
             for action in (
                 (_protocol(candidate.fc or {}).get("actions") or {}).values()
                 if isinstance(_protocol(candidate.fc or {}).get("actions"), Mapping)
