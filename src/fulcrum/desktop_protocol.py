@@ -73,19 +73,22 @@ def _positive_native_completion(
         return False
     if not isinstance(turn_id, str) or not turn_id:
         return False
+    creation_placeholder = assignment.get("creation_action_id")
     for event in lifecycle.values():
         if not isinstance(event, Mapping) or event.get("task_id") != task_id:
             continue
         kind = event.get("type")
-        if (
-            kind
-            in {
-                "task_complete",
-                "task_completed",
-                "turn_complete",
-                "turn_completed",
-            }
-            and event.get("turn_id") == turn_id
+        if kind in {
+            "task_complete",
+            "task_completed",
+            "turn_complete",
+            "turn_completed",
+        } and (
+            event.get("turn_id") == turn_id
+            or (
+                isinstance(creation_placeholder, str)
+                and creation_placeholder == turn_id
+            )
         ):
             return True
     return False
@@ -2979,15 +2982,11 @@ class DesktopProtocolService:
                 "IDENTITY_REQUIRED", "worker registration requires the native task ID"
             )
         session_id = request.input.get("session_id") or task_id
-        turn_id = request.input.get("turn_id") or creation.get("action_id")
+        turn_id = request.input.get("turn_id")
         if not isinstance(session_id, str) or not session_id:
             raise FulcrumError.invalid(
                 "IDENTITY_REQUIRED",
                 "worker registration requires the native session ID",
-            )
-        if not isinstance(turn_id, str) or not turn_id:
-            raise FulcrumError.invalid(
-                "IDENTITY_REQUIRED", "worker registration requires the native turn ID"
             )
         if assignment.get("task_id") and assignment.get("task_id") != task_id:
             raise FulcrumError(

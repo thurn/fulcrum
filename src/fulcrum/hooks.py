@@ -307,9 +307,17 @@ class HookService:
         }
         assignment = protocol.get("assignment")
         if isinstance(assignment, Mapping):
+            observed_task = str(
+                request.input.get("thread_id")
+                or request.input.get("task_id")
+                or request.actor.task_id
+                or request.thread_id
+                or ""
+            )
             if (
-                assignment.get("entry_mode") == "same_task"
-                and not assignment.get("turn_id")
+                assignment.get("task_id") == observed_task
+                and assignment.get("turn_id")
+                in {None, assignment.get("creation_action_id")}
                 and event.get("turn_id")
             ):
                 assignment = {
@@ -463,8 +471,9 @@ class HookService:
         assignment = protocol.get("assignment")
         if (
             isinstance(assignment, Mapping)
-            and assignment.get("entry_mode") == "same_task"
-            and not assignment.get("turn_id")
+            and assignment.get("task_id") == task_id
+            and assignment.get("turn_id")
+            in {None, assignment.get("creation_action_id")}
         ):
             current_turn = next(
                 (

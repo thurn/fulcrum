@@ -814,7 +814,7 @@ def test_worker_registration_derives_native_identity_from_creation_result():
     assignment = result.result["assignment"]
     assert assignment["task_id"] == "worker-derived"
     assert assignment["session_id"] == "worker-derived"
-    assert assignment["turn_id"] == "action-derived"
+    assert assignment["turn_id"] is None
     assert assignment["host_id"] == "local"
     assert ledger.show("fc-derived").assignee == "worker-derived"
 
@@ -1054,6 +1054,39 @@ def test_assignment_history_uses_completing_native_turn():
         replace(request(), input={"turn_id": "turn-real"}), ledger, "fc-a"
     )
     assert "assignment_history" not in (ledger.show("fc-a").fc or {})["desktop"]
+
+
+def test_legacy_creation_action_turn_placeholder_settles_from_task_completion():
+    ledger = MemoryLedger(
+        record(
+            "fc-a",
+            owner="warden-1",
+            phase="awaiting_native_completion",
+            desktop={
+                "assignment": {
+                    "assignment_token": "assignment-1",
+                    "task_id": "warden-1",
+                    "turn_id": "action-create",
+                    "creation_action_id": "action-create",
+                    "role": "warden",
+                    "state": "active",
+                    "finish_operation": "fc-op-finish",
+                },
+                "observations": {
+                    "lifecycle": {
+                        "done": {
+                            "type": "task_complete",
+                            "task_id": "warden-1",
+                            "turn_id": "turn-real",
+                        }
+                    }
+                },
+            },
+        )
+    )
+
+    assert settle_native_completion(request(), ledger, "fc-a")
+    assert "assignment" not in (ledger.show("fc-a").fc or {})["desktop"]
 
 
 def test_recovery_slot_releases_after_finish_and_native_completion():
