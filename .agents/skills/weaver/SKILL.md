@@ -36,6 +36,8 @@ MCP `finish` with the bead, ownership operation as `assignment_token`, outcome
 implementation notes. Keep raw intake and transcript text out of those downstream
 fields: summarize the authorized behavior clearly, and quote only evidence an
 Executor or Warden truly needs. Implementation notes are non-binding hints.
+The `finish` arguments themselves must contain the top-level `acceptance` list;
+never send `checks` in its place and never nest `acceptance` under another object.
 For a low-risk, one-file mechanical request, use one focused repository inspection
 that confirms the target and affected references, then finish immediately. Do not
 run broad history searches, inspect unrelated files, or add process commentary.
