@@ -855,34 +855,13 @@ def _release_unregistered_assignment(
             "recovery": {
                 "assignment_released": True,
                 "capacity_released": True,
-                "task_archival_queued": True,
+                "task_archival_queued": False,
+                "task_archival_deferred_until_workflow_cleanup": True,
                 "automatic_retry_available": not exhausted,
             },
             "updated_at": _utc_now(),
         }
         protocol["incidents"] = incidents
-        actions = dict(protocol.get("actions") or {})
-        purpose = f"archive_unregistered_task:{task_id}"
-        if not any(
-            isinstance(value, Mapping) and value.get("purpose") == purpose
-            for value in actions.values()
-        ):
-            action_id = f"action-{uuid.uuid4()}"
-            actions[action_id] = {
-                "action_id": action_id,
-                "record_id": record.id,
-                "executor": "steward",
-                "tool": "set_thread_archived",
-                "arguments": {"threadId": task_id, "archived": True},
-                "expected_result": {"threadId": task_id, "archived": True},
-                "reporting": {"registration_failure": True},
-                "assignment_token": assignment.get("assignment_token"),
-                "state": "pending",
-                "attempts": [],
-                "created_at": _utc_now(),
-                "purpose": purpose,
-            }
-        protocol["actions"] = actions
         fc.update(
             {
                 "desktop": protocol,
@@ -892,7 +871,7 @@ def _release_unregistered_assignment(
                 "next_action": (
                     "Inspect repeated worker startup failures before authorizing another dispatch."
                     if exhausted
-                    else "Archive the unregistered task, then retry downstream dispatch once."
+                    else "Retry downstream dispatch once; archive the failed task during normal workflow cleanup."
                 ),
             }
         )

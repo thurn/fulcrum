@@ -240,8 +240,9 @@ def _worker_prompt(
         ),
     }.get(role, "Complete only the authorized contract, then finish and end the turn.")
     return (
-        f"You are the Fulcrum {role.title()} for {record.id}. Your role is fixed for "
-        "this assignment. Before any Fulcrum or repository action, read only "
+        f"You are already in the Fulcrum {role.title()} task for {record.id}; do not "
+        "create or delegate to another task. Your role is fixed for this assignment. "
+        "Before any Fulcrum or repository action, read only "
         "CODEX_THREAD_ID and CODEX_SESSION_ID from the environment. Your first "
         "Fulcrum call must be register_worker with bead "
         f"`{record.id}`, assignment_token `{assignment_token}`, task_id set to the exact "

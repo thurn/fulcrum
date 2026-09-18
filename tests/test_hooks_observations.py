@@ -496,12 +496,16 @@ class HookTests(unittest.TestCase):
             protocol["assignment_history"][-1]["state"], "registration_failed"
         )
         self.assertEqual(retained["owner"], "STEWARD")
-        archival = next(
-            value
-            for value in protocol["actions"].values()
-            if value.get("purpose") == "archive_unregistered_task:worker-1"
+        self.assertFalse(
+            any(
+                value.get("purpose") == "archive_unregistered_task:worker-1"
+                for value in protocol["actions"].values()
+            )
         )
-        self.assertEqual(archival["tool"], "set_thread_archived")
+        incident = protocol["incidents"]["registration:assignment-1"]
+        self.assertTrue(
+            incident["recovery"]["task_archival_deferred_until_workflow_cleanup"]
+        )
 
         work = ledger.show("fc-work")
         fc = dict(work.fc or {})
