@@ -227,7 +227,11 @@ def _worker_prompt(
             "yourself; submit_candidate runs it, then wait_for_ci_results returns "
             "the retained result. If validation fails, repair the real failure, "
             "squash the complete task tree to one commit, resubmit, and wait again. "
-            "After finish accepts approved, end the turn without further actions."
+            "A passing wait_for_ci_results response is not completion. Your next and "
+            "final tool call after a passing result must be finish with outcome "
+            "approved and the exact submitted source. Do not send a final answer "
+            "before finish returns accepted. After finish accepts approved, end the "
+            "turn without further actions."
         ),
     }.get(role, "Complete only the authorized contract, then finish and end the turn.")
     return (

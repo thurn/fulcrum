@@ -48,6 +48,16 @@ MANAGED_NATIVE_TOOLS = {
 }
 
 
+def _discover_native_transcript(task_id: str) -> str | None:
+    """Locate one local Codex transcript by its retained native task identity."""
+
+    codex_root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    matches = list((codex_root / "sessions").glob(f"*/*/*/*{task_id}.jsonl"))
+    if len(matches) != 1:
+        return None
+    return str(matches[0].resolve(strict=False))
+
+
 class HookService:
     def __init__(self, ledger: Ledger | None = None) -> None:
         self._ledger_override = ledger
@@ -453,20 +463,21 @@ class HookService:
         for record in ledger.list_records(limit=0):
             protocol = _protocol(record.fc or {})
             transcripts = protocol.get("transcripts")
-            if not isinstance(transcripts, Mapping):
-                continue
             assignment = protocol.get("assignment")
             if not isinstance(assignment, Mapping):
                 continue
             task_id = assignment.get("task_id")
-            retained = transcripts.get(task_id) if isinstance(task_id, str) else None
+            retained = (
+                transcripts.get(task_id)
+                if isinstance(transcripts, Mapping) and isinstance(task_id, str)
+                else None
+            )
             transcript = retained.get("path") if isinstance(retained, Mapping) else None
-            if (
-                not isinstance(task_id, str)
-                or not task_id
-                or not isinstance(transcript, str)
-                or not Path(transcript).is_absolute()
-            ):
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            if not isinstance(transcript, str) or not Path(transcript).is_absolute():
+                transcript = _discover_native_transcript(task_id)
+            if transcript is None:
                 continue
             paths.add(transcript)
             self._collect_transcript_path(
@@ -504,13 +515,19 @@ class HookService:
             protocol = _protocol(record.fc or {})
             assignment = protocol.get("assignment")
             transcripts = protocol.get("transcripts")
-            if not isinstance(assignment, Mapping) or not isinstance(
-                transcripts, Mapping
-            ):
+            if not isinstance(assignment, Mapping):
                 continue
             task_id = assignment.get("task_id")
-            retained = transcripts.get(task_id) if isinstance(task_id, str) else None
+            retained = (
+                transcripts.get(task_id)
+                if isinstance(transcripts, Mapping) and isinstance(task_id, str)
+                else None
+            )
             path = retained.get("path") if isinstance(retained, Mapping) else None
+            if isinstance(task_id, str) and (
+                not isinstance(path, str) or not Path(path).is_absolute()
+            ):
+                path = _discover_native_transcript(task_id)
             if isinstance(path, str) and Path(path).is_absolute():
                 paths.add(path)
         return sorted(paths)

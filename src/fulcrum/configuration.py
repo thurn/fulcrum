@@ -34,7 +34,7 @@ ROLES: tuple[str, ...] = (
     "mason",
     "justiciar",
 )
-EFFORTS: set[str] = {"low", "medium", "high", "xhigh", "max", "ultra"}
+EFFORTS: set[str] = {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 TOP_LEVEL: set[str] = {
     "delivery",
     "beads",

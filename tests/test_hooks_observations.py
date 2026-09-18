@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext
 from fulcrum.desktop_protocol import DesktopProtocolService
@@ -196,6 +197,61 @@ class HookTests(unittest.TestCase):
             watched = HookService(ledger).collect_active_assignments(request())
 
         self.assertEqual(watched, [str(active)])
+
+    def test_active_assignment_discovers_missing_native_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = (
+                Path(directory)
+                / ".codex"
+                / "sessions"
+                / "2026"
+                / "09"
+                / "18"
+                / "rollout-worker-native.jsonl"
+            )
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-09-18T00:00:00Z",
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "turn_id": "native-turn",
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            ledger = MemoryLedger(
+                record(
+                    "fc-work",
+                    owner="worker-native",
+                    phase="reviewing",
+                    role="warden",
+                    ownership_operation="assignment-1",
+                    desktop={
+                        "assignment": {
+                            "assignment_token": "assignment-1",
+                            "role": "warden",
+                            "task_id": "worker-native",
+                            "turn_id": None,
+                            "state": "active",
+                            "finish_operation": "finish-1",
+                        }
+                    },
+                )
+            )
+
+            with patch("fulcrum.hooks.Path.home", return_value=Path(directory)):
+                watched = HookService(ledger).collect_active_assignments(request())
+
+        retained = ledger.show("fc-work")
+        protocol = (retained.fc or {})["desktop"]
+        self.assertEqual(watched, [str(transcript.resolve())])
+        self.assertNotIn("assignment", protocol)
+        self.assertEqual(protocol["assignment_history"][-1]["turn_id"], "native-turn")
 
     def test_active_assignment_paths_omit_completed_and_standing_tasks(self):
         with tempfile.TemporaryDirectory() as directory:

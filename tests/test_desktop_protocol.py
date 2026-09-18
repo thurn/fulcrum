@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError
 from fulcrum.completion import settle_native_completion
-from fulcrum.desktop_protocol import DesktopProtocolService, role_title
+from fulcrum.desktop_protocol import DesktopProtocolService, _worker_prompt, role_title
 from tests.support import (
     MemoryLedger,
     observe_action_prompt,
@@ -871,6 +871,18 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert arguments["model"] == "gpt-6-astra"
     assert arguments["thinking"] == "xhigh"
     assert "$weaver" not in role_title("executor", "fc-a", "$weaver `run`")
+
+
+def test_warden_prompt_requires_finish_after_passing_ci():
+    prompt = _worker_prompt(
+        role="warden",
+        record=record("fc-review"),
+        assignment_token="assignment-review",
+    )
+
+    assert "passing wait_for_ci_results response is not completion" in prompt
+    assert "must be finish with outcome approved" in prompt
+    assert "Do not send a final answer before finish returns accepted" in prompt
 
 
 def test_released_same_task_weaver_does_not_block_executor_dispatch():
