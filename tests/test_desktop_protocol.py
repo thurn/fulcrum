@@ -1039,13 +1039,15 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     assert "passing wait_for_ci_results response is not completion" in prompt
     assert "derives the exact current HEAD" in prompt
     assert "do not supply or retype a source OID" in prompt
+    assert "Do not run Git commands that modify repository state" in prompt
+    assert "submit_candidate with repair_confirmed=true" in prompt
+    assert "Fulcrum amends the task commit" in prompt
     assert "Copy candidate.candidate_id" in prompt
     assert "retain both the current-release outcome and this bead's outcome" in prompt
-    assert "Git rerere may silently populate a resolved file" in prompt
     assert "retain the ordered union of both sides" in prompt
-    assert "inspect the actual file before editing" in prompt
+    assert "inspect the actual file and both git-show versions before editing" in prompt
     assert "make exactly one resolving edit" in prompt
-    assert "one commit atop the current retained base" in prompt
+    assert "one task commit atop the current retained base" in prompt
     assert "must be finish with outcome approved" in prompt
     assert "a nonempty top-level evidence array" in prompt
     assert "and nonempty checks" in prompt
@@ -1072,8 +1074,15 @@ def test_warden_submission_derives_source_from_assigned_worktree():
     source = "a" * 40
     with (
         patch(
-            "fulcrum.delivery_service.DeliveryService.worktree_inspect",
-            return_value=CommandResult.query({"workspace": {"head_oid": source}}),
+            "fulcrum.delivery_service.DeliveryService.candidate_seal",
+            return_value=CommandResult.query(
+                {
+                    "seal": {
+                        "state": "ready",
+                        "workspace": {"head_oid": source},
+                    }
+                }
+            ),
         ),
         patch(
             "fulcrum.delivery_service.DeliveryService.validation_start",
@@ -1092,6 +1101,34 @@ def test_warden_submission_derives_source_from_assigned_worktree():
     submitted = validation_start.call_args.args[0]
     assert submitted.arguments == {"bead": "fc-review", "source": source}
     assert result.result["candidate"]["source"] == source
+
+
+def test_passing_repair_retains_the_consumed_repair_cycle():
+    work = record("fc-review")
+    ledger = MemoryLedger(work)
+    service = DesktopProtocolService(ledger)
+    protocol = {
+        "incidents": {
+            "ci-validation": {
+                "incident_id": "incident-1",
+                "incident_key": "ci-validation",
+                "state": "open",
+                "repair_cycles": 0,
+            }
+        }
+    }
+
+    service._record_candidate_outcome(
+        ledger,
+        work,
+        protocol,
+        {"repair_cycle": 1},
+        "passed",
+    )
+
+    incident = protocol["incidents"]["ci-validation"]
+    assert incident["state"] == "resolved"
+    assert incident["repair_cycles"] == 1
 
 
 def test_released_same_task_weaver_does_not_block_executor_dispatch():

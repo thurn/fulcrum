@@ -100,6 +100,65 @@ class DeliveryService:
         )
 
     @coordinated
+    def candidate_seal(self, request: ParsedRequest) -> CommandResult:
+        ledger, work, project, provider = _context(request)
+        _authorize_warden(ledger, request, work)
+        require_run_control(ledger, "candidate source sealing")
+        reference = _work_ref(request, work, project, _workspace_operation(work))
+        operation, reused = ledger.create_operation(
+            request,
+            bead_id=work.id,
+            planned={
+                "work": reference.to_dict(),
+                "repair_confirmed": bool(request.input.get("repair_confirmed")),
+            },
+            next_action=(
+                "Seal the exact assigned Warden tree as one commit or prepare its "
+                "retained-base conflict for explicit repair."
+            ),
+        )
+        if reused and operation.operation.get("state") in TERMINAL_STATES:
+            return _operation_result(operation)
+        try:
+            with external_effect():
+                facts = _call(
+                    provider.seal_candidate(
+                        reference,
+                        repair_confirmed=bool(request.input.get("repair_confirmed")),
+                    )
+                )
+        except DeliveryProviderError as error:
+            return _failed_operation(ledger, operation, error, "candidate_seal")
+        _retain_workspace(
+            ledger,
+            work,
+            reference,
+            facts.workspace,
+            reference.operation_id,
+            transition_id=operation.id,
+        )
+        result = {"seal": facts.to_dict()}
+        operation = ledger.update_operation(
+            operation.id,
+            state="completed",
+            step=(
+                "candidate_source_ready"
+                if facts.state == "ready"
+                else "candidate_source_repair_required"
+            ),
+            result=result,
+            next_action=(
+                "Submit the exact sealed source for validation."
+                if facts.state == "ready"
+                else (
+                    "Resolve only the returned conflict paths in the assigned "
+                    "worktree, then resubmit with repair_confirmed=true."
+                )
+            ),
+        )
+        return _operation_result(operation)
+
+    @coordinated
     def worktree_cleanup(self, request: ParsedRequest) -> CommandResult:
         ledger, work, project, provider = _context(request)
         _authorize(ledger, request, work)
@@ -791,16 +850,20 @@ def _retain_workspace(
     reference: WorkRef,
     facts: WorkspaceFacts,
     operation_id: str,
+    *,
+    transition_id: str | None = None,
 ) -> None:
     current = ledger.show(work.id)
     assert current is not None and current.fc
     fc = dict(current.fc)
+    previous = fc.get("worktree")
     fc["worktree"] = {
+        **(dict(previous) if isinstance(previous, Mapping) else {}),
         **facts.to_dict(),
         "operation_id": operation_id,
         "intended_path": reference.intended_path,
     }
-    fc["last_transition"] = operation_id
+    fc["last_transition"] = transition_id or operation_id
     ledger.update_fc(work.id, fc)
 
 

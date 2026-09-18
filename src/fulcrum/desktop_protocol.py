@@ -43,6 +43,7 @@ WAIT_STATES = {"waiting", "resolved", "cancelled", "expired"}
 STANDING_ROLES = {"steward", "marshal", "vizier"}
 WORKER_ROLES = {"weaver", "executor", "warden", "sage", "mason", "justiciar"}
 DISPATCHABLE_ROLES = {"executor", "warden", "sage", "mason", "justiciar"}
+CANDIDATE_SEAL_NAMESPACE = uuid.UUID("f86ebec8-eacc-45ff-8d4f-7b0981328379")
 ROLE_TITLES: Mapping[str, tuple[str, str]] = {
     "weaver": ("🧵", "wvr"),
     "executor": ("⚒️", "exe"),
@@ -263,10 +264,12 @@ def _worker_prompt(
         "warden": (
             "Perform a concise independent review. Before the first submission, "
             "ensure the complete candidate is exactly one task commit atop the "
-            "current release. Do not run the project-wide configured validation "
-            "yourself; submit_candidate derives the exact current HEAD from the "
-            "assigned worktree and runs validation, so do not supply or retype a "
-            "source OID. wait_for_ci_results returns the retained result. Copy "
+            "current release. Do not run Git commands that modify repository state, "
+            "including add, commit, rebase, reset, or checkout. Do not run the "
+            "project-wide configured validation yourself; submit_candidate seals "
+            "dirty repairs into the single task commit, reconciles the retained base, "
+            "derives the exact current HEAD, and runs validation, so do not supply or "
+            "retype a source OID. wait_for_ci_results returns the retained result. Copy "
             "candidate.candidate_id from the "
             "submit_candidate result exactly into wait_for_ci_results; never "
             "retype or reconstruct that identifier. If validation fails, repair the real failure, "
@@ -277,12 +280,15 @@ def _worker_prompt(
             "wording. Git rerere may silently populate a resolved file, so read both versions "
             "directly with git show and deliberately synthesize their compatible union. For a "
             "bracketed list, retain the ordered union of both sides and verify the diff against "
-            "the current release removes no current-release entry. After a rebase reports a "
-            "rerere resolution, inspect the actual file before editing; never assume conflict "
-            "markers remain. For a one-file conflict, combine the status, both git-show reads, "
-            "and current-file inspection in one command, make exactly one resolving edit, then "
-            "stage, continue, verify, and resubmit without redundant probes. Squash the complete task "
-            "tree to one commit atop the current retained base, resubmit, and wait again. "
+            "the current release removes no current-release entry. After a merge-conflict result, "
+            "call submit_candidate once without repair_confirmed so Fulcrum prepares the retained "
+            "rebase. If it returns source_repair.state=repair_required, inspect the actual file and "
+            "both git-show versions before editing; never assume conflict markers remain. For a one-file conflict, "
+            "combine those reads in one command, make exactly one resolving edit, then call "
+            "submit_candidate with repair_confirmed=true. Fulcrum stages and continues the rebase, "
+            "verifies exactly one task commit atop the current retained base, and submits without redundant probes. For ordinary "
+            "CI repair, edit the instructed files and call submit_candidate normally; Fulcrum amends "
+            "the task commit. Then wait again. "
             "A passing wait_for_ci_results response is not completion. Your next and "
             "final tool call after a passing result must be finish with outcome "
             "approved, the exact submitted source, a nonempty top-level evidence "
@@ -1062,6 +1068,10 @@ class DesktopProtocolService:
         )
         if state == "passed":
             if existing is not None:
+                incident["repair_cycles"] = max(
+                    int(incident.get("repair_cycles", 0)),
+                    int(candidate.get("repair_cycle") or 0),
+                )
                 incident["state"] = "resolved"
                 incident["resolved_at"] = _utc_now()
                 incident["repair_hold"] = False
@@ -3383,15 +3393,44 @@ class DesktopProtocolService:
             )
         from fulcrum.delivery_service import DeliveryService
 
-        inspected = DeliveryService().worktree_inspect(
+        sealed = DeliveryService().candidate_seal(
             replace(
                 request,
-                command=("worktree", "inspect"),
+                command=("candidate", "seal"),
                 arguments={"bead": bead_id},
-                input={},
+                input={"repair_confirmed": bool(request.input.get("repair_confirmed"))},
+                request_id=str(
+                    uuid.uuid5(
+                        CANDIDATE_SEAL_NAMESPACE,
+                        f"{request.request_id}:candidate-seal",
+                    )
+                ),
             )
         )
-        workspace = inspected.result.get("workspace")
+        if sealed.state is not CommandState.COMPLETED:
+            raise FulcrumError(
+                "SOURCE_NOT_READY",
+                "Fulcrum could not seal the assigned candidate source",
+                exit_code=5,
+                details={
+                    "seal_operation": sealed.operation_id,
+                    "result": sealed.result,
+                },
+            )
+        seal = sealed.result.get("seal")
+        if not isinstance(seal, Mapping):
+            raise FulcrumError(
+                "SOURCE_NOT_READY",
+                "candidate sealing did not return exact workspace facts",
+                exit_code=5,
+            )
+        if seal.get("state") == "repair_required":
+            value = {"source_repair": copy.deepcopy(dict(seal))}
+            _save_request(protocol, request, value, ledger=ledger)
+            current = self._record(ledger, bead_id)
+            ledger.update_fc(current.id, _with_protocol(current.fc or {}, protocol))
+            return _result(request, value)
+        workspace = seal.get("workspace")
         source = workspace.get("head_oid") if isinstance(workspace, Mapping) else None
         if not isinstance(source, str) or not source:
             raise FulcrumError.invalid(

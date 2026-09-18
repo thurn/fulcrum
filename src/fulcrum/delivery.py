@@ -104,6 +104,17 @@ class WorkspaceFacts:
 
 
 @dataclass(frozen=True)
+class CandidateSealFacts:
+    state: str
+    workspace: WorkspaceFacts
+    operations: tuple[str, ...]
+    conflict_paths: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return _json_dict(asdict(self))
+
+
+@dataclass(frozen=True)
 class ValidationFacts:
     handle: str
     source_oid: str
@@ -157,6 +168,9 @@ def _json_dict(value: Mapping[str, Any]) -> dict[str, Any]:
 class Delivery(Protocol):
     async def prepare(self, work: WorkRef) -> WorkspaceFacts: ...
     async def inspect_workspace(self, work: WorkRef) -> WorkspaceFacts: ...
+    async def seal_candidate(
+        self, work: WorkRef, *, repair_confirmed: bool
+    ) -> CandidateSealFacts: ...
     async def validate(self, source: SourceRef) -> LocalCheckFacts: ...
     async def submit(self, source: SourceRef) -> ValidationFacts: ...
     async def inspect(self, source: SourceRef, handle: str | None) -> DeliveryFacts: ...
@@ -175,6 +189,13 @@ class TollgateDelivery:
 
     async def inspect_workspace(self, work: WorkRef) -> WorkspaceFacts:
         return await asyncio.to_thread(self._inspect_workspace, work)
+
+    async def seal_candidate(
+        self, work: WorkRef, *, repair_confirmed: bool
+    ) -> CandidateSealFacts:
+        return await asyncio.to_thread(
+            self._seal_candidate, work, repair_confirmed=repair_confirmed
+        )
 
     async def validate(self, source: SourceRef) -> LocalCheckFacts:
         return await asyncio.to_thread(self._validate, source)
@@ -297,6 +318,7 @@ class TollgateDelivery:
         path = Path(str(match["path"])).resolve(strict=False)
         exists = path.is_dir()
         common_root: str | None = None
+        rebase_head_ref: str | None = None
         owned = False
         dirty_entries: tuple[str, ...] = ()
         if exists:
@@ -309,11 +331,22 @@ class TollgateDelivery:
             project_common = Path(_git(root, ("rev-parse", "--git-common-dir")))
             if not project_common.is_absolute():
                 project_common = (root / project_common).resolve(strict=False)
+            for state_dir in ("rebase-merge", "rebase-apply"):
+                head_name = _git_path(path, f"{state_dir}/head-name")
+                if head_name.is_file():
+                    try:
+                        rebase_head_ref = head_name.read_text().strip()
+                    except OSError:
+                        rebase_head_ref = None
+                    break
             owned = (
                 common_root == str(path)
                 and common_dir.resolve(strict=False)
                 == project_common.resolve(strict=False)
-                and match.get("branch") == expected_ref
+                and (
+                    match.get("branch") == expected_ref
+                    or rebase_head_ref == expected_ref
+                )
             )
             dirty_entries = tuple(
                 item
@@ -339,10 +372,148 @@ class TollgateDelivery:
                 "git_toplevel": common_root,
                 "expected_branch_ref": expected_ref,
                 "observed_branch_ref": match.get("branch"),
+                "rebase_head_ref": rebase_head_ref,
                 "operation_id": work.operation_id,
                 "matches": 1,
             },
             observed_at=_git_time(),
+        )
+
+    def _seal_candidate(
+        self, work: WorkRef, *, repair_confirmed: bool
+    ) -> CandidateSealFacts:
+        facts = self._inspect_workspace(work)
+        if (
+            not facts.exists
+            or not facts.owned
+            or not facts.path
+            or not facts.base_oid
+            or not facts.head_oid
+        ):
+            raise DeliveryProviderError(
+                "candidate sealing requires the exact owned worktree and retained base",
+                category="rejected",
+                evidence=facts.to_dict(),
+            )
+        path = Path(facts.path)
+        operations: list[str] = []
+        rebase_active = _rebase_active(path)
+        if rebase_active:
+            conflicts = _unmerged_paths(path)
+            if not repair_confirmed:
+                return CandidateSealFacts(
+                    state="repair_required",
+                    workspace=facts,
+                    operations=("rebase_pending",),
+                    conflict_paths=conflicts,
+                )
+            _git(path, ("add", "-A"))
+            operations.append("repair_staged")
+            continued = _git_completed(
+                path,
+                (
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "rebase",
+                    "--continue",
+                ),
+            )
+            if continued.returncode != 0:
+                if _rebase_active(path):
+                    refreshed = self._inspect_workspace(work)
+                    return CandidateSealFacts(
+                        state="repair_required",
+                        workspace=refreshed,
+                        operations=tuple((*operations, "rebase_continued")),
+                        conflict_paths=_unmerged_paths(path),
+                    )
+                raise _git_provider_error("rebase", continued)
+            operations.append("rebase_continued")
+            facts = self._inspect_workspace(work)
+        elif facts.head_oid != facts.base_oid and not _is_ancestor(
+            path, facts.base_oid, facts.head_oid
+        ):
+            if facts.dirty:
+                raise DeliveryProviderError(
+                    "start retained-base reconciliation before editing conflict repairs",
+                    category="rejected",
+                    evidence=facts.to_dict(),
+                )
+            rebased = _git_completed(
+                path,
+                (
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "rerere.enabled=false",
+                    "rebase",
+                    facts.base_oid,
+                ),
+            )
+            operations.append("rebase_started")
+            if rebased.returncode != 0:
+                if _rebase_active(path):
+                    refreshed = self._inspect_workspace(work)
+                    return CandidateSealFacts(
+                        state="repair_required",
+                        workspace=refreshed,
+                        operations=tuple(operations),
+                        conflict_paths=_unmerged_paths(path),
+                    )
+                raise _git_provider_error("rebase", rebased)
+            facts = self._inspect_workspace(work)
+        elif facts.dirty:
+            _git(path, ("add", "-A"))
+            staged = _git_completed(path, ("diff", "--cached", "--quiet"))
+            if staged.returncode == 0:
+                raise DeliveryProviderError(
+                    "candidate worktree has no committable changes",
+                    category="rejected",
+                    evidence=facts.to_dict(),
+                )
+            if staged.returncode != 1:
+                raise _git_provider_error("diff", staged)
+            _git(
+                path,
+                (
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "--amend",
+                    "--no-edit",
+                ),
+            )
+            operations.append("candidate_amended")
+            facts = self._inspect_workspace(work)
+
+        if (
+            not facts.exists
+            or not facts.owned
+            or facts.dirty
+            or not facts.path
+            or not facts.base_oid
+            or not facts.head_oid
+            or not _is_ancestor(path, facts.base_oid, facts.head_oid)
+            or _git(
+                path, ("rev-list", "--count", f"{facts.base_oid}..{facts.head_oid}")
+            )
+            != "1"
+        ):
+            raise DeliveryProviderError(
+                "candidate source must be exactly one clean task commit atop the retained base",
+                category="rejected",
+                evidence=facts.to_dict(),
+            )
+        return CandidateSealFacts(
+            state="ready",
+            workspace=facts,
+            operations=tuple(operations),
         )
 
     def _submit(self, source: SourceRef) -> ValidationFacts:
@@ -1052,6 +1223,15 @@ def _run_check_argv(
 
 
 def _git(root: Path, arguments: Sequence[str]) -> str:
+    result = _git_completed(root, arguments)
+    if result.returncode != 0:
+        raise _git_provider_error(arguments[0], result)
+    return result.stdout.strip()
+
+
+def _git_completed(
+    root: Path, arguments: Sequence[str]
+) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *arguments],
@@ -1059,24 +1239,56 @@ def _git(root: Path, arguments: Sequence[str]) -> str:
             text=True,
             timeout=60,
             check=False,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={
+                **os.environ,
+                "GIT_EDITOR": "true",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise DeliveryProviderError(
             f"Git operation {arguments[0]} was unavailable: {error}",
             category="unavailable",
         ) from error
-    if result.returncode != 0:
-        raise DeliveryProviderError(
-            f"Git operation {arguments[0]} failed",
-            category="rejected",
-            evidence={
-                "returncode": result.returncode,
-                "stdout": _bounded_text(result.stdout),
-                "stderr": _bounded_text(result.stderr),
-            },
-        )
-    return result.stdout.strip()
+    return result
+
+
+def _git_provider_error(
+    operation: str, result: subprocess.CompletedProcess[str]
+) -> DeliveryProviderError:
+    return DeliveryProviderError(
+        f"Git operation {operation} failed",
+        category="rejected",
+        evidence={
+            "returncode": result.returncode,
+            "stdout": _bounded_text(result.stdout),
+            "stderr": _bounded_text(result.stderr),
+        },
+    )
+
+
+def _git_path(root: Path, name: str) -> Path:
+    value = Path(_git(root, ("rev-parse", "--git-path", name)))
+    return value if value.is_absolute() else (root / value).resolve(strict=False)
+
+
+def _rebase_active(root: Path) -> bool:
+    return (
+        _git_path(root, "rebase-merge").exists()
+        or _git_path(root, "rebase-apply").exists()
+    )
+
+
+def _unmerged_paths(root: Path) -> tuple[str, ...]:
+    output = _git(root, ("diff", "--name-only", "--diff-filter=U", "-z"))
+    return tuple(path for path in output.split("\0") if path)
+
+
+def _is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = _git_completed(root, ("merge-base", "--is-ancestor", ancestor, descendant))
+    if result.returncode in {0, 1}:
+        return result.returncode == 0
+    raise _git_provider_error("merge-base", result)
 
 
 def _remote_oid(root: Path, remote: str, branch_ref: str) -> str | None:

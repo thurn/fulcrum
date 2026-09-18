@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dataclasses import replace
+import subprocess
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -209,6 +210,118 @@ class DeliverySafetyTests(unittest.TestCase):
             ):
                 adapter._cleanup(self.ref)
         tollgate.remove_worktree.assert_not_called()
+
+    def test_dirty_warden_repair_is_amended_into_the_task_commit(self):
+        adapter = TollgateDelivery(Mock())
+        reference = replace(
+            self.ref,
+            actual_path="/unused/worktree",
+            base_oid="base",
+        )
+        dirty = replace(
+            self.clean,
+            base_oid="base",
+            head_oid="source",
+            dirty=True,
+            dirty_entries=("?? acknowledgement.txt",),
+        )
+        sealed = replace(
+            dirty,
+            head_oid="amended",
+            dirty=False,
+            dirty_entries=(),
+        )
+
+        def git_result(_path, arguments):
+            return subprocess.CompletedProcess(
+                ["git", *arguments],
+                1 if arguments[:2] == ("diff", "--cached") else 0,
+                "",
+                "",
+            )
+
+        def git_output(_path, arguments):
+            return "1" if arguments[:2] == ("rev-list", "--count") else ""
+
+        with (
+            patch.object(adapter, "_inspect_workspace", side_effect=[dirty, sealed]),
+            patch("fulcrum.delivery._rebase_active", return_value=False),
+            patch("fulcrum.delivery._is_ancestor", return_value=True),
+            patch("fulcrum.delivery._git_completed", side_effect=git_result),
+            patch("fulcrum.delivery._git", side_effect=git_output) as git,
+        ):
+            facts = adapter._seal_candidate(reference, repair_confirmed=False)
+
+        self.assertEqual(facts.state, "ready")
+        self.assertEqual(facts.workspace.head_oid, "amended")
+        self.assertEqual(facts.operations, ("candidate_amended",))
+        self.assertTrue(any("--amend" in call.args[1] for call in git.call_args_list))
+
+    def test_conflict_rebase_requires_explicit_repair_then_continues(self):
+        adapter = TollgateDelivery(Mock())
+        reference = replace(
+            self.ref,
+            actual_path="/unused/worktree",
+            base_oid="new-base",
+        )
+        stale = replace(
+            self.clean,
+            base_oid="new-base",
+            head_oid="old-source",
+        )
+        conflicted = replace(
+            stale,
+            head_oid="new-base",
+            dirty=True,
+            dirty_entries=("UU docs/concurrency-fixture.md",),
+        )
+        failed_rebase = subprocess.CompletedProcess(
+            ["git", "rebase"], 1, "", "conflict"
+        )
+        with (
+            patch.object(
+                adapter, "_inspect_workspace", side_effect=[stale, conflicted]
+            ),
+            patch("fulcrum.delivery._rebase_active", side_effect=[False, True]),
+            patch("fulcrum.delivery._is_ancestor", return_value=False),
+            patch("fulcrum.delivery._git_completed", return_value=failed_rebase),
+            patch(
+                "fulcrum.delivery._unmerged_paths",
+                return_value=("docs/concurrency-fixture.md",),
+            ),
+        ):
+            prepared = adapter._seal_candidate(reference, repair_confirmed=False)
+
+        self.assertEqual(prepared.state, "repair_required")
+        self.assertEqual(prepared.conflict_paths, ("docs/concurrency-fixture.md",))
+        self.assertEqual(prepared.operations, ("rebase_started",))
+
+        repaired = replace(
+            conflicted,
+            head_oid="repaired-source",
+            dirty=False,
+            dirty_entries=(),
+        )
+        continued = subprocess.CompletedProcess(["git", "rebase"], 0, "", "")
+
+        def git_output(_path, arguments):
+            return "1" if arguments[:2] == ("rev-list", "--count") else ""
+
+        with (
+            patch.object(
+                adapter, "_inspect_workspace", side_effect=[conflicted, repaired]
+            ),
+            patch("fulcrum.delivery._rebase_active", return_value=True),
+            patch("fulcrum.delivery._is_ancestor", return_value=True),
+            patch("fulcrum.delivery._git_completed", return_value=continued),
+            patch("fulcrum.delivery._unmerged_paths", return_value=()),
+            patch("fulcrum.delivery._git", side_effect=git_output),
+        ):
+            finished = adapter._seal_candidate(reference, repair_confirmed=True)
+
+        self.assertEqual(finished.state, "ready")
+        self.assertEqual(finished.workspace.head_oid, "repaired-source")
+        self.assertEqual(finished.operations, ("repair_staged", "rebase_continued"))
 
     def test_terminal_delivery_can_finish_after_provider_cleanup(self):
         delivery = {

@@ -119,7 +119,15 @@ TOOL_INPUT_PROPERTIES: dict[str, dict[str, Any]] = {
         "summary": {"type": "string"},
         "evidence": {"type": "array", "items": {"type": "string"}},
     },
-    "submit_candidate": {},
+    "submit_candidate": {
+        "repair_confirmed": {
+            "type": "boolean",
+            "description": (
+                "Set true only after resolving conflict paths returned by the prior "
+                "submit_candidate source_repair result."
+            ),
+        }
+    },
     "wait_for_ci_results": {"candidate_id": {"type": "string"}},
     "finish": {
         "outcome": {
@@ -301,8 +309,10 @@ def tool_descriptions() -> list[dict[str, Any]]:
             "and nonempty evidence references."
         ),
         "submit_candidate": (
-            "Warden only: submit one full exact source commit OID for configured local "
-            "validation and provider CI."
+            "Warden only: seal the assigned worktree as one exact task commit and "
+            "submit it for configured validation and provider CI. Omit source_oid. "
+            "After a returned source_repair conflict, resolve its paths and resubmit "
+            "with repair_confirmed=true."
         ),
         "finish": (
             "Seal the active role outcome. Executor uses ready_for_review and Warden "
