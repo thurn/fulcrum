@@ -440,6 +440,44 @@ class HookService:
                 paths.append(transcript)
         return sorted(set(paths))
 
+    def collect_active_assignments(self, request: ParsedRequest) -> list[str]:
+        """Collect active worker transcripts and return every retained watch path."""
+
+        ledger = self._ledger(request)
+        paths: set[str] = set()
+        for record in ledger.list_records(limit=0):
+            protocol = _protocol(record.fc or {})
+            transcripts = protocol.get("transcripts")
+            if not isinstance(transcripts, Mapping):
+                continue
+            for retained in transcripts.values():
+                path = retained.get("path") if isinstance(retained, Mapping) else None
+                if isinstance(path, str) and Path(path).is_absolute():
+                    paths.add(path)
+            assignment = protocol.get("assignment")
+            if not isinstance(assignment, Mapping):
+                continue
+            task_id = assignment.get("task_id")
+            retained = transcripts.get(task_id) if isinstance(task_id, str) else None
+            transcript = retained.get("path") if isinstance(retained, Mapping) else None
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or not isinstance(transcript, str)
+                or not Path(transcript).is_absolute()
+            ):
+                continue
+            self._collect_transcript_path(
+                ledger,
+                request,
+                record,
+                str(assignment.get("role") or "worker"),
+                task_id,
+                transcript,
+                assignment.get("turn_id"),
+            )
+        return sorted(paths)
+
     @staticmethod
     def registered_paths(ledger: Ledger) -> list[str]:
         """Return retained transcript paths without parsing transcript content."""

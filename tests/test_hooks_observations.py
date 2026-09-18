@@ -46,6 +46,57 @@ class ObservationTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    def test_active_assignment_collection_releases_completed_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.jsonl"
+            rows = [
+                {
+                    "type": "turn_context",
+                    "turn_id": "native-turn",
+                    "model": "gpt-5.6-luna",
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "task_complete",
+                        "turn_id": "native-turn",
+                    },
+                },
+            ]
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            ledger = MemoryLedger(
+                record(
+                    "fc-work",
+                    owner="worker-1",
+                    phase="reviewing",
+                    role="executor",
+                    ownership_operation="assignment-1",
+                    desktop={
+                        "assignment": {
+                            "assignment_token": "assignment-1",
+                            "role": "executor",
+                            "task_id": "worker-1",
+                            "turn_id": "native-turn",
+                            "state": "active",
+                            "finish_operation": "finish-1",
+                        },
+                        "transcripts": {
+                            "worker-1": {"path": str(path), "cursor": 0, "gaps": []}
+                        },
+                    },
+                )
+            )
+
+            watched = HookService(ledger).collect_active_assignments(request())
+
+        retained = ledger.show("fc-work")
+        protocol = (retained.fc or {})["desktop"]
+        self.assertEqual(watched, [str(path)])
+        self.assertNotIn("assignment", protocol)
+        self.assertEqual(protocol["assignment_history"][-1]["state"], "finished")
+        self.assertEqual(protocol["assignment_history"][-1]["turn_id"], "native-turn")
+        self.assertEqual(retained.assignee, "STEWARD")
+
     def test_session_only_hook_identity_binds_same_task_weaver(self):
         ledger = MemoryLedger(
             record(

@@ -2703,11 +2703,7 @@ class DesktopProtocolService:
             )
         from fulcrum.hooks import HookService
 
-        watch_paths = HookService.registered_paths(ledger)
-        from fulcrum.completion import settle_native_completion
-
-        for candidate_record in ledger.list_records(limit=0):
-            settle_native_completion(request, ledger, candidate_record.id)
+        watch_paths = HookService(ledger).collect_active_assignments(request)
         request_id = _request_id(request)
         waits = dict(protocol.get("instruction_waits") or {})
         retained = next(
