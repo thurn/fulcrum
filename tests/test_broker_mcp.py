@@ -280,6 +280,7 @@ class McpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("attempt_id", claim["properties"])
         self.assertNotIn("request_id", claim["required"])
         result = tools["report_action_result"]["inputSchema"]
+        self.assertIn("task_id", result["required"])
         self.assertIn("attempt_id", result["required"])
         self.assertIn("outcome", result["required"])
         self.assertIn("native_result", result["required"])

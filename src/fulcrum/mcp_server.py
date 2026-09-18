@@ -246,7 +246,12 @@ def _schema(name: str) -> dict[str, Any]:
             "enter_weaver": ["description"],
             "register_worker": [],
             "marshal_decide": ["turn_id", "input"],
-            "report_action_result": ["attempt_id", "outcome", "native_result"],
+            "report_action_result": [
+                "task_id",
+                "attempt_id",
+                "outcome",
+                "native_result",
+            ],
             "report_progress": ["kind", "summary", "evidence"],
             "submit_candidate": [],
             "wait_for_ci_results": ["candidate_id"],
@@ -297,7 +302,8 @@ def tool_descriptions() -> list[dict[str, Any]]:
         ),
         "report_action_result": (
             "Record the actual result of one claimed native invocation using the "
-            "attempt_id returned by claim_action."
+            "attempt_id returned by claim_action. Supply this task's exact "
+            "CODEX_THREAD_ID as task_id."
         ),
         "register_worker": (
             "Bind this native task to its reserved assignment before editing. Supply "
