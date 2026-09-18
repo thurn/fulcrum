@@ -1076,6 +1076,7 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert "nonempty top-level evidence" in prompt
     assert "Copy assignment.assignment_token" in prompt
     assert "never retype or reconstruct that token" in prompt
+    assert "Supply bead `fc-cdf5657c` as bead" in prompt
     assert arguments["title"] == "⚒️ [exe-cdf5657c] Add newline to README.md"
     assert arguments["model"] == "gpt-6-astra"
     assert arguments["thinking"] == "xhigh"
@@ -1098,6 +1099,7 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     assert "Copy candidate.candidate_id" in prompt
     assert "retain both the current-release outcome and this bead's outcome" in prompt
     assert "retain the ordered union of both sides" in prompt
+    assert "Supply bead `fc-review` as bead" in prompt
     assert "inspect the actual file and both git-show versions before editing" in prompt
     assert "make exactly one resolving edit" in prompt
     assert "one task commit atop the current retained base" in prompt
