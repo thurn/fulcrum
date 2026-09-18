@@ -39,8 +39,11 @@ Executor or Warden truly needs. Implementation notes are non-binding hints.
 The `finish` arguments themselves must contain the top-level `acceptance` list;
 never send `checks` in its place and never nest `acceptance` under another object.
 For a low-risk, one-file mechanical request, use one focused repository inspection
-that confirms the target and affected references, then finish immediately. Do not
-run broad history searches, inspect unrelated files, or add process commentary.
-`ready` is immediately eligible for Steward selection. After a successful finish,
-end the turn without taking another action. Use `answered`, `planned`, or `blocked`
-only when those are the truthful outcomes.
+that confirms the target and affected references, then finish immediately. If that
+inspection proves the requested state is already present, finish with outcome
+`answered`, concise evidence, and no implementation acceptance; never return
+`ready` for already-satisfied work. Do not run broad history searches, inspect
+unrelated files, or add process commentary. `ready` is immediately eligible for
+Steward selection. After a successful finish, end the turn without taking another
+action. Use `answered`, `planned`, or `blocked` only when those are the truthful
+outcomes.
