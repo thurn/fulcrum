@@ -316,6 +316,7 @@ class DeliveryService:
             },
             operation.id,
         )
+        _retain_conflict_base(ledger, work, facts.evidence, operation.id)
         current = ledger.show(work.id)
         if current is not None and current.fc and current.fc.get("role") == "warden":
             fc = dict(current.fc)
@@ -819,6 +820,50 @@ def _retain_delivery(
     delivery["observed_at"] = facts.get("observed_at", utc_now())
     fc["delivery"] = delivery
     fc["last_transition"] = operation_id
+    ledger.update_fc(work.id, fc)
+
+
+def _retain_conflict_base(
+    ledger: Ledger,
+    work: LedgerRecord,
+    evidence: Mapping[str, Any],
+    operation_id: str,
+) -> None:
+    conflict = evidence.get("merge_conflict")
+    if not isinstance(conflict, Mapping):
+        return
+    integration_base = conflict.get("integration_base_oid")
+    source_base = conflict.get("source_base_oid")
+    if not isinstance(integration_base, str) or not isinstance(source_base, str):
+        return
+    current = ledger.show(work.id)
+    assert current is not None and current.fc
+    fc = dict(current.fc)
+    retained = fc.get("worktree")
+    if not isinstance(retained, Mapping) or retained.get("base_oid") != source_base:
+        return
+    workspace = dict(retained)
+    history = list(workspace.get("base_history") or [])
+    history.append(
+        {
+            "base_oid": source_base,
+            "replaced_by": integration_base,
+            "reason": "provider_merge_conflict",
+            "operation_id": operation_id,
+            "observed_at": utc_now(),
+            "paths": list(conflict.get("paths") or []),
+        }
+    )
+    workspace["base_history"] = history[-10:]
+    workspace["base_oid"] = integration_base
+    workspace["base_update"] = {
+        "state": "repair_required",
+        "reason": "provider_merge_conflict",
+        "operation_id": operation_id,
+        "observed_at": utc_now(),
+        "paths": list(conflict.get("paths") or []),
+    }
+    fc["worktree"] = workspace
     ledger.update_fc(work.id, fc)
 
 

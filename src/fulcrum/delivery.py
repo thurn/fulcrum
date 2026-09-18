@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -742,6 +743,7 @@ def _provider_evidence(response: Mapping[str, Any]) -> dict[str, Any]:
     generation = response.get("generation")
     buildset = response.get("buildset")
     certificate = response.get("certificate")
+    conflict = _merge_conflict_evidence(item)
     return {
         "item": dict(item),
         "generation": dict(generation) if isinstance(generation, Mapping) else None,
@@ -767,6 +769,34 @@ def _provider_evidence(response: Mapping[str, Any]) -> dict[str, Any]:
             if isinstance(certificate, Mapping)
             else None
         ),
+        **({"merge_conflict": conflict} if conflict is not None else {}),
+    }
+
+
+def _merge_conflict_evidence(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    if item.get("state") != "merge-conflict":
+        return None
+    reason = item.get("terminal_reason")
+    if not isinstance(reason, str):
+        return None
+    release = re.search(r"promoted release ([0-9a-f]{40})", reason)
+    source_base = re.search(r"source base ([0-9a-f]{40})", reason)
+    paths_match = re.search(r"produced merge conflicts in (\[[^\n]*\])", reason)
+    paths: list[str] = []
+    if paths_match is not None:
+        try:
+            decoded = json.loads(paths_match.group(1))
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, list) and all(isinstance(item, str) for item in decoded):
+            paths = decoded
+    if release is None or source_base is None:
+        return None
+    return {
+        "integration_base_oid": release.group(1),
+        "source_base_oid": source_base.group(1),
+        "paths": paths,
+        "provider_reason": reason,
     }
 
 

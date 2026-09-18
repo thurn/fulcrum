@@ -12,8 +12,9 @@ from fulcrum.delivery import (
     TollgateDelivery,
     WorkRef,
     WorkspaceFacts,
+    _provider_evidence,
 )
-from fulcrum.delivery_service import DeliveryService
+from fulcrum.delivery_service import DeliveryService, _retain_conflict_base
 from tests.support import MemoryLedger, record, request
 
 
@@ -228,4 +229,44 @@ class DeliverySafetyTests(unittest.TestCase):
         )
         self.assertIsNone(
             _settled_delivery_for_source(record(delivery=delivery), "stale-source")
+        )
+
+    def test_merge_conflict_normalizes_and_advances_retained_repair_base(self):
+        old_base = "1" * 40
+        current_base = "2" * 40
+        reason = (
+            f"candidate could not be constructed on promoted release {current_base}: "
+            f"applying source {'3' * 40} (source base {old_base}) produced merge "
+            'conflicts in ["docs/concurrency-fixture.md"]. Rebase and resubmit'
+        )
+        evidence = _provider_evidence(
+            {
+                "item": {
+                    "id": "candidate",
+                    "state": "merge-conflict",
+                    "source_oid": "3" * 40,
+                    "terminal_reason": reason,
+                }
+            }
+        )
+        self.assertEqual(
+            evidence["merge_conflict"],
+            {
+                "integration_base_oid": current_base,
+                "source_base_oid": old_base,
+                "paths": ["docs/concurrency-fixture.md"],
+                "provider_reason": reason,
+            },
+        )
+        work = record(worktree={"base_oid": old_base, "path": "/managed/worktree"})
+        ledger = MemoryLedger(work)
+        _retain_conflict_base(ledger, work, evidence, "fc-validation")
+        retained = ledger.show(work.id)
+        self.assertIsNotNone(retained)
+        workspace = retained.fc["worktree"]
+        self.assertEqual(workspace["base_oid"], current_base)
+        self.assertEqual(workspace["base_update"]["state"], "repair_required")
+        self.assertEqual(
+            workspace["base_history"][0]["paths"],
+            ["docs/concurrency-fixture.md"],
         )

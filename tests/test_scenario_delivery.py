@@ -121,9 +121,22 @@ def test_scenario_barrier_releases_same_base_candidates_in_promotion_order():
                 == "integration"
             )
 
+            repaired = wait_for_scenario_admission(
+                barrier_request,
+                ledger,
+                beta_record,
+                source("fc-beta", "c" * 40),
+            )
+            assert repaired is not None
+            assert (
+                repaired["release"]["condition"]
+                == "initial_candidate_already_released_for_provider_repair"
+            )
+
         retained = json.loads((instance / CONTROL_NAME).read_text(encoding="utf-8"))
         assert list(retained["state"]["arrivals"]) == ["alpha", "beta"]
         assert [item["label"] for item in retained["state"]["releases"]] == [
             "alpha",
             "beta",
         ]
+        assert retained["state"]["repairs"][0]["source_oid"] == "c" * 40

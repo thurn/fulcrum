@@ -38,6 +38,10 @@ def wait_for_scenario_admission(
         return None
     if document.get("repository_id") != source.work.repository_id:
         return None
+    lock_path = path.with_name(f".{path.name}.lock")
+    repair = _retain_repair_release(path, lock_path, document, work, source)
+    if repair is not None:
+        return repair
     label = _candidate_label(document, source)
     if label is None:
         return None
@@ -58,7 +62,6 @@ def wait_for_scenario_admission(
     timeout = _positive_number(document.get("timeout_seconds", 480), path)
     poll = min(_positive_number(document.get("poll_seconds", 0.2), path), 2.0)
     deadline = time.monotonic() + timeout
-    lock_path = path.with_name(f".{path.name}.lock")
 
     while True:
         with ProcessLock(lock_path):
@@ -174,6 +177,78 @@ def wait_for_scenario_admission(
                 },
             )
         time.sleep(poll)
+
+
+def _retain_repair_release(
+    path: Path,
+    lock_path: Path,
+    initial: Mapping[str, Any],
+    work: LedgerRecord,
+    source: SourceRef,
+) -> dict[str, Any] | None:
+    """Do not reapply the initial same-base gate to a provider-requested repair."""
+
+    with ProcessLock(lock_path):
+        current = _read_required(path)
+        _assert_same_configuration(initial, current, path)
+        state = dict(current.get("state") or {})
+        arrivals = dict(state.get("arrivals") or {})
+        releases = list(state.get("releases") or [])
+        matched: tuple[str, dict[str, Any], dict[str, Any]] | None = None
+        for label, raw_arrival in arrivals.items():
+            if not isinstance(label, str) or not isinstance(raw_arrival, Mapping):
+                continue
+            arrival = dict(raw_arrival)
+            release = next(
+                (
+                    dict(item)
+                    for item in releases
+                    if isinstance(item, Mapping) and item.get("label") == label
+                ),
+                None,
+            )
+            if (
+                arrival.get("bead_id") == work.id
+                and arrival.get("source_oid") != source.oid
+                and release is not None
+            ):
+                matched = (label, arrival, release)
+                break
+        if matched is None:
+            return None
+        label, arrival, initial_release = matched
+        repairs = list(state.get("repairs") or [])
+        repair = next(
+            (
+                dict(item)
+                for item in repairs
+                if isinstance(item, Mapping)
+                and item.get("bead_id") == work.id
+                and item.get("source_oid") == source.oid
+            ),
+            None,
+        )
+        if repair is None:
+            repair = {
+                "label": label,
+                "bead_id": work.id,
+                "source_oid": source.oid,
+                "released_at": utc_now(),
+                "condition": "initial_candidate_already_released_for_provider_repair",
+            }
+            repairs.append(repair)
+            state["repairs"] = repairs
+            current["state"] = state
+            _write(path, current)
+        return {
+            "barrier_id": _required_string(current, "id", path),
+            "label": label,
+            "fixture_path": _required_string(current, "fixture_path", path),
+            "expected_base_oid": _required_string(current, "expected_base_oid", path),
+            "initial_arrival": arrival,
+            "initial_release": initial_release,
+            "release": repair,
+        }
 
 
 def _candidate_label(document: Mapping[str, Any], source: SourceRef) -> str | None:
