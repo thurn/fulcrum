@@ -104,6 +104,31 @@ def _acceptance_evidence(value: Any) -> dict[str, dict[str, Any]]:
     return normalized
 
 
+def _hook_confirmation(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise FulcrumError.invalid(
+            "HOOK_CONFIRMATION_INVALID",
+            "hook_confirmation must include confirmed and evidence",
+        )
+    evidence = value.get("evidence")
+    if (
+        value.get("confirmed") is not True
+        or not isinstance(evidence, list)
+        or not evidence
+        or not all(isinstance(item, str) and item.strip() for item in evidence)
+    ):
+        raise FulcrumError.invalid(
+            "HOOK_CONFIRMATION_EVIDENCE_REQUIRED",
+            "hook_confirmation requires confirmed=true and nonempty evidence strings",
+        )
+    return {
+        "confirmed": True,
+        "evidence": [str(item).strip() for item in evidence],
+    }
+
+
 STANDING = {
     "steward": {
         "title": "🧰 STEWARD 🧰",
@@ -420,7 +445,34 @@ class DesktopSetupService(DesktopProtocolService):
                 }
             )
         setup = dict(protocol.get("setup") or {})
+        retained_hook_status = copy_mapping(setup.get("hooks"))
         hook_status = copy_mapping(skills.get("hook"))
+        hook_confirmation = _hook_confirmation(request.input.get("hook_confirmation"))
+        same_hook_definition = all(
+            retained_hook_status.get(field) == hook_status.get(field)
+            for field in ("config", "command", "required_events", "definitions")
+        )
+        retained_confirmation = retained_hook_status.get("operator_confirmation")
+        operator_confirmation: dict[str, Any] | None = None
+        if hook_confirmation is not None:
+            if not hook_status.get("configured"):
+                raise FulcrumError.invalid(
+                    "HOOK_CONFIRMATION_UNAVAILABLE",
+                    "configured Fulcrum hooks are required before confirmation",
+                )
+            operator_confirmation = {
+                **hook_confirmation,
+                "confirmed_at": _utc_now(),
+            }
+        elif same_hook_definition and isinstance(retained_confirmation, Mapping):
+            operator_confirmation = dict(retained_confirmation)
+        if operator_confirmation is not None:
+            hook_status = {
+                **hook_status,
+                "operational_state": "operator_confirmed",
+                "operator_confirmation_required": False,
+                "operator_confirmation": operator_confirmation,
+            }
         setup.update(
             {
                 "state": "preparing",

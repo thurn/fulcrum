@@ -52,10 +52,12 @@ hook command is not evidence of approval.
 - Click **Enable** for those five required hooks.
 
 After the user explicitly confirms approval, rerun bootstrap with a new request
-UUID so it can observe the postconditions. Do not create the continuation until
-that response confirms all five hooks are trusted and enabled and no longer
-requires operator confirmation. If approval is still incomplete, report the
-exact gap and stop again.
+UUID and add `hook_confirmation` to the JSON input as
+`{"confirmed": true, "evidence": ["specific evidence of the user's confirmation"]}`.
+This records only the operator trust/enable gate; do not record `hook_identity`
+acceptance yet. Do not create the continuation until the response reports
+`operator_confirmation_required: false`. If confirmation is rejected or the hook
+definitions changed, report the exact gap and stop again.
 
 Only after hook approval has been observed, apply the MCP catalog boundary. An
 existing task does not acquire MCP tools added after that task started. If the

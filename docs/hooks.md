@@ -23,7 +23,11 @@ context without curated memory.
 
 The returned hook status reports configuration separately from operational
 confirmation. Bootstrap does not treat writing `hooks.json` as proof that required
-callbacks are trusted, enabled, or observed.
+callbacks are trusted, enabled, or observed. After the operator explicitly confirms
+that all five exact definitions are trusted and enabled, bootstrap retains that
+confirmation only while the installed definitions remain unchanged. This clears the
+operator gate without claiming the later `hook_identity` acceptance check; that check
+still requires callbacks bound to the retained task and session identities.
 
 Transcript paths are unstable input. The scoped collector reads only registered
 task transcripts, retains lifecycle/turn/response identities and token records,

@@ -108,7 +108,34 @@ def _replace_owned_link(source: Path, target: Path) -> None:
     os.replace(temporary, target)
 
 
-def install_hook_config(path: Path, command: str) -> None:
+REQUIRED_HOOK_EVENTS = (
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+)
+
+
+def _fulcrum_hook_definitions(command: str) -> dict[str, dict[str, Any]]:
+    definitions: dict[str, dict[str, Any]] = {}
+    for event in REQUIRED_HOOK_EVENTS:
+        handler = {
+            "type": "command",
+            "command": command,
+            "timeout": 60 if event == "Stop" else 30,
+            "statusMessage": f"Fulcrum: recording {event}",
+        }
+        if event == "SessionStart":
+            handler["additionalContextLimit"] = 2000
+        group: dict[str, Any] = {"hooks": [handler]}
+        if event == "SessionStart":
+            group["matcher"] = "^(startup|resume|clear|compact)$"
+        definitions[event] = group
+    return definitions
+
+
+def install_hook_config(path: Path, command: str) -> dict[str, dict[str, Any]]:
     """Preserve unrelated hooks and install the five scoped command hooks."""
 
     existing: Any = (
@@ -146,24 +173,8 @@ def install_hook_config(path: Path, command: str) -> None:
             hooks[event] = retained
         else:
             hooks.pop(event, None)
-    for event in (
-        "SessionStart",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PostToolUse",
-        "Stop",
-    ):
-        handler = {
-            "type": "command",
-            "command": command,
-            "timeout": 60 if event == "Stop" else 30,
-            "statusMessage": f"Fulcrum: recording {event}",
-        }
-        if event == "SessionStart":
-            handler["additionalContextLimit"] = 2000
-        group: dict[str, Any] = {"hooks": [handler]}
-        if event == "SessionStart":
-            group["matcher"] = "^(startup|resume|clear|compact)$"
+    definitions = _fulcrum_hook_definitions(command)
+    for event, group in definitions.items():
         hooks[event] = [*hooks.get(event, []), group]
     existing["hooks"] = hooks
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -173,6 +184,7 @@ def install_hook_config(path: Path, command: str) -> None:
     )
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+    return definitions
 
 
 def reconcile_skills(
@@ -235,6 +247,7 @@ def reconcile_skills(
     # profile, not to the resolved skill-storage parent.
     hook_config = configured_root.parent / "hooks.json"
     hook_command: str | None = None
+    hook_definitions: dict[str, dict[str, Any]] = {}
     if install_hook and executable.is_file() and os.access(executable, os.X_OK):
         authoritative_config = (config_path or instance_root / "config").resolve(
             strict=False
@@ -248,7 +261,7 @@ def reconcile_skills(
                 shlex.quote(str(authoritative_config)),
             )
         )
-        install_hook_config(hook_config, hook_command)
+        hook_definitions = install_hook_config(hook_config, hook_command)
     return {
         "root": str(root),
         "installed": installed,
@@ -260,13 +273,8 @@ def reconcile_skills(
             "config": str(hook_config),
             "command": hook_command,
             "configured": hook_command is not None,
-            "required_events": [
-                "SessionStart",
-                "UserPromptSubmit",
-                "PreToolUse",
-                "PostToolUse",
-                "Stop",
-            ],
+            "required_events": list(REQUIRED_HOOK_EVENTS),
+            "definitions": hook_definitions,
             "operational_state": (
                 "confirmation_required" if hook_command is not None else "unavailable"
             ),

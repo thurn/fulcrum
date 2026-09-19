@@ -427,6 +427,7 @@ INPUT_FIELDS: dict[tuple[str, ...], set[str]] = {
         "configuration",
         "native_tools",
         "model_support",
+        "hook_confirmation",
         "steward_thinking",
         "marshal_thinking",
         "vizier_thinking",

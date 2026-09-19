@@ -341,6 +341,60 @@ def test_bootstrap_rejects_boolean_acceptance_without_evidence():
             )
 
 
+def test_bootstrap_retains_operator_confirmation_for_exact_hook_definition():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        service = DesktopSetupService(MemoryLedger())
+        first = service.bootstrap(bootstrap_request(root))
+        assert first.result["hooks"]["operator_confirmation_required"] is True
+
+        confirmed = service.bootstrap(
+            bootstrap_request(
+                root,
+                hook_confirmation={
+                    "confirmed": True,
+                    "evidence": [
+                        "operator confirmed all five exact hooks trusted and enabled"
+                    ],
+                },
+            )
+        )
+        assert confirmed.result["hooks"]["operational_state"] == "operator_confirmed"
+        assert confirmed.result["hooks"]["operator_confirmation_required"] is False
+        assert confirmed.result["hooks"]["operator_confirmation"]["confirmed"] is True
+
+        retained = service.bootstrap(bootstrap_request(root))
+        assert retained.result["hooks"]["operational_state"] == "operator_confirmed"
+        assert retained.result["hooks"]["operator_confirmation_required"] is False
+
+        system = service._ledger_override.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        setup = dict(desktop["setup"])
+        hooks = dict(setup["hooks"])
+        hooks["definitions"] = {"Stop": {"changed": True}}
+        setup["hooks"] = hooks
+        desktop["setup"] = setup
+        service._ledger_override.update_fc(
+            "fc-system", {**system.fc, "desktop": desktop}
+        )
+
+        changed = service.bootstrap(bootstrap_request(root))
+        assert changed.result["hooks"]["operational_state"] == "confirmation_required"
+        assert changed.result["hooks"]["operator_confirmation_required"] is True
+
+
+def test_bootstrap_rejects_hook_confirmation_without_evidence():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        service = DesktopSetupService(MemoryLedger())
+        with unittest.TestCase().assertRaisesRegex(
+            FulcrumError, "requires confirmed=true and nonempty evidence strings"
+        ):
+            service.bootstrap(
+                bootstrap_request(root, hook_confirmation={"confirmed": True})
+            )
+
+
 def _verify_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)

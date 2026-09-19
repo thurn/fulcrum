@@ -69,7 +69,7 @@ class InstallTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            install_hook_config(path, "/tmp/fulcrum hook handle")
+            definitions = install_hook_config(path, "/tmp/fulcrum hook handle")
             hooks = json.loads(path.read_text(encoding="utf-8"))["hooks"]
             self.assertEqual(
                 set(hooks),
@@ -92,6 +92,10 @@ class InstallTests(unittest.TestCase):
             }:
                 self.assertNotIn("additionalContextLimit", owned[event])
                 self.assertEqual(owned[event]["timeout"], 30)
+            self.assertEqual(
+                definitions,
+                {event: groups[-1] for event, groups in hooks.items()},
+            )
 
     def test_skill_storage_symlink_does_not_redirect_codex_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -123,6 +127,16 @@ class InstallTests(unittest.TestCase):
                 ],
             )
             self.assertNotIn("optional_events", result["hook"])
+            self.assertEqual(
+                set(result["hook"]["definitions"]),
+                {
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PostToolUse",
+                    "Stop",
+                },
+            )
             self.assertEqual(
                 result["hook"]["operational_state"], "confirmation_required"
             )
