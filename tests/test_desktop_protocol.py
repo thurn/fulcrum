@@ -819,8 +819,9 @@ def test_reported_creation_result_can_inject_exact_record_uncertainty():
     assert f"native-action:{action['action_id']}" in retained["incidents"]
 
 
-def test_closed_settled_worker_archives_only_after_ten_minutes():
+def test_closed_settled_worker_archives_only_after_fifteen_minutes():
     now = datetime.now(timezone.utc)
+    completed_at = now - timedelta(minutes=14, seconds=59)
     work = record(
         "fc-a",
         status="closed",
@@ -831,9 +832,18 @@ def test_closed_settled_worker_archives_only_after_ten_minutes():
                     "task_id": "worker-1",
                     "role": "executor",
                     "state": "finished",
-                    "released_at": (now - timedelta(minutes=9)).isoformat(),
+                    "released_at": completed_at.isoformat(),
                 }
-            ]
+            ],
+            "observations": {
+                "lifecycle": {
+                    "completed": {
+                        "type": "task_completed",
+                        "task_id": "worker-1",
+                        "time": completed_at.isoformat(),
+                    }
+                }
+            },
         },
     )
     service, ledger = registered_service(work)
@@ -852,15 +862,133 @@ def test_closed_settled_worker_archives_only_after_ten_minutes():
     history = list(protocol["assignment_history"])
     history[0] = {
         **history[0],
-        "released_at": (now - timedelta(minutes=10, seconds=1)).isoformat(),
+        "released_at": (now - timedelta(minutes=15)).isoformat(),
     }
     protocol["assignment_history"] = history
+    protocol["observations"]["lifecycle"]["completed"]["time"] = (
+        now - timedelta(minutes=15)
+    ).isoformat()
     fc["desktop"] = protocol
     ledger.update_fc("fc-a", fc)
     result = service.wait_for_instructions(wait_request)
     assert result.result["action"]["tool"] == "set_thread_archived"
     assert result.result["action"]["arguments"]["threadId"] == "worker-1"
     assert result.result["action"]["arguments"]["archived"] is True
+    assert result.result["action"]["reporting"]["automatic_archive"] is True
+
+
+def test_recent_native_task_update_prevents_archive_after_old_release():
+    now = datetime.now(timezone.utc)
+    work = record(
+        "fc-a",
+        status="closed",
+        phase="done",
+        desktop={
+            "assignment_history": [
+                {
+                    "task_id": "worker-1",
+                    "role": "executor",
+                    "state": "finished",
+                    "released_at": (now - timedelta(minutes=20)).isoformat(),
+                }
+            ],
+            "observations": {
+                "lifecycle": {
+                    "completed": {
+                        "type": "task_completed",
+                        "task_id": "worker-1",
+                        "time": (now - timedelta(minutes=20)).isoformat(),
+                    },
+                    "follow-up": {
+                        "type": "turn_started",
+                        "task_id": "worker-1",
+                        "time": (now - timedelta(seconds=30)).isoformat(),
+                    },
+                }
+            },
+        },
+    )
+    service, _ = registered_service(work)
+    service.now = lambda: now
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+
+    result = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "archive", "turn_id": "turn-archive"},
+        )
+    )
+
+    assert result.result["transport_wait"]["state"] == "waiting"
+
+
+def test_archive_claim_is_superseded_after_new_native_task_update():
+    now = datetime.now(timezone.utc)
+    completed_at = now - timedelta(minutes=20)
+    work = record(
+        "fc-a",
+        status="closed",
+        phase="done",
+        desktop={
+            "assignment_history": [
+                {
+                    "task_id": "worker-1",
+                    "role": "executor",
+                    "state": "finished",
+                    "released_at": completed_at.isoformat(),
+                }
+            ],
+            "observations": {
+                "lifecycle": {
+                    "completed": {
+                        "type": "task_completed",
+                        "task_id": "worker-1",
+                        "time": completed_at.isoformat(),
+                    }
+                }
+            },
+        },
+    )
+    service, ledger = registered_service(work)
+    service.now = lambda: now
+    service.resume(mutation(("resume",), payload={"reason": "test"}))
+    queued = service.wait_for_instructions(
+        mutation(
+            ("instruction", "wait"),
+            actor="task:steward-1",
+            payload={"loop_id": "archive", "turn_id": "turn-archive"},
+        )
+    ).result["action"]
+    retained = ledger.show("fc-a")
+    fc = dict(retained.fc or {})
+    protocol = dict(fc["desktop"])
+    observations = dict(protocol["observations"])
+    lifecycle = dict(observations["lifecycle"])
+    lifecycle["follow-up"] = {
+        "type": "turn_started",
+        "task_id": "worker-1",
+        "time": (now - timedelta(seconds=30)).isoformat(),
+    }
+    observations["lifecycle"] = lifecycle
+    protocol["observations"] = observations
+    fc["desktop"] = protocol
+    ledger.update_fc("fc-a", fc)
+
+    with unittest.TestCase().assertRaises(FulcrumError) as raised:
+        service.claim_action(
+            mutation(
+                ("action", "claim"),
+                actor="task:steward-1",
+                arguments={"record_id": "fc-a", "action_id": queued["action_id"]},
+                payload={"attempt_id": "archive-attempt"},
+            )
+        )
+
+    assert raised.exception.code == "ACTION_SUPERSEDED"
+    action = (ledger.show("fc-a").fc or {})["desktop"]["actions"][queued["action_id"]]
+    assert action["state"] == "superseded"
+    assert action["superseded_reason"] == "the task received newer native activity"
 
 
 def test_steward_defers_archival_while_foreground_work_is_active():
@@ -2030,7 +2158,9 @@ class DesktopProtocolTests(unittest.TestCase):
         test_observed_title_mismatch_schedules_one_correction()
 
     def test_settled_worker_archives(self):
-        test_closed_settled_worker_archives_only_after_ten_minutes()
+        test_closed_settled_worker_archives_only_after_fifteen_minutes()
+        test_recent_native_task_update_prevents_archive_after_old_release()
+        test_archive_claim_is_superseded_after_new_native_task_update()
 
     def test_equal_action_claim_is_idempotent(self):
         test_equal_action_claim_replays_without_authorizing_second_invocation()

@@ -57,7 +57,7 @@ RETAINED_PROJECTED_REQUESTS = 0
 RETAINED_TERMINAL_INSTRUCTION_WAITS = 8
 REQUEST_PROJECTION_NAMESPACE = uuid.UUID("40d1f5df-973e-47fd-bd90-407f55ab9514")
 WORKSPACE_ADMISSION_NAMESPACE = uuid.UUID("d61fc47b-a024-4bd4-b196-64a24aaaf79d")
-TASK_ARCHIVE_DELAY = timedelta(minutes=10)
+TASK_ARCHIVE_DELAY = timedelta(minutes=15)
 
 
 def _positive_native_completion(
@@ -1954,6 +1954,33 @@ class DesktopProtocolService:
             expected_turn = (action.get("reporting") or {}).get("idle_turn_id")
             if expected_turn is not None and health.get("turn_id") != expected_turn:
                 return "the Steward started another turn"
+        if (
+            str(action.get("purpose") or "").startswith("archive_task:")
+            and (action.get("reporting") or {}).get("automatic_archive") is True
+        ):
+            task_id = str((action.get("arguments") or {}).get("threadId") or "")
+            observed_activity = _parse_protocol_time(
+                (action.get("reporting") or {}).get("last_activity_at")
+            )
+            latest_activity = self._latest_native_task_activity(ledger, task_id)
+            protocol = _protocol(record.fc or {})
+            native_task = (protocol.get("native_tasks") or {}).get(task_id)
+            if record.status != "closed" or protocol.get("assignment"):
+                return "the work is no longer closed and unassigned"
+            if not self._archival_obligations_settled(record, protocol):
+                return "archival obligations are no longer settled"
+            if not self._task_archival_obligations_settled(ledger, task_id):
+                return "task archival obligations are no longer settled"
+            if isinstance(native_task, Mapping) and native_task.get("archived"):
+                return "the task is already archived"
+            if isinstance(native_task, Mapping) and native_task.get("manual_unarchive"):
+                return "the task was manually unarchived"
+            if observed_activity is None or latest_activity is None:
+                return "latest task activity is unavailable"
+            if latest_activity > observed_activity:
+                return "the task received newer native activity"
+            if self.now() - latest_activity < TASK_ARCHIVE_DELAY:
+                return "the task has not been idle for 15 minutes"
         if action.get("purpose") != "routine_dispatch":
             return None
         system = self._system(ledger)
@@ -2684,14 +2711,7 @@ class DesktopProtocolService:
             }
             native_tasks = protocol.get("native_tasks") or {}
             for task_id in sorted(task_ids):
-                completed_times: list[datetime] = []
-                for item in history or []:
-                    if not isinstance(item, Mapping) or item.get("task_id") != task_id:
-                        continue
-                    parsed = _parse_protocol_time(item.get("released_at"))
-                    if parsed is not None:
-                        completed_times.append(parsed)
-                completed_at = max(completed_times, default=None)
+                completed_at = self._latest_native_task_activity(ledger, task_id)
                 if (
                     completed_at is None
                     or self.now() - completed_at < TASK_ARCHIVE_DELAY
@@ -2705,12 +2725,7 @@ class DesktopProtocolService:
                 if not self._task_archival_obligations_settled(ledger, task_id):
                     continue
                 purpose = f"archive_task:{task_id}"
-                if any(
-                    isinstance(item, Mapping)
-                    and item.get("purpose") == purpose
-                    and item.get("state") not in {"rejected", "superseded"}
-                    for item in actions.values()
-                ):
+                if self._task_has_archive_action(ledger, task_id):
                     continue
                 archive = self._append_action(
                     protocol,
@@ -2720,10 +2735,56 @@ class DesktopProtocolService:
                     arguments={"threadId": task_id, "archived": True},
                     purpose=purpose,
                     expected_result={"threadId": task_id, "archived": True},
+                    reporting={
+                        "automatic_archive": True,
+                        "last_activity_at": completed_at.isoformat(),
+                    },
                 )
                 ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
                 return self._record(ledger, record.id), archive
         return None
+
+    @staticmethod
+    def _latest_native_task_activity(ledger: Ledger, task_id: str) -> datetime | None:
+        activity_times: list[datetime] = []
+        release_times: list[datetime] = []
+        saw_native_activity = False
+        for record in ledger.list_records(limit=0):
+            protocol = _protocol(record.fc or {})
+            for item in protocol.get("assignment_history") or []:
+                if not isinstance(item, Mapping) or item.get("task_id") != task_id:
+                    continue
+                released_at = _parse_protocol_time(item.get("released_at"))
+                if released_at is not None:
+                    release_times.append(released_at)
+            observations = protocol.get("observations")
+            lifecycle = (
+                observations.get("lifecycle")
+                if isinstance(observations, Mapping)
+                else None
+            )
+            for event in lifecycle.values() if isinstance(lifecycle, Mapping) else ():
+                if not isinstance(event, Mapping) or event.get("task_id") != task_id:
+                    continue
+                saw_native_activity = True
+                activity_at = _parse_protocol_time(event.get("time"))
+                if activity_at is None:
+                    return None
+                activity_times.append(activity_at)
+        if not saw_native_activity or not activity_times or not release_times:
+            return None
+        return max(*activity_times, *release_times)
+
+    @staticmethod
+    def _task_has_archive_action(ledger: Ledger, task_id: str) -> bool:
+        purpose = f"archive_task:{task_id}"
+        return any(
+            isinstance(action, Mapping)
+            and action.get("purpose") == purpose
+            and action.get("state") not in {"rejected", "superseded"}
+            for record in ledger.list_records(limit=0)
+            for action in (_protocol(record.fc or {}).get("actions") or {}).values()
+        )
 
     def _task_archival_obligations_settled(self, ledger: Ledger, task_id: str) -> bool:
         for record in ledger.list_records(limit=0):
