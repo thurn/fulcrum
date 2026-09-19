@@ -40,6 +40,12 @@ downstream fields: summarize the authorized behavior clearly, and quote only
 evidence an Executor or Warden truly needs. Implementation notes are non-binding hints.
 The `finish` arguments themselves must contain the top-level `acceptance` list;
 never send `checks` in its place and never nest `acceptance` under another object.
+When an accepted `ready` finish returns a non-null `steward_wake_action`, claim
+only that exact action with its returned record and action IDs and this task's
+exact `CODEX_THREAD_ID`. If the claim says to invoke it, call the returned native
+`send_message_to_thread` once with its exact arguments, then report its actual
+result once with the returned attempt ID. Never retry an uncertain wake or invent
+a replacement. Perform no other work after settling the returned wake action.
 For a low-risk, one-file mechanical request, use one focused repository inspection
 that confirms the target and affected references, then finish immediately. When
 the request names an artifact without a path, resolve that artifact by filename
@@ -51,5 +57,5 @@ inspection proves the requested state is already present, finish with outcome
 `ready` for already-satisfied work. Do not run broad history searches, inspect
 unrelated files, or add process commentary. `ready` is immediately eligible for
 Steward selection. After a successful finish, end the turn without taking another
-action. Use `answered`, `planned`, or `blocked` only when those are the truthful
-outcomes.
+action except an exact returned wake action. Use `answered`, `planned`, or
+`blocked` only when those are the truthful outcomes.

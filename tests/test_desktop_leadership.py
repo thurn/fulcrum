@@ -72,6 +72,46 @@ class LeadershipTests(unittest.TestCase):
             )
         self.service.resume(call(("resume",), payload={"reason": "test setup"}))
 
+    def _record_idle_steward(self, *, live=False):
+        system = self.ledger.show("fc-system")
+        desktop = dict(system.fc["desktop"])
+        standing = dict(desktop["standing"])
+        standing["steward"] = {
+            **standing["steward"],
+            "state": "registered",
+            "turn_id": "idle-turn",
+        }
+        desktop["standing"] = standing
+        desktop["instruction_waits"] = {
+            "idle-wait": {
+                "wait_id": "idle-wait",
+                "task_id": "steward-1",
+                "turn_id": "idle-turn",
+                "state": "waiting" if live else "expired",
+                **(
+                    {}
+                    if live
+                    else {
+                        "response": {
+                            "kind": "stop",
+                            "reason": "idle_deadline",
+                            "retained_obligation": False,
+                        }
+                    }
+                ),
+            }
+        }
+        desktop["observations"] = {
+            "lifecycle": {
+                "idle-complete": {
+                    "type": "task_complete",
+                    "task_id": "steward-1",
+                    "turn_id": "idle-turn",
+                }
+            }
+        }
+        self.ledger.update_fc("fc-system", {**system.fc, "desktop": desktop})
+
     def test_ready_work_compiles_without_marshal_approval(self):
         self.service.resume(call(("resume",), payload={"reason": "test"}))
         result = self.service.wait_for_instructions(
@@ -85,6 +125,179 @@ class LeadershipTests(unittest.TestCase):
         self.assertEqual(result.result["action"]["tool"], "create_thread")
         assignment = self.ledger.show("fc-a").fc["desktop"]["assignment"]
         self.assertEqual(assignment["state"], "reserved")
+
+    @patch("fulcrum.desktop_leadership._active_broker_wait_ids", return_value=set())
+    def test_marshal_classifies_completed_idle_deadline_and_wakes_same_steward(
+        self, _active_waits
+    ):
+        self._record_idle_steward()
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-idle-turn"},
+            )
+        )
+
+        self.assertEqual(checked.result["brief"]["steward_health"], "idle")
+        action = checked.result["brief"]["recovery_action"]
+        self.assertEqual(action["tool"], "send_message_to_thread")
+        self.assertEqual(action["executor"], "marshal")
+        self.assertEqual(action["arguments"]["threadId"], "steward-1")
+        self.assertEqual(action["reporting"]["idle_turn_id"], "idle-turn")
+
+    @patch("fulcrum.desktop_leadership._active_broker_wait_ids", return_value=set())
+    def test_marshal_does_nothing_for_idle_steward_without_ready_work(
+        self, _active_waits
+    ):
+        self._record_idle_steward()
+        work = self.ledger.show("fc-a")
+        self.ledger.update_fc("fc-a", work.fc, status="closed")
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-idle-no-work"},
+            )
+        )
+
+        self.assertEqual(checked.result["brief"]["steward_health"], "idle")
+        self.assertIsNone(checked.result["brief"]["recovery_action"])
+
+    @patch(
+        "fulcrum.desktop_leadership._active_broker_wait_ids",
+        return_value={"idle-wait"},
+    )
+    def test_marshal_preserves_healthy_steward_wait(self, _active_waits):
+        self._record_idle_steward(live=True)
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-live-wait"},
+            )
+        )
+
+        self.assertEqual(checked.result["brief"]["steward_health"], "healthy_wait")
+        self.assertIsNone(checked.result["brief"]["recovery_action"])
+
+    @patch("fulcrum.desktop_leadership._active_broker_wait_ids", return_value=set())
+    def test_marshal_does_not_wake_idle_steward_when_paused(self, _active_waits):
+        self._record_idle_steward()
+        self.service.pause(call(("pause",), payload={"reason": "test"}))
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-paused"},
+            )
+        )
+
+        self.assertEqual(checked.result["brief"]["steward_health"], "idle")
+        self.assertIsNone(checked.result["brief"]["recovery_action"])
+
+    @patch("fulcrum.desktop_leadership._active_broker_wait_ids", return_value=set())
+    def test_marshal_does_not_retry_unresolved_idle_wake(self, _active_waits):
+        self._record_idle_steward()
+        work = self.ledger.show("fc-a")
+        desktop = dict(work.fc.get("desktop") or {})
+        desktop["actions"] = {
+            "uncertain-wake": {
+                "action_id": "uncertain-wake",
+                "record_id": "fc-a",
+                "executor": "weaver",
+                "tool": "send_message_to_thread",
+                "arguments": {"threadId": "steward-1", "prompt": "resume"},
+                "reporting": {"idle_turn_id": "idle-turn"},
+                "state": "uncertain",
+                "attempts": [{"attempt_id": "wake-attempt", "state": "uncertain"}],
+                "purpose": "recover_steward_loop",
+            }
+        }
+        self.ledger.update_fc("fc-a", {**work.fc, "desktop": desktop})
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-uncertain"},
+            )
+        )
+
+        self.assertIsNone(checked.result["brief"]["recovery_action"])
+        actions = [
+            value
+            for row in self.ledger.list_records(limit=0)
+            for value in ((row.fc or {}).get("desktop", {}).get("actions", {})).values()
+            if value.get("purpose") == "recover_steward_loop"
+        ]
+        self.assertEqual(len(actions), 1)
+
+    @patch("fulcrum.desktop_leadership._active_broker_wait_ids", return_value=set())
+    def test_marshal_replaces_missed_completed_weaver_wake_once(self, _active_waits):
+        self._record_idle_steward()
+        work = self.ledger.show("fc-a")
+        desktop = dict(work.fc.get("desktop") or {})
+        desktop["assignment"] = {
+            "assignment_token": "weaver-token",
+            "role": "weaver",
+            "task_id": "weaver-1",
+            "turn_id": "weaver-turn",
+            "state": "active",
+            "finish_operation": "weaver-finish",
+        }
+        desktop["observations"] = {
+            "lifecycle": {
+                "weaver-complete": {
+                    "type": "task_complete",
+                    "task_id": "weaver-1",
+                    "turn_id": "weaver-turn",
+                }
+            }
+        }
+        desktop["actions"] = {
+            "weaver-wake": {
+                "action_id": "weaver-wake",
+                "record_id": "fc-a",
+                "executor": "weaver",
+                "tool": "send_message_to_thread",
+                "arguments": {"threadId": "steward-1", "prompt": "resume"},
+                "expected_result": {"thread_id": "steward-1"},
+                "reporting": {"idle_turn_id": "idle-turn"},
+                "assignment_token": "weaver-token",
+                "state": "pending",
+                "attempts": [],
+                "purpose": "recover_steward_loop",
+            }
+        }
+        self.ledger.update_fc("fc-a", {**work.fc, "desktop": desktop})
+
+        checked = self.service.marshal_check(
+            call(
+                ("marshal", "check"),
+                actor="task:marshal-1",
+                payload={"turn_id": "marshal-missed-wake"},
+            )
+        )
+
+        self.assertEqual(
+            self.ledger.show("fc-a").fc["desktop"]["actions"]["weaver-wake"]["state"],
+            "superseded",
+        )
+        action = checked.result["brief"]["recovery_action"]
+        self.assertEqual(action["executor"], "marshal")
+        repeated_actions = [
+            value
+            for row in self.ledger.list_records(limit=0)
+            for value in ((row.fc or {}).get("desktop", {}).get("actions", {})).values()
+            if value.get("purpose") == "recover_steward_loop"
+            and value.get("state") == "pending"
+        ]
+        self.assertEqual(len(repeated_actions), 1)
 
     def test_scheduled_marshal_delivery_revives_identity_and_records_health(self):
         system = self.ledger.show("fc-system")

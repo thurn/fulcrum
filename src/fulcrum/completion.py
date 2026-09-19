@@ -802,8 +802,23 @@ class CompletionService:
         fc["waiting"] = _without_waiting_kind(fc.get("waiting"), "authoring")
         fc["last_transition"] = operation.id
         fc["next_action"] = _scope_next_action(owner)
-        transferred = ledger.update_fc(work.id, fc, assignee=owner, status="open")
-        return _complete_scope_return(ledger, operation, transferred)
+        from fulcrum.desktop_protocol import _protocol, _with_protocol
+
+        protocol = _protocol(fc)
+        _retain_weaver_steward_wake(
+            request,
+            ledger,
+            protocol,
+            assignment=assignment,
+            finish_operation=operation.id,
+        )
+        transferred = ledger.update_fc(
+            work.id,
+            _with_protocol(fc, protocol),
+            assignee=owner,
+            status="open",
+        )
+        return _complete_scope_return(request, ledger, operation, transferred)
 
     def _weaver_planned(
         self, request: ParsedRequest, ledger: Ledger, work: LedgerRecord
@@ -1610,7 +1625,7 @@ def _finish_replay(request: ParsedRequest, ledger: Ledger) -> CommandResult | No
         and scope.get("acceptance") == request.input.get("acceptance")
     ):
         assert work is not None
-        return _complete_scope_return(ledger, operation, work)
+        return _complete_scope_return(request, ledger, operation, work)
     if work is not None and work.fc:
         for field in ("finish", "delivery_finish"):
             sealed = work.fc.get(field)
@@ -1640,9 +1655,30 @@ def _scope_next_action(owner: str) -> str:
 
 
 def _complete_scope_return(
-    ledger: Ledger, operation: OperationRecord, work: LedgerRecord
+    request: ParsedRequest,
+    ledger: Ledger,
+    operation: OperationRecord,
+    work: LedgerRecord,
 ) -> CommandResult:
+    from fulcrum.desktop_protocol import DesktopProtocolService, _protocol
+
     owner = str(operation.operation["planned"]["owner"])
+    wake_action = next(
+        (
+            action
+            for action in (_protocol(work.fc or {}).get("actions") or {}).values()
+            if isinstance(action, Mapping)
+            and action.get("purpose") == "recover_steward_loop"
+            and isinstance(action.get("reporting"), Mapping)
+            and action["reporting"].get("finish_operation") == operation.id
+        ),
+        None,
+    )
+    wake_response = (
+        DesktopProtocolService(ledger)._action_response(request, wake_action)
+        if isinstance(wake_action, Mapping)
+        else None
+    )
     operation = ledger.update_operation(
         operation,
         state="completed",
@@ -1656,10 +1692,74 @@ def _complete_scope_return(
             "attention": "steward_selection",
             "implementation_authorized": True,
             "next_actor": "steward",
+            "steward_wake_action": wake_response,
         },
         next_action=_scope_next_action(owner),
     )
     return _operation_result(operation)
+
+
+def _retain_weaver_steward_wake(
+    request: ParsedRequest,
+    ledger: Ledger,
+    protocol: dict[str, Any],
+    *,
+    assignment: Mapping[str, Any] | None,
+    finish_operation: str,
+) -> None:
+    """Retain one Weaver-authorized wake when the Steward's idle turn is final."""
+
+    from fulcrum.desktop_protocol import (
+        DesktopProtocolService,
+        _active_broker_wait_ids,
+        _protocol,
+        _steward_health,
+        _steward_recovery_actions,
+    )
+
+    system = ledger.show("fc-system")
+    if system is None:
+        return
+    system_protocol = _protocol(system.fc or {})
+    if system_protocol.get("run_control") != "running":
+        return
+    standing = system_protocol.get("standing")
+    steward = standing.get("steward") if isinstance(standing, Mapping) else None
+    if not isinstance(steward, Mapping):
+        return
+    with external_effect():
+        active_wait_ids = _active_broker_wait_ids(request)
+    health = _steward_health(system_protocol, active_wait_ids)
+    if health.get("state") != "idle":
+        return
+    task_id = str(steward.get("task_id") or "")
+    if not task_id or _steward_recovery_actions(
+        ledger, task_id=task_id, turn_id=health.get("turn_id")
+    ):
+        return
+    if not isinstance(assignment, Mapping):
+        return
+    DesktopProtocolService(ledger)._append_action(
+        protocol,
+        record_id=str(request.input.get("bead") or request.arguments.get("bead")),
+        executor="weaver",
+        tool="send_message_to_thread",
+        arguments={
+            "threadId": task_id,
+            "prompt": (
+                "Register as the existing Steward, reconcile retained instruction/"
+                "action state, then call wait_for_instructions."
+            ),
+        },
+        purpose="recover_steward_loop",
+        expected_result={"thread_id": task_id},
+        assignment_token=str(assignment.get("assignment_token") or ""),
+        reporting={
+            "purpose": "same_steward_resumption",
+            "idle_turn_id": health.get("turn_id"),
+            "finish_operation": finish_operation,
+        },
+    )
 
 
 def _waiting_reasons(value: Any) -> list[dict[str, Any]]:

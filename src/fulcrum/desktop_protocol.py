@@ -102,6 +102,120 @@ def _positive_native_completion(
     return False
 
 
+def _active_broker_wait_ids(request: ParsedRequest) -> set[str]:
+    """Return instruction waits still held by the resident broker."""
+
+    path = request.instance.instance_root / "broker.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.25)
+            client.connect(str(path))
+            client.sendall(b'{"type":"health"}\n')
+            raw = client.makefile("rb").readline(1024 * 1024)
+        response = json.loads(raw)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return set()
+    pending = response.get("pending") if isinstance(response, Mapping) else None
+    if not isinstance(pending, list):
+        return set()
+    return {
+        str(item["wait_id"])
+        for item in pending
+        if isinstance(item, Mapping) and item.get("wait_id")
+    }
+
+
+def _steward_health(
+    protocol: Mapping[str, Any], active_wait_ids: set[str]
+) -> dict[str, Any]:
+    """Classify the retained Steward from wait and positive terminal evidence."""
+
+    standing = protocol.get("standing")
+    steward = standing.get("steward") if isinstance(standing, Mapping) else None
+    if not isinstance(steward, Mapping):
+        return {"state": "unknown", "turn_id": None}
+    task_id = steward.get("task_id")
+    waits = protocol.get("instruction_waits")
+    retained_waits = list(waits.values()) if isinstance(waits, Mapping) else []
+    if any(
+        isinstance(wait, Mapping)
+        and wait.get("task_id") == task_id
+        and wait.get("state") == "waiting"
+        and wait.get("wait_id") in active_wait_ids
+        for wait in retained_waits
+    ):
+        return {"state": "healthy_wait", "turn_id": steward.get("turn_id")}
+    if steward.get("state") in {
+        "stopped",
+        "stop_observed",
+        "interrupt_observed",
+    }:
+        return {"state": "stopped", "turn_id": steward.get("turn_id")}
+    if steward.get("state") != "registered":
+        return {"state": "unknown", "turn_id": steward.get("turn_id")}
+
+    turn_id = steward.get("turn_id")
+    idle_wait = next(
+        (
+            wait
+            for wait in retained_waits
+            if isinstance(wait, Mapping)
+            and wait.get("task_id") == task_id
+            and wait.get("turn_id") == turn_id
+            and isinstance(wait.get("response"), Mapping)
+            and wait["response"].get("kind") == "stop"
+            and wait["response"].get("reason") == "idle_deadline"
+            and wait["response"].get("retained_obligation") is False
+        ),
+        None,
+    )
+    observations = protocol.get("observations")
+    lifecycle = (
+        observations.get("lifecycle") if isinstance(observations, Mapping) else None
+    )
+    completed = isinstance(lifecycle, Mapping) and any(
+        isinstance(event, Mapping)
+        and event.get("task_id") == task_id
+        and event.get("turn_id") == turn_id
+        and event.get("type")
+        in {"task_complete", "task_completed", "turn_complete", "turn_completed"}
+        for event in lifecycle.values()
+    )
+    if isinstance(idle_wait, Mapping) and completed:
+        return {
+            "state": "idle",
+            "turn_id": turn_id,
+            "wait_id": idle_wait.get("wait_id"),
+        }
+    return {"state": "unknown", "turn_id": turn_id}
+
+
+def _steward_recovery_actions(
+    ledger: Ledger, *, task_id: str, turn_id: str | None
+) -> list[tuple[LedgerRecord, dict[str, Any]]]:
+    """Find durable same-Steward wake actions for one observed idle turn."""
+
+    matches: list[tuple[LedgerRecord, dict[str, Any]]] = []
+    for record in ledger.list_records(limit=0):
+        actions = _protocol(record.fc or {}).get("actions")
+        if not isinstance(actions, Mapping):
+            continue
+        for value in actions.values():
+            if not isinstance(value, Mapping):
+                continue
+            arguments = value.get("arguments")
+            reporting = value.get("reporting")
+            if (
+                value.get("purpose") == "recover_steward_loop"
+                and isinstance(arguments, Mapping)
+                and arguments.get("threadId") == task_id
+                and isinstance(reporting, Mapping)
+                and reporting.get("idle_turn_id") == turn_id
+            ):
+                matches.append((record, dict(value)))
+    return matches
+
+
 def _release_rejected_dispatch(
     protocol: dict[str, Any], action: Mapping[str, Any]
 ) -> bool:
@@ -1823,6 +1937,23 @@ class DesktopProtocolService:
             and assignment.get("role") == "weaver"
         ):
             return "Weaver tasks are forbidden; Weaver must be the invoking task"
+        if action.get("purpose") == "recover_steward_loop":
+            system_protocol = _protocol(self._system(ledger).fc or {})
+            if system_protocol.get("run_control", "paused") == "paused":
+                return "admission is paused"
+            with external_effect():
+                active_wait_ids = _active_broker_wait_ids(request)
+            health = _steward_health(system_protocol, active_wait_ids)
+            target = (action.get("arguments") or {}).get("threadId")
+            standing = system_protocol.get("standing") or {}
+            steward = standing.get("steward") if isinstance(standing, Mapping) else None
+            if not isinstance(steward, Mapping) or steward.get("task_id") != target:
+                return "the registered Steward changed"
+            if health.get("state") not in {"idle", "stopped"}:
+                return "the Steward is no longer idle"
+            expected_turn = (action.get("reporting") or {}).get("idle_turn_id")
+            if expected_turn is not None and health.get("turn_id") != expected_turn:
+                return "the Steward started another turn"
         if action.get("purpose") != "routine_dispatch":
             return None
         system = self._system(ledger)

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-import json
-import socket
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,7 +12,10 @@ from fulcrum.contracts import CommandResult, FulcrumError, ParsedRequest
 from fulcrum.coordination import coordinated, external_effect
 from fulcrum.desktop_protocol import (
     DesktopProtocolService,
+    DISPATCHABLE_ROLES,
+    _active_broker_wait_ids,
     _opaque,
+    _positive_native_completion,
     _protocol,
     _request_input,
     _result,
@@ -22,31 +23,11 @@ from fulcrum.desktop_protocol import (
     _save_request,
     _utc_now,
     _with_protocol,
+    _steward_health,
+    _steward_recovery_actions,
     action_marker,
     require_run_control,
-    _positive_native_completion,
 )
-
-
-def _active_broker_wait_ids(request: ParsedRequest) -> set[str]:
-    path = request.instance.instance_root / "broker.sock"
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(0.25)
-            client.connect(str(path))
-            client.sendall(b'{"type":"health"}\n')
-            raw = client.makefile("rb").readline(1024 * 1024)
-        response = json.loads(raw)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return set()
-    pending = response.get("pending") if isinstance(response, Mapping) else None
-    if not isinstance(pending, list):
-        return set()
-    return {
-        str(item["wait_id"])
-        for item in pending
-        if isinstance(item, Mapping) and item.get("wait_id")
-    }
 
 
 def _current_native_turn(protocol: Mapping[str, Any], task_id: Any) -> str | None:
@@ -226,6 +207,7 @@ class DesktopLeadershipService(DesktopProtocolService):
         incidents: list[dict[str, Any]] = []
         recoveries: list[dict[str, Any]] = []
         ready: list[dict[str, Any]] = []
+        steward_ready: list[dict[str, Any]] = []
         for record in records:
             fc = record.fc or {}
             desktop = _protocol(fc)
@@ -338,27 +320,34 @@ class DesktopLeadershipService(DesktopProtocolService):
                         "holds": fc.get("holds") or [],
                     }
                 )
-        waits = protocol.get("instruction_waits") or {}
+            if (
+                record.status != "closed"
+                and fc.get("phase") in {"ready", "implementation_ready"}
+                and fc.get("requested_role") in DISPATCHABLE_ROLES
+                and not fc.get("holds")
+                and not fc.get("blocked")
+                and (
+                    not isinstance(desktop.get("assignment"), Mapping)
+                    or (
+                        desktop["assignment"].get("role") == "weaver"
+                        and desktop["assignment"].get("finish_operation")
+                        and _positive_native_completion(desktop, desktop["assignment"])
+                    )
+                )
+                and all(
+                    (dependency := ledger.show(identifier)) is not None
+                    and dependency.status == "closed"
+                    for identifier in ledger.dependencies(record.id)
+                )
+            ):
+                steward_ready.append(
+                    {"bead": record.id, "priority": fc.get("priority", 2)}
+                )
         with external_effect():
             active_wait_ids = _active_broker_wait_ids(request)
-        healthy_wait = any(
-            isinstance(value, Mapping)
-            and value.get("state") == "waiting"
-            and value.get("wait_id") in active_wait_ids
-            for value in waits.values()
-        )
         steward = (protocol.get("standing") or {}).get("steward")
-        steward_health = (
-            "healthy_wait"
-            if healthy_wait
-            else (
-                "stopped"
-                if isinstance(steward, Mapping)
-                and steward.get("state")
-                in {"stopped", "stop_observed", "interrupt_observed"}
-                else "unknown"
-            )
-        )
+        steward_health_evidence = _steward_health(protocol, active_wait_ids)
+        steward_health = str(steward_health_evidence["state"])
         decision = {
             "decision_id": _opaque("decision"),
             "state": "active",
@@ -457,25 +446,68 @@ class DesktopLeadershipService(DesktopProtocolService):
                         _with_protocol(recovery_record.fc or {}, recovery_protocol),
                     )
         if (
-            steward_health == "stopped"
+            steward_health in {"idle", "stopped"}
             and isinstance(steward, Mapping)
-            and not healthy_wait
+            and protocol.get("run_control") == "running"
+            and (steward_health == "stopped" or steward_ready)
             and not unsettled
             and not recoveries
         ):
-            existing = next(
+            wake_actions = _steward_recovery_actions(
+                ledger,
+                task_id=str(steward.get("task_id") or ""),
+                turn_id=steward_health_evidence.get("turn_id"),
+            )
+            settled = next(
                 (
                     action
-                    for action in actions.values()
-                    if isinstance(action, Mapping)
-                    and action.get("purpose") == "recover_steward_loop"
-                    and action.get("state") not in {"rejected", "superseded"}
+                    for _, action in wake_actions
+                    if action.get("state") == "succeeded"
                 ),
                 None,
             )
-            if isinstance(existing, Mapping):
-                recovery_action = dict(existing)
-            else:
+            current = next(
+                (
+                    action
+                    for _, action in wake_actions
+                    if action.get("executor") == "marshal"
+                    and action.get("state") == "pending"
+                ),
+                None,
+            )
+            worker_pending = [
+                (record, action)
+                for record, action in wake_actions
+                if action.get("executor") != "marshal"
+                and action.get("state") == "pending"
+            ]
+            worker_still_active = False
+            for action_record, action in worker_pending:
+                action_protocol = _protocol(action_record.fc or {})
+                assignment = action_protocol.get("assignment")
+                if not (
+                    isinstance(assignment, Mapping)
+                    and _positive_native_completion(action_protocol, assignment)
+                ):
+                    worker_still_active = True
+                    continue
+                retained_actions = dict(action_protocol.get("actions") or {})
+                retained_actions[str(action["action_id"])] = {
+                    **dict(action),
+                    "state": "superseded",
+                    "superseded_at": _utc_now(),
+                    "superseded_reason": (
+                        "the finishing Weaver ended before issuing the retained wake"
+                    ),
+                }
+                action_protocol["actions"] = retained_actions
+                ledger.update_fc(
+                    action_record.id,
+                    _with_protocol(action_record.fc or {}, action_protocol),
+                )
+            if isinstance(current, Mapping):
+                recovery_action = dict(current)
+            elif settled is None and not worker_still_active:
                 action_id = _opaque("action")
                 recovery_action = {
                     "action_id": action_id,
@@ -490,7 +522,10 @@ class DesktopLeadershipService(DesktopProtocolService):
                         ),
                     },
                     "expected_result": {"thread_id": steward.get("task_id")},
-                    "reporting": {"purpose": "same_steward_resumption"},
+                    "reporting": {
+                        "purpose": "same_steward_resumption",
+                        "idle_turn_id": steward_health_evidence.get("turn_id"),
+                    },
                     "state": "pending",
                     "attempts": [],
                     "created_at": _utc_now(),

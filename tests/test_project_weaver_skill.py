@@ -35,6 +35,7 @@ class ProjectWeaverSkillTests(unittest.TestCase):
             "as top-level lists of strings",
             skill,
         )
+        self.assertIn("non-null `steward_wake_action`", skill)
 
     def test_weaver_resolves_named_artifacts_before_reading_values(self):
         skill = (ROOT / ".agents" / "skills" / "weaver" / "SKILL.md").read_text(
