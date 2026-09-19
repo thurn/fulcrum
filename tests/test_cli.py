@@ -160,6 +160,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(parsed.instance.brain_root, brain.resolve())
             self.assertEqual(effective["policy"]["automatic_capacity"], 2)
             self.assertEqual(effective["source"]["repository"], str(checkout.resolve()))
+            self.assertEqual(
+                effective["models"],
+                {
+                    "steward": {"model": "gpt-5.6-luna", "effort": "low"},
+                    "vizier": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "marshal": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "weaver": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "executor": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "warden": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "sage": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "mason": {"model": "gpt-5.6-sol", "effort": "high"},
+                    "justiciar": {"model": "gpt-5.6-sol", "effort": "high"},
+                },
+            )
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
 
     def test_each_cli_invocation_dispatches_in_its_fresh_operation_process(self):

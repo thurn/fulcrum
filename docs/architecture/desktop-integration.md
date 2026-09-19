@@ -31,11 +31,11 @@ remote-publication waits, or restarting existing operations and connections.
 
 ## Roles and native action ownership
 
-| Standing agent | Model | Responsibility |
-| --- | --- | --- |
-| Steward | Luna (`gpt-5.6-luna`) | Execute exact routine actions returned by Fulcrum: create, message, name, inspect, and archive tasks. Repeatedly wait for instructions. Make no scheduling, scope, or policy judgments. |
-| Marshal | Sol (`gpt-5.6-sol`) | Run every 15 minutes and on exceptional failure alerts. Curate priorities, dependencies, holds, and backlog dispositions; check Steward's health; directly create scoped Justiciars. |
-| Vizier | Sol (`gpt-5.6-sol`) | Receive human direction, manage system policy, and present decisions that require the human. Record authorized changes through the same CLI. |
+| Standing agent | Model | Effort | Responsibility |
+| --- | --- | --- | --- |
+| Steward | Luna (`gpt-5.6-luna`) | Low | Execute exact routine actions returned by Fulcrum: create, message, name, inspect, and archive tasks. Repeatedly wait for instructions. Make no scheduling, scope, or policy judgments. |
+| Marshal | Sol (`gpt-5.6-sol`) | High | Run every 15 minutes and on exceptional failure alerts. Curate priorities, dependencies, holds, and backlog dispositions; check Steward's health; directly create scoped Justiciars. |
+| Vizier | Sol (`gpt-5.6-sol`) | High | Receive human direction, manage system policy, and present decisions that require the human. Record authorized changes through the same CLI. |
 
 These are the requested model choices, not permission to substitute an available
 model silently. Use authorized per-role reasoning effort from configuration;

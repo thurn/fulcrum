@@ -45,7 +45,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         root = Path(directory)
         service = DesktopSetupService(MemoryLedger())
         support = {
-            "gpt-5.6-luna": ["high"],
+            "gpt-5.6-luna": ["low"],
             "gpt-5.6-sol": ["high"],
         }
         supplied = {
@@ -60,6 +60,11 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             if "role" in row["reporting"]
         }
         assert set(actions) == {"steward", "marshal", "vizier"}
+        assert actions["steward"]["arguments"]["model"] == "gpt-5.6-luna"
+        assert actions["steward"]["arguments"]["thinking"] == "low"
+        for role in ("marshal", "vizier"):
+            assert actions[role]["arguments"]["model"] == "gpt-5.6-sol"
+            assert actions[role]["arguments"]["thinking"] == "high"
         assert (
             "without inventing loop or turn IDs"
             in actions["steward"]["arguments"]["prompt"]

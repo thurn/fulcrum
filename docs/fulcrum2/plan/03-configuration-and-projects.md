@@ -21,9 +21,9 @@ For example, `config set --input - --actor human --json` with
 `{"policy":{"automatic_capacity":4}}` merges the supplied mapping. Arrays replace;
 unknown keys, duplicate YAML keys and unsafe tags fail. Defaults are four global
 and four per-project slots; no reserve/helper-limit fields remain. Standing
-leadership defaults to the configured Sol/Luna choices, while short-lived Weaver,
-Executor, and Warden work defaults to Luna/low; explicit test/task overrides do
-not edit production defaults.
+leadership defaults to Steward on Luna/low and Marshal and Vizier on Sol/high.
+Short-lived Weaver, Executor, and Warden work defaults to Sol/high; explicit
+test/task overrides do not edit production defaults.
 
 ## Implementation and durable boundaries
 

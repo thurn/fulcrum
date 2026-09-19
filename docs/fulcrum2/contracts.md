@@ -1350,6 +1350,7 @@ configuration uses the setup fields already specified above:
 
 ```yaml
 models:
+  steward: {model: gpt-5.6-luna, effort: low}
   vizier: {model: gpt-5.6-sol, effort: high}
   marshal: {model: gpt-5.6-sol, effort: high}
   weaver: {model: gpt-5.6-sol, effort: high}

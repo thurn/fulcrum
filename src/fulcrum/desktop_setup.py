@@ -108,6 +108,7 @@ STANDING = {
     "steward": {
         "title": "🧰 STEWARD 🧰",
         "model": "gpt-5.6-luna",
+        "effort": "low",
         "prompt": (
             "First call register_standing with role `steward` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
@@ -131,6 +132,7 @@ STANDING = {
     "marshal": {
         "title": "🧭 MARSHAL 🧭",
         "model": "gpt-5.6-sol",
+        "effort": "high",
         "prompt": (
             "$fulcrum-marshal\nRead and follow `~/fulcrum/skills/fulcrum-marshal/SKILL.md` "
             "from local master. First call register_standing with role `marshal` and the action_id from "
@@ -145,6 +147,7 @@ STANDING = {
     "vizier": {
         "title": "🔮 VIZIER 🔮",
         "model": "gpt-5.6-sol",
+        "effort": "high",
         "prompt": (
             "$fulcrum-vizier\nRead and follow `~/fulcrum/skills/fulcrum-vizier/SKILL.md` "
             "from local master. First call register_standing with role `vizier` and the action_id from "
@@ -397,7 +400,7 @@ class DesktopSetupService(DesktopProtocolService):
             effort = (
                 selected.get("effort")
                 if isinstance(selected, Mapping)
-                else request.input.get(f"{role}_thinking", "high")
+                else request.input.get(f"{role}_thinking", definition["effort"])
             )
             return str(model), str(effort)
 

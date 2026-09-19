@@ -76,11 +76,12 @@ uncertain effect. New standing tasks register with the action marker before work
 One bounded native wait lets their initial turns settle; bootstrap reruns inspect
 retained IDs and postconditions instead of recreating tasks.
 
-The fixed identities are `🧰 STEWARD 🧰` on `gpt-5.6-luna` and `🧭 MARSHAL 🧭`
-plus `🔮 VIZIER 🔮` on `gpt-5.6-sol`. One heartbeat targets the registered Marshal
+The fixed identities are `🧰 STEWARD 🧰` on `gpt-5.6-luna` with low
+reasoning effort and `🧭 MARSHAL 🧭` plus `🔮 VIZIER 🔮` on `gpt-5.6-sol`
+with high reasoning effort. One heartbeat targets the registered Marshal
 every 15 minutes and stays quiet on healthy no-op runs. There is no Steward
 heartbeat or hourly recovery task. Short-lived Weaver, Executor, and Warden work
-defaults to Luna with low reasoning effort; project or work-specific configuration
+defaults to Sol with high reasoning effort; project or work-specific configuration
 may override that choice.
 
 Admission opens only after the broker answers, required native tools and model
