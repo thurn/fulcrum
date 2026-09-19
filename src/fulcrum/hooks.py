@@ -768,9 +768,13 @@ class HookService:
             normalized["turn_id"] = normalized.get("turn_id") or turn_id
             if normalized.get("type") == "turn_context" and normalized.get("model"):
                 models[str(normalized.get("turn_id"))] = str(normalized["model"])
-            identity = normalized.get("event_id") or ":".join(
-                str(normalized.get(field) or "unknown")
-                for field in ("task_id", "turn_id", "type")
+            identity = ":".join(
+                str(value or "unknown")
+                for value in (
+                    normalized.get("task_id"),
+                    normalized.get("turn_id"),
+                    normalized.get("event_id") or normalized.get("type"),
+                )
             )
             lifecycle[str(identity)] = normalized
         for item in page.usage:
@@ -780,9 +784,19 @@ class HookService:
             normalized["model"] = normalized.get("model") or models.get(
                 str(normalized.get("turn_id"))
             )
-            identity = normalized.get("response_id") or normalized.get("event_id")
-            if identity:
-                usage[str(identity)] = normalized
+            native_identity = normalized.get("response_id") or normalized.get(
+                "event_id"
+            )
+            if native_identity:
+                identity = ":".join(
+                    str(value or "unknown")
+                    for value in (
+                        normalized.get("task_id"),
+                        normalized.get("turn_id"),
+                        native_identity,
+                    )
+                )
+                usage[identity] = normalized
         observations["lifecycle"] = lifecycle
         observations["usage"] = usage
         protocol["observations"] = observations

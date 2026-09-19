@@ -1127,7 +1127,10 @@ class HookTests(unittest.TestCase):
         self.assertEqual(watched_again, [str(path)])
         self.assertEqual(retained_paths, [str(path)])
         self.assertEqual(len(ledger.writes), writes_after_change)
-        self.assertIn("response-delayed", protocol["observations"]["usage"])
+        self.assertIn(
+            "steward-1:turn-1:response-delayed",
+            protocol["observations"]["usage"],
+        )
         analytics = ledger.list_records(kind="analytics", limit=0)[0]
         self.assertEqual((analytics.fc or {})["coverage"], "in_progress")
         self.assertNotIn(
@@ -1229,6 +1232,7 @@ class HookTests(unittest.TestCase):
         ledger = MemoryLedger()
         desktop = DesktopProtocolService(ledger)
         bindings = {}
+        paths = {}
         for role in ("steward", "marshal"):
             action = seed_action(
                 ledger,
@@ -1265,6 +1269,7 @@ class HookTests(unittest.TestCase):
                 path = Path(directory) / f"{role}.jsonl"
                 rows = [
                     {
+                        "ordinal": 7,
                         "type": "turn_context",
                         "turn_id": turn_id,
                         "model": "gpt-5.6-luna",
@@ -1284,6 +1289,7 @@ class HookTests(unittest.TestCase):
                     },
                 ]
                 path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                paths[role] = path
                 HookService(ledger).handle(
                     replace(
                         request(("hook", "handle")),
@@ -1298,6 +1304,23 @@ class HookTests(unittest.TestCase):
                         request_id=str(uuid.uuid4()),
                     )
                 )
+            with paths["steward"].open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "ordinal": 59,
+                            "type": "token_usage_record",
+                            "payload": {
+                                "thread_id": bindings["steward"],
+                                "turn_id": "turn-steward",
+                                "response_id": "response-steward-late",
+                                "usage": {"input_tokens": 12, "output_tokens": 3},
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            HookService(ledger).collect_registered(request())
         protocol = (ledger.show("fc-system").fc or {})["desktop"]
         self.assertEqual(set(protocol["transcripts"]), {"steward-1", "marshal-1"})
         self.assertEqual(protocol["standing"]["steward"]["state"], "registered")
@@ -1309,6 +1332,9 @@ class HookTests(unittest.TestCase):
             ]
             self.assertNotIn(
                 "terminal_lifecycle_missing", (analytics.fc or {})["missing_reasons"]
+            )
+            self.assertNotIn(
+                "effective_model_missing", (analytics.fc or {})["missing_reasons"]
             )
         self.assertEqual(
             observed_roles,

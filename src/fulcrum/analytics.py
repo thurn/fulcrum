@@ -86,10 +86,16 @@ def record_desktop_usage(
             identity = event.get("response_id") or event.get("event_id")
             if identity:
                 raw[str(identity)] = dict(event)
+        observed_models = {
+            str(value["model"])
+            for value in raw.values()
+            if isinstance(value.get("model"), str) and value.get("model")
+        }
+        turn_model = next(iter(observed_models)) if len(observed_models) == 1 else None
         normalized_input = [
             {
                 "response_id": value.get("response_id") or value.get("event_id"),
-                "model": value.get("model"),
+                "model": value.get("model") or turn_model,
                 "service_tier": value.get("service_tier"),
                 "input_tokens": value.get("input_tokens"),
                 "cached_input_tokens": value.get("cached_input_tokens"),

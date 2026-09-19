@@ -91,6 +91,46 @@ def test_latest_open_turn_is_in_progress_but_superseded_turn_needs_terminal():
     assert "terminal_lifecycle_missing" not in rows["turn-2"]["missing_reasons"]
 
 
+def test_usage_reconcile_backfills_one_observed_turn_model():
+    control = record("fc-system", kind="control")
+    ledger = MemoryLedger(control)
+    usage = [
+        {
+            "task_id": "task-1",
+            "turn_id": "turn-1",
+            "response_id": "response-1",
+            "model": "gpt-5.6-sol",
+            "input_tokens": 10,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_tokens": 0,
+        },
+        {
+            "task_id": "task-1",
+            "turn_id": "turn-1",
+            "response_id": "response-2",
+            "model": None,
+            "input_tokens": 12,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 3,
+            "reasoning_tokens": 0,
+        },
+    ]
+    lifecycle = [{"type": "task_complete", "task_id": "task-1", "turn_id": "turn-1"}]
+
+    record_desktop_usage(ledger, control, "vizier", usage, lifecycle)
+
+    analytics = ledger.list_records(kind="analytics", limit=0)[0]
+    retained = analytics.fc or {}
+    assert retained["model"]["effective"] == "gpt-5.6-sol"
+    assert "effective_model_missing" not in retained["missing_reasons"]
+    assert {
+        response["effective_model"] for response in retained["response_records"]
+    } == {"gpt-5.6-sol"}
+
+
 class AnalyticsTests(unittest.TestCase):
     def test_completion_correction_tracks_coverage_change(self):
         test_completion_correction_records_coverage_change_without_new_turns()
