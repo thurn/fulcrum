@@ -108,10 +108,10 @@ def _marshal_turn_id(
                 exit_code=5,
             )
         return supplied
-    if observed is not None:
-        return observed
     if request.input.get("trigger") == "heartbeat":
         return f"heartbeat:{request.request_id or _opaque('turn')}"
+    if observed is not None:
+        return observed
     raise FulcrumError(
         "IDENTITY_REQUIRED",
         "current Marshal native turn has not been observed yet",

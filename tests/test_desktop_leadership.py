@@ -122,11 +122,12 @@ class LeadershipTests(unittest.TestCase):
         retained = self.ledger.show("fc-system").fc["desktop"]
         self.assertEqual(retained["standing"]["marshal"]["state"], "registered")
         self.assertEqual(retained["marshal_schedule"]["delivery_count"], 1)
-        self.assertEqual(
-            retained["marshal_schedule"]["last_delivery_turn_id"],
-            "heartbeat-turn",
+        self.assertTrue(
+            retained["marshal_schedule"]["last_delivery_turn_id"].startswith(
+                "heartbeat:"
+            )
         )
-        self.assertEqual(checked.result["decision"]["turn_id"], "heartbeat-turn")
+        self.assertTrue(checked.result["decision"]["turn_id"].startswith("heartbeat:"))
 
         decided = self.service.marshal_decide(
             call(
@@ -143,7 +144,8 @@ class LeadershipTests(unittest.TestCase):
         retained = self.ledger.show("fc-system").fc["desktop"]
         self.assertEqual(retained["marshal_schedule"]["completed_cycle_count"], 1)
         self.assertEqual(
-            retained["marshal_schedule"]["last_cycle_turn_id"], "heartbeat-turn"
+            retained["marshal_schedule"]["last_cycle_turn_id"],
+            checked.result["decision"]["turn_id"],
         )
 
     def test_marshal_check_does_not_create_decision_without_turn_evidence(self):
