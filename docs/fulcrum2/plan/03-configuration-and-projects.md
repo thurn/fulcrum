@@ -22,8 +22,8 @@ For example, `config set --input - --actor human --json` with
 unknown keys, duplicate YAML keys and unsafe tags fail. Defaults are four global
 and four per-project slots; no reserve/helper-limit fields remain. Standing
 leadership defaults to Steward on Luna/low and Marshal and Vizier on Sol/high.
-Short-lived Weaver, Executor, and Warden work defaults to Sol/high; explicit
-test/task overrides do not edit production defaults.
+Short-lived Weaver work defaults to Sol/high; Executor and Warden default to
+Sol/medium. Explicit test/task overrides do not edit production defaults.
 
 ## Implementation and durable boundaries
 

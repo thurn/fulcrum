@@ -74,7 +74,24 @@ def test_trace_joins_action_task_lifecycle_and_registration_recovery():
                             "turn_id": "turn-1",
                             "reason": "interrupted",
                         }
-                    }
+                    },
+                    "timings": {
+                        "worker-1:turn-1:response:r1": {
+                            "kind": "model_response",
+                            "item_type": "ModelResponse",
+                            "task_id": "worker-1",
+                            "turn_id": "turn-1",
+                            "response_id": "r1",
+                            "time": "2026-09-17T00:00:02.000Z",
+                            "started_at": "2026-09-17T00:00:00.500Z",
+                            "completed_at": "2026-09-17T00:00:02.000Z",
+                            "duration_ms": 1500.0,
+                            "span_id": "worker-1:turn-1:response:r1",
+                            "parent_span_id": "worker-1:turn-1:item:tool-0",
+                            "correlation_id": "worker-1:turn-1",
+                            "outcome": "completed",
+                        }
+                    },
                 },
                 "registration_failures": [
                     {
@@ -107,6 +124,11 @@ def test_trace_joins_action_task_lifecycle_and_registration_recovery():
     assert rows["action-create"]["attempt_id"] == "attempt-1"
     assert rows["action-create"]["task_id"] == "worker-1"
     assert rows["stop-1"]["outcome"] == "interrupted"
+    timing = rows["worker-1:turn-1:response:r1"]
+    assert timing["transition"] == "native_timing"
+    assert timing["duration_ms"] == 1500.0
+    assert timing["parent_span_id"] == "worker-1:turn-1:item:tool-0"
+    assert timing["correlation_id"] == "worker-1:turn-1"
     assert rows["fc-work:registration-failure:0"]["outcome"] == "capacity_released"
     assert result.result["gaps"] == []
 

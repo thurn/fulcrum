@@ -5,6 +5,12 @@ guessing from the duration of a whole command. Instrumentation is inert unless
 `FULCRUM_TIMING_FILE` is set and never records request payloads, paths, results,
 or descriptions.
 
+Registered native task transcripts also supply durable, always-on timing for
+model responses and completed command, MCP, and file-change items. These bounded,
+redacted spans appear in `fulcrum trace` with task/turn correlation and parent
+span IDs. They are intended for workflow postmortems; the opt-in profiler below
+remains the higher-detail tool for application-process latency.
+
 ## Profile an operation
 
 Run a representative command through the repository tool:

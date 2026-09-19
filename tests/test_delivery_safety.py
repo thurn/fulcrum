@@ -9,13 +9,18 @@ from fulcrum.completion import _settled_delivery_for_source
 from fulcrum.delivery import (
     DeliveryFacts,
     DeliveryProviderError,
+    LocalCheckFacts,
     SourceRef,
     TollgateDelivery,
     WorkRef,
     WorkspaceFacts,
     _provider_evidence,
 )
-from fulcrum.delivery_service import DeliveryService, _retain_conflict_base
+from fulcrum.delivery_service import (
+    DeliveryService,
+    _retain_conflict_base,
+    _validation_configuration_digest,
+)
 from tests.support import MemoryLedger, record, request
 
 
@@ -145,6 +150,76 @@ class DeliverySafetyTests(unittest.TestCase):
         approved = ledger.show("fc-work").fc["delivery"]["approved_source"]
         self.assertEqual(approved["oid"], "current-source")
         self.assertEqual(approved["provider_handle"], "handle")
+
+    def test_validation_reuses_only_the_same_source_and_configuration(self):
+        reference = replace(self.ref, validate_argv=("scripts/check",))
+        configuration_digest = _validation_configuration_digest(reference)
+        prior = {
+            "source_oid": "current-source",
+            "configuration_digest": configuration_digest,
+            "state": "passed",
+            "argv": ["scripts/check"],
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "observed_at": "2026-09-15T00:00:00Z",
+            "operation_id": "fc-check-1",
+        }
+        work = record(local_check=prior)
+        ledger = MemoryLedger(work)
+        provider = Mock()
+        provider.validate = AsyncMock(
+            return_value=LocalCheckFacts(
+                "current-source",
+                "passed",
+                ("scripts/check", "--strict"),
+                0,
+                "",
+                "",
+                "2026-09-15T00:01:00Z",
+            )
+        )
+        validation_request = request(
+            ("validation", "check"),
+            arguments={"bead": "fc-work", "source": "current-source"},
+        )
+        with (
+            patch(
+                "fulcrum.delivery_service._context",
+                return_value=(ledger, work, {}, provider),
+            ),
+            patch("fulcrum.delivery_service._work_ref", return_value=reference),
+        ):
+            reused = DeliveryService().validation_check(validation_request)
+
+        self.assertTrue(reused.ok)
+        self.assertTrue(reused.result["reused"])
+        self.assertEqual(reused.operation_id, "fc-check-1")
+        provider.validate.assert_not_awaited()
+
+        changed = replace(reference, validate_argv=("scripts/check", "--strict"))
+        with (
+            patch(
+                "fulcrum.delivery_service._context",
+                return_value=(ledger, ledger.show(work.id), {}, provider),
+            ),
+            patch("fulcrum.delivery_service._work_ref", return_value=changed),
+        ):
+            rerun = DeliveryService().validation_check(
+                replace(
+                    validation_request,
+                    request_id="00000000-0000-4000-8000-000000000001",
+                )
+            )
+
+        self.assertTrue(rerun.ok)
+        provider.validate.assert_awaited_once()
+        retained = ledger.show(work.id).fc
+        self.assertEqual(
+            retained["local_check"]["configuration_digest"],
+            _validation_configuration_digest(changed),
+        )
+        self.assertEqual(retained["local_check_history"], [prior])
 
     def test_promotion_uses_only_the_current_approved_source_and_handle(self):
         result, provider, ledger = self.invoke(

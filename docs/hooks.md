@@ -7,7 +7,19 @@ client-disconnect cancellation provide the authoritative interruption path.
 Unrelated hook configuration is preserved. Each command reads one JSON
 event from stdin, emits only event-specific hook JSON on stdout, and writes
 diagnostics to stderr. Hooks have a ten-second timeout and compact added context
-is capped at 2,000 characters.
+is capped at 2,000 characters. The `Stop` hook alone has a 60-second deadline so
+its one-shot standing-Steward correction can finish without repeated turns.
+
+Pre- and post-tool callbacks around Fulcrum's own MCP tools take a ledger-free
+fast path because those commands enforce durable authority themselves. Native app
+effects still use the complete claimed-action hook path. Active task binding uses
+the native assignee index before any historical scan so routine tool use does not
+fan out into a global Beads read.
+
+The broker's transport snapshot collects transcripts and rebuilds its watch index
+without holding the global workflow transition lock. Individual durable transcript
+updates still merge under the ledger lock, so a long snapshot cannot block Weaver
+entry or another unrelated command.
 
 Hooks are cooperative evidence and admission checks, not a universal execution
 sandbox. The CLI independently validates every durable transition. `PreToolUse`

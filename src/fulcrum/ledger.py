@@ -329,14 +329,20 @@ class Ledger:
         return None
 
     def list_records(
-        self, *, kind: str | None = None, limit: int = 20
+        self,
+        *,
+        kind: str | None = None,
+        limit: int = 20,
+        assignee: str | None = None,
     ) -> list[LedgerRecord]:
-        if limit == 0 and self._listed_records is not None:
+        if limit == 0 and assignee is None and self._listed_records is not None:
             records = copy.deepcopy(self._listed_records)
             return [record for record in records if kind is None or record.kind == kind]
         arguments = ["list", "--all", "--flat", "--limit", str(limit)]
         if kind is not None:
             arguments.extend(("--label", f"fc:{kind}"))
+        if assignee is not None:
+            arguments.extend(("--assignee", assignee))
         value = self.run(arguments).value
         records = (
             [LedgerRecord.from_native(item) for item in value if isinstance(item, dict)]
@@ -347,7 +353,7 @@ class Ledger:
             records = [record for record in records if record.kind == kind]
         for record in records:
             self._observed[record.id] = copy.deepcopy(dict(record.fc or {}))
-        if limit == 0 and kind is None:
+        if limit == 0 and kind is None and assignee is None:
             self._listed_records = copy.deepcopy(records)
         return records
 

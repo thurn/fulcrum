@@ -49,6 +49,15 @@ class InstallTests(unittest.TestCase):
             if "default_prompt:" in agent:
                 self.assertIn(f"${directory.name}", agent)
 
+    def test_justiciar_skill_supports_system_and_manual_entry_titles(self):
+        text = (
+            Path(__file__).parents[1] / "skills" / "justiciar" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("when Fulcrum creates this task", text)
+        self.assertIn("CODEX_THREAD_ID", text)
+        self.assertIn("set_thread_title", text)
+        self.assertIn("🔥 [jus]", text)
+
     def test_owned_services_are_only_dolt_and_broker(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -121,12 +130,14 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(owned["SessionStart"]["additionalContextLimit"], 2000)
             self.assertEqual(owned["Stop"]["timeout"], 60)
             for event in {
+                "SessionStart",
                 "UserPromptSubmit",
                 "PreToolUse",
                 "PostToolUse",
             }:
-                self.assertNotIn("additionalContextLimit", owned[event])
-                self.assertEqual(owned[event]["timeout"], 30)
+                if event != "SessionStart":
+                    self.assertNotIn("additionalContextLimit", owned[event])
+                self.assertEqual(owned[event]["timeout"], 10)
             self.assertEqual(
                 definitions,
                 {event: groups[-1] for event, groups in hooks.items()},

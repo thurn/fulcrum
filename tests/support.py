@@ -60,11 +60,12 @@ class MemoryLedger(Ledger):
     def show(self, record_id):
         return deepcopy(self.rows.get(record_id))
 
-    def list_records(self, *, kind=None, limit=0):
+    def list_records(self, *, kind=None, limit=0, assignee=None):
         return [
             deepcopy(row)
             for row in self.rows.values()
-            if kind is None or row.kind == kind
+            if (kind is None or row.kind == kind)
+            and (assignee is None or row.assignee == assignee)
         ]
 
     def create_record(

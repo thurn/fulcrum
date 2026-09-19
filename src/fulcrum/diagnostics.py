@@ -1049,6 +1049,46 @@ class DiagnosticService:
                 lifecycle_rows.extend(
                     value for value in lifecycle.values() if isinstance(value, Mapping)
                 )
+            timings = (
+                observations.get("timings")
+                if isinstance(observations, Mapping)
+                else None
+            )
+            if isinstance(timings, Mapping):
+                for index, timing in enumerate(
+                    value for value in timings.values() if isinstance(value, Mapping)
+                ):
+                    items.append(
+                        {
+                            "time": timing.get("time"),
+                            "created_at": timing.get("started_at"),
+                            "completed_at": timing.get("completed_at"),
+                            "id": timing.get("span_id")
+                            or f"{record.id}:timing:{index}",
+                            "bead_id": bead_id,
+                            "task_id": timing.get("task_id"),
+                            "turn_id": timing.get("turn_id"),
+                            "operation_id": None,
+                            "transition": "native_timing",
+                            "effect": timing.get("kind"),
+                            "outcome": timing.get("outcome"),
+                            "duration_ms": timing.get("duration_ms"),
+                            "span_id": timing.get("span_id"),
+                            "parent_span_id": timing.get("parent_span_id"),
+                            "correlation_id": timing.get("correlation_id"),
+                            "response_id": timing.get("response_id"),
+                            "evidence": {
+                                key: timing.get(key)
+                                for key in ("item_type", "server", "tool")
+                                if timing.get(key) is not None
+                            },
+                            "source_oid": None,
+                            "source_oids": [],
+                            "parent_operation_ids": [],
+                            "child_operation_ids": [],
+                            "provider_handles": [],
+                        }
+                    )
             lifecycle_rows.extend(
                 value
                 for value in (desktop.get("hook_events") or [])

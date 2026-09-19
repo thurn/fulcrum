@@ -80,9 +80,9 @@ The fixed identities are `🧰 STEWARD 🧰` on `gpt-5.6-luna` with low
 reasoning effort and `🧭 MARSHAL 🧭` plus `🔮 VIZIER 🔮` on `gpt-5.6-sol`
 with high reasoning effort. One heartbeat targets the registered Marshal
 every 15 minutes and stays quiet on healthy no-op runs. There is no Steward
-heartbeat or hourly recovery task. Short-lived Weaver, Executor, and Warden work
-defaults to Sol with high reasoning effort; project or work-specific configuration
-may override that choice.
+heartbeat or hourly recovery task. Short-lived Weaver work defaults to Sol with
+high reasoning effort; Executor and Warden default to Sol with medium reasoning
+effort. Project or work-specific configuration may override those choices.
 
 Admission opens only after the broker answers, required native tools and model
 efforts are observed, all three tasks register, the schedule result is retained,

@@ -135,7 +135,7 @@ def _fulcrum_hook_definitions(command: str) -> dict[str, dict[str, Any]]:
         handler = {
             "type": "command",
             "command": command,
-            "timeout": 60 if event == "Stop" else 30,
+            "timeout": 60 if event == "Stop" else 10,
             "statusMessage": f"Fulcrum: recording {event}",
         }
         if event == "SessionStart":

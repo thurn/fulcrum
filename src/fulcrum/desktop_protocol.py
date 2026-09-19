@@ -280,12 +280,14 @@ def role_title(role: str, bead_id: str, title: str) -> str:
             f"Fulcrum must not create a native {role} task",
             exit_code=5,
         )
-    suffix = bead_id.removeprefix("fc-")
     emoji, code = ROLE_TITLES[role]
     concise = " ".join(title.split())[:96].strip() or "Authorized work"
     concise = concise.translate(
         str.maketrans({"$": "＄", "`": "'", "<": "(", ">": ")"})
     )
+    if role == "justiciar":
+        return f"{emoji} [{code}] {concise}"
+    suffix = bead_id.removeprefix("fc-")
     return f"{emoji} [{code}-{suffix}] {concise}"
 
 
@@ -332,17 +334,34 @@ def _compiled_worker_contract(record: LedgerRecord, role: str) -> dict[str, Any]
             "scope_revision": scope.get("finish_operation"),
         }
         if role == "warden":
-            contract["candidate_source"] = fc.get("source")
+            worktree = fc.get("worktree")
+            worktree = worktree if isinstance(worktree, Mapping) else {}
             finish = fc.get("finish")
-            contract["executor_evidence"] = (
-                {
+            finish = finish if isinstance(finish, Mapping) else {}
+            local_check = fc.get("local_check")
+            local_check = local_check if isinstance(local_check, Mapping) else {}
+            contract["review_bundle"] = {
+                "candidate": {
+                    "source_oid": fc.get("source"),
+                    "expected_parent_oid": worktree.get("base_oid"),
+                    "recorded_head_oid": worktree.get("head_oid"),
+                    "branch": worktree.get("branch"),
+                    "dirty": worktree.get("dirty"),
+                },
+                "executor_finish": {
+                    "operation_id": finish.get("operation_id"),
                     "summary": finish.get("summary"),
                     "checks": list(finish.get("checks") or []),
                     "evidence": list(finish.get("evidence") or []),
-                }
-                if isinstance(finish, Mapping)
-                else None
-            )
+                },
+                "local_validation": {
+                    "operation_id": local_check.get("operation_id"),
+                    "source_oid": local_check.get("source_oid"),
+                    "configuration_digest": local_check.get("configuration_digest"),
+                    "state": local_check.get("state"),
+                    "observed_at": local_check.get("observed_at"),
+                },
+            }
         return contract
     return {
         "authorized_role": role,
@@ -377,7 +396,9 @@ def _worker_prompt(
         ),
         "warden": (
             "Perform a concise independent review. Before the first submission, "
-            "ensure the complete candidate is exactly one task commit atop the "
+            "use the review_bundle for authoritative Fulcrum handoff facts and normal "
+            "read-only Git and search commands for code inspection. Ensure the "
+            "complete candidate is exactly one task commit atop the "
             "current release. Do not run Git commands that modify repository state, "
             "including add, commit, rebase, reset, or checkout. Do not run the "
             "project-wide configured validation yourself; submit_candidate seals "
@@ -386,23 +407,9 @@ def _worker_prompt(
             "retype a source OID. wait_for_ci_results returns the retained result. Copy "
             "candidate.candidate_id from the "
             "submit_candidate result exactly into wait_for_ci_results; never "
-            "retype or reconstruct that identifier. If validation fails, repair the real failure, "
-            "preserving compatible changes already present in the current release. For a merge "
-            "conflict, retain both the current-release outcome and this bead's outcome; never "
-            "replace current-release content with the stale candidate. Once a conflict occurs, "
-            "those two Git versions are authoritative and supersede stale single-side acceptance "
-            "wording. Git rerere may silently populate a resolved file, so read both versions "
-            "directly with git show and deliberately synthesize their compatible union. For a "
-            "bracketed list, retain the ordered union of both sides and verify the diff against "
-            "the current release removes no current-release entry. After a merge-conflict result, "
-            "call submit_candidate once without repair_confirmed so Fulcrum prepares the retained "
-            "rebase. If it returns source_repair.state=repair_required, inspect the actual file and "
-            "both git-show versions before editing; never assume conflict markers remain. For a one-file conflict, "
-            "combine those reads in one command, make exactly one resolving edit, then call "
-            "submit_candidate with repair_confirmed=true. Fulcrum stages and continues the rebase, "
-            "verifies exactly one task commit atop the current retained base, and submits without redundant probes. For ordinary "
-            "CI repair, edit the instructed files and call submit_candidate normally; Fulcrum amends "
-            "the task commit. Then wait again. "
+            "retype or reconstruct that identifier. If submit_candidate or "
+            "wait_for_ci_results returns repair instructions, follow those returned "
+            "instructions and resubmit exactly as directed. "
             "A passing wait_for_ci_results response is not completion. Your next and "
             "final tool call after a passing result must be finish with outcome "
             "approved, the exact submitted source, a nonempty top-level evidence "
@@ -1008,9 +1015,14 @@ class DesktopProtocolService:
             timeout=request.timeout,
         )
 
-    @coordinated
     def transport_snapshot(self, request: ParsedRequest) -> CommandResult:
-        """Rebuild the broker's policy-free durable wait/file index from Beads."""
+        """Rebuild the broker's policy-free durable wait/file index from Beads.
+
+        This reconciliation can parse several transcripts and settle their
+        records. Each durable write acquires and merges under the ledger state
+        lock itself; holding one outer transition lock across the entire scan
+        would block unrelated admission behind minutes of diagnostic work.
+        """
 
         ledger = self._ledger(request)
         from fulcrum.hooks import HookService
@@ -3828,7 +3840,14 @@ class DesktopProtocolService:
                 exit_code=5,
             )
         if seal.get("state") == "repair_required":
-            value = {"source_repair": copy.deepcopy(dict(seal))}
+            source_repair = copy.deepcopy(dict(seal))
+            source_repair["instructions"] = [
+                "Inspect every returned conflict path in the assigned worktree and read both authoritative Git versions directly; rerere may have populated a file without leaving conflict markers.",
+                "Synthesize the compatible union of the current release and this bead. For bracketed lists, retain the ordered union and verify the diff removes no current-release entry.",
+                "Make one resolving edit per file, then resubmit with repair_confirmed=true so Fulcrum stages and continues the retained rebase.",
+            ]
+            source_repair["resubmit"] = {"repair_confirmed": True}
+            value = {"source_repair": source_repair}
             _save_request(protocol, request, value, ledger=ledger)
             current = self._record(ledger, bead_id)
             ledger.update_fc(current.id, _with_protocol(current.fc or {}, protocol))
@@ -4028,6 +4047,14 @@ class DesktopProtocolService:
         if state in {"passed", "failed", "blocked"}:
             self._record_candidate_outcome(ledger, record, protocol, candidate, state)
             value = {"status": state, "candidate": copy.deepcopy(dict(candidate))}
+            if state == "failed":
+                value["repair"] = {
+                    "instructions": [
+                        "Inspect and repair the exact retained validation failure in the assigned worktree while preserving compatible current-release behavior.",
+                        "Call submit_candidate normally after the edit; Fulcrum amends the task commit and reruns exact-source validation.",
+                    ],
+                    "resubmit": {"repair_confirmed": False},
+                }
             _save_request(protocol, request, value, ledger=ledger)
             ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
             return _result(request, value)

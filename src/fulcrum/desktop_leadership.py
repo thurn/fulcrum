@@ -27,6 +27,8 @@ from fulcrum.desktop_protocol import (
     _steward_recovery_actions,
     action_marker,
     require_run_control,
+    _positive_native_completion,
+    role_title,
 )
 
 
@@ -1404,7 +1406,9 @@ class DesktopLeadershipService(DesktopProtocolService):
         )
         native_arguments: dict[str, Any] = {
             "prompt": prompt,
-            "title": f"⚖️ JUSTICIAR {bead} ⚖️",
+            "title": role_title(
+                "justiciar", bead, str(scope or incident.get("incident_id") or bead)
+            ),
             "target": {
                 "type": "project",
                 "projectId": codex_project,

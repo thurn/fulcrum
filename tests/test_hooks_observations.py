@@ -10,7 +10,7 @@ import uuid
 from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext
-from fulcrum.coordination import coordinated
+from fulcrum.coordination import ProcessLock, coordinated
 from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.hooks import HookService, _arguments_match
 from fulcrum.observations import read_transcript
@@ -28,27 +28,119 @@ class ObservationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rollout.jsonl"
             path.write_bytes(
-                b'{"type":"turn_context","event_id":"e1","turn_id":"t1","model":"gpt-5.6-luna"}\n'
-                b'{"type":"token_usage_record","response_id":"r1","usage":{"input_tokens":12,"cache_write_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}\n'
+                b'{"timestamp":"2026-09-18T00:00:00.000Z","type":"turn_started","event_id":"start","thread_id":"task-1","turn_id":"t1"}\n'
+                b'{"timestamp":"2026-09-18T00:00:00.100Z","type":"turn_context","event_id":"e1","turn_id":"t1","model":"gpt-5.6-luna"}\n'
+                b'{"timestamp":"2026-09-18T00:00:01.500Z","type":"token_usage_record","payload":{"thread_id":"task-1","turn_id":"t1","response_id":"r1","usage":{"input_tokens":12,"cache_write_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}}\n'
+                b'{"timestamp":"2026-09-18T00:00:01.750Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"task-1","turn_id":"t1","item":{"type":"McpToolCall","id":"tool-1","server":"fulcrum","tool":"register_worker","status":"completed","duration":{"secs":0,"nanos":125000000}},"started_at_ms":1789689601625,"completed_at_ms":1789689601750}}\n'
                 b'{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}\n'
                 b'{"type":"event_msg","payload":{"type":"turn_future","turn_id":"t2"}}\n'
                 b'{"type":"turn_started"'
             )
             page = read_transcript(path)
-        self.assertEqual(page.lifecycle[0]["event_id"], "e1")
-        self.assertEqual(page.lifecycle[0]["model"], "gpt-5.6-luna")
-        self.assertEqual(page.lifecycle[1]["type"], "turn_aborted")
-        self.assertEqual(page.lifecycle[1]["reason"], "interrupted")
+        self.assertEqual(page.lifecycle[1]["event_id"], "e1")
+        self.assertEqual(page.lifecycle[1]["model"], "gpt-5.6-luna")
+        self.assertEqual(page.lifecycle[2]["type"], "turn_aborted")
+        self.assertEqual(page.lifecycle[2]["reason"], "interrupted")
         self.assertEqual(page.usage[0]["response_id"], "r1")
         self.assertEqual(page.usage[0]["input_tokens"], 12)
         self.assertEqual(page.usage[0]["cache_write_tokens"], 3)
         self.assertEqual(page.usage[0]["reasoning_tokens"], 2)
+        self.assertEqual(page.timings[0]["kind"], "model_response")
+        self.assertEqual(page.timings[0]["duration_ms"], 1500.0)
+        self.assertEqual(page.timings[0]["correlation_id"], "task-1:t1")
+        self.assertEqual(page.timings[1]["kind"], "mcp_tool")
+        self.assertEqual(page.timings[1]["duration_ms"], 125.0)
+        self.assertEqual(page.timings[1]["parent_span_id"], page.timings[0]["span_id"])
+        self.assertEqual(page.timings[1]["tool"], "register_worker")
         self.assertEqual(page.gaps[0]["kind"], "unrecognized_lifecycle_event")
         self.assertEqual(page.gaps[0]["event_type"], "turn_future")
         self.assertEqual(page.gaps[1]["kind"], "incomplete_trailing_line")
 
+    def test_parser_carries_response_timing_across_incremental_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout.jsonl"
+            first = (
+                '{"timestamp":"2026-09-18T00:00:02.000Z","type":"response_item",'
+                '"payload":{"type":"custom_tool_call_output"}}\n'
+            )
+            path.write_text(first, encoding="utf-8")
+            initial = read_transcript(path)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    '{"timestamp":"2026-09-18T00:00:03.250Z",'
+                    '"type":"token_usage_record","payload":{"thread_id":"task-1",'
+                    '"turn_id":"turn-1","response_id":"response-1","usage":{}}}\n'
+                )
+            followup = read_transcript(
+                path, initial.cursor, timing_state=initial.timing_state
+            )
+
+        self.assertEqual(len(followup.timings), 1)
+        self.assertEqual(followup.timings[0]["duration_ms"], 1250.0)
+        self.assertEqual(
+            followup.timings[0]["span_id"], "task-1:turn-1:response:response-1"
+        )
+
 
 class HookTests(unittest.TestCase):
+    def test_fulcrum_mcp_hooks_do_not_read_the_ledger(self):
+        class FailingLedger(MemoryLedger):
+            def show(self, record_id):
+                raise AssertionError("Fulcrum MCP hook must not read the ledger")
+
+            def list_records(self, *, kind=None, limit=0, assignee=None):
+                raise AssertionError("Fulcrum MCP hook must not scan the ledger")
+
+        hook = HookService(FailingLedger())
+        for event_name, expected in (
+            ("PreToolUse", {}),
+            ("PostToolUse", {"continue": True}),
+        ):
+            result = hook.handle(
+                replace(
+                    request(("hook", "handle")),
+                    input={
+                        "hook_event_name": event_name,
+                        "session_id": "task-1",
+                        "tool_name": "mcp__fulcrum__enter_weaver",
+                        "tool_use_id": "tool-1",
+                    },
+                )
+            )
+            self.assertEqual(result.result, expected)
+
+    def test_transport_snapshot_does_not_hold_global_transition_lock(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowLedger(MemoryLedger):
+            def list_records(self, *, kind=None, limit=0, assignee=None):
+                started.set()
+                self.assert_released(release)
+                return []
+
+            @staticmethod
+            def assert_released(event):
+                if not event.wait(timeout=2):
+                    raise AssertionError("test did not release transport snapshot")
+
+        ledger = SlowLedger()
+        snapshot_request = request(("transport", "snapshot"))
+        thread = threading.Thread(
+            target=DesktopProtocolService(ledger).transport_snapshot,
+            args=(snapshot_request,),
+        )
+        thread.start()
+        self.assertTrue(started.wait(timeout=1))
+        try:
+            state_lock = snapshot_request.instance.brain_root / ".fulcrum-locks/state"
+            with ProcessLock(state_lock, blocking=False):
+                pass
+        finally:
+            release.set()
+            thread.join(timeout=2)
+        self.assertFalse(thread.is_alive())
+
     def test_create_thread_allows_paraphrase_with_exact_action_marker(self):
         action = {
             "action_id": "action-1",

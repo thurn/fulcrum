@@ -9,6 +9,8 @@ from fulcrum.coordination import coordinated, external_effect
 import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Coroutine, TypeVar
 import uuid
@@ -214,19 +216,40 @@ class DeliveryService:
         source_oid = str(request.arguments["source"])
         reference = _work_ref(request, work, project, _workspace_operation(work))
         source = SourceRef(reference, source_oid)
+        configuration_digest = _validation_configuration_digest(reference)
+        prior = (work.fc or {}).get("local_check")
+        if (
+            isinstance(prior, Mapping)
+            and prior.get("source_oid") == source_oid
+            and prior.get("configuration_digest") == configuration_digest
+            and prior.get("state") in {"passed", "not_required"}
+        ):
+            operation_id = prior.get("operation_id")
+            return CommandResult(
+                ok=True,
+                state=CommandState.COMPLETED,
+                operation_id=(
+                    str(operation_id) if isinstance(operation_id, str) else None
+                ),
+                request_id=request.request_id,
+                result={"local_check": dict(prior), "reused": True},
+            )
         canonical_request = replace(
             request,
             request_id=str(
                 uuid.uuid5(
                     LOCAL_CHECK_NAMESPACE,
-                    f"{work.id}:{source_oid}:{list(reference.validate_argv)!r}",
+                    f"{work.id}:{source_oid}:{configuration_digest}",
                 )
             ),
         )
         operation, reused = ledger.create_operation(
             canonical_request,
             bead_id=work.id,
-            planned={"source": source.to_dict()},
+            planned={
+                "source": source.to_dict(),
+                "configuration_digest": configuration_digest,
+            },
             next_action="Run the configured validation command once for this exact source.",
         )
         if reused and operation.operation.get("state") in TERMINAL_STATES:
@@ -241,6 +264,7 @@ class DeliveryService:
                 work,
                 {
                     "source_oid": source.oid,
+                    "configuration_digest": configuration_digest,
                     "state": "unresolved",
                     "argv": list(source.work.validate_argv),
                     "operation_id": operation.id,
@@ -253,7 +277,11 @@ class DeliveryService:
                 },
             )
             return _failed_operation(ledger, operation, error, "local_check")
-        retained = {**facts.to_dict(), "operation_id": operation.id}
+        retained = {
+            **facts.to_dict(),
+            "configuration_digest": configuration_digest,
+            "operation_id": operation.id,
+        }
         _retain_local_check(ledger, work, retained)
         if facts.state not in {"passed", "not_required"}:
             operation = ledger.update_operation(
@@ -937,14 +965,27 @@ def _retain_local_check(
     assert current is not None and current.fc
     fc = dict(current.fc)
     prior = fc.get("local_check")
-    if isinstance(prior, Mapping) and prior.get("source_oid") != facts.get(
-        "source_oid"
-    ):
+    if isinstance(prior, Mapping) and (
+        prior.get("source_oid"),
+        prior.get("configuration_digest"),
+    ) != (facts.get("source_oid"), facts.get("configuration_digest")):
         history = list(fc.get("local_check_history") or [])
         history.append(dict(prior))
         fc["local_check_history"] = history[-10:]
     fc["local_check"] = dict(facts)
     ledger.update_fc(work.id, fc)
+
+
+def _validation_configuration_digest(reference: WorkRef) -> str:
+    payload = json.dumps(
+        {
+            "repository_id": reference.repository_id,
+            "validate_argv": list(reference.validate_argv),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def normalized_delivery(facts: DeliveryFacts) -> dict[str, Any]:

@@ -116,14 +116,27 @@ class HookService:
         )
         if event_name not in HOOK_EVENTS:
             return CommandResult.query({"continue": True})
-        ledger = self._ledger(request)
         task_id = str(
             request.input.get("thread_id")
             or request.input.get("task_id")
             or request.actor.task_id
             or request.thread_id
+            or request.input.get("session_id")
             or ""
         )
+        if event_name in {"PreToolUse", "PostToolUse"} and _is_fulcrum_mcp_tool(
+            request.input
+        ):
+            # Fulcrum MCP commands enforce durable authority themselves. Running
+            # the general hook binding scan around them adds no admission safety
+            # and can make an already-completed intake wait behind global Beads
+            # scans. Native effects still take the full claimed-action hook path.
+            response: dict[str, Any] = (
+                {} if event_name == "PreToolUse" else {"continue": True}
+            )
+            self._log(request, event_name, task_id, False, response)
+            return CommandResult.query(response)
+        ledger = self._ledger(request)
         bound = _binding_for_task(ledger, task_id) if task_id else None
         if bound is None:
             session_id = request.input.get("session_id")
@@ -701,7 +714,14 @@ class HookService:
             if isinstance(current, Mapping)
             else int(discovery_cursor or 0)
         )
-        page = read_transcript(Path(transcript), cursor)
+        timing_state = (
+            current.get("timing_state") if isinstance(current, Mapping) else None
+        )
+        page = read_transcript(
+            Path(transcript),
+            cursor,
+            timing_state if isinstance(timing_state, Mapping) else None,
+        )
         retained_gaps = (
             list(current.get("gaps") or []) if isinstance(current, Mapping) else []
         )
@@ -728,6 +748,7 @@ class HookService:
         usage = dict(observations.get("usage") or {})
         page_lifecycle: list[Mapping[str, Any]] = []
         page_usage: list[Mapping[str, Any]] = []
+        timings = dict(observations.get("timings") or {})
         models = {
             str(value.get("turn_id")): str(value["model"])
             for value in lifecycle.values()
@@ -801,12 +822,32 @@ class HookService:
                     )
                 )
                 usage[identity] = normalized
+        for item in page.timings:
+            normalized = dict(item)
+            normalized["task_id"] = normalized.get("task_id") or task_id
+            normalized["turn_id"] = normalized.get("turn_id") or turn_id
+            span_id = normalized.get("span_id")
+            if span_id:
+                timings[str(span_id)] = normalized
+        retained_timings = sorted(
+            (value for value in timings.values() if isinstance(value, Mapping)),
+            key=lambda value: (
+                str(value.get("time") or ""),
+                str(value.get("span_id") or ""),
+            ),
+        )[-2000:]
         observations["lifecycle"] = lifecycle
         observations["usage"] = usage
+        observations["timings"] = {
+            str(value["span_id"]): dict(value)
+            for value in retained_timings
+            if value.get("span_id")
+        }
         protocol["observations"] = observations
         retained_transcript = {
             "path": transcript,
             "cursor": page.cursor,
+            "timing_state": dict(page.timing_state),
             "gaps": page_gaps,
         }
         history_start_cursor = (
@@ -984,7 +1025,16 @@ def _binding_for_task(ledger: Ledger, task_id: str) -> tuple[LedgerRecord, str] 
             for role, binding in standing.items():
                 if isinstance(binding, Mapping) and binding.get("task_id") == task_id:
                     return system, str(role)
+    assigned = ledger.list_records(limit=0, assignee=task_id)
+    for record in assigned:
+        protocol = _protocol(record.fc or {})
+        assignment = protocol.get("assignment")
+        if isinstance(assignment, Mapping) and assignment.get("task_id") == task_id:
+            return record, str(assignment.get("role") or "worker")
+    assigned_ids = {record.id for record in assigned}
     for record in ledger.list_records(limit=0):
+        if record.id in assigned_ids:
+            continue
         protocol = _protocol(record.fc or {})
         assignment = protocol.get("assignment")
         if isinstance(assignment, Mapping) and assignment.get("task_id") == task_id:
@@ -995,6 +1045,11 @@ def _binding_for_task(ledger: Ledger, task_id: str) -> tuple[LedgerRecord, str] 
                 if isinstance(retained, Mapping) and retained.get("task_id") == task_id:
                     return record, str(retained.get("role") or "worker")
     return None
+
+
+def _is_fulcrum_mcp_tool(value: Mapping[str, Any]) -> bool:
+    name = str(value.get("tool_name") or value.get("toolName") or "")
+    return name.startswith("mcp__fulcrum__")
 
 
 def _release_unregistered_assignment(

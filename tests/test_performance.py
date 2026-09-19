@@ -99,6 +99,29 @@ class LedgerReadCacheTests(unittest.TestCase):
         self.assertIsNotNone(shown)
         self.assertEqual(updated[0].status, "closed")
 
+    def test_assignee_query_is_filtered_and_does_not_poison_full_list_cache(
+        self,
+    ) -> None:
+        assigned = _native_record("open")
+        assigned["assignee"] = "task-1"
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Ledger(Path(directory), executable="/usr/bin/true")
+            with patch.object(
+                ledger,
+                "run",
+                side_effect=(
+                    CommandObservation([assigned], 1, "", "", False),
+                    CommandObservation([assigned], 1, "", "", False),
+                ),
+            ) as run:
+                filtered = ledger.list_records(limit=0, assignee="task-1")
+                complete = ledger.list_records(limit=0)
+
+        self.assertEqual(filtered[0].assignee, "task-1")
+        self.assertEqual(complete[0].id, "fc-a")
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("--assignee", run.call_args_list[0].args[0])
+
 
 def _row(
     span_id: str,

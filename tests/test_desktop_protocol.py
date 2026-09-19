@@ -11,7 +11,12 @@ from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext, CommandResult, FulcrumError
 from fulcrum.completion import settle_native_completion
-from fulcrum.desktop_protocol import DesktopProtocolService, _worker_prompt, role_title
+from fulcrum.desktop_protocol import (
+    DesktopProtocolService,
+    _compiled_worker_contract,
+    _worker_prompt,
+    role_title,
+)
 from tests.support import (
     MemoryLedger,
     observe_action_prompt,
@@ -1224,6 +1229,44 @@ def test_ci_wait_repairs_terminal_candidate_with_stale_delivery():
     assert (ledger.show("fc-a").fc or {})["delivery"]["validation"]["state"] == "passed"
 
 
+def test_ci_failure_returns_repair_guidance_without_putting_it_in_base_prompt():
+    work = record(
+        "fc-a",
+        delivery={"validation": {"state": "failed"}},
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-1",
+                "task_id": "warden-1",
+                "role": "warden",
+                "state": "active",
+            },
+            "candidate": {
+                "candidate_id": "provider-1",
+                "source": "abc",
+                "state": "failed",
+                "deadline": "2026-09-16T00:30:00Z",
+            },
+        },
+    )
+    result = DesktopProtocolService(MemoryLedger(work)).wait_for_ci_results(
+        mutation(
+            ("ci", "wait"),
+            actor="task:warden-1",
+            arguments={"bead": "fc-a"},
+            payload={
+                "candidate_id": "provider-1",
+                "assignment_token": "assignment-1",
+            },
+        )
+    )
+
+    assert result.result["status"] == "failed"
+    assert result.result["repair"]["resubmit"] == {"repair_confirmed": False}
+    assert "exact retained validation failure" in " ".join(
+        result.result["repair"]["instructions"]
+    )
+
+
 def test_steward_dispatches_executor_from_retained_worktree_path():
     archived = record(
         "fc-archived",
@@ -1297,6 +1340,9 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert arguments["model"] == "gpt-6-astra"
     assert arguments["thinking"] == "xhigh"
     assert "$weaver" not in role_title("executor", "fc-a", "$weaver `run`")
+    assert role_title("justiciar", "fc-a", "Repair intake") == (
+        "🔥 [jus] Repair intake"
+    )
 
 
 def test_warden_prompt_requires_finish_after_passing_ci():
@@ -1308,17 +1354,14 @@ def test_warden_prompt_requires_finish_after_passing_ci():
 
     assert "passing wait_for_ci_results response is not completion" in prompt
     assert "derives the exact current HEAD" in prompt
+    assert "review_bundle" in prompt
+    assert "normal read-only Git and search commands" in prompt
     assert "do not supply or retype a source OID" in prompt
     assert "Do not run Git commands that modify repository state" in prompt
-    assert "submit_candidate with repair_confirmed=true" in prompt
-    assert "Fulcrum amends the task commit" in prompt
+    assert "follow those returned instructions" in prompt
     assert "Copy candidate.candidate_id" in prompt
-    assert "retain both the current-release outcome and this bead's outcome" in prompt
-    assert "retain the ordered union of both sides" in prompt
     assert "Supply bead `fc-review` as bead" in prompt
-    assert "inspect the actual file and both git-show versions before editing" in prompt
-    assert "make exactly one resolving edit" in prompt
-    assert "one task commit atop the current retained base" in prompt
+    assert "one task commit atop the current release" in prompt
     assert "must be finish with outcome approved" in prompt
     assert "a nonempty top-level evidence array" in prompt
     assert "and nonempty checks" in prompt
@@ -1327,6 +1370,73 @@ def test_warden_prompt_requires_finish_after_passing_ci():
     assert "do not create or delegate to another task" in prompt
     assert "source_thread_id in delegation metadata identifies the Steward" in prompt
     assert "use only the exact CODEX_THREAD_ID as task_id" in prompt
+    assert "ordered union" not in prompt
+    assert "rerere" not in prompt
+
+
+def test_warden_contract_contains_only_compact_review_handoff_facts():
+    source = "a" * 40
+    contract = _compiled_worker_contract(
+        record(
+            "fc-review",
+            scope={
+                "summary": "Review the candidate.",
+                "acceptance": ["The focused behavior passes."],
+                "finish_operation": "scope-1",
+            },
+            source=source,
+            worktree={
+                "base_oid": "b" * 40,
+                "head_oid": source,
+                "branch": "codex/fc-review",
+                "dirty": False,
+                "path": "/private/irrelevant",
+            },
+            finish={
+                "operation_id": "finish-1",
+                "summary": "Implemented the behavior.",
+                "checks": [{"name": "focused", "status": "passed"}],
+                "evidence": ["tests/test_example.py"],
+                "request_id": "irrelevant-request",
+            },
+            local_check={
+                "operation_id": "check-1",
+                "source_oid": source,
+                "configuration_digest": "digest-1",
+                "state": "passed",
+                "observed_at": "2026-09-18T00:00:00Z",
+                "stdout": "irrelevant output",
+            },
+        ),
+        "warden",
+    )
+
+    assert contract["review_bundle"] == {
+        "candidate": {
+            "source_oid": source,
+            "expected_parent_oid": "b" * 40,
+            "recorded_head_oid": source,
+            "branch": "codex/fc-review",
+            "dirty": False,
+        },
+        "executor_finish": {
+            "operation_id": "finish-1",
+            "summary": "Implemented the behavior.",
+            "checks": [{"name": "focused", "status": "passed"}],
+            "evidence": ["tests/test_example.py"],
+        },
+        "local_validation": {
+            "operation_id": "check-1",
+            "source_oid": source,
+            "configuration_digest": "digest-1",
+            "state": "passed",
+            "observed_at": "2026-09-18T00:00:00Z",
+        },
+    }
+    assert "candidate_source" not in contract
+    assert "executor_evidence" not in contract
+    assert "/private/irrelevant" not in str(contract)
+    assert "irrelevant output" not in str(contract)
 
 
 def test_warden_submission_derives_source_from_assigned_worktree():
@@ -1374,6 +1484,48 @@ def test_warden_submission_derives_source_from_assigned_worktree():
     submitted = validation_start.call_args.args[0]
     assert submitted.arguments == {"bead": "fc-review", "source": source}
     assert result.result["candidate"]["source"] == source
+
+
+def test_merge_repair_guidance_is_returned_only_when_repair_is_required():
+    work = record(
+        "fc-review",
+        desktop={
+            "assignment": {
+                "assignment_token": "assignment-review",
+                "task_id": "warden-1",
+                "role": "warden",
+                "state": "active",
+            }
+        },
+    )
+    service = DesktopProtocolService(MemoryLedger(work))
+    with patch(
+        "fulcrum.delivery_service.DeliveryService.candidate_seal",
+        return_value=CommandResult.query(
+            {
+                "result": {
+                    "seal": {
+                        "state": "repair_required",
+                        "conflict_paths": ["docs/example.md"],
+                    }
+                }
+            }
+        ),
+    ):
+        result = service.submit_candidate(
+            mutation(
+                ("candidate", "submit"),
+                actor="task:warden-1",
+                arguments={"bead": "fc-review"},
+                payload={"assignment_token": "assignment-review"},
+            )
+        )
+
+    repair = result.result["source_repair"]
+    assert repair["conflict_paths"] == ["docs/example.md"]
+    assert repair["resubmit"] == {"repair_confirmed": True}
+    assert "rerere" in " ".join(repair["instructions"])
+    assert "ordered union" in " ".join(repair["instructions"])
 
 
 def test_passing_repair_retains_the_consumed_repair_cycle():

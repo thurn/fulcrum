@@ -699,6 +699,14 @@ native task/host/turn identity, not lexicographic ordering of opaque IDs. A late
 old completion cannot finish a newer turn or authorize new work over a live one.
 Do not scan unrelated transcripts or use a private Desktop database.
 
+The same scoped parser retains bounded, redacted native timing spans. Model
+responses run from the observed input-ready boundary to the response usage record;
+command, MCP, and file-change spans use native item timing. Every span carries the
+task/turn correlation ID and causal parent when observable. Raw commands,
+arguments, paths, output, and prompt text are not copied into timing observations.
+`fulcrum trace` joins these spans with workflow operations so model and tool time
+can be distinguished without reopening raw transcripts.
+
 When lifecycle evidence needs corroboration, Steward may execute an explicitly
 requested bounded `read_thread`/inventory action; Marshal may inspect Steward
 under its scheduled health check. Validate the actual returned fields. Neither
@@ -730,6 +738,10 @@ show the saved project while commands operate in the assigned worktree; disclose
 this difference. Native permissions remain the user's Desktop configuration.
 Full cooked role prompts preserve behavioral scope and acceptance, not raw
 intake or obsolete implementation suggestions as mandatory implementation facts.
+Warden receives a compact review bundle containing candidate topology, Executor
+finish evidence, and the exact retained local-validation receipt. It continues to
+use ordinary read-only Git and search commands for code inspection; Fulcrum does
+not replace those primitives with a parallel repository-inspection command.
 
 Workers report meaningful progress at least every ten minutes when able to call
 tools. The reporting deadline is thirty minutes after registration or accepted
@@ -753,6 +765,13 @@ Warden submits its reviewed source and local-check evidence through
 submission uncertainty. This authorizes validation, not promotion or assignment
 release. Reconnect or a lost response must inspect the existing submission,
 never create another candidate blindly.
+
+Successful local validation is reusable only when both the immutable source OID
+and the canonical validation-configuration digest match. A source or configured
+command change runs a new check and retains the prior receipt in bounded history.
+Merge/rebase and ordinary CI repair instructions are returned only with the
+specific failure that needs them; the ordinary Warden prompt contains only the
+happy-path contract and direction to follow those structured instructions.
 
 Warden calls `wait_for_ci_results(candidate_id, assignment_token, request_id)`.
 The fresh CLI validates actor, exact source/candidate, current assignment, and

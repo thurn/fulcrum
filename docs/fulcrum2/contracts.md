@@ -1354,8 +1354,8 @@ models:
   vizier: {model: gpt-5.6-sol, effort: high}
   marshal: {model: gpt-5.6-sol, effort: high}
   weaver: {model: gpt-5.6-sol, effort: high}
-  executor: {model: gpt-5.6-sol, effort: high}
-  warden: {model: gpt-5.6-sol, effort: high}
+  executor: {model: gpt-5.6-sol, effort: medium}
+  warden: {model: gpt-5.6-sol, effort: medium}
   sage: {model: gpt-5.6-sol, effort: high}
   mason: {model: gpt-5.6-sol, effort: high}
   justiciar: {model: gpt-5.6-sol, effort: high}

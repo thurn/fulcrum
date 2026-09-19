@@ -295,7 +295,8 @@ def tool_descriptions() -> list[dict[str, Any]]:
         "wait_for_ci_results": (
             "Warden only: wait for terminal evidence for the exact candidate. When "
             "called through functions.exec, use one 3900000ms-yield cell and do not "
-            "poll it with functions.wait."
+            "poll it with functions.wait. Follow returned repair instructions only "
+            "when the terminal result includes them."
         ),
         "claim_action": (
             "Claim one native invocation before executing it. Omit attempt_id and "
@@ -318,8 +319,8 @@ def tool_descriptions() -> list[dict[str, Any]]:
         "submit_candidate": (
             "Warden only: seal the assigned worktree as one exact task commit and "
             "submit it for configured validation and provider CI. Omit source_oid. "
-            "After a returned source_repair conflict, resolve its paths and resubmit "
-            "with repair_confirmed=true."
+            "If source_repair is returned, follow its instructions and resubmit "
+            "using its exact resubmit fields."
         ),
         "finish": (
             "Seal the active role outcome. Executor uses ready_for_review and Warden "
