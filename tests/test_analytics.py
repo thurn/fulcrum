@@ -131,6 +131,59 @@ def test_usage_reconcile_backfills_one_observed_turn_model():
     } == {"gpt-5.6-sol"}
 
 
+def test_terminal_only_delta_updates_existing_turn_coverage():
+    control = record("fc-system", kind="control")
+    ledger = MemoryLedger(control)
+    usage = [
+        {
+            "task_id": "task-1",
+            "turn_id": "turn-1",
+            "response_id": "response-1",
+            "model": "gpt-5.6-sol",
+            "input_tokens": 10,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 2,
+            "reasoning_tokens": 0,
+        }
+    ]
+    record_desktop_usage(ledger, control, "marshal", usage, [])
+    analytics = ledger.list_records(kind="analytics", limit=0)[0]
+    assert (analytics.fc or {})["coverage"] == "in_progress"
+
+    record_desktop_usage(
+        ledger,
+        control,
+        "marshal",
+        [],
+        [{"type": "turn_complete", "task_id": "task-1", "turn_id": "turn-1"}],
+    )
+
+    retained = ledger.show(analytics.id).fc or {}
+    assert retained["terminal_state"] == "turn_complete"
+    assert retained["coverage"] == "partial"
+    assert retained["coverage"] != "in_progress"
+    assert len(retained["raw_responses"]) == 1
+
+
+def test_terminal_only_delta_without_prior_usage_remains_partial():
+    control = record("fc-system", kind="control")
+    ledger = MemoryLedger(control)
+
+    record_desktop_usage(
+        ledger,
+        control,
+        "marshal",
+        [],
+        [{"type": "turn_complete", "task_id": "task-1", "turn_id": "turn-1"}],
+    )
+
+    retained = ledger.list_records(kind="analytics", limit=0)[0].fc or {}
+    assert retained["terminal_state"] == "turn_complete"
+    assert retained["coverage"] == "partial"
+    assert retained["missing_reasons"] == ["usage_observation_missing"]
+
+
 class AnalyticsTests(unittest.TestCase):
     def test_completion_correction_tracks_coverage_change(self):
         test_completion_correction_records_coverage_change_without_new_turns()

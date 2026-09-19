@@ -902,8 +902,14 @@ class DesktopProtocolService:
         from fulcrum.hooks import HookService
 
         hooks = HookService(ledger)
-        standing_paths = hooks.collect_standing(request)
-        hooks.collect_active_assignments(request)
+        # Transcript reads and analytics reconciliation may be slow, especially for
+        # a long-running standing task. Their individual ledger writes reacquire the
+        # state lock and merge against fresh records, so the full scan must not
+        # exclude unrelated workflow transitions.
+        with external_effect():
+            standing_paths = hooks.collect_standing(request)
+            hooks.collect_active_assignments(request)
+        ledger.refresh_records()
         collected_paths = hooks.active_assignment_paths(ledger)
         waits: list[dict[str, Any]] = []
         watch_paths: set[str] = {*standing_paths, *collected_paths}

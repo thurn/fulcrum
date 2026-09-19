@@ -726,6 +726,8 @@ class HookService:
         observations = dict(protocol.get("observations") or {})
         lifecycle = dict(observations.get("lifecycle") or {})
         usage = dict(observations.get("usage") or {})
+        page_lifecycle: list[Mapping[str, Any]] = []
+        page_usage: list[Mapping[str, Any]] = []
         models = {
             str(value.get("turn_id")): str(value["model"])
             for value in lifecycle.values()
@@ -766,6 +768,7 @@ class HookService:
             normalized = dict(item)
             normalized["task_id"] = normalized.get("task_id") or task_id
             normalized["turn_id"] = normalized.get("turn_id") or turn_id
+            page_lifecycle.append(normalized)
             if normalized.get("type") == "turn_context" and normalized.get("model"):
                 models[str(normalized.get("turn_id"))] = str(normalized["model"])
             identity = ":".join(
@@ -788,6 +791,7 @@ class HookService:
                 "event_id"
             )
             if native_identity:
+                page_usage.append(normalized)
                 identity = ":".join(
                     str(value or "unknown")
                     for value in (
@@ -821,20 +825,17 @@ class HookService:
         protocol["transcripts"] = transcripts
         ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
         self._cancel_waits_for_terminal_events(ledger, request, task_id, page.lifecycle)
-        task_usage = [
-            value
-            for value in usage.values()
-            if isinstance(value, Mapping) and value.get("task_id") == task_id
-        ]
-        if task_usage:
+        if page_usage or any(
+            value.get("type") in TERMINAL_LIFECYCLE_TYPES for value in page_lifecycle
+        ):
             from fulcrum.analytics import record_desktop_usage
 
             record_desktop_usage(
                 ledger,
                 record,
                 role,
-                task_usage,
-                [value for value in lifecycle.values() if isinstance(value, Mapping)],
+                page_usage,
+                page_lifecycle,
             )
         from fulcrum.completion import settle_native_completion
 

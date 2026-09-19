@@ -4,11 +4,13 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
 
 from fulcrum.contracts import ActorContext
+from fulcrum.coordination import coordinated
 from fulcrum.desktop_protocol import DesktopProtocolService
 from fulcrum.hooks import HookService, _arguments_match
 from fulcrum.observations import read_transcript
@@ -367,6 +369,10 @@ class HookTests(unittest.TestCase):
         self.assertNotIn("assignment", protocol)
         self.assertEqual(protocol["assignment_history"][-1]["turn_id"], "native-turn")
         self.assertEqual(result.result["watch_paths"], [])
+        analytics = ledger.list_records(kind="analytics", limit=0)
+        self.assertEqual(len(analytics), 1)
+        self.assertEqual((analytics[0].fc or {})["turn_id"], "native-turn")
+        self.assertEqual((analytics[0].fc or {})["terminal_state"], "task_complete")
 
     def test_transport_snapshot_discovers_and_collects_standing_transcript(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1136,6 +1142,217 @@ class HookTests(unittest.TestCase):
         self.assertNotIn(
             "terminal_lifecycle_missing", (analytics.fc or {})["missing_reasons"]
         )
+
+    def test_long_standing_transcript_append_reconciles_only_affected_turn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "marshal.jsonl"
+            historical = []
+            observations = {"lifecycle": {}, "usage": {}}
+            for index in range(100):
+                turn_id = f"turn-{index}"
+                context = {
+                    "type": "turn_context",
+                    "turn_id": turn_id,
+                    "model": "gpt-5.6-sol",
+                }
+                usage = {
+                    "type": "token_usage_record",
+                    "payload": {
+                        "thread_id": "marshal-1",
+                        "turn_id": turn_id,
+                        "response_id": f"response-{index}",
+                        "usage": {"input_tokens": index + 1, "output_tokens": 1},
+                    },
+                }
+                historical.extend((context, usage))
+                observations["lifecycle"][f"marshal-1:{turn_id}:turn_context"] = {
+                    **context,
+                    "task_id": "marshal-1",
+                }
+                observations["usage"][f"marshal-1:{turn_id}:response-{index}"] = {
+                    "task_id": "marshal-1",
+                    "turn_id": turn_id,
+                    "response_id": f"response-{index}",
+                    "model": "gpt-5.6-sol",
+                    "input_tokens": index + 1,
+                    "output_tokens": 1,
+                }
+            prefix = "".join(json.dumps(row) + "\n" for row in historical)
+            path.write_text(prefix, encoding="utf-8")
+            ledger = MemoryLedger(
+                record(
+                    "fc-system",
+                    kind="control",
+                    desktop={
+                        "standing": {
+                            "marshal": {
+                                "role": "marshal",
+                                "task_id": "marshal-1",
+                                "turn_id": "turn-99",
+                                "state": "registered",
+                            }
+                        },
+                        "observations": observations,
+                        "transcripts": {
+                            "marshal-1": {
+                                "path": str(path),
+                                "cursor": len(prefix.encode()),
+                                "gaps": [],
+                            }
+                        },
+                    },
+                )
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "type": "token_usage_record",
+                            "payload": {
+                                "thread_id": "marshal-1",
+                                "turn_id": "turn-99",
+                                "response_id": "response-new",
+                                "usage": {"input_tokens": 5, "output_tokens": 2},
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+            HookService(ledger).collect_standing(request())
+
+        analytics_writes = [
+            record_id
+            for record_id in ledger.writes
+            if (ledger.show(record_id).fc or {}).get("kind") == "analytics"
+        ]
+        self.assertEqual(len(analytics_writes), 1)
+        analytics = ledger.show(analytics_writes[0]).fc or {}
+        self.assertEqual(analytics["turn_id"], "turn-99")
+        self.assertEqual(len(analytics["raw_responses"]), 1)
+
+    def test_transport_snapshot_releases_state_lock_during_transcript_scan(self):
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        class MarshalProbe:
+            @coordinated
+            def marshal_check(self, _request):
+                completed.set()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "marshal.jsonl"
+            path.write_text("", encoding="utf-8")
+            ledger = MemoryLedger(
+                record(
+                    "fc-system",
+                    kind="control",
+                    desktop={
+                        "standing": {
+                            "marshal": {
+                                "role": "marshal",
+                                "task_id": "marshal-1",
+                                "state": "registered",
+                            }
+                        },
+                        "transcripts": {
+                            "marshal-1": {"path": str(path), "cursor": 0, "gaps": []}
+                        },
+                    },
+                )
+            )
+            original = read_transcript
+
+            def slow_read(*args, **kwargs):
+                entered.set()
+                self.assertTrue(release.wait(2))
+                return original(*args, **kwargs)
+
+            snapshot_request = replace(request(("transport", "snapshot")), arguments={})
+            marshal_request = replace(request(("marshal", "check")), arguments={})
+            snapshot = threading.Thread(
+                target=DesktopProtocolService(ledger).transport_snapshot,
+                args=(snapshot_request,),
+            )
+            with patch("fulcrum.hooks.read_transcript", side_effect=slow_read):
+                snapshot.start()
+                try:
+                    self.assertTrue(entered.wait(1))
+                    MarshalProbe().marshal_check(marshal_request)
+                    self.assertTrue(completed.is_set())
+                    self.assertTrue(snapshot.is_alive())
+                finally:
+                    release.set()
+                    snapshot.join(2)
+
+        self.assertFalse(snapshot.is_alive())
+
+    def test_transport_snapshot_refreshes_state_after_unlocked_scan(self):
+        listed = threading.Event()
+        release = threading.Event()
+        result = []
+
+        class CachedLedger(MemoryLedger):
+            def __init__(self, *records):
+                super().__init__(*records)
+                self._listed_records = None
+                self._blocked_once = False
+
+            def list_records(self, *, kind=None, limit=0):
+                if self._listed_records is None:
+                    self._listed_records = super().list_records(limit=0)
+                    if not self._blocked_once:
+                        self._blocked_once = True
+                        listed.set()
+                        self.assert_release()
+                return [
+                    row
+                    for row in self._listed_records
+                    if kind is None or row.kind == kind
+                ]
+
+            @staticmethod
+            def assert_release():
+                if not release.wait(2):
+                    raise AssertionError("snapshot scan was not released")
+
+        ledger = CachedLedger(record("fc-system", kind="control", desktop={}))
+        snapshot_request = replace(request(("transport", "snapshot")), arguments={})
+        snapshot = threading.Thread(
+            target=lambda: result.append(
+                DesktopProtocolService(ledger).transport_snapshot(snapshot_request)
+            )
+        )
+        snapshot.start()
+        try:
+            self.assertTrue(listed.wait(1))
+            ledger.create_record(
+                record_id="fc-new-wait",
+                kind="work",
+                title="new wait",
+                description="created during transcript reconstruction",
+                owner="worker",
+                fc={
+                    "kind": "work",
+                    "owner": "worker",
+                    "desktop": {
+                        "instruction_waits": {
+                            "wait-new": {
+                                "wait_id": "wait-new",
+                                "state": "waiting",
+                                "deadline": "2099-01-01T00:00:00Z",
+                            }
+                        }
+                    },
+                },
+            )
+        finally:
+            release.set()
+            snapshot.join(2)
+
+        self.assertFalse(snapshot.is_alive())
+        self.assertEqual(result[0].result["waits"][0]["wait_id"], "wait-new")
 
     def test_turn_aborted_cancels_retained_wait_without_interrupt_hook(self):
         ledger = MemoryLedger()

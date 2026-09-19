@@ -189,6 +189,11 @@ class Ledger:
         retained.append(copy.deepcopy(record))
         self._listed_records = retained
 
+    def refresh_records(self) -> None:
+        """Require the next full listing to observe current durable state."""
+
+        self._listed_records = None
+
     def _lock_for(self, bead_id: str | None) -> ProcessLock:
         return ProcessLock(self.workspace / ".fulcrum-locks" / "state")
 

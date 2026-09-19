@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fulcrum.coordination import coordinated
+from fulcrum.coordination import coordinated, transition
 
 import uuid
 from collections import defaultdict
@@ -72,6 +72,16 @@ def record_desktop_usage(
             and turn_id
         ):
             grouped[(task_id, turn_id)].append(event)
+    for event in lifecycle_events:
+        task_id = event.get("task_id")
+        turn_id = event.get("turn_id")
+        if (
+            isinstance(task_id, str)
+            and task_id
+            and isinstance(turn_id, str)
+            and turn_id
+        ):
+            grouped.setdefault((task_id, turn_id), [])
     written: list[str] = []
     for (task_id, turn_id), events in grouped.items():
         external_ref = f"fulcrum:usage:{task_id}:{turn_id}"
@@ -137,6 +147,10 @@ def record_desktop_usage(
                 and event.get("type") in TERMINAL_LIFECYCLE_TYPES
             ),
             None,
+        ) or (
+            str(prior["terminal_state"])
+            if isinstance(prior.get("terminal_state"), str)
+            else None
         )
         task_turns = [
             str(event["turn_id"])
@@ -182,6 +196,7 @@ def record_desktop_usage(
             "coverage": (
                 "complete"
                 if terminal
+                and priced
                 and all(value.get("coverage") == "complete" for value in priced)
                 else "in_progress" if in_progress else "partial"
             ),
@@ -201,21 +216,23 @@ def record_desktop_usage(
                     if raw and not normalized_input
                     else set()
                 )
+                | ({"usage_observation_missing"} if terminal and not raw else set())
             ),
             "terminal_state": terminal,
             "observed_at": observed_at,
             "last_observation_at": utc_now(),
         }
         if existing is None:
-            ledger.create_record(
-                record_id=record_id,
-                kind="analytics",
-                title=f"Native usage: {task_id}/{turn_id}",
-                description="Trusted Desktop transcript usage and pricing evidence.",
-                owner=task_id,
-                fc=fc,
-                external_ref=external_ref,
-            )
+            with transition(ledger.workspace):
+                ledger.create_record(
+                    record_id=record_id,
+                    kind="analytics",
+                    title=f"Native usage: {task_id}/{turn_id}",
+                    description="Trusted Desktop transcript usage and pricing evidence.",
+                    owner=task_id,
+                    fc=fc,
+                    external_ref=external_ref,
+                )
         else:
             if existing.kind != "analytics" or prior.get("subtype") != "turn":
                 raise FulcrumError(
