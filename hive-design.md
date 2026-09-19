@@ -57,7 +57,8 @@ or validation. Writing this document does not activate Hive or migrate Fulcrum.
 This assessment uses the repository at its 600-commit point,
 `4a01a0068ae54e4a7a06175314b17ba54900f11b`, and retained measurements and
 incident reports. Historical incidents describe the implementation that
-existed at the time; they are not claims that every defect remains present today.
+existed at the time. They do not establish that every defect remains present
+today.
 
 The important findings are:
 
