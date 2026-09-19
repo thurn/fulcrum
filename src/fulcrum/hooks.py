@@ -564,45 +564,77 @@ class HookService:
         return sorted(set(paths))
 
     def collect_active_assignments(self, request: ParsedRequest) -> list[str]:
-        """Collect active workers and return only their transcript watch paths."""
+        """Collect active workers and unresolved descendants for broker observation."""
 
         ledger = self._ledger(request)
         paths: set[str] = set()
         for record in ledger.list_records(limit=0):
-            if record.status == "closed" or (record.fc or {}).get("phase") == "done":
-                continue
             protocol = _protocol(record.fc or {})
             transcripts = protocol.get("transcripts")
             assignment = protocol.get("assignment")
-            if not isinstance(assignment, Mapping):
+            if (
+                isinstance(assignment, Mapping)
+                and record.status != "closed"
+                and (record.fc or {}).get("phase") != "done"
+            ):
+                task_id = assignment.get("task_id")
+                retained = (
+                    transcripts.get(task_id)
+                    if isinstance(transcripts, Mapping) and isinstance(task_id, str)
+                    else None
+                )
+                transcript = (
+                    retained.get("path") if isinstance(retained, Mapping) else None
+                )
+                discovery_cursor: int | None = None
+                if isinstance(task_id, str) and task_id:
+                    if (
+                        not isinstance(transcript, str)
+                        or not Path(transcript).is_absolute()
+                    ):
+                        transcript = _discover_native_transcript(task_id)
+                        if transcript is not None:
+                            discovery_cursor = _recent_transcript_cursor(
+                                Path(transcript)
+                            )
+                    if transcript is not None:
+                        paths.add(transcript)
+                        self._collect_transcript_path(
+                            ledger,
+                            request,
+                            record,
+                            str(assignment.get("role") or "worker"),
+                            task_id,
+                            transcript,
+                            assignment.get("turn_id"),
+                            discovery_cursor=discovery_cursor,
+                        )
+            refreshed = ledger.show(record.id) or record
+            refreshed_protocol = _protocol(refreshed.fc or {})
+            descendants = refreshed_protocol.get("descendants")
+            if not isinstance(descendants, Mapping):
                 continue
-            task_id = assignment.get("task_id")
-            retained = (
-                transcripts.get(task_id)
-                if isinstance(transcripts, Mapping) and isinstance(task_id, str)
-                else None
+            role = str(
+                (
+                    assignment.get("role") or (refreshed.fc or {}).get("role")
+                    if isinstance(assignment, Mapping)
+                    else (refreshed.fc or {}).get("role")
+                )
+                or "worker"
             )
-            transcript = retained.get("path") if isinstance(retained, Mapping) else None
-            discovery_cursor: int | None = None
-            if not isinstance(task_id, str) or not task_id:
-                continue
-            if not isinstance(transcript, str) or not Path(transcript).is_absolute():
-                transcript = _discover_native_transcript(task_id)
-                if transcript is not None:
-                    discovery_cursor = _recent_transcript_cursor(Path(transcript))
-            if transcript is None:
-                continue
-            paths.add(transcript)
-            self._collect_transcript_path(
-                ledger,
-                request,
-                record,
-                str(assignment.get("role") or "worker"),
-                task_id,
-                transcript,
-                assignment.get("turn_id"),
-                discovery_cursor=discovery_cursor,
-            )
+            for child_task_id in sorted(descendants):
+                if not isinstance(child_task_id, str):
+                    continue
+                path = self._collect_descendant(
+                    ledger,
+                    request,
+                    record.id,
+                    role,
+                    child_task_id,
+                    set(),
+                )
+                if path is not None:
+                    paths.add(path)
         return sorted(paths)
 
     def collect_standing(self, request: ParsedRequest) -> list[str]:
@@ -668,30 +700,45 @@ class HookService:
 
     @staticmethod
     def active_assignment_paths(ledger: Ledger) -> list[str]:
-        """Return only transcript paths needed to observe active workers."""
+        """Return transcript paths needed to observe active workers and descendants."""
 
         paths: set[str] = set()
         for record in ledger.list_records(limit=0):
-            if record.status == "closed" or (record.fc or {}).get("phase") == "done":
-                continue
             protocol = _protocol(record.fc or {})
             assignment = protocol.get("assignment")
             transcripts = protocol.get("transcripts")
-            if not isinstance(assignment, Mapping):
-                continue
-            task_id = assignment.get("task_id")
-            retained = (
-                transcripts.get(task_id)
-                if isinstance(transcripts, Mapping) and isinstance(task_id, str)
-                else None
-            )
-            path = retained.get("path") if isinstance(retained, Mapping) else None
-            if isinstance(task_id, str) and (
-                not isinstance(path, str) or not Path(path).is_absolute()
+            if (
+                isinstance(assignment, Mapping)
+                and record.status != "closed"
+                and (record.fc or {}).get("phase") != "done"
             ):
-                path = _discover_native_transcript(task_id)
-            if isinstance(path, str) and Path(path).is_absolute():
-                paths.add(path)
+                task_id = assignment.get("task_id")
+                retained = (
+                    transcripts.get(task_id)
+                    if isinstance(transcripts, Mapping) and isinstance(task_id, str)
+                    else None
+                )
+                path = retained.get("path") if isinstance(retained, Mapping) else None
+                if isinstance(task_id, str) and (
+                    not isinstance(path, str) or not Path(path).is_absolute()
+                ):
+                    path = _discover_native_transcript(task_id)
+                if isinstance(path, str) and Path(path).is_absolute():
+                    paths.add(path)
+            descendants = protocol.get("descendants")
+            if not isinstance(descendants, Mapping):
+                continue
+            for task_id, descendant in descendants.items():
+                retained = (
+                    transcripts.get(task_id)
+                    if isinstance(transcripts, Mapping) and isinstance(task_id, str)
+                    else None
+                )
+                path = retained.get("path") if isinstance(retained, Mapping) else None
+                if not isinstance(path, str) and isinstance(descendant, Mapping):
+                    path = descendant.get("transcript_path")
+                if isinstance(path, str) and Path(path).is_absolute():
+                    paths.add(path)
         return sorted(paths)
 
     def _collect_transcript_path(
@@ -705,7 +752,12 @@ class HookService:
         turn_id: Any,
         *,
         discovery_cursor: int | None = None,
+        visited: set[str] | None = None,
     ) -> None:
+        visited = set(visited or ())
+        if task_id in visited:
+            return
+        visited.add(task_id)
         protocol = _protocol(record.fc or {})
         transcripts = dict(protocol.get("transcripts") or {})
         current = transcripts.get(task_id)
@@ -722,6 +774,72 @@ class HookService:
             cursor,
             timing_state if isinstance(timing_state, Mapping) else None,
         )
+        descendants = dict(protocol.get("descendants") or {})
+        parent_lineage = descendants.get(task_id)
+        parent_depth = (
+            int(parent_lineage.get("lineage_depth", 0))
+            if isinstance(parent_lineage, Mapping)
+            else 0
+        )
+        for link in page.subagents:
+            child_task_id = link.get("child_task_id")
+            if not isinstance(child_task_id, str) or not child_task_id:
+                continue
+            prior_descendant = descendants.get(child_task_id)
+            prior_descendant = (
+                dict(prior_descendant) if isinstance(prior_descendant, Mapping) else {}
+            )
+            activity_id = link.get("activity_id")
+            activity_ids = {
+                str(value)
+                for value in prior_descendant.get("activity_ids", [])
+                if value
+            }
+            if activity_id:
+                activity_ids.add(str(activity_id))
+            observed_state = str(link.get("state") or "observed")
+            state_order = {"observed": 0, "started": 1, "interacted": 2, "completed": 3}
+            prior_state = str(prior_descendant.get("state") or "observed")
+            retained_state = (
+                observed_state
+                if state_order.get(observed_state, 0) >= state_order.get(prior_state, 0)
+                else prior_state
+            )
+            descendants[child_task_id] = {
+                **prior_descendant,
+                "task_id": child_task_id,
+                "parent_task_id": link.get("parent_task_id") or task_id,
+                "parent_turn_id": link.get("parent_turn_id") or turn_id,
+                "spawn_activity_id": prior_descendant.get("spawn_activity_id")
+                or (activity_id if observed_state == "started" else None),
+                "activity_ids": sorted(activity_ids),
+                "state": retained_state,
+                "agent_path": link.get("agent_path")
+                or prior_descendant.get("agent_path"),
+                "lineage_depth": parent_depth + 1,
+                "first_seen_at": prior_descendant.get("first_seen_at") or _utc_now(),
+                "last_seen_at": _utc_now(),
+                "telemetry_semantics": "separate_child_response_counters",
+            }
+        if isinstance(parent_lineage, Mapping):
+            descendant = dict(parent_lineage)
+            descendant["transcript_path"] = transcript
+            descendant["transcript_cursor"] = page.cursor
+            if page.usage:
+                descendant["usage_observed"] = True
+            terminal = next(
+                (
+                    str(item.get("type"))
+                    for item in reversed(page.lifecycle)
+                    if item.get("type") in TERMINAL_LIFECYCLE_TYPES
+                ),
+                None,
+            )
+            if terminal is not None:
+                descendant["terminal_lifecycle"] = terminal
+            descendant["last_collected_at"] = _utc_now()
+            descendants[task_id] = descendant
+        protocol["descendants"] = descendants
         retained_gaps = (
             list(current.get("gaps") or []) if isinstance(current, Mapping) else []
         )
@@ -741,6 +859,10 @@ class HookService:
             # capacity forever solely because its last action result won the race.
             from fulcrum.completion import settle_native_completion
 
+            if isinstance(parent_lineage, Mapping):
+                self._reconcile_descendant_attribution(
+                    ledger, record, task_id, parent_lineage
+                )
             settle_native_completion(request, ledger, record.id)
             return
         observations = dict(protocol.get("observations") or {})
@@ -877,10 +999,140 @@ class HookService:
                 role,
                 page_usage,
                 page_lifecycle,
+                lineage=(
+                    descendants.get(task_id)
+                    if isinstance(descendants.get(task_id), Mapping)
+                    else None
+                ),
             )
+        if isinstance(parent_lineage, Mapping):
+            self._reconcile_descendant_attribution(
+                ledger,
+                ledger.show(record.id) or record,
+                task_id,
+                descendants.get(task_id) or parent_lineage,
+            )
+        for child_task_id in sorted(
+            {
+                str(link.get("child_task_id"))
+                for link in page.subagents
+                if link.get("child_task_id")
+            }
+        ):
+            self._collect_descendant(
+                ledger,
+                request,
+                record.id,
+                role,
+                child_task_id,
+                visited,
+            )
+        if isinstance(parent_lineage, Mapping) and (
+            page_usage
+            or any(
+                value.get("type") in TERMINAL_LIFECYCLE_TYPES
+                for value in page_lifecycle
+            )
+        ):
+            from fulcrum.analytics import AnalyticsService
+
+            retained_record = ledger.show(record.id) or record
+            root_id = (retained_record.fc or {}).get("workflow_root")
+            root = ledger.show(str(root_id)) if isinstance(root_id, str) else None
+            if root is not None and root.status == "closed" and root.fc:
+                AnalyticsService().finalize_root(
+                    ledger,
+                    root,
+                    f"native-subagent:{task_id}:{page.cursor}",
+                    correction=True,
+                )
         from fulcrum.completion import settle_native_completion
 
         settle_native_completion(request, ledger, record.id)
+
+    def _collect_descendant(
+        self,
+        ledger: Ledger,
+        request: ParsedRequest,
+        record_id: str,
+        role: str,
+        task_id: str,
+        visited: set[str],
+    ) -> str | None:
+        if task_id in visited:
+            return None
+        record = ledger.show(record_id)
+        if record is None:
+            return None
+        protocol = _protocol(record.fc or {})
+        descendants = dict(protocol.get("descendants") or {})
+        lineage = descendants.get(task_id)
+        if not isinstance(lineage, Mapping):
+            return None
+        transcripts = dict(protocol.get("transcripts") or {})
+        retained = transcripts.get(task_id)
+        transcript = retained.get("path") if isinstance(retained, Mapping) else None
+        if not isinstance(transcript, str) or not Path(transcript).is_absolute():
+            transcript = _discover_native_transcript(task_id)
+            if transcript is None:
+                descendant = dict(lineage)
+                descendant["transcript_state"] = "unavailable"
+                descendant["last_discovery_at"] = _utc_now()
+                descendants[task_id] = descendant
+                protocol["descendants"] = descendants
+                ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+                return None
+            descendant = dict(lineage)
+            descendant["transcript_path"] = transcript
+            descendant["transcript_state"] = "available"
+            descendant["last_discovery_at"] = _utc_now()
+            descendants[task_id] = descendant
+            transcripts[task_id] = {
+                "path": transcript,
+                "cursor": 0,
+                "gaps": [],
+            }
+            protocol["descendants"] = descendants
+            protocol["transcripts"] = transcripts
+            ledger.update_fc(record.id, _with_protocol(record.fc or {}, protocol))
+            record = ledger.show(record.id) or record
+        self._collect_transcript_path(
+            ledger,
+            request,
+            record,
+            role,
+            task_id,
+            transcript,
+            None,
+            visited=visited,
+        )
+        return transcript
+
+    def _reconcile_descendant_attribution(
+        self,
+        ledger: Ledger,
+        record: LedgerRecord,
+        task_id: str,
+        lineage: Mapping[str, Any],
+    ) -> None:
+        from fulcrum.analytics import (
+            AnalyticsService,
+            reconcile_descendant_attribution,
+        )
+
+        if not reconcile_descendant_attribution(ledger, lineage):
+            return
+        root_id = (record.fc or {}).get("workflow_root")
+        root = ledger.show(str(root_id)) if isinstance(root_id, str) else None
+        if root is None or root.status != "closed" or not root.fc:
+            return
+        AnalyticsService().finalize_root(
+            ledger,
+            root,
+            "native-subagent-attribution:"
+            f"{task_id}:{lineage.get('parent_turn_id') or 'unknown'}",
+            correction=True,
+        )
 
     def _cancel_waits_for_terminal_events(
         self,

@@ -855,12 +855,29 @@ trailing lines, and replay with native response identity for deduplication. Neve
 sum successive cumulative samples. Reconcile unique response usage with terminal
 totals; completion evidence remains distinct from usage evidence.
 
+An `item_completed`/`SubAgentActivity` observation in a managed transcript extends
+that scoped collection boundary to the named child task. Retain the parent
+task/turn, spawn and activity identities, agent path, lifecycle state, and lineage
+depth under the work record's Desktop metadata. Resolve the child transcript with
+the same native-task locator, observe available paths through the broker, and
+repeat recursively for nested children. Active and unavailable descendants stay
+registered for later scans; collection is idempotent across duplicate activity
+events, hooks, reconciliation, and restart. This is transcript observation, not a
+new resident-owned subagent runtime, so it preserves source leases and requires no
+connection restart.
+
 Correlate effective model, service tier, and reroute evidence before pricing.
 Configured settings alone do not prove effective execution. Use disjoint input
 categories and per-response long-context/tier rules; reasoning is already included
 in output. Missing counters/model/tier/rates retain observed tokens and mark cost
 partial or unknown, never zero. Retain priced subtotals and frozen completion
-summaries with explicit later corrections. These are API-equivalent estimates,
+summaries with explicit later corrections. A child response keeps its own
+task/turn/response identity while inheriting the causal parent's workflow
+attribution and direct, review, or coordination component. Missing child
+transcript, terminal lifecycle, counters, effective model, tier, rate, or causal
+attribution is named and keeps coverage partial; it is never treated as zero. Late
+child evidence appends a correction referencing the prior summary and updates the
+root annotation without rewriting history. These are API-equivalent estimates,
 not subscription bills; accounting gaps do not block delivery.
 
 Include Steward, Marshal, Vizier, and Justiciar overhead under the existing
@@ -870,9 +887,13 @@ estimate, and keep unattributable usage as coordination overhead. Do not charge
 the entire continuing Steward turn to its first bead. Expose provisional usage
 while it runs, and allow workflow cost summaries to close over settled attributed
 responses/actions without waiting for the whole Steward turn to end. Retain
-explicit coverage and issue corrections for later evidence. Count native totals
-once; subagent attribution gaps must not become invented extra usage. Verified
-terminal evidence still seals final whole-turn totals.
+explicit coverage and issue corrections for later evidence. Count every parent
+and descendant response once. Reports list included descendant identities and
+counts plus excluded descendants and reasons. Retain the observed separate-counter
+telemetry semantic; if a future format appears to fold child counters into a
+parent total, mark coverage partial rather than silently adding both. Subagent
+attribution gaps must not become invented extra usage. Verified terminal evidence
+still seals final whole-turn totals.
 
 Measure healthy idle-wait usage separately from per-action and scheduled-run
 costs. Missing collection capability fails readiness; an isolated recoverable

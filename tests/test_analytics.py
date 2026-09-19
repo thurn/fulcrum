@@ -6,6 +6,7 @@ from unittest.mock import patch
 from fulcrum.analytics import (
     AnalyticsService,
     _expected_workflow_gaps,
+    reconcile_descendant_attribution,
     record_desktop_usage,
 )
 from tests.support import MemoryLedger, record
@@ -182,6 +183,130 @@ def test_terminal_only_delta_without_prior_usage_remains_partial():
     assert retained["terminal_state"] == "turn_complete"
     assert retained["coverage"] == "partial"
     assert retained["missing_reasons"] == ["usage_observation_missing"]
+
+
+def test_subagent_inherits_review_and_coordination_parent_components():
+    usage = {
+        "response_id": "response",
+        "model": "gpt-5.6-sol",
+        "input_tokens": 1,
+        "cached_input_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 1,
+        "reasoning_tokens": 0,
+    }
+    for record_id, role, expected in (
+        ("fc-review", "warden", "review"),
+        ("fc-system", "steward", "coordination"),
+    ):
+        parent_task = f"{role}-parent"
+        child_task = f"{role}-child"
+        retained = record(
+            record_id,
+            kind="control" if record_id == "fc-system" else "work",
+            workflow_root="fc-root",
+        )
+        ledger = MemoryLedger(retained)
+        record_desktop_usage(
+            ledger,
+            retained,
+            role,
+            [{**usage, "task_id": parent_task, "turn_id": "parent-turn"}],
+            [
+                {
+                    "type": "turn_complete",
+                    "task_id": parent_task,
+                    "turn_id": "parent-turn",
+                }
+            ],
+        )
+        record_desktop_usage(
+            ledger,
+            retained,
+            role,
+            [{**usage, "task_id": child_task, "turn_id": "child-turn"}],
+            [
+                {
+                    "type": "turn_complete",
+                    "task_id": child_task,
+                    "turn_id": "child-turn",
+                }
+            ],
+            lineage={
+                "parent_task_id": parent_task,
+                "parent_turn_id": "parent-turn",
+                "spawn_activity_id": "spawn",
+                "lineage_depth": 1,
+                "telemetry_semantics": "separate_child_response_counters",
+            },
+        )
+        child = next(
+            item.fc or {}
+            for item in ledger.list_records(kind="analytics", limit=0)
+            if (item.fc or {}).get("thread_id") == child_task
+        )
+        assert child["component"] == expected
+        assert child["attributions"] == [{"workflow_root": "fc-root", "weight": "1"}]
+
+
+def test_delayed_parent_attribution_reconciles_existing_child_turn():
+    work = record("fc-root", workflow_root="fc-root")
+    ledger = MemoryLedger(work)
+    usage = {
+        "response_id": "response",
+        "model": "gpt-5.6-sol",
+        "input_tokens": 1,
+        "cached_input_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 1,
+        "reasoning_tokens": 0,
+    }
+    lineage = {
+        "task_id": "child",
+        "parent_task_id": "parent",
+        "parent_turn_id": "parent-turn",
+        "lineage_depth": 1,
+    }
+    record_desktop_usage(
+        ledger,
+        work,
+        "executor",
+        [{**usage, "task_id": "child", "turn_id": "child-turn"}],
+        [
+            {
+                "type": "turn_complete",
+                "task_id": "child",
+                "turn_id": "child-turn",
+            }
+        ],
+        lineage=lineage,
+    )
+    child = next(
+        item
+        for item in ledger.list_records(kind="analytics", limit=0)
+        if (item.fc or {}).get("thread_id") == "child"
+    )
+    assert "causal_parent_attribution_missing" in (child.fc or {})["missing_reasons"]
+    record_desktop_usage(
+        ledger,
+        work,
+        "executor",
+        [{**usage, "task_id": "parent", "turn_id": "parent-turn"}],
+        [
+            {
+                "type": "turn_complete",
+                "task_id": "parent",
+                "turn_id": "parent-turn",
+            }
+        ],
+    )
+
+    assert reconcile_descendant_attribution(ledger, lineage) is True
+    updated = ledger.show(child.id).fc or {}
+    assert updated["component"] == "direct"
+    assert updated["attributions"] == [{"workflow_root": "fc-root", "weight": "1"}]
+    assert "causal_parent_attribution_missing" not in updated["missing_reasons"]
+    assert reconcile_descendant_attribution(ledger, lineage) is False
 
 
 class AnalyticsTests(unittest.TestCase):

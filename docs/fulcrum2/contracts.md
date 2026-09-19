@@ -1055,11 +1055,22 @@ This accounting must not start extra Marshal turns to simplify attribution.
 Duplicate cumulative usage observations replace the same observation; sum unique
 final native turns, never successive cumulative totals. Track independent
 review tasks through their Beads relationship and distinct native task/turn IDs,
-including late results. Fulcrum does not discover or price native subagents as a
-separate contribution. If native totals include usage without enough attribution,
-retain those observed totals and mark the breakdown incomplete rather than adding
-invented task rows. Unrelated native tasks are excluded. Native model-reroute
-events affect the next response only:
+including late results. For a managed transcript, retain each
+`SubAgentActivity` child task with its causal parent task/turn, spawn/activity
+identity, path, state, and lineage depth. Discover that child's transcript by its
+native task ID, collect it recursively, and price each child response under its
+own task/turn/response identity exactly once. Child records inherit the exact
+causal parent's workflow attribution and direct, review, or coordination
+component; if that parent attribution cannot be resolved, retain the observed
+child usage as unattributed coordination with partial coverage rather than
+guessing. Started, unfinished, unavailable, or incompletely priced descendants
+remain explicit exclusions and keep workflow coverage partial. Broker scans retry
+them, and evidence arriving after completion creates a correction referencing the
+prior summary. Reports expose included descendant identities/counts and named
+excluded descendants instead of a blanket exclusion flag. Unrelated native tasks
+remain excluded. If a future native format folds child counters into parent
+counters, mark the telemetry semantics ambiguous and coverage partial rather than
+double counting. Native model-reroute events affect the next response only:
 deduplicate retransmission while pending, consume once at the next response,
 and treat a later occurrence as new. Missing response/model evidence marks cost
 partial instead of guessing from the originally configured model.

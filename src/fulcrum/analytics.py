@@ -58,6 +58,8 @@ def record_desktop_usage(
     role: str,
     usage_events: Sequence[Mapping[str, Any]],
     lifecycle_events: Sequence[Mapping[str, Any]],
+    *,
+    lineage: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Persist trusted transcript counters without depending on legacy task records."""
 
@@ -163,6 +165,46 @@ def record_desktop_usage(
         in_progress = terminal is None and turn_id == latest_turn_id
         work_fc = record.fc or {}
         workflow_root = work_fc.get("workflow_root")
+        component = (
+            "coordination"
+            if record.id == "fc-system"
+            else "review" if role == "warden" else "direct"
+        )
+        purpose = (
+            "coordination"
+            if record.id == "fc-system"
+            else "review" if role == "warden" else "work"
+        )
+        attributions = (
+            [{"workflow_root": workflow_root, "weight": "1"}]
+            if isinstance(workflow_root, str)
+            else []
+        )
+        attribution_missing: set[str] = set()
+        parent_fc: Mapping[str, Any] | None = None
+        if lineage is not None:
+            parent_task_id = lineage.get("parent_task_id")
+            parent_turn_id = lineage.get("parent_turn_id")
+            if isinstance(parent_task_id, str) and isinstance(parent_turn_id, str):
+                parent = ledger.show(
+                    _analytics_id(f"fulcrum:usage:{parent_task_id}:{parent_turn_id}")
+                )
+                if parent is not None and (parent.fc or {}).get("subtype") == "turn":
+                    parent_fc = parent.fc or {}
+            if parent_fc is not None:
+                workflow_root = parent_fc.get("workflow_root")
+                component = str(parent_fc.get("component") or "coordination")
+                purpose = str(parent_fc.get("purpose") or "coordination")
+                attributions = [
+                    dict(item)
+                    for item in parent_fc.get("attributions", [])
+                    if isinstance(item, Mapping)
+                ]
+            else:
+                component = "coordination"
+                purpose = "coordination"
+                attributions = []
+                attribution_missing.add("causal_parent_attribution_missing")
         fc = {
             "kind": "analytics",
             "subtype": "turn",
@@ -171,16 +213,28 @@ def record_desktop_usage(
             "turn_id": turn_id,
             "bead_id": record.id if record.kind == "work" else None,
             "workflow_root": workflow_root,
-            "role": role,
-            "project": work_fc.get("project"),
+            "role": "subagent" if lineage is not None else role,
+            "project": (
+                parent_fc.get("project")
+                if parent_fc is not None
+                else work_fc.get("project")
+            ),
             "operation_id": None,
             "related_task": task_id,
-            "purpose": "coordination" if record.id == "fc-system" else "work",
-            "component": "coordination" if record.id == "fc-system" else "direct",
-            "attributions": (
-                [{"workflow_root": workflow_root, "weight": "1"}]
-                if isinstance(workflow_root, str)
-                else []
+            "purpose": purpose,
+            "component": component,
+            "attributions": attributions,
+            "native_subagent": lineage is not None,
+            "parent_task_id": lineage.get("parent_task_id") if lineage else None,
+            "parent_turn_id": lineage.get("parent_turn_id") if lineage else None,
+            "spawn_activity_id": lineage.get("spawn_activity_id") if lineage else None,
+            "activity_ids": list(lineage.get("activity_ids") or []) if lineage else [],
+            "agent_path": lineage.get("agent_path") if lineage else None,
+            "lineage_depth": lineage.get("lineage_depth") if lineage else 0,
+            "telemetry_semantics": (
+                lineage.get("telemetry_semantics")
+                if lineage
+                else "managed_task_counters"
             ),
             "model": {
                 "configured": None,
@@ -217,6 +271,7 @@ def record_desktop_usage(
                     else set()
                 )
                 | ({"usage_observation_missing"} if terminal and not raw else set())
+                | attribution_missing
             ),
             "terminal_state": terminal,
             "observed_at": observed_at,
@@ -245,11 +300,73 @@ def record_desktop_usage(
     return written
 
 
+def reconcile_descendant_attribution(
+    ledger: Ledger, lineage: Mapping[str, Any]
+) -> bool:
+    """Adopt causal parent attribution when it arrives after child telemetry."""
+
+    parent_task_id = lineage.get("parent_task_id")
+    parent_turn_id = lineage.get("parent_turn_id")
+    child_task_id = lineage.get("task_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (parent_task_id, parent_turn_id, child_task_id)
+    ):
+        return False
+    parent = ledger.show(
+        _analytics_id(f"fulcrum:usage:{parent_task_id}:{parent_turn_id}")
+    )
+    if parent is None or (parent.fc or {}).get("subtype") != "turn":
+        return False
+    parent_fc = parent.fc or {}
+    changed = False
+    for child in ledger.list_records(kind="analytics", limit=0):
+        child_fc = dict(child.fc or {})
+        if (
+            child_fc.get("subtype") != "turn"
+            or child_fc.get("native_subagent") is not True
+            or child_fc.get("thread_id") != child_task_id
+        ):
+            continue
+        attributions = [
+            dict(item)
+            for item in parent_fc.get("attributions", [])
+            if isinstance(item, Mapping)
+        ]
+        missing = [
+            str(reason)
+            for reason in child_fc.get("missing_reasons", [])
+            if reason != "causal_parent_attribution_missing"
+        ]
+        updates = {
+            "workflow_root": parent_fc.get("workflow_root"),
+            "project": parent_fc.get("project"),
+            "purpose": parent_fc.get("purpose") or "coordination",
+            "component": parent_fc.get("component") or "coordination",
+            "attributions": attributions,
+            "missing_reasons": sorted(set(missing)),
+        }
+        if all(child_fc.get(key) == value for key, value in updates.items()):
+            continue
+        child_fc.update(updates)
+        responses = child_fc.get("response_records")
+        if (
+            child_fc.get("terminal_state")
+            and isinstance(responses, list)
+            and responses
+            and not missing
+        ):
+            child_fc["coverage"] = "complete"
+        ledger.update_fc(child.id, child_fc)
+        changed = True
+    return changed
+
+
 class AnalyticsService:
     def usage(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
         rows = self._selected_turns(ledger, request.arguments)
-        return CommandResult.query(_usage_report(rows, request.arguments))
+        return CommandResult.query(_usage_report(ledger, rows, request.arguments))
 
     def cost(self, request: ParsedRequest) -> CommandResult:
         ledger = _ledger(request)
@@ -923,7 +1040,9 @@ def _price_response(
 
 
 def _usage_report(
-    records: Sequence[LedgerRecord], filters: Mapping[str, Any]
+    ledger: Ledger,
+    records: Sequence[LedgerRecord],
+    filters: Mapping[str, Any],
 ) -> dict[str, Any]:
     totals = _sum_usage(records, filters)
     missing = sorted(
@@ -942,6 +1061,15 @@ def _usage_report(
     coverages = [
         str((record.fc or {}).get("coverage") or "unknown") for record in records
     ]
+    descendants = _descendant_report(
+        ledger, records, _optional(filters.get("workflow"))
+    )
+    missing = sorted(
+        {
+            *missing,
+            *(str(item["reason"]) for item in descendants["excluded"]),
+        }
+    )
     return {
         "group_by": group_by,
         "totals": totals,
@@ -969,12 +1097,15 @@ def _usage_report(
             else (
                 "complete"
                 if all(item == "complete" for item in coverages)
+                and not descendants["excluded"]
                 else "partial"
             )
         ),
         "missing_reasons": missing,
         "included_native_turn_ids": [_turn_identity(item) for item in records],
-        "excluded_native_subagents": True,
+        "included_native_subagent_ids": descendants["included"],
+        "native_subagent_count": len(descendants["included"]),
+        "excluded_native_subagents": descendants["excluded"],
     }
 
 
@@ -1025,6 +1156,9 @@ def _cost_report(
             missing.update(str(item) for item in repriced.get("missing_reasons", []))
     if len(currencies) > 1:
         missing.add("mixed_currencies")
+    descendants = _descendant_report(ledger, records, workflow)
+    exclusions.extend(descendants["excluded"])
+    missing.update(str(item["reason"]) for item in descendants["excluded"])
     currency = next(iter(currencies)) if len(currencies) == 1 else None
     coverage = (
         "complete" if records and not missing else "partial" if records else "unknown"
@@ -1045,6 +1179,9 @@ def _cost_report(
             ),
         },
         "included_native_turn_ids": [_turn_identity(item) for item in records],
+        "included_native_subagent_ids": descendants["included"],
+        "native_subagent_count": len(descendants["included"]),
+        "excluded_native_subagents": descendants["excluded"],
         "missing_reasons": sorted(
             missing or ({"no_managed_turns"} if not records else set())
         ),
@@ -1079,6 +1216,69 @@ def _cost_report(
             for key, rows in sorted(grouped.items())
         ]
     return result
+
+
+def _descendant_report(
+    ledger: Ledger,
+    records: Sequence[LedgerRecord],
+    workflow: str | None,
+) -> dict[str, Any]:
+    child_rows: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for record in records:
+        fc = record.fc or {}
+        if fc.get("native_subagent") is True and isinstance(fc.get("thread_id"), str):
+            child_rows[str(fc["thread_id"])].append(fc)
+    included = sorted(child_rows)
+    registry: dict[str, Mapping[str, Any]] = {}
+    for work in ledger.list_records(limit=0):
+        fc = work.fc or {}
+        if fc.get("kind") == "analytics":
+            continue
+        if (
+            workflow is not None
+            and work.id != workflow
+            and fc.get("workflow_root") != workflow
+        ):
+            continue
+        desktop = fc.get("desktop")
+        descendants = (
+            desktop.get("descendants") if isinstance(desktop, Mapping) else None
+        )
+        if not isinstance(descendants, Mapping):
+            continue
+        for task_id, value in descendants.items():
+            if isinstance(task_id, str) and isinstance(value, Mapping):
+                registry[task_id] = value
+    excluded: list[dict[str, Any]] = []
+    for task_id, lineage in sorted(registry.items()):
+        rows = child_rows.get(task_id, [])
+        if rows and all(row.get("coverage") == "complete" for row in rows):
+            continue
+        if lineage.get("transcript_state") == "unavailable" or not lineage.get(
+            "transcript_path"
+        ):
+            reason = "native_subagent_transcript_unavailable"
+        elif not rows:
+            reason = "native_subagent_usage_missing"
+        elif not lineage.get("terminal_lifecycle"):
+            reason = "native_subagent_terminal_lifecycle_missing"
+        else:
+            row_reasons = sorted(
+                {str(value) for row in rows for value in row.get("missing_reasons", [])}
+            )
+            reason = (
+                row_reasons[0] if row_reasons else "native_subagent_telemetry_partial"
+            )
+        excluded.append(
+            {
+                "thread_id": task_id,
+                "parent_task_id": lineage.get("parent_task_id"),
+                "parent_turn_id": lineage.get("parent_turn_id"),
+                "state": lineage.get("state"),
+                "reason": reason,
+            }
+        )
+    return {"included": included, "excluded": excluded}
 
 
 def _counters(value: Mapping[str, Any]) -> tuple[dict[str, int], list[str]]:
@@ -1319,6 +1519,40 @@ def _expected_workflow_gaps(
                     "turn_id": turn_id,
                     "terminal_state": "finished",
                     "reason": "terminal usage has not been persisted",
+                }
+            )
+        descendants = desktop.get("descendants")
+        if not isinstance(descendants, Mapping):
+            continue
+        observed_children = {
+            str((item.fc or {}).get("thread_id")): item.fc or {}
+            for item in observed
+            if (item.fc or {}).get("native_subagent") is True
+        }
+        for task_id, lineage in sorted(descendants.items()):
+            if not isinstance(task_id, str) or not isinstance(lineage, Mapping):
+                continue
+            child = observed_children.get(task_id)
+            if child is not None and child.get("coverage") == "complete":
+                continue
+            if lineage.get("transcript_state") == "unavailable" or not lineage.get(
+                "transcript_path"
+            ):
+                reason = "native subagent transcript is unavailable"
+            elif child is None:
+                reason = "native subagent usage has not been persisted"
+            elif not lineage.get("terminal_lifecycle"):
+                reason = "native subagent lifecycle is not terminal"
+            else:
+                reason = "native subagent telemetry is partial"
+            gaps.append(
+                {
+                    "bead_id": work.id,
+                    "thread_id": task_id,
+                    "parent_task_id": lineage.get("parent_task_id"),
+                    "parent_turn_id": lineage.get("parent_turn_id"),
+                    "terminal_state": lineage.get("state"),
+                    "reason": reason,
                 }
             )
     return gaps

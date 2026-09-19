@@ -19,6 +19,7 @@ from typing import Any
 class TranscriptPage:
     cursor: int
     lifecycle: tuple[Mapping[str, Any], ...]
+    subagents: tuple[Mapping[str, Any], ...]
     usage: tuple[Mapping[str, Any], ...]
     timings: tuple[Mapping[str, Any], ...]
     timing_state: Mapping[str, Any]
@@ -28,6 +29,7 @@ class TranscriptPage:
         return {
             "cursor": self.cursor,
             "lifecycle": [dict(item) for item in self.lifecycle],
+            "subagents": [dict(item) for item in self.subagents],
             "usage": [dict(item) for item in self.usage],
             "timings": [dict(item) for item in self.timings],
             "timing_state": dict(self.timing_state),
@@ -74,12 +76,14 @@ def read_transcript(
         return TranscriptPage(
             cursor=cursor,
             lifecycle=(),
+            subagents=(),
             usage=(),
             timings=(),
             timing_state=dict(timing_state or {}),
             gaps=({"kind": "transcript_unavailable", "message": str(error)},),
         )
     lifecycle: list[Mapping[str, Any]] = []
+    subagents: list[Mapping[str, Any]] = []
     usage: list[Mapping[str, Any]] = []
     timings: list[Mapping[str, Any]] = []
     gaps: list[Mapping[str, Any]] = []
@@ -134,6 +138,9 @@ def read_transcript(
         if event_type in {"custom_tool_call_output", "function_call_output"}:
             _start_response(state, value, event)
         if event_type == "item_completed":
+            subagent = _subagent(event, value)
+            if subagent is not None:
+                subagents.append(subagent)
             timing = _item_timing(value, event, state)
             if timing is not None:
                 timings.append(timing)
@@ -146,11 +153,39 @@ def read_transcript(
     return TranscriptPage(
         cursor=cursor + consumed,
         lifecycle=tuple(lifecycle),
+        subagents=tuple(subagents),
         usage=tuple(usage),
         timings=tuple(timings),
         timing_state=state,
         gaps=tuple(gaps),
     )
+
+
+def _subagent(
+    event: Mapping[str, Any], root: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    item = event.get("item")
+    if not isinstance(item, Mapping) or item.get("type") != "SubAgentActivity":
+        return None
+    child_task_id = item.get("agent_thread_id") or item.get("agentThreadId")
+    if not isinstance(child_task_id, str) or not child_task_id:
+        return None
+    state = item.get("kind")
+    return {
+        "parent_task_id": _first(
+            event.get("thread_id"), event.get("task_id"), root.get("thread_id")
+        ),
+        "parent_turn_id": _first(
+            event.get("turn_id"), event.get("turnId"), root.get("turn_id")
+        ),
+        "child_task_id": child_task_id,
+        "activity_id": _first(item.get("id"), event.get("id"), root.get("ordinal")),
+        "state": str(state) if state is not None else "observed",
+        "agent_path": item.get("agent_path") or item.get("agentPath"),
+        "time": _first(
+            event.get("time"), event.get("timestamp"), root.get("timestamp")
+        ),
+    }
 
 
 def _event(value: Mapping[str, Any]) -> Mapping[str, Any]:

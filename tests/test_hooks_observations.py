@@ -32,6 +32,7 @@ class ObservationTests(unittest.TestCase):
                 b'{"timestamp":"2026-09-18T00:00:00.100Z","type":"turn_context","event_id":"e1","turn_id":"t1","model":"gpt-5.6-luna"}\n'
                 b'{"timestamp":"2026-09-18T00:00:01.500Z","type":"token_usage_record","payload":{"thread_id":"task-1","turn_id":"t1","response_id":"r1","usage":{"input_tokens":12,"cache_write_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2}}}\n'
                 b'{"timestamp":"2026-09-18T00:00:01.750Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"task-1","turn_id":"t1","item":{"type":"McpToolCall","id":"tool-1","server":"fulcrum","tool":"register_worker","status":"completed","duration":{"secs":0,"nanos":125000000}},"started_at_ms":1789689601625,"completed_at_ms":1789689601750}}\n'
+                b'{"timestamp":"2026-09-18T00:00:01.800Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"task-1","turn_id":"t1","item":{"type":"SubAgentActivity","id":"call-spawn","kind":"started","agent_thread_id":"child-1","agent_path":"/root/research"}}}\n'
                 b'{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"t1","reason":"interrupted"}}\n'
                 b'{"type":"event_msg","payload":{"type":"turn_future","turn_id":"t2"}}\n'
                 b'{"type":"turn_started"'
@@ -52,6 +53,20 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(page.timings[1]["duration_ms"], 125.0)
         self.assertEqual(page.timings[1]["parent_span_id"], page.timings[0]["span_id"])
         self.assertEqual(page.timings[1]["tool"], "register_worker")
+        self.assertEqual(
+            page.subagents,
+            (
+                {
+                    "parent_task_id": "task-1",
+                    "parent_turn_id": "t1",
+                    "child_task_id": "child-1",
+                    "activity_id": "call-spawn",
+                    "state": "started",
+                    "agent_path": "/root/research",
+                    "time": "2026-09-18T00:00:01.800Z",
+                },
+            ),
+        )
         self.assertEqual(page.gaps[0]["kind"], "unrecognized_lifecycle_event")
         self.assertEqual(page.gaps[0]["event_type"], "turn_future")
         self.assertEqual(page.gaps[1]["kind"], "incomplete_trailing_line")
@@ -1234,6 +1249,341 @@ class HookTests(unittest.TestCase):
         self.assertNotIn(
             "terminal_lifecycle_missing", (analytics.fc or {})["missing_reasons"]
         )
+
+    def test_native_subagents_collect_recursively_and_roll_up_once(self):
+        from fulcrum.analytics import AnalyticsService, seed_bundled_rates
+
+        def transcript(
+            task_id, turn_id, counters, child=None, terminal="task_complete"
+        ):
+            rows = [
+                {
+                    "timestamp": "2026-09-18T00:00:00Z",
+                    "type": "turn_context",
+                    "thread_id": task_id,
+                    "turn_id": turn_id,
+                    "model": "gpt-5.6-sol",
+                },
+                {
+                    "timestamp": "2026-09-18T00:00:01Z",
+                    "type": "token_usage_record",
+                    "payload": {
+                        "thread_id": task_id,
+                        "turn_id": turn_id,
+                        "response_id": f"response-{task_id}",
+                        "model": "gpt-5.6-sol",
+                        "usage": counters,
+                    },
+                },
+            ]
+            if child is not None:
+                for kind, activity_id in (
+                    ("started", f"spawn-{child}"),
+                    ("completed", f"complete-{child}"),
+                ):
+                    rows.append(
+                        {
+                            "timestamp": "2026-09-18T00:00:02Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "thread_id": task_id,
+                                "turn_id": turn_id,
+                                "item": {
+                                    "type": "SubAgentActivity",
+                                    "id": activity_id,
+                                    "kind": kind,
+                                    "agent_thread_id": child,
+                                    "agent_path": f"/root/{child}",
+                                },
+                            },
+                        }
+                    )
+            rows.append(
+                {
+                    "timestamp": "2026-09-18T00:00:03Z",
+                    "type": terminal,
+                    "thread_id": task_id,
+                    "turn_id": turn_id,
+                }
+            )
+            return "".join(json.dumps(row) + "\n" for row in rows)
+
+        with tempfile.TemporaryDirectory() as directory:
+            paths = {
+                task_id: Path(directory) / f"{task_id}.jsonl"
+                for task_id in ("parent", "child", "grandchild")
+            }
+            paths["parent"].write_text(
+                transcript(
+                    "parent",
+                    "parent-turn",
+                    {
+                        "input_tokens": 10,
+                        "cached_input_tokens": 2,
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": 3,
+                        "reasoning_output_tokens": 1,
+                    },
+                    "child",
+                ),
+                encoding="utf-8",
+            )
+            paths["child"].write_text(
+                transcript(
+                    "child",
+                    "child-turn",
+                    {
+                        "input_tokens": 20,
+                        "cached_input_tokens": 5,
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": 4,
+                        "reasoning_output_tokens": 1,
+                    },
+                    "grandchild",
+                ),
+                encoding="utf-8",
+            )
+            paths["grandchild"].write_text(
+                transcript(
+                    "grandchild",
+                    "grandchild-turn",
+                    {
+                        "input_tokens": 30,
+                        "cached_input_tokens": 10,
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": 5,
+                        "reasoning_output_tokens": 2,
+                    },
+                    terminal="turn_aborted",
+                ),
+                encoding="utf-8",
+            )
+            ledger = MemoryLedger(
+                record(
+                    "fc-work",
+                    status="closed",
+                    workflow_root="fc-work",
+                    project="toy",
+                    completion_cost={
+                        "summary_bead": "fc-prior",
+                        "coverage": "partial",
+                    },
+                    desktop={
+                        "assignment": {
+                            "task_id": "parent",
+                            "turn_id": "parent-turn",
+                            "role": "executor",
+                            "state": "active",
+                        },
+                        "transcripts": {
+                            "parent": {"path": str(paths["parent"]), "cursor": 0}
+                        },
+                    },
+                ),
+                record(
+                    "fc-prior",
+                    kind="analytics",
+                    subtype="completion_summary",
+                    workflow_root="fc-work",
+                    included_native_turn_ids=["parent:parent-turn"],
+                    rate_card_ids=[],
+                    coverage="partial",
+                    missing_reasons=["terminal_usage_observation_missing"],
+                    exclusions=[],
+                    currency="USD",
+                    priced_subtotal=None,
+                    total=None,
+                    components={},
+                ),
+            )
+            seed_bundled_rates(ledger)
+            with patch(
+                "fulcrum.hooks._discover_native_transcript",
+                side_effect=lambda task_id: str(paths[task_id]),
+            ):
+                hook = HookService(ledger)
+                hook.collect_registered(request())
+                hook.collect_registered(request())
+                watched = hook.registered_paths(ledger)
+
+        self.assertEqual(watched, sorted(str(path) for path in paths.values()))
+        turns = {
+            (item.fc or {}).get("thread_id"): item.fc or {}
+            for item in ledger.list_records(kind="analytics", limit=0)
+            if (item.fc or {}).get("subtype") == "turn"
+        }
+        self.assertEqual(set(turns), {"parent", "child", "grandchild"})
+        self.assertEqual(turns["child"]["parent_task_id"], "parent")
+        self.assertEqual(turns["child"]["parent_turn_id"], "parent-turn")
+        self.assertEqual(turns["child"]["spawn_activity_id"], "spawn-child")
+        self.assertEqual(turns["child"]["lineage_depth"], 1)
+        self.assertEqual(turns["grandchild"]["lineage_depth"], 2)
+        self.assertEqual(turns["grandchild"]["terminal_state"], "turn_aborted")
+        self.assertEqual(turns["grandchild"]["component"], "direct")
+        analytics_request = replace(
+            request(("analytics", "usage")),
+            arguments={"workflow": "fc-work", "group_by": "workflow"},
+        )
+        with patch("fulcrum.analytics._ledger", return_value=ledger):
+            usage = AnalyticsService().usage(analytics_request).result
+            cost = (
+                AnalyticsService()
+                .cost(replace(analytics_request, command=("analytics", "cost")))
+                .result
+            )
+        self.assertEqual(usage["totals"]["input_tokens"], "60")
+        self.assertEqual(usage["totals"]["output_tokens"], "12")
+        self.assertEqual(usage["included_native_subagent_ids"], ["child", "grandchild"])
+        self.assertEqual(usage["native_subagent_count"], 2)
+        self.assertEqual(usage["excluded_native_subagents"], [])
+        self.assertEqual(cost["total"], "0.000419")
+        self.assertEqual(cost["components"]["direct"], "0.000419")
+        correction = (ledger.show("fc-work").fc or {})["completion_cost"]
+        self.assertEqual(correction["prior_summary"], "fc-prior")
+        self.assertNotEqual(correction["summary_bead"], "fc-prior")
+
+    def test_unavailable_subagent_stays_partial_then_collects_delayed_transcript(self):
+        from fulcrum.analytics import AnalyticsService, seed_bundled_rates
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "parent.jsonl"
+            child = Path(directory) / "child.jsonl"
+            parent.write_text(
+                "".join(
+                    json.dumps(row) + "\n"
+                    for row in (
+                        {
+                            "timestamp": "2026-09-18T00:00:00Z",
+                            "type": "turn_context",
+                            "thread_id": "parent",
+                            "turn_id": "parent-turn",
+                            "model": "gpt-5.6-sol",
+                        },
+                        {
+                            "timestamp": "2026-09-18T00:00:00Z",
+                            "type": "token_usage_record",
+                            "payload": {
+                                "thread_id": "parent",
+                                "turn_id": "parent-turn",
+                                "response_id": "parent-response",
+                                "model": "gpt-5.6-sol",
+                                "usage": {
+                                    "input_tokens": 1,
+                                    "cached_input_tokens": 0,
+                                    "cache_write_input_tokens": 0,
+                                    "output_tokens": 1,
+                                    "reasoning_output_tokens": 0,
+                                },
+                            },
+                        },
+                        {
+                            "timestamp": "2026-09-18T00:00:00Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "thread_id": "parent",
+                                "turn_id": "parent-turn",
+                                "item": {
+                                    "type": "SubAgentActivity",
+                                    "id": "spawn-child",
+                                    "kind": "started",
+                                    "agent_thread_id": "child",
+                                    "agent_path": "/root/child",
+                                },
+                            },
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+            ledger = MemoryLedger(
+                record(
+                    "fc-work",
+                    workflow_root="fc-work",
+                    desktop={
+                        "assignment": {
+                            "task_id": "parent",
+                            "turn_id": "parent-turn",
+                            "role": "executor",
+                            "state": "active",
+                        },
+                        "transcripts": {"parent": {"path": str(parent), "cursor": 0}},
+                    },
+                )
+            )
+            seed_bundled_rates(ledger)
+            with patch("fulcrum.hooks._discover_native_transcript", return_value=None):
+                HookService(ledger).collect_active_assignments(request())
+            report_request = replace(
+                request(("analytics", "usage")), arguments={"workflow": "fc-work"}
+            )
+            with patch("fulcrum.analytics._ledger", return_value=ledger):
+                interim = AnalyticsService().usage(report_request).result
+            self.assertEqual(interim["coverage"], "partial")
+            self.assertEqual(
+                interim["excluded_native_subagents"][0]["reason"],
+                "native_subagent_transcript_unavailable",
+            )
+            child.write_text(
+                "".join(
+                    json.dumps(row) + "\n"
+                    for row in (
+                        {
+                            "timestamp": "2026-09-18T00:00:01Z",
+                            "type": "turn_context",
+                            "thread_id": "child",
+                            "turn_id": "child-turn",
+                            "model": "gpt-5.6-sol",
+                        },
+                        {
+                            "timestamp": "2026-09-18T00:00:02Z",
+                            "type": "token_usage_record",
+                            "payload": {
+                                "thread_id": "child",
+                                "turn_id": "child-turn",
+                                "response_id": "child-response",
+                                "model": "gpt-5.6-sol",
+                                "usage": {
+                                    "input_tokens": 2,
+                                    "cached_input_tokens": 0,
+                                    "cache_write_input_tokens": 0,
+                                    "output_tokens": 1,
+                                    "reasoning_output_tokens": 0,
+                                },
+                            },
+                        },
+                        {
+                            "timestamp": "2026-09-18T00:00:03Z",
+                            "type": "task_complete",
+                            "thread_id": "child",
+                            "turn_id": "child-turn",
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+            with patch(
+                "fulcrum.hooks._discover_native_transcript", return_value=str(child)
+            ):
+                watched = HookService(ledger).collect_active_assignments(request())
+
+        with patch("fulcrum.analytics._ledger", return_value=ledger):
+            report = AnalyticsService().usage(report_request).result
+        child_turn = next(
+            (item.fc or {})
+            for item in ledger.list_records(kind="analytics", limit=0)
+            if (item.fc or {}).get("thread_id") == "child"
+        )
+        self.assertEqual(
+            child_turn["attributions"], [{"workflow_root": "fc-work", "weight": "1"}]
+        )
+        self.assertIn(str(child), watched)
+        self.assertEqual(report["included_native_subagent_ids"], ["child"])
+        self.assertEqual(report["excluded_native_subagents"], [])
+        lineage = (ledger.show("fc-work").fc or {})["desktop"]["descendants"]["child"]
+        self.assertEqual(lineage["terminal_lifecycle"], "task_complete")
+        self.assertTrue(lineage["usage_observed"])
 
     def test_long_standing_transcript_append_reconciles_only_affected_turn(self):
         with tempfile.TemporaryDirectory() as directory:
