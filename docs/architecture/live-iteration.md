@@ -61,13 +61,10 @@ action counts, pressure, gaps, and associated work IDs in the diagnostic journal
 This preserves prompt event handling while making idle operation inexpensive and
 the cause of repeated scheduling directly inspectable.
 
-The standing Steward keeps one blocking instruction wait alive. A one-minute
-thread heartbeat is the bounded continuity fallback when its prior model turn has
-ended. Each heartbeat processes at most thirty-two authorized native actions, returns
-to the blocking wait after every result, and ends on the first idle deadline or
-protocol stop. It does not make policy decisions or replace event-driven wakeups.
-This bounds turn context without letting scheduler cadence or background archival
-work strand foreground delivery.
+The standing Steward keeps one blocking instruction wait alive and returns to it
+after every result. Scheduled prompts never target the Steward because they could
+interfere with that active wait. The independent Marshal heartbeat detects a
+stopped or disconnected Steward and authorizes recovery of that same task.
 
 ## Coordination
 

@@ -117,12 +117,10 @@ native action.
 
 Setup is complete only when all three identities, the source-following MCP server,
 five trusted required hooks, broker socket, supported models/tools, transcript and
-accounting checks, an active one-minute Steward heartbeat targeted at the retained
-Steward, an active Marshal heartbeat targeted at the retained Marshal, and focused
-acceptance are recorded. The Steward heartbeat maintains one bounded blocking wait
-per turn so a completed or context-exhausted turn cannot strand ready work. It
-processes at most sixteen native actions, returns to the blocking wait after every
-result, and ends on the first idle deadline or protocol stop.
+accounting checks, an active Marshal heartbeat targeted at the retained Marshal,
+and focused acceptance are recorded. The standing Steward maintains one blocking
+instruction wait and returns to it after every result. Do not schedule prompts on
+the Steward task because they can interfere with that active wait.
 Record acceptance only from direct evidence:
 
 - `workspace_access`: each retained standing task has its reported workspace and
@@ -138,10 +136,10 @@ Record acceptance only from direct evidence:
 
 For each check, pass `{"passed": true, "evidence": ["specific retained or native evidence"]}`
 only after it actually succeeds. Bare booleans and empty evidence are rejected.
-Bootstrap then returns the actions that create both heartbeats already active.
-Claim and invoke each exact action once, report its actual result, and rerun
-bootstrap with a new request UUID. Returned automation identities and `ACTIVE`
-statuses prove configuration, not delivery; they are sufficient to finish
+Bootstrap then returns the action that creates the Marshal heartbeat already
+active. Claim and invoke that exact action once, report its actual result, and
+rerun bootstrap with a new request UUID. The returned automation identity and
+`ACTIVE` status prove configuration, not delivery; they are sufficient to finish
 bootstrap because scheduled delivery is monitored asynchronously.
 
 After bootstrap returns `state: ready` and `admission: running`, enroll the

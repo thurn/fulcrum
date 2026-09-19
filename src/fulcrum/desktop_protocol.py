@@ -2253,67 +2253,6 @@ class DesktopProtocolService:
                 }
             )
             protocol["marshal_schedule"] = schedule
-        if action.get("purpose") == "bootstrap_steward_schedule":
-            schedule = dict(protocol.get("steward_schedule") or {})
-            arguments = action.get("arguments") or {}
-            active = (
-                normalized_outcome == "succeeded"
-                and arguments.get("status") == "ACTIVE"
-            )
-            schedule.update(
-                {
-                    "action_id": action_id,
-                    "state": normalized_outcome,
-                    "automation_id": _native_identifier(
-                        request.input.get("native_result"),
-                        "automationId",
-                        "automation_id",
-                        "id",
-                    ),
-                    "status": "ACTIVE" if active else None,
-                    "activated_at": _utc_now() if active else None,
-                    "target_task_id": arguments.get("targetThreadId"),
-                    "prompt": arguments.get("prompt"),
-                    "rrule": arguments.get("rrule"),
-                    "observed_at": _utc_now(),
-                }
-            )
-            protocol["steward_schedule"] = schedule
-        if action.get("purpose") == "recover_steward_schedule":
-            schedule = dict(protocol.get("steward_schedule") or {})
-            arguments = action.get("arguments") or {}
-            target = arguments.get("targetThreadId")
-            active = (
-                normalized_outcome == "succeeded"
-                and arguments.get("status") == "ACTIVE"
-            )
-            schedule.update(
-                {
-                    "retarget_action_id": action_id,
-                    "retarget_state": normalized_outcome,
-                    "target_task_id": (
-                        target
-                        if normalized_outcome == "succeeded"
-                        else schedule.get("target_task_id")
-                    ),
-                    "status": "ACTIVE" if active else schedule.get("status"),
-                    "activated_at": (
-                        _utc_now() if active else schedule.get("activated_at")
-                    ),
-                    "prompt": (
-                        arguments.get("prompt")
-                        if normalized_outcome == "succeeded"
-                        else schedule.get("prompt")
-                    ),
-                    "rrule": (
-                        arguments.get("rrule")
-                        if normalized_outcome == "succeeded"
-                        else schedule.get("rrule")
-                    ),
-                    "observed_at": _utc_now(),
-                }
-            )
-            protocol["steward_schedule"] = schedule
         if (
             action.get("purpose") == "recover_steward_loop"
             or str(action.get("purpose") or "").startswith("resume_repaired_steward:")

@@ -69,7 +69,7 @@ def _inventory(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
         for name, service in services.items()
     }
     standing: dict[str, Any] = {}
-    schedules: dict[str, dict[str, Any]] = {}
+    schedule: dict[str, Any] = {}
     blockers: list[dict[str, Any]] = []
     try:
         records = ledger.list_records(limit=0)
@@ -86,10 +86,8 @@ def _inventory(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
         if record.id == "fc-system":
             value = desktop.get("standing")
             standing = dict(value) if isinstance(value, Mapping) else {}
-            for schedule_name in ("marshal_schedule", "steward_schedule"):
-                value = desktop.get(schedule_name)
-                if isinstance(value, Mapping):
-                    schedules[schedule_name] = dict(value)
+            value = desktop.get("marshal_schedule")
+            schedule = dict(value) if isinstance(value, Mapping) else {}
             if desktop.get("run_control") != "paused":
                 blockers.append({"record_id": record.id, "kind": "admission"})
         assignment = desktop.get("assignment")
@@ -162,17 +160,16 @@ def _inventory(request: ParsedRequest, ledger: Ledger) -> dict[str, Any]:
                 for role, value in standing.items()
                 if isinstance(value, Mapping)
             },
-            "schedules": {
-                name: {
+            "marshal_schedule": (
+                {
                     "automation_id": schedule.get("automation_id"),
                     "target_task_id": schedule.get("target_task_id"),
                     "status": schedule.get("status"),
-                    "prompt": schedule.get("prompt"),
-                    "rrule": schedule.get("rrule"),
                     "reason": "the old heartbeat must be paused before destructive reset",
                 }
-                for name, schedule in schedules.items()
-            },
+                if schedule
+                else None
+            ),
         },
     }
 
@@ -320,37 +317,9 @@ class ResetService:
                     exit_code=5,
                     details={"action": expected},
                 )
-            disable_actions = fence.get("schedule_disable_actions")
-            disable_index = int(fence.get("schedule_disable_index") or 0) + 1
-            if isinstance(disable_actions, list) and disable_index < len(
-                disable_actions
-            ):
-                fence.update(
-                    schedule_disable_action=disable_actions[disable_index],
-                    schedule_disable_index=disable_index,
-                    schedule_disable_results=[
-                        *(fence.get("schedule_disable_results") or []),
-                        result,
-                    ],
-                    updated_at=_now(),
-                )
-                _write(fence_path, fence)
-                return CommandResult(
-                    ok=True,
-                    state=CommandState.RUNNING,
-                    request_id=request.request_id,
-                    result=fence,
-                    warnings=(
-                        "Pause the next retained Fulcrum heartbeat with the exact returned action, then rerun reset with its native result.",
-                    ),
-                )
             fence.update(
                 state="deleting_old_state",
                 schedule_disable_result=result,
-                schedule_disable_results=[
-                    *(fence.get("schedule_disable_results") or []),
-                    result,
-                ],
                 updated_at=_now(),
             )
             _write(fence_path, fence)
@@ -422,61 +391,43 @@ class ResetService:
             "admission": "paused",
         }
         _write(fence_path, active_fence)
-        retained_schedules = inventory.get("native_retention_exceptions", {}).get(
-            "schedules"
+        retained_schedule = inventory.get("native_retention_exceptions", {}).get(
+            "marshal_schedule"
         )
-        planned_disable_actions: list[dict[str, Any]] = []
-        if isinstance(retained_schedules, Mapping):
-            for schedule_name, retained_schedule in retained_schedules.items():
-                if not isinstance(retained_schedule, Mapping):
-                    continue
-                automation_id = retained_schedule.get("automation_id")
-                if not automation_id:
-                    continue
-                role = "marshal" if schedule_name == "marshal_schedule" else "steward"
-                target_task_id = retained_schedule.get("target_task_id") or (
-                    inventory.get("native_retention_exceptions", {})
-                    .get("standing_tasks", {})
-                    .get(role, {})
-                    .get("task_id")
-                )
-                planned_disable_actions.append(
-                    {
-                        "tool": "automation_update",
-                        "arguments": {
-                            "mode": "update",
-                            "id": automation_id,
-                            "kind": "heartbeat",
-                            "name": (
-                                "Fulcrum Marshal check"
-                                if role == "marshal"
-                                else "Fulcrum Steward loop"
-                            ),
-                            "prompt": retained_schedule.get("prompt") or "End quietly.",
-                            "rrule": retained_schedule.get("rrule")
-                            or (
-                                "FREQ=MINUTELY;INTERVAL=15"
-                                if role == "marshal"
-                                else "FREQ=MINUTELY;INTERVAL=1"
-                            ),
-                            "status": "PAUSED",
-                            "notificationPolicy": "failed_runs_only",
-                            "targetThreadId": target_task_id,
-                            "destination": "thread",
-                        },
-                        "expected_result": {
-                            "automation_id": automation_id,
-                            "status": "PAUSED",
-                        },
-                    }
-                )
-        if planned_disable_actions:
+        automation_id = (
+            retained_schedule.get("automation_id")
+            if isinstance(retained_schedule, Mapping)
+            else None
+        )
+        if automation_id:
+            target_task_id = retained_schedule.get("target_task_id") or (
+                inventory.get("native_retention_exceptions", {})
+                .get("standing_tasks", {})
+                .get("marshal", {})
+                .get("task_id")
+            )
+            disable_action = {
+                "tool": "automation_update",
+                "arguments": {
+                    "mode": "update",
+                    "id": automation_id,
+                    "kind": "heartbeat",
+                    "name": "Fulcrum Marshal check",
+                    "prompt": "Call marshal_check, settle the bounded brief, and end quietly when no action is required.",
+                    "rrule": "FREQ=MINUTELY;INTERVAL=15",
+                    "status": "PAUSED",
+                    "notificationPolicy": "failed_runs_only",
+                    "targetThreadId": target_task_id,
+                    "destination": "thread",
+                },
+                "expected_result": {
+                    "automation_id": automation_id,
+                    "status": "PAUSED",
+                },
+            }
             active_fence.update(
                 state="native_cleanup_required",
-                schedule_disable_action=planned_disable_actions[0],
-                schedule_disable_actions=planned_disable_actions,
-                schedule_disable_index=0,
-                schedule_disable_results=[],
+                schedule_disable_action=disable_action,
                 updated_at=_now(),
             )
             _write(fence_path, active_fence)
@@ -486,7 +437,7 @@ class ResetService:
                 request_id=request.request_id,
                 result=active_fence,
                 warnings=(
-                    "Pause each retained Fulcrum heartbeat with the exact returned action, rerunning reset with each native result.",
+                    "Pause the retained Marshal heartbeat with the exact returned action, then rerun reset with its native result.",
                 ),
             )
         with WriterLock(request.instance.lock_path):

@@ -62,18 +62,6 @@ MARSHAL_HEARTBEAT_PROMPT = (
     "Do not inspect implementation source or invent identifiers. End quietly when "
     "no action is required."
 )
-STEWARD_HEARTBEAT_PROMPT = (
-    "This is the scheduled Fulcrum Steward heartbeat. Read CODEX_THREAD_ID and "
-    "call wait_for_instructions with that exact task_id through one functions.exec cell "
-    'whose first line is `// @exec: {"yield_time_ms": 3900000}`. Await and emit that '
-    "result directly; never poll the cell with functions.wait. Process up to thirty-two returned "
-    "actions in this turn. For each action, claim it with the exact record_id and "
-    "action_id, invoke its native tool and arguments once, report the actual result "
-    "with the returned attempt_id, and immediately call wait_for_instructions again. "
-    "End after the thirty-second settled action, an idle deadline, or a protocol stop. Do "
-    "not choose priorities, invent arguments, retry uncertain effects, poll tasks, or "
-    "involve another standing role."
-)
 
 
 def _acceptance_evidence(value: Any) -> dict[str, dict[str, Any]]:
@@ -747,62 +735,10 @@ class DesktopSetupService(DesktopProtocolService):
                 "status": "ACTIVE",
             }
             protocol["marshal_schedule"] = schedule
-        steward_schedule = protocol.get("steward_schedule")
-        if (
-            standing_ready
-            and not missing_pre_activation
-            and (
-                not isinstance(steward_schedule, Mapping)
-                or not steward_schedule.get("action_id")
-            )
-        ):
-            steward = standing["steward"]
-            action_id = _opaque("action")
-            actions[action_id] = {
-                "action_id": action_id,
-                "record_id": system.id,
-                "executor": "bootstrap",
-                "tool": "automation_update",
-                "arguments": {
-                    "mode": "create",
-                    "kind": "heartbeat",
-                    "name": "Fulcrum Steward loop",
-                    "prompt": STEWARD_HEARTBEAT_PROMPT,
-                    "rrule": "FREQ=MINUTELY;INTERVAL=1",
-                    "status": "ACTIVE",
-                    "notificationPolicy": "failed_runs_only",
-                    "targetThreadId": steward.get("task_id"),
-                    "destination": "thread",
-                },
-                "expected_result": {
-                    "automation_id": "bound Steward heartbeat",
-                    "status": "ACTIVE",
-                },
-                "reporting": {"purpose": "steward_schedule"},
-                "state": "pending",
-                "attempts": [],
-                "created_at": _utc_now(),
-                "purpose": "bootstrap_steward_schedule",
-            }
-            steward_schedule = {
-                "action_id": action_id,
-                "state": "pending",
-                "interval_minutes": 1,
-                "target_task_id": steward.get("task_id"),
-                "prompt": STEWARD_HEARTBEAT_PROMPT,
-                "rrule": "FREQ=MINUTELY;INTERVAL=1",
-                "status": "ACTIVE",
-            }
-            protocol["steward_schedule"] = steward_schedule
         broker_ready = (instance / "broker.sock").exists()
         schedule_action = (
             actions.get(schedule.get("action_id"))
             if isinstance(schedule, Mapping)
-            else None
-        )
-        steward_schedule_action = (
-            actions.get(steward_schedule.get("action_id"))
-            if isinstance(steward_schedule, Mapping)
             else None
         )
         retained_retarget_action = (
@@ -862,67 +798,6 @@ class DesktopSetupService(DesktopProtocolService):
             if isinstance(schedule, Mapping) and schedule.get("retarget_action_id")
             else None
         )
-        retained_steward_retarget_action = (
-            actions.get(steward_schedule.get("retarget_action_id"))
-            if isinstance(steward_schedule, Mapping)
-            and steward_schedule.get("retarget_action_id")
-            else None
-        )
-        if (
-            standing_ready
-            and isinstance(steward_schedule, Mapping)
-            and steward_schedule.get("automation_id")
-            and (
-                steward_schedule.get("target_task_id")
-                != standing["steward"].get("task_id")
-                or steward_schedule.get("prompt") != STEWARD_HEARTBEAT_PROMPT
-                or steward_schedule.get("rrule") != "FREQ=MINUTELY;INTERVAL=1"
-                or steward_schedule.get("status") != "ACTIVE"
-            )
-            and (
-                not isinstance(retained_steward_retarget_action, Mapping)
-                or retained_steward_retarget_action.get("state")
-                in {"succeeded", "superseded"}
-            )
-        ):
-            retarget_action_id = _opaque("action")
-            actions[retarget_action_id] = {
-                "action_id": retarget_action_id,
-                "record_id": system.id,
-                "executor": "bootstrap",
-                "tool": "automation_update",
-                "arguments": {
-                    "mode": "update",
-                    "id": steward_schedule["automation_id"],
-                    "kind": "heartbeat",
-                    "name": "Fulcrum Steward loop",
-                    "prompt": STEWARD_HEARTBEAT_PROMPT,
-                    "rrule": "FREQ=MINUTELY;INTERVAL=1",
-                    "status": "ACTIVE",
-                    "notificationPolicy": "failed_runs_only",
-                    "targetThreadId": standing["steward"].get("task_id"),
-                    "destination": "thread",
-                },
-                "expected_result": {"automation_id": steward_schedule["automation_id"]},
-                "reporting": {"purpose": "steward_schedule_retarget"},
-                "state": "pending",
-                "attempts": [],
-                "created_at": _utc_now(),
-                "purpose": "recover_steward_schedule",
-            }
-            steward_schedule = {
-                **dict(steward_schedule),
-                "retarget_action_id": retarget_action_id,
-                "retarget_state": "pending",
-            }
-            protocol["steward_schedule"] = steward_schedule
-            protocol["actions"] = actions
-        steward_retarget_action = (
-            actions.get(steward_schedule.get("retarget_action_id"))
-            if isinstance(steward_schedule, Mapping)
-            and steward_schedule.get("retarget_action_id")
-            else None
-        )
         if request.thread_id:
             for action_id, action in list(actions.items()):
                 if (
@@ -940,9 +815,6 @@ class DesktopSetupService(DesktopProtocolService):
             and isinstance(schedule_action, Mapping)
             and schedule_action.get("state") == "succeeded"
             and schedule.get("status") == "ACTIVE"
-            and isinstance(steward_schedule_action, Mapping)
-            and steward_schedule_action.get("state") == "succeeded"
-            and steward_schedule.get("status") == "ACTIVE"
             and isinstance(diagnostic_action, Mapping)
             and diagnostic_action.get("state") == "succeeded"
             and (
@@ -950,13 +822,6 @@ class DesktopSetupService(DesktopProtocolService):
                 or (
                     isinstance(retarget_action, Mapping)
                     and retarget_action.get("state") == "succeeded"
-                )
-            )
-            and (
-                steward_retarget_action is None
-                or (
-                    isinstance(steward_retarget_action, Mapping)
-                    and steward_retarget_action.get("state") == "succeeded"
                 )
             )
             and broker_ready
@@ -983,7 +848,6 @@ class DesktopSetupService(DesktopProtocolService):
             },
             "standing": copy_mapping(standing),
             "schedule": copy_mapping(schedule),
-            "steward_schedule": copy_mapping(steward_schedule),
             "diagnostic_escape_hatch": (
                 {
                     "state": diagnostic_action.get("state"),
