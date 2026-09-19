@@ -1361,7 +1361,7 @@ class DesktopLeadershipService(DesktopProtocolService):
         ledger.update_fc(system.id, _with_protocol(system.fc or {}, system_protocol))
         scope = request.input.get("scope") or incident.get("scope")
         prompt = (
-            f"$fulcrum-justiciar\nRegister as Justiciar for {bead} before editing. "
+            f"$justiciar\nRegister as Justiciar for {bead} before editing. "
             f"Work only in {workspace}. Assignment token: {assignment_token}.\n"
             f"Incident: {incident.get('incident_id')}\nScope: {scope}\n"
             f"Current source: {source or 'not retained'}\n"

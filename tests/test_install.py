@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from fulcrum.install import (
+    HUMAN_SKILLS,
     install_hook_config,
     reconcile_skills,
     service_definitions,
@@ -14,6 +15,40 @@ from fulcrum.install import (
 
 
 class InstallTests(unittest.TestCase):
+    def test_skill_catalog_uses_unprefixed_role_names(self):
+        expected = (
+            "bead",
+            "bootstrap",
+            "executor",
+            "justiciar",
+            "marshal",
+            "mason",
+            "postmortem",
+            "sage",
+            "uninstall",
+            "vizier",
+            "warden",
+            "weaver",
+        )
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(HUMAN_SKILLS, expected)
+        self.assertEqual(
+            {path.name for path in (root / "skills").iterdir() if path.is_dir()},
+            set(expected),
+        )
+        for directory in [
+            *(root / "skills").iterdir(),
+            *(root / ".agents" / "skills").iterdir(),
+        ]:
+            if not directory.is_dir():
+                continue
+            skill = (directory / "SKILL.md").read_text(encoding="utf-8")
+            agent = (directory / "agents" / "openai.yaml").read_text(encoding="utf-8")
+            self.assertIn(f"name: {directory.name}\n", skill)
+            self.assertIn(f'display_name: "{directory.name.title()}"', agent)
+            if "default_prompt:" in agent:
+                self.assertIn(f"${directory.name}", agent)
+
     def test_owned_services_are_only_dolt_and_broker(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

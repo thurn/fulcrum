@@ -1,0 +1,5 @@
+interface:
+  display_name: "Executor"
+  short_description: "Execute one registered assignment"
+policy:
+  allow_implicit_invocation: false

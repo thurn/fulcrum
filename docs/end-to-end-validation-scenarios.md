@@ -63,7 +63,7 @@ For every iteration:
 - Verify worker tasks remain visible until at least ten minutes after that
   individual task completes. The archive action itself should be quick. Standing
   Steward, Marshal, and Vizier tasks must never be automatically archived.
-- Briefly analyze the bounded run in the manner of the `fulcrum-postmortem`
+- Briefly analyze the bounded run in the manner of the `$postmortem`
   skill: reconstruct the critical path first, distinguish confirmed facts from
   inference and unknowns, identify observability gaps separately, and map every
   fix to evidence. Do not create a postmortem document unless separately asked.

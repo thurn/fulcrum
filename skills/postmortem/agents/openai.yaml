@@ -1,0 +1,4 @@
+interface:
+  display_name: "Postmortem"
+  short_description: "Reconstruct and analyze Fulcrum workflow failures"
+  default_prompt: "Use $postmortem to reconstruct this Fulcrum run and write an evidence-backed postmortem."

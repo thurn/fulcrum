@@ -1,0 +1,5 @@
+interface:
+  display_name: "Justiciar"
+  short_description: "Perform one scoped recovery intervention"
+policy:
+  allow_implicit_invocation: false

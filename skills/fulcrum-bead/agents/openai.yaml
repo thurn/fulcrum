@@ -1,5 +1,0 @@
-interface:
-  display_name: "Fulcrum Bead"
-  short_description: "File one implementation-ready follow-up"
-policy:
-  allow_implicit_invocation: false

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Uninstall"
+  short_description: "Remove Fulcrum and all local state"
+policy:
+  allow_implicit_invocation: false

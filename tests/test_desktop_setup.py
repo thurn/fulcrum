@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 
 from fulcrum.contracts import ActorContext, FulcrumError, InstanceContext
@@ -14,6 +15,13 @@ from fulcrum.desktop_setup import (
     REQUIRED_NATIVE_TOOLS,
 )
 from tests.support import MemoryLedger, observe_action_prompt, request
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def invoke_bootstrap(service, parsed_request):
+    with patch("fulcrum.desktop_setup.master_source_root", return_value=SOURCE_ROOT):
+        return service.bootstrap(parsed_request)
 
 
 def bootstrap_request(root: Path, **payload):
@@ -52,7 +60,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             "native_tools": sorted(REQUIRED_NATIVE_TOOLS),
             "model_support": support,
         }
-        first = service.bootstrap(bootstrap_request(root, **supplied))
+        first = invoke_bootstrap(service, bootstrap_request(root, **supplied))
         assert first.result["admission"] == "paused"
         actions = {
             row["reporting"]["role"]: row
@@ -82,12 +90,14 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
             in actions["steward"]["arguments"]["prompt"]
         )
         assert "yield-time_ms" not in actions["steward"]["arguments"]["prompt"]
+        assert "$marshal\n" in actions["marshal"]["arguments"]["prompt"]
         assert (
-            "~/fulcrum/skills/fulcrum-marshal/SKILL.md"
+            "~/fulcrum/skills/marshal/SKILL.md"
             in actions["marshal"]["arguments"]["prompt"]
         )
+        assert "$vizier\n" in actions["vizier"]["arguments"]["prompt"]
         assert (
-            "~/fulcrum/skills/fulcrum-vizier/SKILL.md"
+            "~/fulcrum/skills/vizier/SKILL.md"
             in actions["vizier"]["arguments"]["prompt"]
         )
         for role, action in actions.items():
@@ -111,7 +121,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                 )
             )
 
-        second = service.bootstrap(bootstrap_request(root, **supplied))
+        second = invoke_bootstrap(service, bootstrap_request(root, **supplied))
         diagnostic = next(
             row
             for row in second.result["pending_actions"]
@@ -149,12 +159,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         )
         (root / "instance" / "broker.sock").touch()
         pre_activation = acceptance(PRE_ACTIVATION_ACCEPTANCE)
-        activating = service.bootstrap(
+        activating = invoke_bootstrap(
+            service,
             bootstrap_request(
                 root,
                 acceptance=pre_activation,
                 **supplied,
-            )
+            ),
         )
         assert activating.result["admission"] == "paused"
         assert activating.result["prerequisites"]["acceptance"] is None
@@ -204,12 +215,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                     },
                 )
             )
-        ready = service.bootstrap(
+        ready = invoke_bootstrap(
+            service,
             bootstrap_request(
                 root,
                 acceptance=acceptance(REQUIRED_ACCEPTANCE),
                 **supplied,
-            )
+            ),
         )
         assert ready.result["state"] == "ready"
         assert ready.result["admission"] == "running"
@@ -233,12 +245,13 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         service._ledger_override.update_fc(
             "fc-system", {**system.fc, "desktop": desktop}
         )
-        repairing = service.bootstrap(
+        repairing = invoke_bootstrap(
+            service,
             bootstrap_request(
                 root,
                 acceptance=acceptance(REQUIRED_ACCEPTANCE),
                 **supplied,
-            )
+            ),
         )
         repair = next(
             row
@@ -276,7 +289,8 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
         service._ledger_override.update_fc(
             "fc-system", {**system.fc, "desktop": desktop}
         )
-        replacing = service.bootstrap(
+        replacing = invoke_bootstrap(
+            service,
             bootstrap_request(
                 root,
                 replacement={
@@ -290,7 +304,7 @@ def test_bootstrap_reuses_standing_tasks_and_opens_only_after_acceptance():
                     },
                 },
                 **supplied,
-            )
+            ),
         )
         recoveries = [
             action
@@ -313,7 +327,7 @@ def test_bootstrap_preserves_unrelated_codex_configuration():
         config = root / "codex" / "config.toml"
         config.parent.mkdir()
         config.write_text('model = "gpt-6-astra"\n', encoding="utf-8")
-        DesktopSetupService(MemoryLedger()).bootstrap(bootstrap_request(root))
+        invoke_bootstrap(DesktopSetupService(MemoryLedger()), bootstrap_request(root))
         retained = config.read_text(encoding="utf-8")
         assert 'model = "gpt-6-astra"' in retained
         assert "[mcp_servers.fulcrum]" in retained
@@ -333,11 +347,12 @@ def test_bootstrap_rejects_boolean_acceptance_without_evidence():
         with unittest.TestCase().assertRaisesRegex(
             FulcrumError, "must include passed and evidence"
         ):
-            service.bootstrap(
+            invoke_bootstrap(
+                service,
                 bootstrap_request(
                     root,
                     acceptance={"workspace_access": True},
-                )
+                ),
             )
 
 
@@ -345,10 +360,11 @@ def test_bootstrap_retains_operator_confirmation_for_exact_hook_definition():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         service = DesktopSetupService(MemoryLedger())
-        first = service.bootstrap(bootstrap_request(root))
+        first = invoke_bootstrap(service, bootstrap_request(root))
         assert first.result["hooks"]["operator_confirmation_required"] is True
 
-        confirmed = service.bootstrap(
+        confirmed = invoke_bootstrap(
+            service,
             bootstrap_request(
                 root,
                 hook_confirmation={
@@ -357,13 +373,13 @@ def test_bootstrap_retains_operator_confirmation_for_exact_hook_definition():
                         "operator confirmed all five exact hooks trusted and enabled"
                     ],
                 },
-            )
+            ),
         )
         assert confirmed.result["hooks"]["operational_state"] == "operator_confirmed"
         assert confirmed.result["hooks"]["operator_confirmation_required"] is False
         assert confirmed.result["hooks"]["operator_confirmation"]["confirmed"] is True
 
-        retained = service.bootstrap(bootstrap_request(root))
+        retained = invoke_bootstrap(service, bootstrap_request(root))
         assert retained.result["hooks"]["operational_state"] == "operator_confirmed"
         assert retained.result["hooks"]["operator_confirmation_required"] is False
 
@@ -378,7 +394,7 @@ def test_bootstrap_retains_operator_confirmation_for_exact_hook_definition():
             "fc-system", {**system.fc, "desktop": desktop}
         )
 
-        changed = service.bootstrap(bootstrap_request(root))
+        changed = invoke_bootstrap(service, bootstrap_request(root))
         assert changed.result["hooks"]["operational_state"] == "confirmation_required"
         assert changed.result["hooks"]["operator_confirmation_required"] is True
 
@@ -390,8 +406,8 @@ def test_bootstrap_rejects_hook_confirmation_without_evidence():
         with unittest.TestCase().assertRaisesRegex(
             FulcrumError, "requires confirmed=true and nonempty evidence strings"
         ):
-            service.bootstrap(
-                bootstrap_request(root, hook_confirmation={"confirmed": True})
+            invoke_bootstrap(
+                service, bootstrap_request(root, hook_confirmation={"confirmed": True})
             )
 
 
@@ -399,13 +415,14 @@ def _verify_pending_bootstrap_actions_rebind_to_the_latest_bootstrap_task():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         service = DesktopSetupService(MemoryLedger())
-        first = service.bootstrap(
-            replace(bootstrap_request(root), thread_id="first-bootstrap-task")
+        first = invoke_bootstrap(
+            service, replace(bootstrap_request(root), thread_id="first-bootstrap-task")
         )
         action_id = first.result["pending_actions"][0]["action_id"]
 
-        second = service.bootstrap(
-            replace(bootstrap_request(root), thread_id="resumed-bootstrap-task")
+        second = invoke_bootstrap(
+            service,
+            replace(bootstrap_request(root), thread_id="resumed-bootstrap-task"),
         )
         assert any(
             action["action_id"] == action_id

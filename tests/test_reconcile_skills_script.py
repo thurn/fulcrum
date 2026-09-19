@@ -37,16 +37,20 @@ class ReconcileSkillsScriptTests(unittest.TestCase):
             unrelated = skills / "personal-skill"
             unrelated.mkdir()
             (unrelated / "notes.txt").write_text("mine", encoding="utf-8")
-            stale = skills / "fulcrum-executor"
+            stale = skills / "executor"
             stale.symlink_to(home / "missing", target_is_directory=True)
-            legacy = skills / "fulcrum-weaver"
-            legacy.symlink_to(ROOT / "skills" / "weaver", target_is_directory=True)
+            obsolete = []
+            for name in HUMAN_SKILLS:
+                legacy = skills / f"fulcrum-{name}"
+                legacy.symlink_to(ROOT / "skills" / name, target_is_directory=True)
+                obsolete.append(legacy)
 
             first = self.run_script(home)
             self.assertEqual(first.returncode, 0, first.stderr)
             self.assertIn(f"linked {stale}", first.stdout)
-            self.assertIn(f"removed {legacy}", first.stdout)
-            self.assertFalse(legacy.exists())
+            for legacy in obsolete:
+                self.assertIn(f"removed {legacy}", first.stdout)
+                self.assertFalse(legacy.exists())
             self.assertTrue(unrelated.is_dir())
             self.assertEqual((unrelated / "notes.txt").read_text(), "mine")
             self.assertEqual(hooks.read_bytes(), hooks_before)

@@ -67,7 +67,7 @@ class CliTests(unittest.TestCase):
         parser = build_parser()
         with tempfile.TemporaryDirectory() as directory:
             payload = Path(directory) / "entry.json"
-            literal = "$fulcrum-executor\n```sh\n$(touch /tmp/nope)\n```"
+            literal = "$executor\n```sh\n$(touch /tmp/nope)\n```"
             payload.write_text(json.dumps({"description": literal}))
             with (
                 patch("fulcrum.cli.resolve_instance", return_value=context),

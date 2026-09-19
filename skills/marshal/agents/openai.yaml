@@ -1,0 +1,5 @@
+interface:
+  display_name: "Marshal"
+  short_description: "Run the registered scheduled Marshal"
+policy:
+  allow_implicit_invocation: false

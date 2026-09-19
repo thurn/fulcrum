@@ -6,7 +6,7 @@
    authenticated Codex Desktop/CLI profile.
 2. Clone Fulcrum at the canonical path `~/fulcrum` with `master` checked out.
 3. Open `~/fulcrum` as a project in Codex Desktop.
-4. Invoke `$fulcrum-bootstrap` in that project.
+4. Invoke `$bootstrap` in that project.
 
 The repository exposes bootstrap and uninstall skills through `.agents/skills`,
 so both are available immediately from a fresh clone. The bootstrap skill
@@ -97,8 +97,8 @@ alone is not setup.
 An existing task does not acquire MCP tools added after it started. When the
 initial MCP configuration changes, the bootstrap skill creates exactly one new
 task in the saved `~/fulcrum` project, using the retained checkout directly rather
-than a worktree. That continuation invokes `$fulcrum-bootstrap`, explicitly names
-`~/fulcrum/skills/fulcrum-bootstrap/SKILL.md`, uses a new request ID, receives the
+than a worktree. That continuation invokes `$bootstrap`, explicitly names
+`~/fulcrum/skills/bootstrap/SKILL.md`, uses a new request ID, receives the
 current MCP tool catalog, and rebinds retained pending actions to itself. The
 current Desktop UI lists servers under Settings > Plugins > MCPs and does not
 expose the former Restart control; do not toggle the server or quit the app.
@@ -124,7 +124,7 @@ skill iteration.
 
 ## Complete uninstall
 
-Invoke `$fulcrum-uninstall` for a complete removal. It uses Codex native tools to
+Invoke `$uninstall` for a complete removal. It uses Codex native tools to
 delete the Marshal heartbeat and archive only the three Fulcrum role tasks, then
 runs `~/fulcrum/scripts/uninstall`. The script previews by default and requires
 `--yes` before changing anything. A full uninstall also passes `--remove-source`;

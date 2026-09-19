@@ -1,0 +1,5 @@
+interface:
+  display_name: "Warden"
+  short_description: "Review and deliver one exact candidate"
+policy:
+  allow_implicit_invocation: false

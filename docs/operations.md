@@ -25,7 +25,7 @@ command output and does not write workflow state.
 
 ## Work
 
-Use `$weaver` for new requests and `$fulcrum-bead` for one small incidental report.
+Use `$weaver` for new requests and `$bead` for one small incidental report.
 Weaver `ready` and deterministically validated implementation-ready reports become
 eligible for Steward selection immediately, subject to pause, dependencies,
 capacity, overlap, project enablement, and an exact Tollgate workspace. Marshal

@@ -1,5 +1,0 @@
-interface:
-  display_name: "Fulcrum Executor"
-  short_description: "Execute one registered assignment"
-policy:
-  allow_implicit_invocation: false

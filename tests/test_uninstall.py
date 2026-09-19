@@ -45,14 +45,15 @@ class UninstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             source = home / "fulcrum"
-            owned_skill = source / "skills" / "fulcrum-bootstrap"
+            owned_skill = source / "skills" / "bootstrap"
             owned_skill.mkdir(parents=True)
             (source / ".venv").mkdir()
             codex = home / ".codex"
             skills = codex / "skills"
             skills.mkdir(parents=True)
+            (skills / "bootstrap").symlink_to(owned_skill)
             (skills / "fulcrum-bootstrap").symlink_to(owned_skill)
-            foreign = skills / "fulcrum-marshal"
+            foreign = skills / "marshal"
             foreign.mkdir()
             launcher = home / ".local" / "bin" / "fulcrum"
             launcher.parent.mkdir(parents=True)
@@ -105,6 +106,7 @@ class UninstallTests(unittest.TestCase):
             self.assertFalse(instance.exists())
             self.assertFalse(brain.exists())
             self.assertFalse(launcher.exists())
+            self.assertFalse((skills / "bootstrap").exists())
             self.assertFalse((skills / "fulcrum-bootstrap").exists())
             self.assertTrue(foreign.is_dir())
             self.assertNotIn("fulcrum", (codex / "config.toml").read_text().lower())

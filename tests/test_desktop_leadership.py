@@ -447,6 +447,7 @@ class LeadershipTests(unittest.TestCase):
             "project-1",
         )
         self.assertEqual(prepared.result["action"]["arguments"]["model"], "gpt-5.6-sol")
+        self.assertIn("$justiciar\n", prepared.result["action"]["arguments"]["prompt"])
         retained = self.ledger.show("fc-a").fc
         self.assertEqual(retained["recovery_fence"]["state"], "active")
         assignment = retained["desktop"]["assignment"]

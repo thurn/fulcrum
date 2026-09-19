@@ -159,7 +159,7 @@ STANDING = {
         "model": "gpt-5.6-sol",
         "effort": "high",
         "prompt": (
-            "$fulcrum-marshal\nRead and follow `~/fulcrum/skills/fulcrum-marshal/SKILL.md` "
+            "$marshal\nRead and follow `~/fulcrum/skills/marshal/SKILL.md` "
             "from local master. First call register_standing with role `marshal` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id, and omit request_id for a new registration. On scheduled prompts call "
@@ -174,7 +174,7 @@ STANDING = {
         "model": "gpt-5.6-sol",
         "effort": "high",
         "prompt": (
-            "$fulcrum-vizier\nRead and follow `~/fulcrum/skills/fulcrum-vizier/SKILL.md` "
+            "$vizier\nRead and follow `~/fulcrum/skills/vizier/SKILL.md` "
             "from local master. First call register_standing with role `vizier` and the action_id from "
             "the Fulcrum-Action marker; supply CODEX_THREAD_ID as task_id and "
             "CODEX_SESSION_ID as session_id, and omit request_id for a new registration. Present exact retained human "

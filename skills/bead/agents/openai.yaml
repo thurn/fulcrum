@@ -1,0 +1,5 @@
+interface:
+  display_name: "Bead"
+  short_description: "File one implementation-ready follow-up"
+policy:
+  allow_implicit_invocation: false

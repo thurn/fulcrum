@@ -1029,9 +1029,9 @@ loop is part of the design.
 
 ## Bootstrap, naming, and standing-task recovery
 
-The checkout exposes `$fulcrum-bootstrap` through `.agents/skills` before global
+The checkout exposes `$bootstrap` through `.agents/skills` before global
 installation. The MCP-refresh continuation prompt also names the canonical
-`~/fulcrum/skills/fulcrum-bootstrap/SKILL.md` source path explicitly. The skill
+`~/fulcrum/skills/bootstrap/SKILL.md` source path explicitly. The skill
 discovers the retained checkout and existing configuration, initializes stock
 configuration when it is absent, then drives deterministic CLI setup and exact
 returned native actions. It does not reconstruct workflow policy in prose. Missing

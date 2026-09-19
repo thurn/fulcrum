@@ -1,0 +1,5 @@
+interface:
+  display_name: "Sage"
+  short_description: "Investigate registered workflow evidence"
+policy:
+  allow_implicit_invocation: false

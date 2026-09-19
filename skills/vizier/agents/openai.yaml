@@ -1,0 +1,5 @@
+interface:
+  display_name: "Vizier"
+  short_description: "Record exact retained human decisions"
+policy:
+  allow_implicit_invocation: false

@@ -37,7 +37,7 @@ or wait for a remote push for ordinary edits. See [live iteration](docs/architec
 ## Bootstrap
 
 For a fresh installation, clone the repository at `~/fulcrum`, open that checkout
-in Codex Desktop, and invoke `$fulcrum-bootstrap`. The bootstrap skill is exposed
+in Codex Desktop, and invoke `$bootstrap`. The bootstrap skill is exposed
 directly by the checkout, so it is available before Fulcrum has installed any
 global skills or configuration.
 
@@ -73,7 +73,7 @@ fulcrum trace --bead WORK_ID --json
 fulcrum logs --limit 100 --json
 ```
 
-Use `$weaver` for a new request and `$fulcrum-bead` for one small incidental
+Use `$weaver` for a new request and `$bead` for one small incidental
 follow-up. Exact mutating retries reuse the same request UUID and unchanged input.
 A timeout means the detached operation or native effect may still complete; inspect
 its durable locator before doing anything else.

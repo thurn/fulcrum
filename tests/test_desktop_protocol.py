@@ -1124,7 +1124,7 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
         codex_project_id="project-1",
         models={"executor": {"model": "gpt-6-astra", "effort": "xhigh"}},
         outcome="RAW INTAKE $weaver must never reach the Executor",
-        context=["```$fulcrum-warden``` raw Weaver transcript"],
+        context=["```$warden``` raw Weaver transcript"],
         scope={
             "summary": "Add newline to README.md",
             "acceptance": ["README.md ends with a newline"],
@@ -1153,7 +1153,7 @@ def test_steward_dispatches_executor_from_retained_worktree_path():
     assert "RAW INTAKE" not in prompt
     assert "raw Weaver transcript" not in prompt
     assert "$weaver" not in prompt
-    assert "$fulcrum-executor" not in prompt
+    assert "$executor" not in prompt
     assert "its scope is the complete authorized contract" in prompt
     assert "checks proportional to the change" in prompt
     assert "exactly one task commit" in prompt
