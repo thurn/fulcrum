@@ -51,6 +51,8 @@ or validation. Writing this document does not activate Hive or migrate Fulcrum.
   from starting work and simplifying task naming.
 - [Desktop blocking-wait experiment][wait-experiment]: retained evidence for
   waiting without repeated model activity.
+- [Local Beads contention measurements][beads-benchmark]: a follow-up comparison
+  of embedded/server queries, claims, transaction rollback, and capacity locks.
 
 ## What Fulcrum's history establishes
 
@@ -111,8 +113,10 @@ required**, as well as changing storage.
 ### Why SQLite, without Beads
 
 Beads already offers dependencies, ready-task selection, and atomic claiming.
-A minimal Beads workflow could be substantially cheaper than Fulcrum's current
-integration; that comparison has not been measured. See the
+Follow-up [local contention measurements][beads-benchmark] found fast queries
+in server mode, but repeated serialization errors in concurrent ready-task
+claims. A shared admission lock removed those errors at a queueing cost.
+Embedded mode developed multi-second tails under contention. See also the
 [Beads documentation][beads].
 
 SQLite is selected because Hive needs a small set of transactions spanning
@@ -120,10 +124,11 @@ task ownership, capacity, dependencies, and lifecycle state. Implementing those
 directly avoids a second state model and a subprocess boundary for every
 operation.
 
-This is an architectural choice, not a claim of experimentally demonstrated
-superiority over stock Beads. SQLite supports this single-host arrangement,
-provided write transactions remain short. See
-[SQLite application guidance][sqlite-use].
+Beads remains a viable alternative if a local Dolt service and shared admission
+wrapper are acceptable. SQLite's selection remains an architectural choice;
+the follow-up did not benchmark SQLite or complete agent workflows. SQLite
+supports this single-host arrangement, provided write transactions remain
+short. See [SQLite application guidance][sqlite-use].
 
 ## Skills are the interface
 
@@ -886,6 +891,7 @@ observability, and live updates through the same user-facing interfaces.
 [entry]: docs/postmortems/2026-09-17-bead-cdf5657c-weaver-dispatch-regression.md
 [wait-experiment]: docs/experiments/2026-09-16-desktop-mcp-ci-wait.md
 [beads]: https://github.com/gastownhall/beads
+[beads-benchmark]: docs/experiments/2026-09-19-beads-contention.md
 [sqlite-use]: https://www.sqlite.org/whentouse.html
 [sqlite-tx]: https://www.sqlite.org/lang_transaction.html
 [sqlite-wal]: https://www.sqlite.org/wal.html
