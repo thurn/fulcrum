@@ -831,7 +831,7 @@ class HookTests(unittest.TestCase):
                 request_id=str(uuid.uuid4()),
             )
         )
-        HookService(ledger).handle(
+        paused_stop = HookService(ledger).handle(
             replace(
                 request(("hook", "handle")),
                 actor=ActorContext.parse("task:steward-1"),
@@ -845,9 +845,118 @@ class HookTests(unittest.TestCase):
                 request_id=str(uuid.uuid4()),
             )
         )
+        self.assertNotIn("decision", paused_stop.result)
         binding = (ledger.show("fc-system").fc or {})["desktop"]["standing"]["steward"]
         self.assertEqual(binding["state"], "registered")
         self.assertEqual(binding["last_lifecycle_event"]["event"], "Stop")
+
+        system = ledger.show("fc-system")
+        fc = dict(system.fc or {})
+        protocol = dict(fc["desktop"])
+        protocol["run_control"] = "running"
+        fc["desktop"] = protocol
+        ledger.update_fc("fc-system", fc)
+        corrected = HookService(ledger).handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-2",
+                    "turn_id": "turn-2",
+                    "session_id": "session-1",
+                    "stop_hook_active": False,
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertEqual(corrected.result["decision"], "block")
+        self.assertIn("wait_for_instructions", corrected.result["reason"])
+
+        repeated = HookService(ledger).handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-3",
+                    "turn_id": "turn-2",
+                    "session_id": "session-1",
+                    "stop_hook_active": True,
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertNotIn("decision", repeated.result)
+
+        system = ledger.show("fc-system")
+        fc = dict(system.fc or {})
+        protocol = dict(fc["desktop"])
+        protocol["instruction_waits"] = {
+            "wait-idle": {
+                "wait_id": "wait-idle",
+                "task_id": "steward-1",
+                "turn_id": "turn-idle",
+                "state": "expired",
+                "response": {
+                    "kind": "stop",
+                    "reason": "idle_deadline",
+                    "retained_obligation": False,
+                },
+            }
+        }
+        fc["desktop"] = protocol
+        ledger.update_fc("fc-system", fc)
+        idle_stop = HookService(ledger).handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-idle",
+                    "turn_id": "turn-idle",
+                    "session_id": "session-1",
+                    "stop_hook_active": False,
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertNotIn("decision", idle_stop.result)
+
+        system = ledger.show("fc-system")
+        fc = dict(system.fc or {})
+        protocol = dict(fc["desktop"])
+        protocol["instruction_waits"] = {
+            f"wait-{index}": {
+                "wait_id": f"wait-{index}",
+                "task_id": "steward-1",
+                "turn_id": "turn-max",
+                "state": "resolved",
+                "response": {"kind": "action"},
+            }
+            for index in range(32)
+        }
+        fc["desktop"] = protocol
+        ledger.update_fc("fc-system", fc)
+        bounded_stop = HookService(ledger).handle(
+            replace(
+                request(("hook", "handle")),
+                actor=ActorContext.parse("task:steward-1"),
+                thread_id="steward-1",
+                input={
+                    "hook_event_name": "Stop",
+                    "event_id": "stop-max",
+                    "turn_id": "turn-max",
+                    "session_id": "session-1",
+                    "stop_hook_active": False,
+                },
+                request_id=str(uuid.uuid4()),
+            )
+        )
+        self.assertNotIn("decision", bounded_stop.result)
 
     def test_steward_hook_claim_is_resolved_on_owning_work_record(self):
         ledger = MemoryLedger(record("fc-work"))

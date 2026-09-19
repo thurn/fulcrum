@@ -63,8 +63,10 @@ the cause of repeated scheduling directly inspectable.
 
 The standing Steward keeps one blocking instruction wait alive and returns to it
 after every result. Scheduled prompts never target the Steward because they could
-interfere with that active wait. The independent Marshal heartbeat detects a
-stopped or disconnected Steward and authorizes recovery of that same task.
+interfere with that active wait. A one-shot `Stop` hook continuation corrects an
+ordinary premature finish without starting another turn or repeatedly messaging
+the task. The independent Marshal heartbeat detects a hard-interrupted or
+disconnected Steward and authorizes recovery of that same task.
 
 ## Coordination
 

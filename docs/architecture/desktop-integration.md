@@ -674,8 +674,11 @@ cover that residual risk; do not present prompt compliance as hard enforcement.
 An optional single Stop correction may ask a pre-finish worker to submit its
 missing outcome, respecting `stop_hook_active`, pause, human input, and the same
 assignment's correction budget. It may not reopen accepted work or replenish
-repair limits. Never use repeated Stop continuations to sustain Steward or
-Marshal. If Steward exits, record the obligation for independent recovery.
+repair limits. The registered Steward also receives one Stop correction when
+admission is running and no valid idle or protocol stop is recorded for that turn;
+it resumes the blocking instruction loop. Never use repeated Stop continuations
+to sustain Steward or Marshal. Hard interruption still records the obligation for
+independent recovery.
 `PermissionRequest`, `SessionEnd`, and subagent hooks are not prerequisites;
 Fulcrum does not auto-answer native approvals.
 

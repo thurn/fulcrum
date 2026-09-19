@@ -35,6 +35,11 @@ ownership or proves completion.
 Standing Steward waits use one long-yield execution cell and never poll that cell
 with repeated model turns. A stopped client closes the broker connection and
 cancels its active evaluation; transcript evidence then settles the durable wait.
+When a registered Steward tries to finish while admission is running and its turn
+has no valid idle or protocol stop, the `Stop` hook returns one `decision: block`
+continuation telling that same turn to resume the instruction loop. Codex's
+`stop_hook_active` flag prevents a repeated continuation. Interruptions remain
+observational and are recovered independently by Marshal.
 
 Hook commands resolve the current committed checkout on every invocation. Existing
 agent turns keep already-delivered instructions, while the next hook callback sees

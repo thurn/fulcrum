@@ -48,6 +48,13 @@ MANAGED_NATIVE_TOOLS = {
 }
 
 DISCOVERED_TRANSCRIPT_TAIL_BYTES = 512 * 1024
+STEWARD_STOP_CORRECTION = (
+    "Fulcrum still retains this task as the active standing Steward, and no valid "
+    "stop is recorded for this turn. Do not end the turn. Settle any action already "
+    "returned to you exactly once, then call wait_for_instructions with task_id set "
+    "to CODEX_THREAD_ID, omitting generated request, loop, and turn IDs, and continue "
+    "the retained Steward loop."
+)
 
 
 def _discover_native_transcript(task_id: str) -> str | None:
@@ -157,11 +164,65 @@ class HookService:
             self._post_tool(ledger, request, bound)
         elif bound is not None:
             self._lifecycle(ledger, request, bound, event_name)
+            if event_name == "Stop":
+                correction = self._steward_stop_correction(ledger, request, bound)
+                if correction is not None:
+                    response = correction
         if bound is not None:
             bound = _binding_for_task(ledger, task_id) or bound
             self._collect_transcript(ledger, request, bound, task_id)
         self._log(request, event_name, task_id, bound is not None, response)
         return CommandResult.query(response)
+
+    def _steward_stop_correction(
+        self,
+        ledger: Ledger,
+        request: ParsedRequest,
+        bound: tuple[LedgerRecord, str],
+    ) -> dict[str, Any] | None:
+        _, role = bound
+        if role != "steward" or request.input.get("stop_hook_active") is True:
+            return None
+        system = ledger.show("fc-system")
+        if system is None:
+            return None
+        protocol = _protocol(system.fc or {})
+        if protocol.get("run_control") != "running":
+            return None
+        standing = protocol.get("standing")
+        steward = standing.get("steward") if isinstance(standing, Mapping) else None
+        task_id = request.actor.task_id or request.thread_id
+        if (
+            not isinstance(steward, Mapping)
+            or steward.get("task_id") != task_id
+            or steward.get("state") != "registered"
+        ):
+            return None
+        turn_id = request.input.get("turn_id")
+        waits = [
+            wait
+            for wait in (protocol.get("instruction_waits") or {}).values()
+            if isinstance(wait, Mapping)
+            and wait.get("task_id") == task_id
+            and wait.get("turn_id") == turn_id
+        ]
+        for wait in waits:
+            response = wait.get("response")
+            if (
+                isinstance(response, Mapping)
+                and response.get("kind") == "stop"
+                and response.get("retained_obligation") is False
+            ):
+                return None
+        returned_actions = sum(
+            1
+            for wait in waits
+            if isinstance(wait.get("response"), Mapping)
+            and wait["response"].get("kind") == "action"
+        )
+        if returned_actions >= 32:
+            return None
+        return {"decision": "block", "reason": STEWARD_STOP_CORRECTION}
 
     def _record_manual_task_activity(
         self,
