@@ -53,6 +53,8 @@ or validation. Writing this document does not activate Hive or migrate Fulcrum.
   waiting without repeated model activity.
 - [Local Beads contention measurements][beads-benchmark]: a follow-up comparison
   of embedded/server queries, claims, transaction rollback, and capacity locks.
+- [Markdown/YAML versus SQLite measurements][files-benchmark]: a 1,000-task
+  prototype comparison showing that plain files can meet sub-second targets.
 
 ## What Fulcrum's history establishes
 
@@ -892,6 +894,7 @@ observability, and live updates through the same user-facing interfaces.
 [wait-experiment]: docs/experiments/2026-09-16-desktop-mcp-ci-wait.md
 [beads]: https://github.com/gastownhall/beads
 [beads-benchmark]: docs/experiments/2026-09-19-beads-contention.md
+[files-benchmark]: docs/experiments/2026-09-20-task-files.md
 [sqlite-use]: https://www.sqlite.org/whentouse.html
 [sqlite-tx]: https://www.sqlite.org/lang_transaction.html
 [sqlite-wal]: https://www.sqlite.org/wal.html
