@@ -12,7 +12,7 @@ claims, but file storage was not intrinsically too slow for Hive.
 
 ## What was compared
 
-This was a disposable prototype of storage operations, not a Hive implementation.
+This benchmark used disposable storage prototypes. It did not implement Hive.
 The final run recorded **688 timed operations**, with no operation failures.
 
 The same task fixture was represented in three ways:
