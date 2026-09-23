@@ -387,10 +387,10 @@ Completion and cancellation clear the assignee with the terminal state and
 outcome in the same native update, after resource settlement. Deferred work
 resumes to queued, not directly to its former owned state; it must be admitted
 again. Owner-only mutations compare both native task ID and native turn ID under
-the admission lock. Phase changes, deferral, settlement, completion, and delayed
-stop callbacks all reject an earlier turn, even if the same conversation still
-owns the bead. Recovery changes ownership through its explicit operation rather
-than an unrestricted metadata edit.
+the admission lock. Phase changes, deferral, completion, and delayed stop
+callbacks all reject an earlier turn, even if the same conversation still owns
+the bead. Settlement of an ended owner uses the separate conditional recovery
+operation described below; it is not an owner mutation impersonating that turn.
 
 Resumption preserves the checkpoint's workspace, source, and candidate so that
 admission can continue retained work rather than repeat it. It requires settled
@@ -732,6 +732,7 @@ enter_turn(bead, task_id, turn_id) -> Entered | Paused | EntryRefused
 inspect_activity(task_id) -> KnownActivity | UnknownActivity
 record_stop(bead, task_id, turn_id, cause) -> Paused | OwnershipChanged
 inspect_writers(task_id, turn_id, workspace) -> Settled | Active | Unknown
+settle_owner(bead, expected_owner, observer) -> SettlementResult
 ```
 
 `KnownActivity` distinguishes an active turn, queued continuation, and an idle
@@ -746,10 +747,34 @@ same task requires confirmed settlement of that turn's writers and no unresolved
 interruption. `EntryRefused` distinguishes changed ownership, required recovery,
 and unavailable native evidence; none permits editing.
 
+Same-conversation re-entry is distinct from peer recovery. Once the older
+turn's local writers have stopped and interruption is resolved, a new turn in
+that task may replace only the owning turn ID under the admission lock. It
+retains the same bead, candidate, phase, and continuously occupied slot. While
+delivery is pending, successful entry permits inspection and reattaching the
+blocking wait, not implementation changes. Deferred entry still returns
+`Paused`; this path cannot erase a user pause or another release condition.
+
+`settle_owner` accepts the old task-and-turn pair as `expected_owner` and the
+invoking task-and-turn pair as `observer`. The observer must establish stopped
+writers and settled external work, then compare the expected owner under the
+admission lock before clearing it. The result distinguishes `Settled`,
+`StillActive`, `Unknown`, and `OwnershipChanged`. Settlement never clears pause
+conditions or grants the observer permission to implement the bead.
+
+Clearing an owned bead's assignee also returns it to queued in the same native
+update, retaining its checkpoint. A deferred bead stays deferred with its
+release conditions; settlement clears only its ownership and occupied slot.
+
+For example, task A's new turn may settle its ended turn's ownership through
+this operation. A delayed callback naming that ended turn cannot settle a bead
+now owned by the new turn: its expected owner no longer matches. A peer uses
+the same conditional settlement operation with its own observer identity.
+
 Entry on a deferred bead returns `Paused` with its release conditions and leaves
 the retained owner unchanged. A new message, even explicit user resumption, does
-not itself grant execution ownership. Read-only inspection and settlement may
-proceed using the observed old owner pair and stopped-writer evidence.
+not itself grant execution ownership. Read-only inspection and `settle_owner`
+may proceed using the observed old owner pair and stopped-writer evidence.
 Settlement clears ownership without clearing any pause. Resumption resolves only
 the user-pause condition. Once all conditions are resolved and ownership is
 settled, reopen to queued and use normal admission with the new turn identity.
@@ -824,8 +849,21 @@ generated token.
 Recover the retained work before deciding what should run again. An ended
 conversation alone does not determine whether its external operation succeeded.
 
-Recovery records the checkpoint, settles the old owner under the admission lock,
-and uses ordinary admission to claim continuation. A recoverer may adopt a
+Peer recovery retains the old owner and its slot while a candidate is still
+validating, promoting, or synchronizing. An observer may attach a blocking wait
+without claiming the bead or starting implementation. An unknown provider
+outcome also prevents settlement. Only after external work and local writers
+are settled may `settle_owner` clear the old ownership; continuation then uses
+ordinary admission. Peer recovery does not transfer an occupied slot to another
+task. Same-conversation re-entry follows the separate rule above.
+
+For example, with eight occupied slots, one executor ending during CI leaves
+eight occupied slots. A peer can observe that candidate until delivery settles,
+then conditionally release its old owner. Capacity becomes seven until another
+claim succeeds. A failed terminal candidate permits the same settlement once
+its writers have stopped, with its failure retained for the next executor.
+
+Recovery records the checkpoint before settlement. A recoverer may adopt a
 preserved workspace only after confirming quiescence and recording the new
 owner. Existing candidates are inspected, not resubmitted blindly. For an
 already promoted candidate, finish any required synchronization before closing
@@ -1280,6 +1318,18 @@ repeatable without touching production work.
     confirm the existing candidate is found instead of duplicated. Resume the
     same conversation in a new turn, then deliver an old turn's completion or
     stop callback; verify neither can mutate the new attempt's state.
+    At eight occupied slots, end an executor during CI: its bead remains owned
+    by the old turn, keeps its candidate and waiting phase, and still consumes
+    one of eight slots. Observe delivery from a peer without new implementation.
+    After delivery and writers settle, conditional settlement queues the bead
+    and preserves the candidate checkpoint; occupied capacity becomes seven.
+    Verify normal admission claims continuation and restores the count
+    to eight. Repeat with an unknown provider outcome and verify no release.
+    Separately, re-enter the original conversation in a new turn during CI,
+    with old local writers stopped and interruption resolved. Verify only its
+    owning turn changes, capacity stays eight, and the retained candidate is
+    observed through a blocking wait without implementation edits. Repeat with
+    a user pause and verify entry remains refused until authorized resumption.
     Send unrelated input to a paused owner and verify entry does not permit
     editing. Explicitly resume it and verify settlement, remaining release
     conditions, and fresh admission precede continued implementation.
