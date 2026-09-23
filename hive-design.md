@@ -133,7 +133,14 @@ Executor accepts a description containing one or several tasks, bug reports, or
 feature requests, or an existing bead ID. It asks material scope questions and
 inspects existing work before deciding whether implementation should start.
 
-The ordinary loop is:
+Project-file changes, including documentation, use a Tollgate worktree and
+candidate delivery. A non-code bead whose output is an external document or
+research report still uses admission, a fresh warden review of the artifact and
+its relevant invariants, and the completion checklist. It records the delivered
+artifact location and acceptance result instead of inventing a code candidate.
+It needs a worktree only if producing that artifact changes project files.
+
+The ordinary loop for project-file changes is:
 
 1. Clarify intent, search for duplicates and pending prerequisites, and file
    appropriately sized beads with priorities and dependency links.
@@ -170,9 +177,11 @@ Warden reviews a specific diff or the architecture of a project. Its review is
 aggressive about simplifying structure, but findings must explain a concrete
 maintenance, correctness, or testing consequence.
 
-A cold reviewer receives the bead, agreed scope, workspace, exact source commit,
-project invariant document, and relevant test commands. It reads the code
-independently; the author's conversation and reasoning are not inherited.
+For project-file work, a cold reviewer receives the bead, agreed scope,
+workspace, exact source commit, project invariant document, and relevant test
+commands. For artifact work, it receives the artifact instead of a workspace
+and commit, plus its acceptance criteria and relevant project invariants. It
+reads independently; the author's conversation and reasoning are not inherited.
 
 Warden examines:
 
@@ -288,6 +297,11 @@ of Hive-specific lifecycle data in bead metadata. Do not maintain a shadow
 issue table, separate capacity counter, custom ID allocator, event-sourced task
 engine, or general-purpose operation receipt system.
 
+**Infrastructure records** are native Beads records for Hive configuration and
+conversation enrollment. They are explicitly excluded from the work backlog,
+dependency selection, and capacity count. Their record type distinguishes them
+from implementation beads; titles and emojis do not determine that distinction.
+
 The additional metadata has a concrete purpose:
 
 - The registered project identifies the repository and execution boundary.
@@ -318,9 +332,21 @@ persisted status field that competes with Beads status.
 | Cancelled | Closed with cancelled outcome; does not satisfy dependencies |
 
 An owned bead progresses through preparing, implementing, reviewing, and
-waiting for delivery. These phases explain current activity and required
-resource references, not a persisted workflow graph. Review completion is not a
-core proof flag.
+waiting for delivery. Store the current phase in Hive metadata together with
+the resource references required by that phase, in one native update. This is
+one current-state value, not a persisted workflow graph. Review completion is
+not a core proof flag.
+
+Preparing retains the intended branch until the workspace exists. Implementing
+and reviewing require the workspace; waiting for delivery also requires the
+candidate and source commit. A lost creation or submission response leaves the
+last valid phase intact. Recovery inspects Tollgate using the branch or source
+commit before advancing it, as described in
+[Reconciling retained work](#reconciling-retained-work).
+
+Artifact work uses a drafting or reviewing-artifact phase instead; neither
+requires a workspace, and reviewing-artifact requires an artifact location.
+Its terminal outcome retains that location and the acceptance result.
 
 A deferred bead may retain its assignee while outstanding work settles. It
 continues consuming a slot until the assignee is cleared. Thus capacity is the
@@ -343,6 +369,23 @@ resumes to queued, not directly to its former owned state; it must be admitted
 again. Owner-only mutations check the current owner under the admission lock
 and reject a stale caller. Recovery changes ownership through its explicit
 operation rather than an unrestricted metadata edit.
+
+Resumption preserves the checkpoint's workspace, source, and candidate so that
+admission can continue retained work rather than repeat it. It requires settled
+ownership and a resolved deferral reason:
+
+- User pause requires an explicit user resumption.
+- Pending design approval requires approval of the intended design scope.
+- Missing input requires the needed answer; an executor can then resume it.
+- A temporary checkpoint can be resumed by a peer after its recorded blocker
+  is resolved and any interrupted dependency changes are repaired.
+- Recovery uncertainty requires the stopped-writer and external-outcome checks
+  in [Peer recovery](#peer-recovery-and-live-state-changes).
+
+Changing the pause reason cannot remove an outstanding user pause or approval
+requirement. For an interrupted prerequisite-discovery sequence, inspect the
+checkpoint, find or file its prerequisite, and establish the native dependency
+before reopening the parent. If that intent is unclear, keep it deferred.
 
 Only successful completion satisfies a prerequisite. Beads may treat any
 closed prerequisite as resolved; Hive additionally checks the recorded outcome
@@ -613,6 +656,12 @@ candidate,
 attempt supported cancellation where applicable, and report the actual result.
 Do not promise that pausing a conversation rolls back code delivery.
 
+If promotion finishes after a user stop, record its observed result and settle
+any finished writers, but leave the bead deferred with its user-pause reason.
+Observation and settlement do not authorize new implementation or a next claim.
+On explicit resumption, admit the retained work, reconcile synchronization and
+the completion checklist, and close it without repeating delivered changes.
+
 A native interruption signal should record the pause promptly. If Hive cannot
 distinguish a user stop from a crash, recovery preserves the pause/uncertainty
 until it is resolved rather than treating silence as permission to restart.
@@ -714,10 +763,9 @@ current conversation, even if the user created it. Retain the native task ID and
 project in the Beads-backed Hive registry so enrollment and archival scope do
 not depend on recognizing an emoji in a title.
 
-Registry records are native Beads infrastructure records, excluded from the
-implementation backlog and its capacity count. They store enrollment and native
-identity, not a second copy of bead ownership. A conversation that later changes
-roles remains the same registered task.
+Registry records use the infrastructure record type described above. They store
+enrollment and native identity, not a second copy of bead ownership. A
+conversation that later changes roles remains the same registered task.
 
 The name format is role emoji, current bead when one exists, and a clear subject
 with an optional short state:
@@ -1085,6 +1133,7 @@ repeatable without touching production work.
 9. **Interruption:** stop during implementation and during an already-authorized
    delivery. Verify the user pause persists and the reported candidate outcome
    reflects what actually happened, including any promotion already underway.
+   Resume delivered work and verify it closes without repeated implementation.
 10. **Recovery:** terminate an executor unexpectedly, including a case with a
     surviving write-capable process. Verify peers recover only the settled case
     and escalate uncertain ownership. Simulate a lost submission response and
@@ -1115,3 +1164,6 @@ repeatable without touching production work.
     backup enabled. Inspect per-operation p95, error counts, lock wait, and
     startup costs. Record a target miss honestly rather than substituting
     database-only timings for complete commands.
+18. **Artifact delivery:** complete an external research report through
+    admission and fresh review. Verify completion records its artifact and
+    acceptance result without requiring a nonexistent Tollgate candidate.
