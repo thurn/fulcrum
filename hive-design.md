@@ -59,6 +59,16 @@ this document does not install Hive, change existing workers, or migrate data.
 is a conversation in which an agent works. One executor conversation can finish
 several beads in sequence; a bead can survive several execution attempts.
 
+A **native turn** is one Codex execution of an agent responding to input in that
+conversation. Its identity distinguishes an ended attempt from a later resumed
+attempt in the same task.
+
+A **Tollgate candidate** identifies submitted source for validation and
+integration. **Promotion** makes validated, integrated source the project's
+accepted release. **Configured source synchronization** updates the local and
+remote branches selected by the project's Tollgate configuration. Ordinary code
+delivery is complete only after promotion and that synchronization finish.
+
 Hive's rigid core has four responsibilities:
 
 - Maintain valid ownership and lifecycle transitions in Beads.
@@ -219,6 +229,14 @@ Weaver handles larger scopes that need a technical design, usually in the
 project's `/plan` area. It explores first, asks clarifying questions, writes a
 standalone document, and runs a fresh cold-reader subagent with only the
 document and reading instructions.
+
+When the design changes project files, authoring is its own planning bead.
+Weaver claims it through normal admission, writes in a Tollgate worktree, and
+delivers the cold-reviewed document through Tollgate. If admission is refused,
+it files the planning bead and exits. Publishing a draft and completing that
+planning bead do not approve its implementation; the document's approval state
+and any deferred implementation beads continue to make that distinction clear.
+An external design artifact instead follows the artifact delivery rules.
 
 It resolves comprehension gaps and obtains user approval of the design. It then
 files implementation beads with useful acceptance criteria and dependency
