@@ -369,7 +369,7 @@ terminal outcome retains that location and the acceptance result.
 
 A deferred bead may retain its assignee while outstanding work settles. It
 continues consuming a slot until the assignee is cleared. Thus capacity is the
-count of owned records, including deferred records with unsettled owners, not
+count of records retaining an assignee, including deferred unsettled work, not
 just a count of native `in_progress` status.
 
 Examples make the distinction visible:
@@ -385,9 +385,11 @@ closed, outcome=delivered         -> done
 Completion and cancellation clear the assignee with the terminal state and
 outcome in the same native update, after resource settlement. Deferred work
 resumes to queued, not directly to its former owned state; it must be admitted
-again. Owner-only mutations check the current owner under the admission lock and
-reject a stale caller. Recovery changes ownership through its explicit operation
-rather than an unrestricted metadata edit.
+again. Owner-only mutations compare both native task ID and native turn ID under
+the admission lock. Phase changes, deferral, settlement, completion, and delayed
+stop callbacks all reject an earlier turn, even if the same conversation still
+owns the bead. Recovery changes ownership through its explicit operation rather
+than an unrestricted metadata edit.
 
 Resumption preserves the checkpoint's workspace, source, and candidate so that
 admission can continue retained work rather than repeat it. It requires settled
@@ -670,10 +672,21 @@ A stop hook gives one reminder when an executor is about to end normally while
 eligible project work appears available. It reads bounded state, directs the
 executor to the normal next-work operation, and does not launch another task.
 
-Use the hook's continuation guard so the same stopping attempt cannot produce a
-reminder loop. A new completed bead can lead to a new legitimate next-work
-check. Capacity refusals, all-blocked work, explicit user stops, and emergency
-suspension do not trigger pressure to keep working.
+The hook adapter receives the native task and turn identity, stop cause, and
+the most recently completed bead in that turn, if any. It returns either
+`AllowStop` or `RemindOnce` with the next-work instruction. A small local guard
+remembers the last completion observed when that task and turn received a
+reminder, including the initial case with no completion. This guard tracks only
+reminder delivery; it grants no work authority and is not a task ledger.
+
+Atomically check and record the guard before emitting the reminder. Repeated
+stop callbacks and hook process restarts cannot repeat it without a newly
+completed bead. A subsequent completion permits one new reminder; a new native
+turn starts its own guard.
+Discard old guard entries when their native turns end. If guard state is
+unavailable or ambiguous, allow the stop rather than risk a reminder loop.
+Capacity refusals, all-blocked work, explicit user stops, and emergency
+suspension return `AllowStop` without consuming a reminder.
 
 An explicit user stop defers the bead with a user-pause reason. No peer or
 specialist may automatically resume it. Existing external work may already be
@@ -1042,6 +1055,11 @@ hive delivery wait <tollgate-candidate-id>
 hive status --project search
 ```
 
+The owner argument selects the native conversation; the adapter also obtains
+and validates its invoking turn ID. Every owner mutation carries the resulting
+`Owner` pair internally. An absent or unverifiable turn identity refuses the
+mutation instead of treating the conversation ID alone as sufficient.
+
 Provide task show, priority update, dependency add/remove, outcome recording,
 owner settlement, and recovery inspection through the same typed adapter. A
 read-only ready list is advisory; only claim grants ownership. Completion
@@ -1071,16 +1089,28 @@ telemetry, and external APIs enter as `object`, are validated at their adapters,
 and become immutable typed values or explicit errors.
 
 Use distinct types for bead IDs, native task IDs, candidate IDs, project IDs,
-and paths whose confusion would cause a real error. Do not mechanically wrap
-every string. Native source commit IDs are retained for Tollgate integration,
-not turned into Hive fingerprints.
+native turn IDs, and paths whose confusion would cause a real error. Do not
+mechanically wrap every string. Native source commit IDs are retained for
+Tollgate integration, not turned into Hive fingerprints.
+
+Ownership identifies an execution attempt, not just its conversation:
+
+```python
+@dataclass(frozen=True)
+class Owner:
+    task: CodexTaskId
+    turn: CodexTurnId
+```
+
+A delivery wait retains the reviewed source alongside its native candidate:
 
 ```python
 @dataclass(frozen=True)
 class WaitingForDelivery:
     bead: BeadId
-    owner: CodexTaskId
+    owner: Owner
     workspace: WorktreePath
+    source: SourceCommitId
     candidate: TollgateCandidateId
 ```
 
@@ -1217,12 +1247,16 @@ repeatable without touching production work.
 10. **Recovery:** terminate an executor unexpectedly, including a case with a
     surviving write-capable process. Verify peers recover only the settled case
     and escalate uncertain ownership. Simulate a lost submission response and
-    confirm the existing candidate is found instead of duplicated.
+    confirm the existing candidate is found instead of duplicated. Resume the
+    same conversation in a new turn, then deliver an old turn's completion or
+    stop callback; verify neither can mutate the new attempt's state.
 11. **Justiciar:** in the disposable environment, break admission or Tollgate.
     Verify a nondelegating justiciar stops the damage, documents any emergency
     bypass, restores valid ownership, and preserves explicit user pauses.
 12. **Continuation:** attempt an ordinary stop with eligible work remaining.
-    Verify a single reminder, no reminder loop, and no scheduled worker revival
+    Repeat the callback and restart its hook process; verify a single reminder.
+    Complete another bead and verify one new reminder is possible. Verify
+    explicit stops produce no reminder and no scheduled worker revival occurs
     after all executors have stopped.
 13. **Task UI:** fail a rename and restore access. Verify bounded retry, visible
     drift, continued delivery, and correction at the next transition. Archive an
