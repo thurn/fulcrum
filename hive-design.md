@@ -401,10 +401,15 @@ ownership and a resolved deferral reason:
 - Recovery uncertainty requires the stopped-writer and external-outcome checks
   in [Peer recovery](#peer-recovery-and-live-state-changes).
 
-Changing the pause reason cannot remove an outstanding user pause or approval
-requirement. For an interrupted prerequisite-discovery sequence, inspect the
-checkpoint, find or file its prerequisite, and establish the native dependency
-before reopening the parent. If that intent is unclear, keep it deferred.
+A deferred state retains all unresolved release conditions, even when several
+apply at once. For example, stopping work that awaits design approval adds a
+user pause; resuming that pause does not approve the design. Changing the
+displayed reason cannot discard another condition. Reopen the bead only when
+each condition has been resolved by its authorized actor.
+
+For an interrupted prerequisite-discovery sequence, inspect the checkpoint,
+find or file its prerequisite, and establish the native dependency before
+reopening the parent. If that intent is unclear, keep it deferred.
 
 Only successful completion satisfies a prerequisite. Beads may treat any closed
 prerequisite as resolved; Hive additionally checks the recorded outcome before
@@ -427,6 +432,13 @@ Changes to readiness participate in the admission lock. This includes changing
 an eligible bead's prerequisites, pausing it, and resuming it. A direct claim
 must check the same dependencies as selecting the next ready bead; the local
 benchmark showed that native direct claiming alone did not enforce them.
+
+Reject dependency edits to any bead that still has an owner, including a
+deferred bead whose writers are settling. If a claim wins the lock race, a later
+dependency edit fails visibly; it cannot invalidate readiness underneath the
+executor. The owner must checkpoint, defer, and settle before anyone changes
+that bead's prerequisites. Other workers can file the proposed prerequisite
+without changing the owned bead's edges.
 
 If a worker discovers an unstarted prerequisite:
 
