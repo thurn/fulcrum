@@ -108,7 +108,8 @@ from reviewers, workflow audits, and completion checklists. Unresolved material
 product decisions still require clarification.
 
 - Explicit user restrictions override the default execution authority.
-- Weaver's unapproved design work is deferred until the document is approved.
+- Implementation governed by an unapproved design remains deferred until that
+  design is approved; authoring and reviewing the design can proceed.
 - A user pause remains paused until the user resumes it.
 - Each executor drains only its starting project. Cross-project storage and
   visibility do not grant cross-project execution authority.
@@ -159,8 +160,9 @@ The ordinary loop for project-file changes is:
 3. Claim through Hive admission. Create a Tollgate worktree before editing
    project files. Read-only scoping and filing do not require a worktree.
 4. Implement the claimed scope and run proportionate local checks.
-5. Run a fresh `$warden` subagent with no forked conversation history. Address
-   its findings and record reasons for rejecting suggestions.
+5. Commit the source to review, then run a fresh `$warden` subagent with no
+   forked conversation history. Address its findings and record reasons for
+   rejecting suggestions. Commit repairs before reviewing the changed diff.
 6. Submit and authorize the exact candidate through Tollgate when permitted;
    block for results, fix in-scope failures, and complete delivery.
 7. Run the completion checklist, record the outcome, and close the bead.
@@ -585,7 +587,7 @@ promotion because Tollgate may remove the clean source workspace afterward.
 After local work and cold review:
 
 ```text
-commit the reviewed source in the Tollgate workspace
+confirm HEAD is the source commit covered by cold review
 tg candidate HEAD
 tg approve <candidate-id> --wait
 record the delivered outcome and close the bead
@@ -1140,7 +1142,8 @@ repeatable without touching production work.
 6. **Review and specialists:** exercise a valid finding, a reasoned rejection,
    a missing invariant document, and a brittle-test finding. Verify a standalone
    specialist enters admission before making implementation changes. Check
-   that weaver's unapproved design beads cannot execute.
+   that design authoring can execute while its unapproved implementation beads
+   remain deferred.
 7. **Bead filing:** invoke `$bead` in a new session and inside an executor
    reply.
    Verify immediate durable filing, useful dependencies, no implicit execution
