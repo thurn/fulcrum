@@ -763,12 +763,16 @@ another condition remains     -> keep deferred
 all conditions resolved       -> queue, claim, then continue retained work
 ```
 
-At the beginning of every executor turn, its entry instruction calls
-`enter_turn` before editing or starting write-capable tools. Native stop events
-invoke the short `record_stop` mutation when available. If the runtime cannot
-provide a reliable stop callback, the next observer records the interruption
-and leaves it deferred pending clarification. The native adapter must expose
-unsupported activity distinctions as unknown, never idle.
+A fresh turn without an owned bead may scope, file, and claim through normal
+admission first. Claim records its native task and turn pair. Before editing
+project files or starting workspace writers, it calls `enter_turn` to validate
+that ownership. A turn returning to retained ownership calls `enter_turn`
+before continuing that work; a paused result follows the resumption path above.
+
+Native stop events invoke the short `record_stop` mutation when available. If
+the runtime cannot provide a reliable stop callback, the next observer records
+the interruption and leaves it deferred pending clarification. The native
+adapter must expose unsupported activity distinctions as unknown, never idle.
 
 Writer inspection starts with the native commands and child reviews associated
 with the recorded task and turn. Hive-launched commands retain their native
