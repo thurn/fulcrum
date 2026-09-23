@@ -13,8 +13,8 @@ admission mistakes.
 
 Hive is a new codebase at `~/hive`. One host runs workers across registered
 projects, sharing a fresh server-mode Beads database under `~/brain`. Bead IDs
-use Beads' default short-ID allocation with the `hv-` prefix. The database
-is the only task authority. GitHub holds periodic backups, not a competing live
+use Beads' default short-ID allocation with the `hv-` prefix. The database is
+the only task authority. GitHub holds periodic backups, not a competing live
 queue.
 
 This document specifies target behavior, not an implemented system. In
@@ -25,8 +25,9 @@ this document does not install Hive, change existing workers, or migrate data.
 
 - [Live iteration](docs/architecture/live-iteration.md) establishes the existing
   local-master, consistent-source, and connection-continuity requirements.
-- [Beads contention measurements][beads-measurements]
-  establish the measured benefits and limitations of server mode and locking.
+- [Beads contention measurements][beads-measurements] establish the measured
+  benefits and limitations of server mode and locking. Its earlier storage
+  recommendation and 250ms budget are historical; this design supersedes them.
 - [Blocking-wait experiment](docs/experiments/2026-09-16-desktop-mcp-ci-wait.md)
   demonstrates a five-minute MCP wait without model polling.
 - [Tollgate](/Users/dthurn/tollgate/README.md) specifies worktree delivery,
@@ -43,8 +44,8 @@ this document does not install Hive, change existing workers, or migrate data.
 - [Codex MCP configuration][mcp] describes the client configuration needed for
   long blocking tool calls.
 - [Handoff-delay postmortem][handoff] and [dispatch regression][dispatch]
-  explain
-  why unrelated failures and multi-role handoffs must not govern all progress.
+  explain why unrelated failures and multi-role handoffs must not govern all
+  progress.
 
 [beads-measurements]: docs/experiments/2026-09-19-beads-contention.md
 [review]: https://github.com/cursor/plugins/blob/main/cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md
@@ -79,8 +80,8 @@ Hive's rigid core has four responsibilities:
 
 Skills decide scope, priority, decomposition, review responses, conflict risk,
 and whether current resources make more work sensible. They also enforce the
-completion checklist. Hive does not persist a checklist proof, require a
-review certificate, or reconstruct Tollgate's validation evidence.
+completion checklist. Hive does not persist a checklist proof, require a review
+certificate, or reconstruct Tollgate's validation evidence.
 
 The division of authority is concrete:
 
@@ -95,10 +96,10 @@ The division of authority is concrete:
 | Justiciar | Explicit emergency intervention described below |
 
 Shared storage is centralized data, not centralized coordination. Every worker
-uses the same admission operation independently. Losing one worker must not
-stop unrelated ready work. Losing every executor leaves durable pending work
-until a user starts another executor; Hive makes no autonomous recovery promise
-for that condition.
+uses the same admission operation independently. Losing one worker must not stop
+unrelated ready work. Losing every executor leaves durable pending work until a
+user starts another executor; Hive makes no autonomous recovery promise for that
+condition.
 
 ### Authorization and project scope
 
@@ -117,8 +118,8 @@ product decisions still require clarification.
   recruiter's project scope.
 
 For example, an executor in `search` may see that a `storage` bead blocks its
-next task, but it cannot silently switch repositories to implement that bead.
-It can explain the dependency and continue other eligible `search` work.
+next task, but it cannot silently switch repositories to implement that bead. It
+can explain the dependency and continue other eligible `search` work.
 
 ## Skills and agent behavior
 
@@ -155,8 +156,8 @@ The ordinary loop for project-file changes is:
 
 1. Clarify intent, search for duplicates and pending prerequisites, and file
    appropriately sized beads with priorities and dependency links.
-2. Inspect current owners, candidate status, concurrency, resource pressure,
-   and likely merge conflicts. Choose ready work or leave it in the backlog.
+2. Inspect current owners, candidate status, concurrency, resource pressure, and
+   likely merge conflicts. Choose ready work or leave it in the backlog.
 3. Claim through Hive admission. Create a Tollgate worktree before editing
    project files. Read-only scoping and filing do not require a worktree.
 4. Implement the claimed scope and run proportionate local checks.
@@ -191,9 +192,9 @@ maintenance, correctness, or testing consequence.
 
 For project-file work, a cold reviewer receives the bead, agreed scope,
 workspace, exact source commit, project invariant document, and relevant test
-commands. For artifact work, it receives the artifact instead of a workspace
-and commit, plus its acceptance criteria and relevant project invariants. It
-reads independently; the author's conversation and reasoning are not inherited.
+commands. For artifact work, it receives the artifact instead of a workspace and
+commit, plus its acceptance criteria and relevant project invariants. It reads
+independently; the author's conversation and reasoning are not inherited.
 
 Warden examines:
 
@@ -209,10 +210,10 @@ Warden examines:
   arbitrary aesthetic choices.
 
 **Project invariants** are critical properties recorded in a project-owned
-Markdown document. Project registration identifies that document. It is read
-for each review, and findings identify which invariant is affected. If a
-project lacks one, warden reports the gap and files work to establish it; it
-does not invent supposed user requirements or silently claim a complete audit.
+Markdown document. Project registration identifies that document. It is read for
+each review, and findings identify which invariant is affected. If a project
+lacks one, warden reports the gap and files work to establish it; it does not
+invent supposed user requirements or silently claim a complete audit.
 
 Cold review is mandatory for ordinary executor work, but warden has no veto.
 Executor fixes valid findings, explains rejected ones, and files worthwhile
@@ -220,10 +221,10 @@ out-of-scope improvements. Removing brittle tests happens in executor scope,
 with valuable behavioral coverage preserved. Broad audits may file beads or
 transition to executor through admission.
 
-A source-changing repair after review requires review of the changed diff
-before delivery. Review does not loop until warden approves: executor retains
-judgment over findings. Mechanical conflict resolutions are included in that
-review when they change source behavior or structure.
+A source-changing repair after review requires review of the changed diff before
+delivery. Review does not loop until warden approves: executor retains judgment
+over findings. Mechanical conflict resolutions are included in that review when
+they change source behavior or structure.
 
 ### Weaver
 
@@ -241,16 +242,15 @@ and any deferred implementation beads continue to make that distinction clear.
 An external design artifact instead follows the artifact delivery rules.
 
 It resolves comprehension gaps and obtains user approval of the design. It then
-files implementation beads with useful acceptance criteria and dependency
-links, each pointing to the approved document, and transitions to executor.
-Beads filed while approval is pending remain deferred. Approving the document
-releases only its intended work, not a later unrelated expansion.
+files implementation beads with useful acceptance criteria and dependency links,
+each pointing to the approved document, and transitions to executor. Beads filed
+while approval is pending remain deferred. Approving the document releases only
+its intended work, not a later unrelated expansion.
 
 ### Sage and vizier
 
 Sage uses logs, task traces, cost reports, profiling, and actual tool behavior
-to
-find workflow improvements. Typical subjects include build and CI time,
+to find workflow improvements. Typical subjects include build and CI time,
 formatting and linting overhead, documentation discovery, useful diagnostics,
 and the clarity of Hive's own skills. It files evidence-backed beads and may
 transition to executor through admission.
@@ -262,14 +262,14 @@ then follow executor rules. It can also finish as a research task.
 
 Warden and sage can run as optional scheduled audits. Each run is bounded, uses
 a fresh task, and has a stated project and audit purpose. They are not disguised
-backlog monitors. Their ability to transition to executor is the same as that
-of an explicitly invoked specialist.
+backlog monitors. Their ability to transition to executor is the same as that of
+an explicitly invoked specialist.
 
 ### Bead
 
 In a new session, `$bead` means file the issue or issues and exit. In a reply to
-another role, it means file this item now, then return to the enclosing role.
-It does not change that role's name or start execution itself.
+another role, it means file this item now, then return to the enclosing role. It
+does not change that role's name or start execution itself.
 
 Filing includes enough scope, priority, project identity, and dependencies for a
 future executor to act. A large unclear request can be recorded as planning
@@ -294,27 +294,26 @@ Ordinary code delivery remains subject to Tollgate. Its emergency exception is
 limited to restoring the broken system, not shipping unrelated feature work.
 Justiciar records what failed, what it stopped or changed, which checks were
 bypassed, and what validation or reconciliation remains. If Beads is
-unavailable,
-local recovery notes are sufficient until the database is restored.
+unavailable, local recovery notes are sufficient until the database is restored.
 
 Before reopening admission, it checks the repaired shared state, reconciles
 interrupted owners and candidates, and makes unfinished work visible. Any
-emergency code change receives normal validation once that path works again.
-An explicit user pause is not erased by global recovery. There is no requirement
-to obtain a second permission merely because the requested recovery needs the
+emergency code change receives normal validation once that path works again. An
+explicit user pause is not erased by global recovery. There is no requirement to
+obtain a second permission merely because the requested recovery needs the
 emergency authority described here.
 
 ## Beads persistence and lifecycle
 
 All projects use one canonical Hive database under `~/brain`, connected through
-a local Dolt server. Resolve that database explicitly on every invocation;
-never discover a different store from the current code worktree. Do not fall
-back to embedded mode or a second task store when the server is unavailable.
+a local Dolt server. Resolve that database explicitly on every invocation; never
+discover a different store from the current code worktree. Do not fall back to
+embedded mode or a second task store when the server is unavailable.
 
 Use native Beads fields for title, description, acceptance criteria, priority,
 status, assignee, and dependencies. Store project identity and the small amount
-of Hive-specific lifecycle data in bead metadata. Do not maintain a shadow
-issue table, separate capacity counter, custom ID allocator, event-sourced task
+of Hive-specific lifecycle data in bead metadata. Do not maintain a shadow issue
+table, separate capacity counter, custom ID allocator, event-sourced task
 engine, or general-purpose operation receipt system.
 
 **Infrastructure records** are native Beads records for Hive configuration and
@@ -325,8 +324,8 @@ from implementation beads; titles and emojis do not determine that distinction.
 The additional metadata has a concrete purpose:
 
 - The registered project identifies the repository and execution boundary.
-- Pause reason distinguishes user pause, pending design approval, missing
-  input, and a worker's temporary checkpoint.
+- Pause reason distinguishes user pause, pending design approval, missing input,
+  and a worker's temporary checkpoint.
 - Workspace and candidate identifiers support delivery and recovery.
 - A terminal outcome distinguishes successful completion from cancellation.
 - A concise recovery note explains an uncertain external outcome when needed.
@@ -334,9 +333,9 @@ The additional metadata has a concrete purpose:
 Assignee holds the native Codex task ID for a claimed bead. Metadata also holds
 the owning native turn ID, so a resumed conversation can be distinguished from
 an ended attempt during recovery. Workspace or candidate data is added only
-after that resource exists; phases expose typed
-variants that require those values when applicable. Keep native status and
-Hive metadata consistent in one supported update when changing both.
+after that resource exists; phases expose typed variants that require those
+values when applicable. Keep native status and Hive metadata consistent in one
+supported update when changing both.
 
 ### State model
 
@@ -351,22 +350,22 @@ persisted status field that competes with Beads status.
 | Done | Closed, successful outcome recorded; satisfies dependencies |
 | Cancelled | Closed with cancelled outcome; does not satisfy dependencies |
 
-An owned bead progresses through preparing, implementing, reviewing, and
-waiting for delivery. Store the current phase in Hive metadata together with
-the resource references required by that phase, in one native update. This is
-one current-state value, not a persisted workflow graph. Review completion is
-not a core proof flag.
+An owned bead progresses through preparing, implementing, reviewing, and waiting
+for delivery. Store the current phase in Hive metadata together with the
+resource references required by that phase, in one native update. This is one
+current-state value, not a persisted workflow graph. Review completion is not a
+core proof flag.
 
 Preparing retains the intended branch until the workspace exists. Implementing
 and reviewing require the workspace; waiting for delivery also requires the
 candidate and source commit. A lost creation or submission response leaves the
 last valid phase intact. Recovery inspects Tollgate using the branch or source
-commit before advancing it, as described in
-[Reconciling retained work](#reconciling-retained-work).
+commit before advancing it, as described in [Reconciling retained
+work](#reconciling-retained-work).
 
 Artifact work uses a drafting or reviewing-artifact phase instead; neither
-requires a workspace, and reviewing-artifact requires an artifact location.
-Its terminal outcome retains that location and the acceptance result.
+requires a workspace, and reviewing-artifact requires an artifact location. Its
+terminal outcome retains that location and the acceptance result.
 
 A deferred bead may retain its assignee while outstanding work settles. It
 continues consuming a slot until the assignee is cleared. Thus capacity is the
@@ -386,9 +385,9 @@ closed, outcome=delivered         -> done
 Completion and cancellation clear the assignee with the terminal state and
 outcome in the same native update, after resource settlement. Deferred work
 resumes to queued, not directly to its former owned state; it must be admitted
-again. Owner-only mutations check the current owner under the admission lock
-and reject a stale caller. Recovery changes ownership through its explicit
-operation rather than an unrestricted metadata edit.
+again. Owner-only mutations check the current owner under the admission lock and
+reject a stale caller. Recovery changes ownership through its explicit operation
+rather than an unrestricted metadata edit.
 
 Resumption preserves the checkpoint's workspace, source, and candidate so that
 admission can continue retained work rather than repeat it. It requires settled
@@ -397,8 +396,8 @@ ownership and a resolved deferral reason:
 - User pause requires an explicit user resumption.
 - Pending design approval requires approval of the intended design scope.
 - Missing input requires the needed answer; an executor can then resume it.
-- A temporary checkpoint can be resumed by a peer after its recorded blocker
-  is resolved and any interrupted dependency changes are repaired.
+- A temporary checkpoint can be resumed by a peer after its recorded blocker is
+  resolved and any interrupted dependency changes are repaired.
 - Recovery uncertainty requires the stopped-writer and external-outcome checks
   in [Peer recovery](#peer-recovery-and-live-state-changes).
 
@@ -407,9 +406,9 @@ requirement. For an interrupted prerequisite-discovery sequence, inspect the
 checkpoint, find or file its prerequisite, and establish the native dependency
 before reopening the parent. If that intent is unclear, keep it deferred.
 
-Only successful completion satisfies a prerequisite. Beads may treat any
-closed prerequisite as resolved; Hive additionally checks the recorded outcome
-before admission. A cancelled prerequisite needs an explicit dependency change,
+Only successful completion satisfies a prerequisite. Beads may treat any closed
+prerequisite as resolved; Hive additionally checks the recorded outcome before
+admission. A cancelled prerequisite needs an explicit dependency change,
 replacement, or cancellation of its dependent.
 
 Task operations validate their relevant records at the boundary. Malformed
@@ -420,8 +419,8 @@ reason to stop every current task.
 
 ### Dependencies and interrupted changes
 
-Use native Beads dependency edges and cycle detection. Project boundaries do
-not prevent cross-project dependencies, but execution authority remains
+Use native Beads dependency edges and cycle detection. Project boundaries do not
+prevent cross-project dependencies, but execution authority remains
 project-scoped. Descriptions and document links are not substitutes for edges.
 
 Changes to readiness participate in the admission lock. This includes changing
@@ -436,9 +435,9 @@ If a worker discovers an unstarted prerequisite:
 3. File the prerequisite and attach its dependency edge.
 4. Reopen the original bead only after the edge exists, then claim useful work.
 
-A crash leaves deferred work or an extra visible prerequisite, not runnable
-work missing a known prerequisite. A parent must not hold a slot indefinitely
-while waiting for a child that cannot obtain capacity. Waiting for its own
+A crash leaves deferred work or an extra visible prerequisite, not runnable work
+missing a known prerequisite. A parent must not hold a slot indefinitely while
+waiting for a child that cannot obtain capacity. Waiting for its own
 already-started review or CI is different and retains the slot.
 
 Use `bd batch` when its supported operations fit a genuine transaction. Do not
@@ -450,8 +449,8 @@ partially completed series of independent commands.
 
 The normal adapter uses supported `bd` JSON interfaces. Keep calls few, request
 bounded results, avoid rereading successful writes solely to manufacture proof,
-and disable per-mutation remote synchronization. Native Beads short IDs are
-used as returned, including longer IDs when its allocation algorithm needs them.
+and disable per-mutation remote synchronization. Native Beads short IDs are used
+as returned, including longer IDs when its allocation algorithm needs them.
 
 Direct Dolt access is an exception requiring strong justification:
 
@@ -460,8 +459,8 @@ Direct Dolt access is an exception requiring strong justification:
 - Describe the exact query or transaction and the Beads behavior it must retain.
 - Confine it to one typed adapter with real-server behavioral tests covering
   that behavior, including dependencies and any derived Beads fields.
-- Reject unsupported schema changes visibly. Do not guess or maintain a chain
-  of compatibility implementations.
+- Reject unsupported schema changes visibly. Do not guess or maintain a chain of
+  compatibility implementations.
 
 This exception does not create another task authority. It also does not justify
 writing arbitrary issue tables from skills. Prefer a supported Beads improvement
@@ -497,8 +496,8 @@ against arbitrary database access.
 Reads and independent title, description, or priority edits use native atomic
 operations without that lock unless they also change admission-relevant state.
 Priority observed at selection is advisory ordering; it does not authorize a
-claim. Never hold the admission lock during model work, resource sampling,
-Codex requests, worktree creation, CI, Git operations, or network backup.
+claim. Never hold the admission lock during model work, resource sampling, Codex
+requests, worktree creation, CI, Git operations, or network backup.
 
 The claim operation has the following semantics:
 
@@ -535,13 +534,13 @@ One bead retains one slot from claim until delivery or settled deferral:
 - Preparing its workspace, implementation, and merge repair consume the slot.
 - A cold reviewer shares the bead's slot while its executor waits.
 - Queued and running CI, and promotion or synchronization waits, retain it.
-- Requested cancellation or an interrupted conversation does not by itself
-  prove resource use has stopped.
+- Requested cancellation or an interrupted conversation does not by itself prove
+  resource use has stopped.
 
 Read-only scoping, filing, and bounded specialist audits do not claim execution
 slots. Their agents still consume resources, so recruitment and optional audit
-schedules must consider actual load. Hive's ceiling limits in-flight work
-items, not every process or model request. Tollgate separately manages builds.
+schedules must consider actual load. Hive's ceiling limits in-flight work items,
+not every process or model request. Tollgate separately manages builds.
 
 Resource reporting includes active beads and phases, recent CPU load, memory
 pressure, and available Tollgate queue information with observation times.
@@ -558,20 +557,20 @@ work through normal admission before making any project changes.
 
 No slot is reserved in a second record before native task creation. Racing
 recruiters may create more conversations than available slots, but only eight
-beads can be admitted. A child denied admission reports the reason and exits.
-A child given an exact bead does not silently substitute different work if that
+beads can be admitted. A child denied admission reports the reason and exits. A
+child given an exact bead does not silently substitute different work if that
 initial claim fails.
 
 Recruiters are peers, not supervisors. Stopping the recruiter does not stop
 recruited executors. They have independent native task identities and lifetimes,
 and each drains its starting project's backlog. Use the saved project for the
-native task; Tollgate creates the implementation worktree, avoiding nested
-Codex and Tollgate worktrees.
+native task; Tollgate creates the implementation worktree, avoiding nested Codex
+and Tollgate worktrees.
 
-If native creation returns an uncertain result, inspect the native task list
-for the attempted creation before retrying. If it cannot be identified, report
-the uncertainty and stop recruitment rather than creating duplicates in a loop.
-No central process reconciles these attempts.
+If native creation returns an uncertain result, inspect the native task list for
+the attempted creation before retrying. If it cannot be identified, report the
+uncertainty and stop recruitment rather than creating duplicates in a loop. No
+central process reconciles these attempts.
 
 ## Delivery, completion, and stopping
 
@@ -581,8 +580,8 @@ Tollgate's certificates into its own proof format.
 
 The executor creates each new implementation workspace through Tollgate, based
 on its promoted release: the latest code Tollgate has validated and integrated.
-It stops workspace-rooted background processes before
-promotion because Tollgate may remove the clean source workspace afterward.
+It stops workspace-rooted background processes before promotion because Tollgate
+may remove the clean source workspace afterward.
 
 After local work and cold review:
 
@@ -599,15 +598,14 @@ that approval. The exact source and candidate must still be the ones approved.
 
 A validation pass alone is not completion. Require promotion and the configured
 source synchronization to finish. Handle a merge conflict against Tollgate's
-current promoted release, preserve the task scope, review material changes,
-and submit the replacement candidate. Do not push worktree branches directly.
+current promoted release, preserve the task scope, review material changes, and
+submit the replacement candidate. Do not push worktree branches directly.
 
 An in-scope CI failure stays with the same executor and bead. Out-of-scope
 pre-existing failures receive follow-up beads. If such a failure blocks
-delivery,
-checkpoint and defer with the repair dependency instead of bypassing CI or
-claiming success. Temporary infrastructure failure is reported with a bounded
-next action; repeated blind submissions are not recovery.
+delivery, checkpoint and defer with the repair dependency instead of bypassing
+CI or claiming success. Temporary infrastructure failure is reported with a
+bounded next action; repeated blind submissions are not recovery.
 
 ### Blocking waits
 
@@ -672,9 +670,9 @@ running; state what is still settling and retain capacity until it settles.
 Stopping cannot retract an already-authorized Tollgate promotion. Ordinary
 one-step approval grants Tollgate authority before its blocking wait, so a stop
 during that wait may arrive too late to prevent promotion. Inspect the
-candidate,
-attempt supported cancellation where applicable, and report the actual result.
-Do not promise that pausing a conversation rolls back code delivery.
+candidate, attempt supported cancellation where applicable, and report the
+actual result. Do not promise that pausing a conversation rolls back code
+delivery.
 
 If promotion finishes after a user stop, record its observed result and settle
 any finished writers, but leave the bead deferred with its user-pause reason.
@@ -689,8 +687,58 @@ until it is resolved rather than treating silence as permission to restart.
 ## Peer recovery and live state changes
 
 At work boundaries, executors can inspect abandoned ownership, including when
-apparent capacity is full. Recovery does not require a leader, elapsed lease,
-or periodic global reconciliation pass.
+apparent capacity is full. Recovery does not require a leader, elapsed lease, or
+periodic global reconciliation pass.
+
+### Native activity boundary
+
+A thin Codex adapter supplies native task and turn identities, turn activity,
+queued continuation state, and interruption cause. Obtain identities from the
+invoking session or its native request context, then validate them against the
+native task. Do not derive them from a title, transcript timestamp, or generated
+replacement ID. Missing identity prevents entry into owned execution.
+
+The minimum operations are explicit:
+
+```text
+enter_turn(bead, task_id, turn_id) -> Entered | OwnershipChanged | Unavailable
+inspect_activity(task_id) -> KnownActivity | UnknownActivity
+record_stop(bead, task_id, turn_id, cause) -> Paused | OwnershipChanged
+inspect_writers(task_id, turn_id, workspace) -> Settled | Active | Unknown
+```
+
+`KnownActivity` distinguishes an active turn, queued continuation, and an idle
+conversation and carries the native identities observed. An interruption cause
+is either an explicit user stop, another known cause, or unknown. Unknown cause
+preserves uncertainty; it must not be reclassified as an abandoned owner merely
+because time passes.
+
+At the beginning of every executor turn, its entry instruction calls
+`enter_turn` before editing or starting write-capable tools. Native stop events
+invoke the short `record_stop` mutation when available. If the runtime cannot
+provide a reliable stop callback, the next observer records the interruption
+and leaves it deferred pending clarification. The native adapter must expose
+unsupported activity distinctions as unknown, never idle.
+
+Writer inspection starts with the native commands and child reviews associated
+with the recorded task and turn. Hive-launched commands retain their native
+command/session IDs and process-group identities for inspection; use native
+process identity including start time to avoid confusing a reused PID. Process
+inspection also checks descendants and processes rooted in the retained
+workspace. These observations support settlement, not a second task ledger or
+a lease that authorizes takeover.
+
+Workers must not detach write-capable work from inspectable native sessions.
+An escaped process, unavailable command inventory, or unexplained workspace
+writer yields `Unknown`; peers cannot recover it. Justiciar investigates and
+stops the relevant activity before settling ownership. Tollgate candidates are
+inspected separately because stopping a shell does not stop provider delivery.
+
+Validate this boundary against the actual Codex runtime before enabling peer
+recovery: exercise resumed and queued turns, explicit stops, review children,
+and a surviving command after its parent turn ends. Documentation of an API is
+not evidence that every required distinction is available through the deployed
+adapter. Unavailable capabilities disable that recovery path visibly.
 
 ### Establishing that an owner has stopped
 
@@ -702,27 +750,27 @@ A peer recovers only after establishing that:
 - The workspace, retained candidate, and any external action have been
   inspected.
 
-A stale timestamp, missing transcript, lost connection, or missing heartbeat
-is insufficient. If native state or process activity cannot be established,
-leave ownership visible and escalate to justiciar. Recorded ownership cannot
-fence an arbitrary process that is still writing files.
+A stale timestamp, missing transcript, lost connection, or missing heartbeat is
+insufficient. If native state or process activity cannot be established, leave
+ownership visible and escalate to justiciar. Recorded ownership cannot fence an
+arbitrary process that is still writing files.
 
 An ended turn is not a permanently dead conversation. Every executor turn must
 enter Hive before editing: while holding the admission lock, it checks current
 ownership and records its native turn ID. Recovery inspects the previously
 recorded turn, then checks under that lock that both owner and turn are
-unchanged
-before releasing the claim. A resumed turn that enters first invalidates that
-recovery attempt; one that enters afterward sees it no longer owns the bead and
-must not edit. This uses native identities, not a lease or a generated token.
+unchanged before releasing the claim. A resumed turn that enters first
+invalidates that recovery attempt; one that enters afterward sees it no longer
+owns the bead and must not edit. This uses native identities, not a lease or a
+generated token.
 
 ### Reconciling retained work
 
 Recover the retained work before deciding what should run again. An ended
 conversation alone does not determine whether its external operation succeeded.
 
-Recovery records the checkpoint, settles the old owner under the admission
-lock, and uses ordinary admission to claim continuation. A recoverer may adopt a
+Recovery records the checkpoint, settles the old owner under the admission lock,
+and uses ordinary admission to claim continuation. A recoverer may adopt a
 preserved workspace only after confirming quiescence and recording the new
 owner. Existing candidates are inspected, not resubmitted blindly. For an
 already promoted candidate, finish any required synchronization before closing
@@ -804,10 +852,10 @@ it restores the executor role afterward. A one-off `$bead` reply preserves its
 parent's role and title. Do not rename after every command or keep a completed
 bead's ID when moving to unrelated work.
 
-Use direct native naming tools. Attempt one bounded retry on failure, expose
-the desired name and drift in status, and retry at the next meaningful
-transition. UI failure does not strand delivery. Keeping names current remains
-a required workflow action even though failure is nonblocking.
+Use direct native naming tools. Attempt one bounded retry on failure, expose the
+desired name and drift in status, and retry at the next meaningful transition.
+UI failure does not strand delivery. Keeping names current remains a required
+workflow action even though failure is nonblocking.
 
 ### Archivist
 
@@ -823,20 +871,20 @@ turn and cannot qualify.
   the inactivity rule. Archiving is UI cleanup, not cancellation or completion.
 - Do not archive unregistered tasks, the running archivist itself, or a task
   whose activity is unknown.
-- Respect an explicit manual unarchive by exempting that conversation until
-  the user opts it back into automatic archival.
+- Respect an explicit manual unarchive by exempting that conversation until the
+  user opts it back into automatic archival.
 - Preserve bead ownership, dependencies, and outcomes regardless of archive
   status. Archive failure must not change work state.
 
 Persist archive eligibility and the last Hive-initiated archive or unarchive
 result in the conversation's registry record. An observed archived-to-visible
-change without a matching Hive action is treated as a manual unarchive and
-sets the exemption. Record Hive's own race-repair unarchive before making that
+change without a matching Hive action is treated as a manual unarchive and sets
+the exemption. Record Hive's own race-repair unarchive before making that
 request and reconcile its result on the next run. Ambiguous origin
-conservatively
-sets the exemption; it must not cause repeated re-archiving. If the collector
-missed a visibility change entirely, no manual action can be inferred: record
-that observation gap rather than claiming complete manual-unarchive detection.
+conservatively sets the exemption; it must not cause repeated re-archiving. If
+the collector missed a visibility change entirely, no manual action can be
+inferred: record that observation gap rather than claiming complete
+manual-unarchive detection.
 
 Codex's documented archive operation may also archive descendant tasks. Before
 archiving a parent, verify affected descendants are eligible; skip it if a child
@@ -906,11 +954,11 @@ machine.
 ## Backup and cutover
 
 Local Beads transactions provide task persistence. Remote backup is independent
-and asynchronous, initially every 15 minutes when changes exist. It does not
-run in a claim's critical section or require an executor to remain alive.
-A host timer runs this deterministic backup command. Codex's scheduler invokes
-archivist and any explicitly configured specialist audits. Neither timer is
-used to inspect the backlog and restart executors.
+and asynchronous, initially every 15 minutes when changes exist. It does not run
+in a claim's critical section or require an executor to remain alive. A host
+timer runs this deterministic backup command. Codex's scheduler invokes
+archivist and any explicitly configured specialist audits. Neither timer is used
+to inspect the backlog and restart executors.
 
 For GitHub, export a consistent issue snapshot using supported Beads facilities,
 including Hive infrastructure records, dependencies, comments, and metadata.
@@ -942,8 +990,8 @@ archived conversation do not prove an executor has stopped.
 ### Moving from Fulcrum
 
 The existing `~/brain` contains a Fulcrum server-mode Beads database. Its Git
-context currently resolves to the home-directory dotfiles repository. Neither
-is an empty Hive installation target.
+context currently resolves to the home-directory dotfiles repository. Neither is
+an empty Hive installation target.
 
 Create a distinct Hive database under `~/brain`; preserve Fulcrum's database,
 configuration, and running workers. Configure explicit database routing and a
@@ -1002,8 +1050,7 @@ No claim was made. Continue eligible search work or inspect the prerequisite.
 The CLI emits concise text for interactive use and JSON for tools. MCP mirrors
 only the operations that benefit from native tool invocation, especially long
 waits. Both adapters call the same implementation and return equivalent
-outcomes.
-No business policy lives permanently inside the MCP transport.
+outcomes. No business policy lives permanently inside the MCP transport.
 
 ### Type safety
 
@@ -1027,8 +1074,8 @@ class WaitingForDelivery:
 
 Use unions for meaningful alternatives: a waiting-for-delivery state requires a
 candidate; an unclaimed bead does not have a collection of optional ownership
-fields. Pure transition functions accept an old state and an event and return
-an allowed new state or a typed refusal. Persistence and external effects remain
+fields. Pure transition functions accept an old state and an event and return an
+allowed new state or a typed refusal. Persistence and external effects remain
 explicit adapter operations.
 
 Use strict static checking, exhaustive handling with `assert_never`, and narrow
@@ -1051,8 +1098,8 @@ behavior, not exact internal call ordering or arbitrary formatting.
 
 Required scenarios cover:
 
-- Racing direct and next claims never duplicate ownership or exceed eight
-  slots; blocked,deferred, and cross-project beads cannot bypass admission.
+- Racing direct and next claims never duplicate ownership or exceed eight slots;
+  blocked, deferred, and cross-project beads cannot bypass admission.
 - Dependency edits race correctly with admission, cycles are rejected, and
   cancelled prerequisites do not silently satisfy work.
 - Killing a lock holder releases its lock; an interrupted multi-step change
@@ -1060,8 +1107,8 @@ Required scenarios cover:
 - A lost claim response does not cause another claim by the same executor.
 - All occupied beads can obtain cold review without needing another slot.
 - All workers can discover prerequisites without retaining every parent slot.
-- Explicit stops stay paused, uncertain interruptions are not resumed, and
-  peer recovery requires stopped writers and reconciled external effects.
+- Explicit stops stay paused, uncertain interruptions are not resumed, and peer
+  recovery requires stopped writers and reconciled external effects.
 - In-scope CI repair, pre-existing blockers, conflicts, failed synchronization,
   and lost provider responses preserve honest delivery state.
 - Title failure, collector outage, and remote backup failure do not halt normal
@@ -1069,8 +1116,8 @@ Required scenarios cover:
 - Archiving respects active turns and descendants and repairs observed races.
 - Ordinary source updates affect the next invocation without changing code or
   assets underneath an existing wait or dropping native connections.
-- Concurrent backup is consistent; restore never treats historical ownership
-  as permission to resume.
+- Concurrent backup is consistent; restore never treats historical ownership as
+  permission to resume.
 
 ### Latency acceptance
 
@@ -1079,14 +1126,14 @@ including source selection, imports, lock waiting, Beads work, boundary
 validation, and ordinary observability overhead.
 
 The target is **p95 below 100ms** for task reads, ready queries, creation,
-ordinary updates, and successful claims with eight concurrent clients and
-1,000 unfinished beads. Measure each operation separately. Include realistic
+ordinary updates, and successful claims with eight concurrent clients and 1,000
+unfinished beads. Measure each operation separately. Include realistic
 dependencies and a substantial completed history; do not average cheap reads
 with expensive claims to hide a miss.
 
 - Run observability and scheduled backup during representative measurements.
-- Report cold source preparation separately, targeting p95 below one second
-  with unchanged dependencies. Normal calls cannot hide repeated preparation.
+- Report cold source preparation separately, targeting p95 below one second with
+  unchanged dependencies. Normal calls cannot hide repeated preparation.
 - Report one-, eight-, and sixteen-client contention and saturation separately,
   including denied claims and lock timeout rates.
 - Characterize 100 and 10,000 unfinished beads and increasing completed history
@@ -1094,8 +1141,8 @@ with expensive claims to hide a miss.
 - Use sufficient repeated samples for tail estimates, record host load and
   sample counts, and report failures alongside latency.
 - Exclude remote publication, Codex title RPC latency, and actual CI duration
-  from local task-command latency, but report their workflow cost separately.
-  A local command must not secretly wait for those effects before returning.
+  from local task-command latency, but report their workflow cost separately. A
+  local command must not secretly wait for those effects before returning.
 
 The retained September 19 measurements used Beads 1.2.2 and Dolt 2.2.0. At 1,000
 issues, single-client server reads were roughly 73–91ms p95 and independent
@@ -1139,15 +1186,15 @@ repeatable without touching production work.
    work. Verify parents checkpoint and release settled ownership, prerequisites
    become runnable, and an interrupted dependency edit leaves safe deferred
    work.
-6. **Review and specialists:** exercise a valid finding, a reasoned rejection,
-   a missing invariant document, and a brittle-test finding. Verify a standalone
-   specialist enters admission before making implementation changes. Check
-   that design authoring can execute while its unapproved implementation beads
-   remain deferred.
+6. **Review and specialists:** exercise a valid finding, a reasoned rejection, a
+   missing invariant document, and a brittle-test finding. Verify a standalone
+   specialist enters admission before making implementation changes. Check that
+   design authoring can execute while its unapproved implementation beads remain
+   deferred.
 7. **Bead filing:** invoke `$bead` in a new session and inside an executor
-   reply.
-   Verify immediate durable filing, useful dependencies, no implicit execution
-   by the filing skill, and preservation of the enclosing role's title.
+   reply. Verify immediate durable filing, useful dependencies, no implicit
+   execution by the filing skill, and preservation of the enclosing role's
+   title.
 8. **Long wait:** hold real CI for at least 30 minutes. Verify one pending tool
    call with no intermediate model polling, retained capacity, a useful wait
    title, and no archival while the turn is active.
@@ -1166,8 +1213,8 @@ repeatable without touching production work.
     Verify a single reminder, no reminder loop, and no scheduled worker revival
     after all executors have stopped.
 13. **Task UI:** fail a rename and restore access. Verify bounded retry, visible
-    drift, continued delivery, and correction at the next transition. Archive
-    an inactive eligible task; verify recent input, an active child, and manual
+    drift, continued delivery, and correction at the next transition. Archive an
+    inactive eligible task; verify recent input, an active child, and manual
     unarchive exemption prevent incorrect cleanup.
 14. **Observability:** interrupt collection, append an incomplete record, and
     include an unpriced model. Restore collection and inspect trace and cost:
@@ -1179,8 +1226,8 @@ repeatable without touching production work.
 16. **Backup and cutover:** export while workers change tasks, disable remote
     access, restore it, and restore a snapshot into a disposable database.
     Verify consistent dependencies, visible backup age, ownership
-    reconciliation,
-    preserved Fulcrum state, and no accidental dotfiles publication.
+    reconciliation, preserved Fulcrum state, and no accidental dotfiles
+    publication.
 17. **Performance:** run the eight-client command workload with observation and
     backup enabled. Inspect per-operation p95, error counts, lock wait, and
     startup costs. Record a target miss honestly rather than substituting
