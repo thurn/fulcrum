@@ -223,8 +223,9 @@ transition to executor through admission.
 
 A source-changing repair after review requires review of the changed diff before
 delivery. Review does not loop until warden approves: executor retains judgment
-over findings. Mechanical conflict resolutions are included in that review when
-they change source behavior or structure.
+over findings. This includes mechanical conflict resolutions that change the
+submitted source, even when they preserve behavior. The candidate's source
+commit must be covered by that review; a small diff is not an exemption.
 
 ### Weaver
 
@@ -612,8 +613,9 @@ that approval. The exact source and candidate must still be the ones approved.
 
 A validation pass alone is not completion. Require promotion and the configured
 source synchronization to finish. Handle a merge conflict against Tollgate's
-current promoted release, preserve the task scope, review material changes, and
-submit the replacement candidate. Do not push worktree branches directly.
+current promoted release, preserve the task scope, review every source-changing
+repair, and submit the replacement candidate. This includes mechanical conflict
+resolutions, as required above. Do not push worktree branches directly.
 
 An in-scope CI failure stays with the same executor and bead. Out-of-scope
 pre-existing failures receive follow-up beads. If such a failure blocks
@@ -726,7 +728,7 @@ replacement ID. Missing identity prevents entry into owned execution.
 The minimum operations are explicit:
 
 ```text
-enter_turn(bead, task_id, turn_id) -> Entered | OwnershipChanged | Unavailable
+enter_turn(bead, task_id, turn_id) -> Entered | Paused | EntryRefused
 inspect_activity(task_id) -> KnownActivity | UnknownActivity
 record_stop(bead, task_id, turn_id, cause) -> Paused | OwnershipChanged
 inspect_writers(task_id, turn_id, workspace) -> Settled | Active | Unknown
@@ -737,6 +739,29 @@ conversation and carries the native identities observed. An interruption cause
 is either an explicit user stop, another known cause, or unknown. Unknown cause
 preserves uncertainty; it must not be reclassified as an abandoned owner merely
 because time passes.
+
+`Entered` permits ordinary work only on an owned, non-deferred bead. Repeating
+entry for its current task and turn is harmless. Replacing an older turn of the
+same task requires confirmed settlement of that turn's writers and no unresolved
+interruption. `EntryRefused` distinguishes changed ownership, required recovery,
+and unavailable native evidence; none permits editing.
+
+Entry on a deferred bead returns `Paused` with its release conditions and leaves
+the retained owner unchanged. A new message, even explicit user resumption, does
+not itself grant execution ownership. Read-only inspection and settlement may
+proceed using the observed old owner pair and stopped-writer evidence.
+Settlement clears ownership without clearing any pause. Resumption resolves only
+the user-pause condition. Once all conditions are resolved and ownership is
+settled, reopen to queued and use normal admission with the new turn identity.
+
+For example, unrelated input and authorized resumption follow different paths:
+
+```text
+paused bead + "What happened?" -> Paused; inspect and answer, do not edit
+paused bead + "Resume"         -> resolve user pause; settle old writers
+another condition remains     -> keep deferred
+all conditions resolved       -> queue, claim, then continue retained work
+```
 
 At the beginning of every executor turn, its entry instruction calls
 `enter_turn` before editing or starting write-capable tools. Native stop events
@@ -781,10 +806,11 @@ ownership visible and escalate to justiciar. Recorded ownership cannot fence an
 arbitrary process that is still writing files.
 
 An ended turn is not a permanently dead conversation. Every executor turn must
-enter Hive before editing: while holding the admission lock, it checks current
-ownership and records its native turn ID. Recovery inspects the previously
-recorded turn, then checks under that lock that both owner and turn are
-unchanged before releasing the claim. A resumed turn that enters first
+enter Hive before editing: while holding the admission lock, it checks the entry
+conditions above and records its native turn ID only on success. Recovery
+inspects the previously recorded turn, then checks under that lock that both
+owner and turn are unchanged before releasing the claim. A resumed turn that
+enters first
 invalidates that recovery attempt; one that enters afterward sees it no longer
 owns the bead and must not edit. This uses native identities, not a lease or a
 generated token.
@@ -1250,6 +1276,9 @@ repeatable without touching production work.
     confirm the existing candidate is found instead of duplicated. Resume the
     same conversation in a new turn, then deliver an old turn's completion or
     stop callback; verify neither can mutate the new attempt's state.
+    Send unrelated input to a paused owner and verify entry does not permit
+    editing. Explicitly resume it and verify settlement, remaining release
+    conditions, and fresh admission precede continued implementation.
 11. **Justiciar:** in the disposable environment, break admission or Tollgate.
     Verify a nondelegating justiciar stops the damage, documents any emergency
     bypass, restores valid ownership, and preserves explicit user pauses.
